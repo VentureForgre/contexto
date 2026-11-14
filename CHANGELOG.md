@@ -25,11 +25,11 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   `--upstream URL`.
 - Search finds more. When no paged-out turn holds every word of a query, `contexto_search` and
   `contexto search` now give approximate matches and say so: question words are dropped,
-  `refresh_token` finds `refreshToken`, a turn holding most of the words is returned, and one
-  one-letter typo is tolerated. Each match names the words it matched and the ones it did not. A
-  query that some turn holds every word of gets the same result as before
-  ([docs/search.md](docs/search.md)). `contexto search --json` marks such a result `approximate`
-  and gives each hit's `matched` and `missing` words.
+  `refresh_token` finds `refreshToken`, a turn holding enough of the query (rarer words count more)
+  is returned, and one one-letter typo is tolerated. Each match names the words it matched and the
+  ones it did not. A query that some turn holds every word of gets the same result as before
+  ([docs/search.md](docs/search.md)). `contexto search --json` marks such a result `approximate` and
+  gives each hit's `matched` and `missing` words.
 - `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
   described in the command's `--help`; an error is still one line on stderr with the usual exit
   code.
@@ -51,6 +51,32 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 - `contexto run codex` with a session id that starts with `-` no longer starts Codex without
   Contexto's tools: the MCP server now gets the id as one `--session=<id>` argument, as Claude Code's
   already did.
+- New command: `contexto doctor` checks what `contexto run` needs from the directory you run it
+  in, and prints one line per check with the next step under a warning or a failure. It checks
+  Python, the `claude` and `codex` CLIs and their versions, the Claude Code settings files, the
+  upstream and what sets it, whether a key or key helper is configured, the store home, the MCP
+  server, and whether `contexto run claude` would refuse to launch because a cloud-provider switch
+  is on (a failure, with the launcher's own message). `--json` prints the same results for scripts.
+  It makes no network request, runs no key helper and prints no key. Details:
+  [docs/doctor.md](docs/doctor.md).
+- `contexto run claude` now refuses to launch (exit 2) when a cloud-provider switch is on, in the
+  environment or in a Claude Code settings file: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+  `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS` or
+  `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` (D70, D64). With one on, Claude Code sends its requests to
+  that provider and none through the proxy, so the session would not be kept under the bound;
+  0.5.24 launched anyway. It also refuses while a settings file that may turn one on cannot be read.
+  The message says which switch and where; to keep using the provider, run `claude` without
+  Contexto.
+- A Claude Code settings file that starts with a UTF-8 byte order mark is read. Claude Code reads
+  such a file, and Contexto treated it as absent, so `contexto run` missed an
+  `ANTHROPIC_BASE_URL` or `apiKeyHelper` set there and used another upstream than Claude Code's own.
+- A Claude Code settings file is now read as Claude Code reads it in four more cases: a named
+  pipe in its place is never opened for reading (`contexto run` waited on it for ever), a file
+  holding `NaN` or `Infinity` is ignored, a file holding a number longer than 4,300 digits is read,
+  and a file whose `env` block is not a JSON object is ignored whole, so an `apiKeyHelper` in it
+  is no longer used (Claude Code loads nothing from it either). `contexto run claude`
+  refuses to launch while a named pipe, or a file it cannot parse that may name a cloud-provider
+  switch, is in a settings file's place (D70).
 
 ## 0.5.24 (2026-11-06)
 

@@ -55,7 +55,11 @@ has the short list; this is the full one.
   one-line reply that states its value.
 - **Search cost.** The first search of each MCP process reads every page once (1.6 s at 6,000
   synthetic pages). Each query word scans the search text once, so a long query with matches costs
-  more, and the up to 53 pages one search shows are read in full with no size cap.
+  more, and the up to 53 pages one search shows are read in full with no size cap. On `main`
+  (unreleased, D65), a query that no turn holds every word of also runs the approximate fallback:
+  at 6,000 pages such a miss took 0.6 to 1.4 s, against 0.3 to 0.6 s for the empty answer before
+  (2.2 to 3.7 times), and its reply shows 3 pages in detail and lists 10 more
+  ([search.md](search.md)).
 - **Before the first token count.** Until the API reports a request's real input count, Contexto
   estimates it, and a very dense start of the conversation (JSON, code, non-English text) is
   estimated low. If the upstream never reports counts, tool-loop requests can go over the bound

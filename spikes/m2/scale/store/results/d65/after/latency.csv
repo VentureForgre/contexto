@@ -1,0 +1,1389 @@
+n,pass,load1,side,kind,query,rep,seconds,chars
+6000,1,11.72,warm-up,warm,E4127,0,2.381365,562
+6000,1,11.72,tree,startup,initialize,0,0.080645,0
+6000,1,11.72,baseline,startup,initialize,0,0.086052,0
+6000,1,11.72,tree,first (searched first),E4127,0,2.234667,562
+6000,1,11.72,baseline,first (searched second),E4127,0,2.399744,562
+6000,1,11.72,tree,rare,E4127,0,0.341995,562
+6000,1,11.72,baseline,rare,E4127,0,0.335573,562
+6000,1,11.72,baseline,rare,E4127,1,0.327601,562
+6000,1,11.72,tree,rare,E4127,1,0.344710,562
+6000,1,11.72,tree,rare,E4127,2,0.345181,562
+6000,1,11.72,baseline,rare,E4127,2,0.334742,562
+6000,1,11.72,baseline,rare,E4127,3,0.340989,562
+6000,1,11.72,tree,rare,E4127,3,0.337620,562
+6000,1,11.72,tree,rare,E4127,4,0.337951,562
+6000,1,11.72,baseline,rare,E4127,4,0.341893,562
+6000,1,11.72,tree,rare,SUP-48213,0,0.313756,445
+6000,1,11.72,baseline,rare,SUP-48213,0,0.289415,445
+6000,1,11.72,baseline,rare,SUP-48213,1,0.299781,445
+6000,1,11.72,tree,rare,SUP-48213,1,0.309710,445
+6000,1,11.72,tree,rare,SUP-48213,2,0.308970,445
+6000,1,11.72,baseline,rare,SUP-48213,2,0.302036,445
+6000,1,11.72,baseline,rare,SUP-48213,3,0.313529,445
+6000,1,11.72,tree,rare,SUP-48213,3,0.309789,445
+6000,1,11.72,tree,rare,SUP-48213,4,0.302942,445
+6000,1,11.72,baseline,rare,SUP-48213,4,0.294919,445
+6000,1,11.72,tree,rare,ctx-artifacts-euw3-7f2a,0,0.275374,536
+6000,1,11.72,baseline,rare,ctx-artifacts-euw3-7f2a,0,0.284093,536
+6000,1,11.72,baseline,rare,ctx-artifacts-euw3-7f2a,1,0.290857,536
+6000,1,11.72,tree,rare,ctx-artifacts-euw3-7f2a,1,0.270852,536
+6000,1,11.72,tree,rare,ctx-artifacts-euw3-7f2a,2,0.282247,536
+6000,1,11.72,baseline,rare,ctx-artifacts-euw3-7f2a,2,0.278882,536
+6000,1,11.72,baseline,rare,ctx-artifacts-euw3-7f2a,3,0.280057,536
+6000,1,11.72,tree,rare,ctx-artifacts-euw3-7f2a,3,0.290389,536
+6000,1,11.72,tree,rare,ctx-artifacts-euw3-7f2a,4,0.286086,536
+6000,1,11.72,baseline,rare,ctx-artifacts-euw3-7f2a,4,0.287905,536
+6000,1,11.72,tree,common,self,0,0.280893,4335
+6000,1,11.72,baseline,common,self,0,0.289043,4335
+6000,1,11.72,baseline,common,self,1,0.299265,4335
+6000,1,11.72,tree,common,self,1,0.295250,4335
+6000,1,11.72,tree,common,self,2,0.312519,4335
+6000,1,11.72,baseline,common,self,2,0.291749,4335
+6000,1,11.72,baseline,common,self,3,0.290330,4335
+6000,1,11.72,tree,common,self,3,0.294031,4335
+6000,1,11.72,tree,common,self,4,0.293417,4335
+6000,1,11.72,baseline,common,self,4,0.294336,4335
+6000,1,11.72,tree,common,return,0,0.314530,4939
+6000,1,11.72,baseline,common,return,0,0.282114,4939
+6000,1,11.72,baseline,common,return,1,0.296928,4939
+6000,1,11.72,tree,common,return,1,0.298232,4939
+6000,1,11.72,tree,common,return,2,0.299187,4939
+6000,1,11.72,baseline,common,return,2,0.276620,4939
+6000,1,11.72,baseline,common,return,3,0.279813,4939
+6000,1,11.72,tree,common,return,3,0.270637,4939
+6000,1,11.72,tree,common,return,4,0.273835,4939
+6000,1,11.72,baseline,common,return,4,0.270966,4939
+6000,1,11.72,tree,common,import,0,0.276654,4524
+6000,1,11.72,baseline,common,import,0,0.279063,4524
+6000,1,11.72,baseline,common,import,1,0.276753,4524
+6000,1,11.72,tree,common,import,1,0.271863,4524
+6000,1,11.72,tree,common,import,2,0.276973,4524
+6000,1,11.72,baseline,common,import,2,0.287263,4524
+6000,1,11.72,baseline,common,import,3,0.296091,4524
+6000,1,11.72,tree,common,import,3,0.295810,4524
+6000,1,11.72,tree,common,import,4,0.286360,4524
+6000,1,11.72,baseline,common,import,4,0.281354,4524
+6000,1,11.72,tree,multi,the staging DB port,0,0.438159,1569
+6000,1,11.72,baseline,multi,the staging DB port,0,0.440893,1569
+6000,1,11.72,baseline,multi,the staging DB port,1,0.427641,1569
+6000,1,11.72,tree,multi,the staging DB port,1,0.420989,1569
+6000,1,11.72,tree,multi,the staging DB port,2,0.432344,1569
+6000,1,11.72,baseline,multi,the staging DB port,2,0.432662,1569
+6000,1,11.72,baseline,multi,the staging DB port,3,0.422234,1569
+6000,1,11.72,tree,multi,the staging DB port,3,0.454090,1569
+6000,1,11.72,tree,multi,the staging DB port,4,0.438747,1569
+6000,1,11.72,baseline,multi,the staging DB port,4,0.440454,1569
+6000,1,11.72,tree,multi,failed with exit code,0,0.516632,3572
+6000,1,11.72,baseline,multi,failed with exit code,0,0.501407,3572
+6000,1,11.72,baseline,multi,failed with exit code,1,0.508103,3572
+6000,1,11.72,tree,multi,failed with exit code,1,0.504007,3572
+6000,1,11.72,tree,multi,failed with exit code,2,0.481120,3572
+6000,1,11.72,baseline,multi,failed with exit code,2,0.477393,3572
+6000,1,11.72,baseline,multi,failed with exit code,3,0.477262,3572
+6000,1,11.72,tree,multi,failed with exit code,3,0.474490,3572
+6000,1,11.72,tree,multi,failed with exit code,4,0.474197,3572
+6000,1,11.72,baseline,multi,failed with exit code,4,0.485834,3572
+6000,1,11.72,tree,multi,Renamed parse_header to,0,0.352623,410
+6000,1,11.72,baseline,multi,Renamed parse_header to,0,0.364560,410
+6000,1,11.72,baseline,multi,Renamed parse_header to,1,0.361308,410
+6000,1,11.72,tree,multi,Renamed parse_header to,1,0.363229,410
+6000,1,11.72,tree,multi,Renamed parse_header to,2,0.356840,410
+6000,1,11.72,baseline,multi,Renamed parse_header to,2,0.355709,410
+6000,1,11.72,baseline,multi,Renamed parse_header to,3,0.354885,410
+6000,1,11.72,tree,multi,Renamed parse_header to,3,0.354418,410
+6000,1,11.72,tree,multi,Renamed parse_header to,4,0.352245,410
+6000,1,11.72,baseline,multi,Renamed parse_header to,4,0.350950,410
+6000,1,11.72,tree,miss_identifier,streamChunkedV3,0,0.630325,708
+6000,1,11.72,baseline,miss_identifier,streamChunkedV3,0,0.262409,149
+6000,1,11.72,baseline,miss_identifier,streamChunkedV3,1,0.254417,149
+6000,1,11.72,tree,miss_identifier,streamChunkedV3,1,0.686840,708
+6000,1,11.72,tree,miss_identifier,streamChunkedV3,2,0.712390,708
+6000,1,11.72,baseline,miss_identifier,streamChunkedV3,2,0.292393,149
+6000,1,11.72,baseline,miss_identifier,streamChunkedV3,3,0.292805,149
+6000,1,11.72,tree,miss_identifier,streamChunkedV3,3,0.714684,708
+6000,1,11.72,tree,miss_identifier,streamChunkedV3,4,0.714149,708
+6000,1,11.72,baseline,miss_identifier,streamChunkedV3,4,0.303189,149
+6000,1,11.72,tree,miss_identifier,decodeFrameHeader,0,0.720068,2071
+6000,1,11.72,baseline,miss_identifier,decodeFrameHeader,0,0.286725,149
+6000,1,11.72,baseline,miss_identifier,decodeFrameHeader,1,0.290718,149
+6000,1,11.72,tree,miss_identifier,decodeFrameHeader,1,0.692913,2071
+6000,1,11.72,tree,miss_identifier,decodeFrameHeader,2,0.659956,2071
+6000,1,11.72,baseline,miss_identifier,decodeFrameHeader,2,0.266482,149
+6000,1,11.72,baseline,miss_identifier,decodeFrameHeader,3,0.275605,149
+6000,1,11.72,tree,miss_identifier,decodeFrameHeader,3,0.651655,2071
+6000,1,11.72,tree,miss_identifier,decodeFrameHeader,4,0.652700,2071
+6000,1,11.72,baseline,miss_identifier,decodeFrameHeader,4,0.267010,149
+6000,1,11.72,tree,miss_identifier,refresh_token,0,0.681058,726
+6000,1,11.72,baseline,miss_identifier,refresh_token,0,0.290672,149
+6000,1,11.72,baseline,miss_identifier,refresh_token,1,0.283069,149
+6000,1,11.72,tree,miss_identifier,refresh_token,1,0.694301,726
+6000,1,11.72,tree,miss_identifier,refresh_token,2,0.740660,726
+6000,1,11.72,baseline,miss_identifier,refresh_token,2,0.291775,149
+6000,1,11.72,baseline,miss_identifier,refresh_token,3,0.301540,149
+6000,1,11.72,tree,miss_identifier,refresh_token,3,0.734796,726
+6000,1,11.72,tree,miss_identifier,refresh_token,4,0.737947,726
+6000,1,11.72,baseline,miss_identifier,refresh_token,4,0.304359,149
+6000,1,11.72,tree,miss_question,What port is the staging database on?,0,0.862639,1844
+6000,1,11.72,baseline,miss_question,What port is the staging database on?,0,0.388198,149
+6000,1,11.72,baseline,miss_question,What port is the staging database on?,1,0.380377,149
+6000,1,11.72,tree,miss_question,What port is the staging database on?,1,0.850180,1844
+6000,1,11.72,tree,miss_question,What port is the staging database on?,2,0.833887,1844
+6000,1,11.72,baseline,miss_question,What port is the staging database on?,2,0.387264,149
+6000,1,11.72,baseline,miss_question,What port is the staging database on?,3,0.392793,149
+6000,1,11.72,tree,miss_question,What port is the staging database on?,3,0.794927,1844
+6000,1,11.72,tree,miss_question,What port is the staging database on?,4,0.773511,1844
+6000,1,11.72,baseline,miss_question,What port is the staging database on?,4,0.348018,149
+6000,1,11.72,tree,miss_question,Which test in the ledger suite fails intermittently?,0,1.087493,1371
+6000,1,11.72,baseline,miss_question,Which test in the ledger suite fails intermittently?,0,0.406679,149
+6000,1,11.72,baseline,miss_question,Which test in the ledger suite fails intermittently?,1,0.396081,149
+6000,1,11.72,tree,miss_question,Which test in the ledger suite fails intermittently?,1,1.071757,1371
+6000,1,11.72,tree,miss_question,Which test in the ledger suite fails intermittently?,2,1.093862,1371
+6000,1,11.72,baseline,miss_question,Which test in the ledger suite fails intermittently?,2,0.399142,149
+6000,1,11.72,baseline,miss_question,Which test in the ledger suite fails intermittently?,3,0.392185,149
+6000,1,11.72,tree,miss_question,Which test in the ledger suite fails intermittently?,3,1.065411,1371
+6000,1,11.72,tree,miss_question,Which test in the ledger suite fails intermittently?,4,1.060296,1371
+6000,1,11.72,baseline,miss_question,Which test in the ledger suite fails intermittently?,4,0.383896,149
+6000,1,11.72,tree,miss_question,What is the name of the bucket the artifacts go to?,0,1.294329,2000
+6000,1,11.72,baseline,miss_question,What is the name of the bucket the artifacts go to?,0,0.360239,149
+6000,1,11.72,baseline,miss_question,What is the name of the bucket the artifacts go to?,1,0.363271,149
+6000,1,11.72,tree,miss_question,What is the name of the bucket the artifacts go to?,1,1.274944,2000
+6000,1,11.72,tree,miss_question,What is the name of the bucket the artifacts go to?,2,1.277416,2000
+6000,1,11.72,baseline,miss_question,What is the name of the bucket the artifacts go to?,2,0.361465,149
+6000,1,11.72,baseline,miss_question,What is the name of the bucket the artifacts go to?,3,0.363636,149
+6000,1,11.72,tree,miss_question,What is the name of the bucket the artifacts go to?,3,1.279384,2000
+6000,1,11.72,tree,miss_question,What is the name of the bucket the artifacts go to?,4,1.312660,2000
+6000,1,11.72,baseline,miss_question,What is the name of the bucket the artifacts go to?,4,0.384381,149
+6000,1,11.72,tree,miss_typo,stagng DB port,0,1.396200,2014
+6000,1,11.72,baseline,miss_typo,stagng DB port,0,0.406644,149
+6000,1,11.72,baseline,miss_typo,stagng DB port,1,0.406340,149
+6000,1,11.72,tree,miss_typo,stagng DB port,1,1.376314,2014
+6000,1,11.72,tree,miss_typo,stagng DB port,2,1.356371,2014
+6000,1,11.72,baseline,miss_typo,stagng DB port,2,0.403041,149
+6000,1,11.72,baseline,miss_typo,stagng DB port,3,0.408213,149
+6000,1,11.72,tree,miss_typo,stagng DB port,3,1.378383,2014
+6000,1,11.72,tree,miss_typo,stagng DB port,4,1.396013,2014
+6000,1,11.72,baseline,miss_typo,stagng DB port,4,0.431667,149
+6000,1,11.72,tree,miss_typo,Redis eviction polciy,0,1.352197,1578
+6000,1,11.72,baseline,miss_typo,Redis eviction polciy,0,0.497610,149
+6000,1,11.72,baseline,miss_typo,Redis eviction polciy,1,0.495929,149
+6000,1,11.72,tree,miss_typo,Redis eviction polciy,1,1.358154,1578
+6000,1,11.72,tree,miss_typo,Redis eviction polciy,2,1.416841,1578
+6000,1,11.72,baseline,miss_typo,Redis eviction polciy,2,0.508306,149
+6000,1,11.72,baseline,miss_typo,Redis eviction polciy,3,0.520896,149
+6000,1,11.72,tree,miss_typo,Redis eviction polciy,3,1.464079,1578
+6000,1,11.72,tree,miss_typo,Redis eviction polciy,4,1.449139,1578
+6000,1,11.72,baseline,miss_typo,Redis eviction polciy,4,0.531997,149
+6000,1,11.72,tree,miss_typo,webhook signing seccret,0,1.736815,527
+6000,1,11.72,baseline,miss_typo,webhook signing seccret,0,0.477051,149
+6000,1,11.72,baseline,miss_typo,webhook signing seccret,1,0.484702,149
+6000,1,11.72,tree,miss_typo,webhook signing seccret,1,1.760359,527
+6000,1,11.72,tree,miss_typo,webhook signing seccret,2,1.773805,527
+6000,1,11.72,baseline,miss_typo,webhook signing seccret,2,0.496407,149
+6000,1,11.72,baseline,miss_typo,webhook signing seccret,3,0.504433,149
+6000,1,11.72,tree,miss_typo,webhook signing seccret,3,1.772844,527
+6000,1,11.72,tree,miss_typo,webhook signing seccret,4,1.762181,527
+6000,1,11.72,baseline,miss_typo,webhook signing seccret,4,0.487718,149
+6000,1,11.72,tree,miss_extra_word,staging DB port number,0,1.629361,2096
+6000,1,11.72,baseline,miss_extra_word,staging DB port number,0,0.534854,149
+6000,1,11.72,baseline,miss_extra_word,staging DB port number,1,0.535448,149
+6000,1,11.72,tree,miss_extra_word,staging DB port number,1,1.646835,2096
+6000,1,11.72,tree,miss_extra_word,staging DB port number,2,1.649771,2096
+6000,1,11.72,baseline,miss_extra_word,staging DB port number,2,0.533923,149
+6000,1,11.72,baseline,miss_extra_word,staging DB port number,3,0.530323,149
+6000,1,11.72,tree,miss_extra_word,staging DB port number,3,1.662358,2096
+6000,1,11.72,tree,miss_extra_word,staging DB port number,4,1.625423,2096
+6000,1,11.72,baseline,miss_extra_word,staging DB port number,4,0.518753,149
+6000,1,11.72,tree,miss_extra_word,Redis eviction policy production,0,1.426017,505
+6000,1,11.72,baseline,miss_extra_word,Redis eviction policy production,0,0.589374,149
+6000,1,11.72,baseline,miss_extra_word,Redis eviction policy production,1,0.594964,149
+6000,1,11.72,tree,miss_extra_word,Redis eviction policy production,1,1.465069,505
+6000,1,11.72,tree,miss_extra_word,Redis eviction policy production,2,1.494105,505
+6000,1,11.72,baseline,miss_extra_word,Redis eviction policy production,2,0.611659,149
+6000,1,11.72,baseline,miss_extra_word,Redis eviction policy production,3,0.610466,149
+6000,1,11.72,tree,miss_extra_word,Redis eviction policy production,3,1.401191,505
+6000,1,11.72,tree,miss_extra_word,Redis eviction policy production,4,1.507105,505
+6000,1,11.72,baseline,miss_extra_word,Redis eviction policy production,4,0.603833,149
+6000,1,11.72,tree,miss_extra_word,webhook signing secret location,0,1.559558,539
+6000,1,11.72,baseline,miss_extra_word,webhook signing secret location,0,0.582981,149
+6000,1,11.72,baseline,miss_extra_word,webhook signing secret location,1,0.579748,149
+6000,1,11.72,tree,miss_extra_word,webhook signing secret location,1,1.556836,539
+6000,1,11.72,tree,miss_extra_word,webhook signing secret location,2,1.545812,539
+6000,1,11.72,baseline,miss_extra_word,webhook signing secret location,2,0.580867,149
+6000,1,11.72,baseline,miss_extra_word,webhook signing secret location,3,0.581473,149
+6000,1,11.72,tree,miss_extra_word,webhook signing secret location,3,1.549477,539
+6000,1,11.72,tree,miss_extra_word,webhook signing secret location,4,1.571464,539
+6000,1,11.72,baseline,miss_extra_word,webhook signing secret location,4,0.573855,149
+6000,1,11.72,tree,miss_none,kubernetes ingress annotations,0,1.192003,149
+6000,1,11.72,baseline,miss_none,kubernetes ingress annotations,0,0.473858,149
+6000,1,11.72,baseline,miss_none,kubernetes ingress annotations,1,0.472090,149
+6000,1,11.72,tree,miss_none,kubernetes ingress annotations,1,1.197151,149
+6000,1,11.72,tree,miss_none,kubernetes ingress annotations,2,1.196672,149
+6000,1,11.72,baseline,miss_none,kubernetes ingress annotations,2,0.469826,149
+6000,1,11.72,baseline,miss_none,kubernetes ingress annotations,3,0.467602,149
+6000,1,11.72,tree,miss_none,kubernetes ingress annotations,3,1.162915,149
+6000,1,11.72,tree,miss_none,kubernetes ingress annotations,4,1.160181,149
+6000,1,11.72,baseline,miss_none,kubernetes ingress annotations,4,0.463406,149
+6000,1,11.72,tree,miss_none,GraphQL resolver dataloader,0,1.338702,149
+6000,1,11.72,baseline,miss_none,GraphQL resolver dataloader,0,0.463862,149
+6000,1,11.72,baseline,miss_none,GraphQL resolver dataloader,1,0.468936,149
+6000,1,11.72,tree,miss_none,GraphQL resolver dataloader,1,1.344441,149
+6000,1,11.72,tree,miss_none,GraphQL resolver dataloader,2,1.344394,149
+6000,1,11.72,baseline,miss_none,GraphQL resolver dataloader,2,0.469839,149
+6000,1,11.72,baseline,miss_none,GraphQL resolver dataloader,3,0.461614,149
+6000,1,11.72,tree,miss_none,GraphQL resolver dataloader,3,1.347928,149
+6000,1,11.72,tree,miss_none,GraphQL resolver dataloader,4,1.357800,149
+6000,1,11.72,baseline,miss_none,GraphQL resolver dataloader,4,0.457146,149
+6000,1,11.72,tree,miss_none,kubernetes liveness probe timeout,0,1.443561,149
+6000,1,11.72,baseline,miss_none,kubernetes liveness probe timeout,0,0.580963,149
+6000,1,11.72,baseline,miss_none,kubernetes liveness probe timeout,1,0.574779,149
+6000,1,11.72,tree,miss_none,kubernetes liveness probe timeout,1,1.437094,149
+6000,1,11.72,tree,miss_none,kubernetes liveness probe timeout,2,1.458725,149
+6000,1,11.72,baseline,miss_none,kubernetes liveness probe timeout,2,0.580736,149
+6000,1,11.72,baseline,miss_none,kubernetes liveness probe timeout,3,0.576092,149
+6000,1,11.72,tree,miss_none,kubernetes liveness probe timeout,3,1.491532,149
+6000,1,11.72,tree,miss_none,kubernetes liveness probe timeout,4,1.501935,149
+6000,1,11.72,baseline,miss_none,kubernetes liveness probe timeout,4,0.623405,149
+6000,1,11.72,tree,miss_paraphrase,intermittently failing test,0,1.455325,477
+6000,1,11.72,baseline,miss_paraphrase,intermittently failing test,0,0.391515,149
+6000,1,11.72,baseline,miss_paraphrase,intermittently failing test,1,0.379539,149
+6000,1,11.72,tree,miss_paraphrase,intermittently failing test,1,1.471763,477
+6000,1,11.72,tree,miss_paraphrase,intermittently failing test,2,1.421939,477
+6000,1,11.72,baseline,miss_paraphrase,intermittently failing test,2,0.378979,149
+6000,1,11.72,baseline,miss_paraphrase,intermittently failing test,3,0.386542,149
+6000,1,11.72,tree,miss_paraphrase,intermittently failing test,3,1.442358,477
+6000,1,11.72,tree,miss_paraphrase,intermittently failing test,4,1.444449,477
+6000,1,11.72,baseline,miss_paraphrase,intermittently failing test,4,0.380324,149
+6000,1,11.72,tree,miss_paraphrase,build artifacts S3 bucket,0,1.560098,653
+6000,1,11.72,baseline,miss_paraphrase,build artifacts S3 bucket,0,0.612119,149
+6000,1,11.72,baseline,miss_paraphrase,build artifacts S3 bucket,1,0.607664,149
+6000,1,11.72,tree,miss_paraphrase,build artifacts S3 bucket,1,1.494802,653
+6000,1,11.72,tree,miss_paraphrase,build artifacts S3 bucket,2,1.469697,653
+6000,1,11.72,baseline,miss_paraphrase,build artifacts S3 bucket,2,0.604306,149
+6000,1,11.72,baseline,miss_paraphrase,build artifacts S3 bucket,3,0.613442,149
+6000,1,11.72,tree,miss_paraphrase,build artifacts S3 bucket,3,1.531190,653
+6000,1,11.72,tree,miss_paraphrase,build artifacts S3 bucket,4,1.532270,653
+6000,1,11.72,baseline,miss_paraphrase,build artifacts S3 bucket,4,0.602919,149
+6000,1,11.72,tree,miss_paraphrase,password hash algorithm,0,1.133533,535
+6000,1,11.72,baseline,miss_paraphrase,password hash algorithm,0,0.415954,149
+6000,1,11.72,baseline,miss_paraphrase,password hash algorithm,1,0.413479,149
+6000,1,11.72,tree,miss_paraphrase,password hash algorithm,1,1.133252,535
+6000,1,11.72,tree,miss_paraphrase,password hash algorithm,2,1.154906,535
+6000,1,11.72,baseline,miss_paraphrase,password hash algorithm,2,0.416475,149
+6000,1,11.72,baseline,miss_paraphrase,password hash algorithm,3,0.417802,149
+6000,1,11.72,tree,miss_paraphrase,password hash algorithm,3,1.144600,535
+6000,1,11.72,tree,miss_paraphrase,password hash algorithm,4,1.152545,535
+6000,1,11.72,baseline,miss_paraphrase,password hash algorithm,4,0.419161,149
+6000,1,11.72,tree,miss_typo_carried,allkeys-lru,0,0.761415,149
+6000,1,11.72,baseline,miss_typo_carried,allkeys-lru,0,0.312545,149
+6000,1,11.72,baseline,miss_typo_carried,allkeys-lru,1,0.310418,149
+6000,1,11.72,tree,miss_typo_carried,allkeys-lru,1,0.761496,149
+6000,1,11.72,tree,miss_typo_carried,allkeys-lru,2,0.754858,149
+6000,1,11.72,baseline,miss_typo_carried,allkeys-lru,2,0.311646,149
+6000,1,11.72,baseline,miss_typo_carried,allkeys-lru,3,0.313952,149
+6000,1,11.72,tree,miss_typo_carried,allkeys-lru,3,0.727123,149
+6000,1,11.72,tree,miss_typo_carried,allkeys-lru,4,0.717583,149
+6000,1,11.72,baseline,miss_typo_carried,allkeys-lru,4,0.309983,149
+6000,1,11.72,tree,miss_typo_carried,aragon2id,0,0.643177,149
+6000,1,11.72,baseline,miss_typo_carried,aragon2id,0,0.307718,149
+6000,1,11.72,baseline,miss_typo_carried,aragon2id,1,0.313429,149
+6000,1,11.72,tree,miss_typo_carried,aragon2id,1,0.626550,149
+6000,1,11.72,tree,miss_typo_carried,aragon2id,2,0.615638,149
+6000,1,11.72,baseline,miss_typo_carried,aragon2id,2,0.311078,149
+6000,1,11.72,baseline,miss_typo_carried,aragon2id,3,0.303110,149
+6000,1,11.72,tree,miss_typo_carried,aragon2id,3,0.578380,149
+6000,1,11.72,tree,miss_typo_carried,aragon2id,4,0.629952,149
+6000,1,11.72,baseline,miss_typo_carried,aragon2id,4,0.295703,149
+6000,1,11.72,tree,miss_typo_carried,streamimg flag,0,1.093719,700
+6000,1,11.72,baseline,miss_typo_carried,streamimg flag,0,0.401256,149
+6000,1,11.72,baseline,miss_typo_carried,streamimg flag,1,0.401474,149
+6000,1,11.72,tree,miss_typo_carried,streamimg flag,1,1.113511,700
+6000,1,11.72,tree,miss_typo_carried,streamimg flag,2,1.109731,700
+6000,1,11.72,baseline,miss_typo_carried,streamimg flag,2,0.411341,149
+6000,1,11.72,baseline,miss_typo_carried,streamimg flag,3,0.403395,149
+6000,1,11.72,tree,miss_typo_carried,streamimg flag,3,1.121231,700
+6000,1,11.72,tree,miss_typo_carried,streamimg flag,4,1.118274,700
+6000,1,11.72,baseline,miss_typo_carried,streamimg flag,4,0.404730,149
+6000,1,11.72,tree,miss_extra_word_common,webhook signing secret owner,0,1.410146,536
+6000,1,11.72,baseline,miss_extra_word_common,webhook signing secret owner,0,0.647322,149
+6000,1,11.72,baseline,miss_extra_word_common,webhook signing secret owner,1,0.587948,149
+6000,1,11.72,tree,miss_extra_word_common,webhook signing secret owner,1,1.473100,536
+6000,1,11.72,tree,miss_extra_word_common,webhook signing secret owner,2,1.439671,536
+6000,1,11.72,baseline,miss_extra_word_common,webhook signing secret owner,2,0.578835,149
+6000,1,11.72,baseline,miss_extra_word_common,webhook signing secret owner,3,0.607638,149
+6000,1,11.72,tree,miss_extra_word_common,webhook signing secret owner,3,1.408578,536
+6000,1,11.72,tree,miss_extra_word_common,webhook signing secret owner,4,1.412148,536
+6000,1,11.72,baseline,miss_extra_word_common,webhook signing secret owner,4,0.594781,149
+6000,1,11.72,tree,miss_extra_word_common,max upload size flag,0,1.442834,2071
+6000,1,11.72,baseline,miss_extra_word_common,max upload size flag,0,0.710094,149
+6000,1,11.72,baseline,miss_extra_word_common,max upload size flag,1,0.673653,149
+6000,1,11.72,tree,miss_extra_word_common,max upload size flag,1,1.499296,2071
+6000,1,11.72,tree,miss_extra_word_common,max upload size flag,2,1.444238,2071
+6000,1,11.72,baseline,miss_extra_word_common,max upload size flag,2,0.669299,149
+6000,1,11.72,baseline,miss_extra_word_common,max upload size flag,3,0.670208,149
+6000,1,11.72,tree,miss_extra_word_common,max upload size flag,3,1.468355,2071
+6000,1,11.72,tree,miss_extra_word_common,max upload size flag,4,1.452683,2071
+6000,1,11.72,baseline,miss_extra_word_common,max upload size flag,4,0.678451,149
+6000,1,11.72,tree,miss_paraphrase_common,artifacts bucket name,0,1.397752,1669
+6000,1,11.72,baseline,miss_paraphrase_common,artifacts bucket name,0,0.555920,149
+6000,1,11.72,baseline,miss_paraphrase_common,artifacts bucket name,1,0.515383,149
+6000,1,11.72,tree,miss_paraphrase_common,artifacts bucket name,1,1.297989,1669
+6000,1,11.72,tree,miss_paraphrase_common,artifacts bucket name,2,1.297746,1669
+6000,1,11.72,baseline,miss_paraphrase_common,artifacts bucket name,2,0.512197,149
+6000,1,11.72,baseline,miss_paraphrase_common,artifacts bucket name,3,0.526545,149
+6000,1,11.72,tree,miss_paraphrase_common,artifacts bucket name,3,1.317443,1669
+6000,1,11.72,tree,miss_paraphrase_common,artifacts bucket name,4,1.343876,1669
+6000,1,11.72,baseline,miss_paraphrase_common,artifacts bucket name,4,0.533803,149
+6000,1,11.72,tree,miss_paraphrase_common,Redis cache eviction,0,1.099627,1735
+6000,1,11.72,baseline,miss_paraphrase_common,Redis cache eviction,0,0.519727,149
+6000,1,11.72,baseline,miss_paraphrase_common,Redis cache eviction,1,0.537720,149
+6000,1,11.72,tree,miss_paraphrase_common,Redis cache eviction,1,1.063209,1735
+6000,1,11.72,tree,miss_paraphrase_common,Redis cache eviction,2,1.031141,1735
+6000,1,11.72,baseline,miss_paraphrase_common,Redis cache eviction,2,0.529484,149
+6000,1,11.72,baseline,miss_paraphrase_common,Redis cache eviction,3,0.535076,149
+6000,1,11.72,tree,miss_paraphrase_common,Redis cache eviction,3,1.084247,1735
+6000,1,11.72,tree,miss_paraphrase_common,Redis cache eviction,4,1.058118,1735
+6000,1,11.72,baseline,miss_paraphrase_common,Redis cache eviction,4,0.517888,149
+6000,1,11.72,tree,peak_rss,,0,,142458880
+6000,1,11.72,baseline,peak_rss,,0,,140607488
+6000,2,13.16,warm-up,warm,E4127,0,3.011799,562
+6000,2,13.16,baseline,startup,initialize,0,0.067520,0
+6000,2,13.16,tree,startup,initialize,0,0.072251,0
+6000,2,13.16,baseline,first (searched first),E4127,0,2.005753,562
+6000,2,13.16,tree,first (searched second),E4127,0,2.021647,562
+6000,2,13.16,baseline,rare,E4127,0,0.323423,562
+6000,2,13.16,tree,rare,E4127,0,0.329262,562
+6000,2,13.16,tree,rare,E4127,1,0.318276,562
+6000,2,13.16,baseline,rare,E4127,1,0.321524,562
+6000,2,13.16,baseline,rare,E4127,2,0.319763,562
+6000,2,13.16,tree,rare,E4127,2,0.315268,562
+6000,2,13.16,tree,rare,E4127,3,0.330073,562
+6000,2,13.16,baseline,rare,E4127,3,0.332145,562
+6000,2,13.16,baseline,rare,E4127,4,0.327926,562
+6000,2,13.16,tree,rare,E4127,4,0.340309,562
+6000,2,13.16,baseline,rare,SUP-48213,0,0.310115,445
+6000,2,13.16,tree,rare,SUP-48213,0,0.306468,445
+6000,2,13.16,tree,rare,SUP-48213,1,0.312164,445
+6000,2,13.16,baseline,rare,SUP-48213,1,0.308923,445
+6000,2,13.16,baseline,rare,SUP-48213,2,0.312599,445
+6000,2,13.16,tree,rare,SUP-48213,2,0.310115,445
+6000,2,13.16,tree,rare,SUP-48213,3,0.314226,445
+6000,2,13.16,baseline,rare,SUP-48213,3,0.314461,445
+6000,2,13.16,baseline,rare,SUP-48213,4,0.314864,445
+6000,2,13.16,tree,rare,SUP-48213,4,0.310422,445
+6000,2,13.16,baseline,rare,ctx-artifacts-euw3-7f2a,0,0.278524,536
+6000,2,13.16,tree,rare,ctx-artifacts-euw3-7f2a,0,0.267013,536
+6000,2,13.16,tree,rare,ctx-artifacts-euw3-7f2a,1,0.254858,536
+6000,2,13.16,baseline,rare,ctx-artifacts-euw3-7f2a,1,0.264894,536
+6000,2,13.16,baseline,rare,ctx-artifacts-euw3-7f2a,2,0.264114,536
+6000,2,13.16,tree,rare,ctx-artifacts-euw3-7f2a,2,0.266181,536
+6000,2,13.16,tree,rare,ctx-artifacts-euw3-7f2a,3,0.262354,536
+6000,2,13.16,baseline,rare,ctx-artifacts-euw3-7f2a,3,0.256440,536
+6000,2,13.16,baseline,rare,ctx-artifacts-euw3-7f2a,4,0.253550,536
+6000,2,13.16,tree,rare,ctx-artifacts-euw3-7f2a,4,0.258140,536
+6000,2,13.16,baseline,common,self,0,0.261870,4335
+6000,2,13.16,tree,common,self,0,0.271844,4335
+6000,2,13.16,tree,common,self,1,0.272874,4335
+6000,2,13.16,baseline,common,self,1,0.262063,4335
+6000,2,13.16,baseline,common,self,2,0.255568,4335
+6000,2,13.16,tree,common,self,2,0.266816,4335
+6000,2,13.16,tree,common,self,3,0.262522,4335
+6000,2,13.16,baseline,common,self,3,0.277540,4335
+6000,2,13.16,baseline,common,self,4,0.273674,4335
+6000,2,13.16,tree,common,self,4,0.270784,4335
+6000,2,13.16,baseline,common,return,0,0.286276,4939
+6000,2,13.16,tree,common,return,0,0.288625,4939
+6000,2,13.16,tree,common,return,1,0.291010,4939
+6000,2,13.16,baseline,common,return,1,0.286337,4939
+6000,2,13.16,baseline,common,return,2,0.288932,4939
+6000,2,13.16,tree,common,return,2,0.294612,4939
+6000,2,13.16,tree,common,return,3,0.293493,4939
+6000,2,13.16,baseline,common,return,3,0.295784,4939
+6000,2,13.16,baseline,common,return,4,0.290822,4939
+6000,2,13.16,tree,common,return,4,0.291936,4939
+6000,2,13.16,baseline,common,import,0,0.302426,4524
+6000,2,13.16,tree,common,import,0,0.301288,4524
+6000,2,13.16,tree,common,import,1,0.309928,4524
+6000,2,13.16,baseline,common,import,1,0.297643,4524
+6000,2,13.16,baseline,common,import,2,0.279148,4524
+6000,2,13.16,tree,common,import,2,0.279107,4524
+6000,2,13.16,tree,common,import,3,0.281536,4524
+6000,2,13.16,baseline,common,import,3,0.284259,4524
+6000,2,13.16,baseline,common,import,4,0.288105,4524
+6000,2,13.16,tree,common,import,4,0.291226,4524
+6000,2,13.16,baseline,multi,the staging DB port,0,0.431198,1569
+6000,2,13.16,tree,multi,the staging DB port,0,0.428546,1569
+6000,2,13.16,tree,multi,the staging DB port,1,0.438276,1569
+6000,2,13.16,baseline,multi,the staging DB port,1,0.446679,1569
+6000,2,13.16,baseline,multi,the staging DB port,2,0.441608,1569
+6000,2,13.16,tree,multi,the staging DB port,2,0.438751,1569
+6000,2,13.16,tree,multi,the staging DB port,3,0.430971,1569
+6000,2,13.16,baseline,multi,the staging DB port,3,0.438637,1569
+6000,2,13.16,baseline,multi,the staging DB port,4,0.429686,1569
+6000,2,13.16,tree,multi,the staging DB port,4,0.437998,1569
+6000,2,13.16,baseline,multi,failed with exit code,0,0.512803,3572
+6000,2,13.16,tree,multi,failed with exit code,0,0.493848,3572
+6000,2,13.16,tree,multi,failed with exit code,1,0.499548,3572
+6000,2,13.16,baseline,multi,failed with exit code,1,0.487736,3572
+6000,2,13.16,baseline,multi,failed with exit code,2,0.488670,3572
+6000,2,13.16,tree,multi,failed with exit code,2,0.492114,3572
+6000,2,13.16,tree,multi,failed with exit code,3,0.505325,3572
+6000,2,13.16,baseline,multi,failed with exit code,3,0.502445,3572
+6000,2,13.16,baseline,multi,failed with exit code,4,0.508585,3572
+6000,2,13.16,tree,multi,failed with exit code,4,0.510840,3572
+6000,2,13.16,baseline,multi,Renamed parse_header to,0,0.370941,410
+6000,2,13.16,tree,multi,Renamed parse_header to,0,0.370818,410
+6000,2,13.16,tree,multi,Renamed parse_header to,1,0.368208,410
+6000,2,13.16,baseline,multi,Renamed parse_header to,1,0.405007,410
+6000,2,13.16,baseline,multi,Renamed parse_header to,2,0.361741,410
+6000,2,13.16,tree,multi,Renamed parse_header to,2,0.366041,410
+6000,2,13.16,tree,multi,Renamed parse_header to,3,0.368303,410
+6000,2,13.16,baseline,multi,Renamed parse_header to,3,0.368550,410
+6000,2,13.16,baseline,multi,Renamed parse_header to,4,0.365277,410
+6000,2,13.16,tree,multi,Renamed parse_header to,4,0.352057,410
+6000,2,13.16,baseline,miss_identifier,streamChunkedV3,0,0.257650,149
+6000,2,13.16,tree,miss_identifier,streamChunkedV3,0,0.633685,708
+6000,2,13.16,tree,miss_identifier,streamChunkedV3,1,0.633335,708
+6000,2,13.16,baseline,miss_identifier,streamChunkedV3,1,0.262904,149
+6000,2,13.16,baseline,miss_identifier,streamChunkedV3,2,0.262582,149
+6000,2,13.16,tree,miss_identifier,streamChunkedV3,2,0.640366,708
+6000,2,13.16,tree,miss_identifier,streamChunkedV3,3,0.647885,708
+6000,2,13.16,baseline,miss_identifier,streamChunkedV3,3,0.278394,149
+6000,2,13.16,baseline,miss_identifier,streamChunkedV3,4,0.271959,149
+6000,2,13.16,tree,miss_identifier,streamChunkedV3,4,0.642732,708
+6000,2,13.16,baseline,miss_identifier,decodeFrameHeader,0,0.260046,149
+6000,2,13.16,tree,miss_identifier,decodeFrameHeader,0,0.668966,2071
+6000,2,13.16,tree,miss_identifier,decodeFrameHeader,1,0.687337,2071
+6000,2,13.16,baseline,miss_identifier,decodeFrameHeader,1,0.291879,149
+6000,2,13.16,baseline,miss_identifier,decodeFrameHeader,2,0.278460,149
+6000,2,13.16,tree,miss_identifier,decodeFrameHeader,2,0.662704,2071
+6000,2,13.16,tree,miss_identifier,decodeFrameHeader,3,0.652456,2071
+6000,2,13.16,baseline,miss_identifier,decodeFrameHeader,3,0.266027,149
+6000,2,13.16,baseline,miss_identifier,decodeFrameHeader,4,0.273802,149
+6000,2,13.16,tree,miss_identifier,decodeFrameHeader,4,0.672695,2071
+6000,2,13.16,baseline,miss_identifier,refresh_token,0,0.288756,149
+6000,2,13.16,tree,miss_identifier,refresh_token,0,0.679383,726
+6000,2,13.16,tree,miss_identifier,refresh_token,1,0.667629,726
+6000,2,13.16,baseline,miss_identifier,refresh_token,1,0.276212,149
+6000,2,13.16,baseline,miss_identifier,refresh_token,2,0.277407,149
+6000,2,13.16,tree,miss_identifier,refresh_token,2,0.665036,726
+6000,2,13.16,tree,miss_identifier,refresh_token,3,0.662506,726
+6000,2,13.16,baseline,miss_identifier,refresh_token,3,0.270674,149
+6000,2,13.16,baseline,miss_identifier,refresh_token,4,0.266587,149
+6000,2,13.16,tree,miss_identifier,refresh_token,4,0.645929,726
+6000,2,13.16,baseline,miss_question,What port is the staging database on?,0,0.348311,149
+6000,2,13.16,tree,miss_question,What port is the staging database on?,0,0.772887,1844
+6000,2,13.16,tree,miss_question,What port is the staging database on?,1,0.796305,1844
+6000,2,13.16,baseline,miss_question,What port is the staging database on?,1,0.350945,149
+6000,2,13.16,baseline,miss_question,What port is the staging database on?,2,0.351229,149
+6000,2,13.16,tree,miss_question,What port is the staging database on?,2,0.793304,1844
+6000,2,13.16,tree,miss_question,What port is the staging database on?,3,0.759088,1844
+6000,2,13.16,baseline,miss_question,What port is the staging database on?,3,0.346683,149
+6000,2,13.16,baseline,miss_question,What port is the staging database on?,4,0.353144,149
+6000,2,13.16,tree,miss_question,What port is the staging database on?,4,0.754334,1844
+6000,2,13.16,baseline,miss_question,Which test in the ledger suite fails intermittently?,0,0.385502,149
+6000,2,13.16,tree,miss_question,Which test in the ledger suite fails intermittently?,0,1.056342,1371
+6000,2,13.16,tree,miss_question,Which test in the ledger suite fails intermittently?,1,1.098113,1371
+6000,2,13.16,baseline,miss_question,Which test in the ledger suite fails intermittently?,1,0.405028,149
+6000,2,13.16,baseline,miss_question,Which test in the ledger suite fails intermittently?,2,0.409328,149
+6000,2,13.16,tree,miss_question,Which test in the ledger suite fails intermittently?,2,1.116474,1371
+6000,2,13.16,tree,miss_question,Which test in the ledger suite fails intermittently?,3,1.100669,1371
+6000,2,13.16,baseline,miss_question,Which test in the ledger suite fails intermittently?,3,0.410043,149
+6000,2,13.16,baseline,miss_question,Which test in the ledger suite fails intermittently?,4,0.400768,149
+6000,2,13.16,tree,miss_question,Which test in the ledger suite fails intermittently?,4,1.098874,1371
+6000,2,13.16,baseline,miss_question,What is the name of the bucket the artifacts go to?,0,0.388663,149
+6000,2,13.16,tree,miss_question,What is the name of the bucket the artifacts go to?,0,1.352761,2000
+6000,2,13.16,tree,miss_question,What is the name of the bucket the artifacts go to?,1,1.334778,2000
+6000,2,13.16,baseline,miss_question,What is the name of the bucket the artifacts go to?,1,0.394323,149
+6000,2,13.16,baseline,miss_question,What is the name of the bucket the artifacts go to?,2,0.399605,149
+6000,2,13.16,tree,miss_question,What is the name of the bucket the artifacts go to?,2,1.341351,2000
+6000,2,13.16,tree,miss_question,What is the name of the bucket the artifacts go to?,3,1.352555,2000
+6000,2,13.16,baseline,miss_question,What is the name of the bucket the artifacts go to?,3,0.370511,149
+6000,2,13.16,baseline,miss_question,What is the name of the bucket the artifacts go to?,4,0.372851,149
+6000,2,13.16,tree,miss_question,What is the name of the bucket the artifacts go to?,4,1.336855,2000
+6000,2,13.16,baseline,miss_typo,stagng DB port,0,0.430416,149
+6000,2,13.16,tree,miss_typo,stagng DB port,0,1.367987,2014
+6000,2,13.16,tree,miss_typo,stagng DB port,1,1.355494,2014
+6000,2,13.16,baseline,miss_typo,stagng DB port,1,0.403054,149
+6000,2,13.16,baseline,miss_typo,stagng DB port,2,0.391159,149
+6000,2,13.16,tree,miss_typo,stagng DB port,2,1.349794,2014
+6000,2,13.16,tree,miss_typo,stagng DB port,3,1.364233,2014
+6000,2,13.16,baseline,miss_typo,stagng DB port,3,0.419424,149
+6000,2,13.16,baseline,miss_typo,stagng DB port,4,0.420393,149
+6000,2,13.16,tree,miss_typo,stagng DB port,4,1.361127,2014
+6000,2,13.16,baseline,miss_typo,Redis eviction polciy,0,0.478595,149
+6000,2,13.16,tree,miss_typo,Redis eviction polciy,0,1.311408,1578
+6000,2,13.16,tree,miss_typo,Redis eviction polciy,1,1.315335,1578
+6000,2,13.16,baseline,miss_typo,Redis eviction polciy,1,0.468319,149
+6000,2,13.16,baseline,miss_typo,Redis eviction polciy,2,0.492159,149
+6000,2,13.16,tree,miss_typo,Redis eviction polciy,2,1.305623,1578
+6000,2,13.16,tree,miss_typo,Redis eviction polciy,3,1.314744,1578
+6000,2,13.16,baseline,miss_typo,Redis eviction polciy,3,0.472746,149
+6000,2,13.16,baseline,miss_typo,Redis eviction polciy,4,0.483504,149
+6000,2,13.16,tree,miss_typo,Redis eviction polciy,4,1.324672,1578
+6000,2,13.16,baseline,miss_typo,webhook signing seccret,0,0.434256,149
+6000,2,13.16,tree,miss_typo,webhook signing seccret,0,1.580016,527
+6000,2,13.16,tree,miss_typo,webhook signing seccret,1,1.585730,527
+6000,2,13.16,baseline,miss_typo,webhook signing seccret,1,0.430531,149
+6000,2,13.16,baseline,miss_typo,webhook signing seccret,2,0.436556,149
+6000,2,13.16,tree,miss_typo,webhook signing seccret,2,1.607033,527
+6000,2,13.16,tree,miss_typo,webhook signing seccret,3,1.592525,527
+6000,2,13.16,baseline,miss_typo,webhook signing seccret,3,0.452503,149
+6000,2,13.16,baseline,miss_typo,webhook signing seccret,4,0.454600,149
+6000,2,13.16,tree,miss_typo,webhook signing seccret,4,1.605232,527
+6000,2,13.16,baseline,miss_extra_word,staging DB port number,0,0.516342,149
+6000,2,13.16,tree,miss_extra_word,staging DB port number,0,1.560906,2096
+6000,2,13.16,tree,miss_extra_word,staging DB port number,1,1.557931,2096
+6000,2,13.16,baseline,miss_extra_word,staging DB port number,1,0.504131,149
+6000,2,13.16,baseline,miss_extra_word,staging DB port number,2,0.497047,149
+6000,2,13.16,tree,miss_extra_word,staging DB port number,2,1.542394,2096
+6000,2,13.16,tree,miss_extra_word,staging DB port number,3,1.562179,2096
+6000,2,13.16,baseline,miss_extra_word,staging DB port number,3,0.502554,149
+6000,2,13.16,baseline,miss_extra_word,staging DB port number,4,0.495304,149
+6000,2,13.16,tree,miss_extra_word,staging DB port number,4,1.554766,2096
+6000,2,13.16,baseline,miss_extra_word,Redis eviction policy production,0,0.557102,149
+6000,2,13.16,tree,miss_extra_word,Redis eviction policy production,0,1.351652,505
+6000,2,13.16,tree,miss_extra_word,Redis eviction policy production,1,1.371601,505
+6000,2,13.16,baseline,miss_extra_word,Redis eviction policy production,1,0.546581,149
+6000,2,13.16,baseline,miss_extra_word,Redis eviction policy production,2,0.544966,149
+6000,2,13.16,tree,miss_extra_word,Redis eviction policy production,2,1.321397,505
+6000,2,13.16,tree,miss_extra_word,Redis eviction policy production,3,1.307295,505
+6000,2,13.16,baseline,miss_extra_word,Redis eviction policy production,3,0.533062,149
+6000,2,13.16,baseline,miss_extra_word,Redis eviction policy production,4,0.540794,149
+6000,2,13.16,tree,miss_extra_word,Redis eviction policy production,4,1.313910,505
+6000,2,13.16,baseline,miss_extra_word,webhook signing secret location,0,0.527286,149
+6000,2,13.16,tree,miss_extra_word,webhook signing secret location,0,1.400285,539
+6000,2,13.16,tree,miss_extra_word,webhook signing secret location,1,1.407761,539
+6000,2,13.16,baseline,miss_extra_word,webhook signing secret location,1,0.517085,149
+6000,2,13.16,baseline,miss_extra_word,webhook signing secret location,2,0.509299,149
+6000,2,13.16,tree,miss_extra_word,webhook signing secret location,2,1.369639,539
+6000,2,13.16,tree,miss_extra_word,webhook signing secret location,3,1.388102,539
+6000,2,13.16,baseline,miss_extra_word,webhook signing secret location,3,0.517787,149
+6000,2,13.16,baseline,miss_extra_word,webhook signing secret location,4,0.527785,149
+6000,2,13.16,tree,miss_extra_word,webhook signing secret location,4,1.381551,539
+6000,2,13.16,baseline,miss_none,kubernetes ingress annotations,0,0.418435,149
+6000,2,13.16,tree,miss_none,kubernetes ingress annotations,0,1.072520,149
+6000,2,13.16,tree,miss_none,kubernetes ingress annotations,1,1.078999,149
+6000,2,13.16,baseline,miss_none,kubernetes ingress annotations,1,0.419476,149
+6000,2,13.16,baseline,miss_none,kubernetes ingress annotations,2,0.417293,149
+6000,2,13.16,tree,miss_none,kubernetes ingress annotations,2,1.079475,149
+6000,2,13.16,tree,miss_none,kubernetes ingress annotations,3,1.067467,149
+6000,2,13.16,baseline,miss_none,kubernetes ingress annotations,3,0.422037,149
+6000,2,13.16,baseline,miss_none,kubernetes ingress annotations,4,0.416488,149
+6000,2,13.16,tree,miss_none,kubernetes ingress annotations,4,1.073887,149
+6000,2,13.16,baseline,miss_none,GraphQL resolver dataloader,0,0.416830,149
+6000,2,13.16,tree,miss_none,GraphQL resolver dataloader,0,1.219368,149
+6000,2,13.16,tree,miss_none,GraphQL resolver dataloader,1,1.212017,149
+6000,2,13.16,baseline,miss_none,GraphQL resolver dataloader,1,0.424704,149
+6000,2,13.16,baseline,miss_none,GraphQL resolver dataloader,2,0.424450,149
+6000,2,13.16,tree,miss_none,GraphQL resolver dataloader,2,1.217848,149
+6000,2,13.16,tree,miss_none,GraphQL resolver dataloader,3,1.205729,149
+6000,2,13.16,baseline,miss_none,GraphQL resolver dataloader,3,0.429665,149
+6000,2,13.16,baseline,miss_none,GraphQL resolver dataloader,4,0.411095,149
+6000,2,13.16,tree,miss_none,GraphQL resolver dataloader,4,1.204172,149
+6000,2,13.16,baseline,miss_none,kubernetes liveness probe timeout,0,0.524549,149
+6000,2,13.16,tree,miss_none,kubernetes liveness probe timeout,0,1.347304,149
+6000,2,13.16,tree,miss_none,kubernetes liveness probe timeout,1,1.345979,149
+6000,2,13.16,baseline,miss_none,kubernetes liveness probe timeout,1,0.528513,149
+6000,2,13.16,baseline,miss_none,kubernetes liveness probe timeout,2,0.541058,149
+6000,2,13.16,tree,miss_none,kubernetes liveness probe timeout,2,1.349613,149
+6000,2,13.16,tree,miss_none,kubernetes liveness probe timeout,3,1.360688,149
+6000,2,13.16,baseline,miss_none,kubernetes liveness probe timeout,3,0.547366,149
+6000,2,13.16,baseline,miss_none,kubernetes liveness probe timeout,4,0.548125,149
+6000,2,13.16,tree,miss_none,kubernetes liveness probe timeout,4,1.405588,149
+6000,2,13.16,baseline,miss_paraphrase,intermittently failing test,0,0.343481,149
+6000,2,13.16,tree,miss_paraphrase,intermittently failing test,0,1.311369,477
+6000,2,13.16,tree,miss_paraphrase,intermittently failing test,1,1.324259,477
+6000,2,13.16,baseline,miss_paraphrase,intermittently failing test,1,0.355591,149
+6000,2,13.16,baseline,miss_paraphrase,intermittently failing test,2,0.356335,149
+6000,2,13.16,tree,miss_paraphrase,intermittently failing test,2,1.361124,477
+6000,2,13.16,tree,miss_paraphrase,intermittently failing test,3,1.328062,477
+6000,2,13.16,baseline,miss_paraphrase,intermittently failing test,3,0.345883,149
+6000,2,13.16,baseline,miss_paraphrase,intermittently failing test,4,0.340818,149
+6000,2,13.16,tree,miss_paraphrase,intermittently failing test,4,1.326504,477
+6000,2,13.16,baseline,miss_paraphrase,build artifacts S3 bucket,0,0.577625,149
+6000,2,13.16,tree,miss_paraphrase,build artifacts S3 bucket,0,1.467537,653
+6000,2,13.16,tree,miss_paraphrase,build artifacts S3 bucket,1,1.430253,653
+6000,2,13.16,baseline,miss_paraphrase,build artifacts S3 bucket,1,0.573148,149
+6000,2,13.16,baseline,miss_paraphrase,build artifacts S3 bucket,2,0.558536,149
+6000,2,13.16,tree,miss_paraphrase,build artifacts S3 bucket,2,1.397819,653
+6000,2,13.16,tree,miss_paraphrase,build artifacts S3 bucket,3,1.403844,653
+6000,2,13.16,baseline,miss_paraphrase,build artifacts S3 bucket,3,0.568677,149
+6000,2,13.16,baseline,miss_paraphrase,build artifacts S3 bucket,4,0.548263,149
+6000,2,13.16,tree,miss_paraphrase,build artifacts S3 bucket,4,1.400255,653
+6000,2,13.16,baseline,miss_paraphrase,password hash algorithm,0,0.361308,149
+6000,2,13.16,tree,miss_paraphrase,password hash algorithm,0,0.999181,535
+6000,2,13.16,tree,miss_paraphrase,password hash algorithm,1,0.984145,535
+6000,2,13.16,baseline,miss_paraphrase,password hash algorithm,1,0.357452,149
+6000,2,13.16,baseline,miss_paraphrase,password hash algorithm,2,0.354500,149
+6000,2,13.16,tree,miss_paraphrase,password hash algorithm,2,0.991905,535
+6000,2,13.16,tree,miss_paraphrase,password hash algorithm,3,0.980397,535
+6000,2,13.16,baseline,miss_paraphrase,password hash algorithm,3,0.354098,149
+6000,2,13.16,baseline,miss_paraphrase,password hash algorithm,4,0.356985,149
+6000,2,13.16,tree,miss_paraphrase,password hash algorithm,4,0.994654,535
+6000,2,13.16,baseline,miss_typo_carried,allkeys-lru,0,0.258401,149
+6000,2,13.16,tree,miss_typo_carried,allkeys-lru,0,0.627893,149
+6000,2,13.16,tree,miss_typo_carried,allkeys-lru,1,0.628659,149
+6000,2,13.16,baseline,miss_typo_carried,allkeys-lru,1,0.267511,149
+6000,2,13.16,baseline,miss_typo_carried,allkeys-lru,2,0.264407,149
+6000,2,13.16,tree,miss_typo_carried,allkeys-lru,2,0.615025,149
+6000,2,13.16,tree,miss_typo_carried,allkeys-lru,3,0.635350,149
+6000,2,13.16,baseline,miss_typo_carried,allkeys-lru,3,0.271079,149
+6000,2,13.16,baseline,miss_typo_carried,allkeys-lru,4,0.266515,149
+6000,2,13.16,tree,miss_typo_carried,allkeys-lru,4,0.633077,149
+6000,2,13.16,baseline,miss_typo_carried,aragon2id,0,0.273368,149
+6000,2,13.16,tree,miss_typo_carried,aragon2id,0,0.553094,149
+6000,2,13.16,tree,miss_typo_carried,aragon2id,1,0.562280,149
+6000,2,13.16,baseline,miss_typo_carried,aragon2id,1,0.279683,149
+6000,2,13.16,baseline,miss_typo_carried,aragon2id,2,0.283423,149
+6000,2,13.16,tree,miss_typo_carried,aragon2id,2,0.564110,149
+6000,2,13.16,tree,miss_typo_carried,aragon2id,3,0.557150,149
+6000,2,13.16,baseline,miss_typo_carried,aragon2id,3,0.282254,149
+6000,2,13.16,baseline,miss_typo_carried,aragon2id,4,0.281276,149
+6000,2,13.16,tree,miss_typo_carried,aragon2id,4,0.575911,149
+6000,2,13.16,baseline,miss_typo_carried,streamimg flag,0,0.367598,149
+6000,2,13.16,tree,miss_typo_carried,streamimg flag,0,0.999547,700
+6000,2,13.16,tree,miss_typo_carried,streamimg flag,1,1.002438,700
+6000,2,13.16,baseline,miss_typo_carried,streamimg flag,1,0.359311,149
+6000,2,13.16,baseline,miss_typo_carried,streamimg flag,2,0.356545,149
+6000,2,13.16,tree,miss_typo_carried,streamimg flag,2,1.006748,700
+6000,2,13.16,tree,miss_typo_carried,streamimg flag,3,1.003338,700
+6000,2,13.16,baseline,miss_typo_carried,streamimg flag,3,0.350820,149
+6000,2,13.16,baseline,miss_typo_carried,streamimg flag,4,0.352462,149
+6000,2,13.16,tree,miss_typo_carried,streamimg flag,4,0.996374,700
+6000,2,13.16,baseline,miss_extra_word_common,webhook signing secret owner,0,0.521022,149
+6000,2,13.16,tree,miss_extra_word_common,webhook signing secret owner,0,1.287793,536
+6000,2,13.16,tree,miss_extra_word_common,webhook signing secret owner,1,1.260464,536
+6000,2,13.16,baseline,miss_extra_word_common,webhook signing secret owner,1,0.519868,149
+6000,2,13.16,baseline,miss_extra_word_common,webhook signing secret owner,2,0.523976,149
+6000,2,13.16,tree,miss_extra_word_common,webhook signing secret owner,2,1.262555,536
+6000,2,13.16,tree,miss_extra_word_common,webhook signing secret owner,3,1.282854,536
+6000,2,13.16,baseline,miss_extra_word_common,webhook signing secret owner,3,0.534456,149
+6000,2,13.16,baseline,miss_extra_word_common,webhook signing secret owner,4,0.532396,149
+6000,2,13.16,tree,miss_extra_word_common,webhook signing secret owner,4,1.275712,536
+6000,2,13.16,baseline,miss_extra_word_common,max upload size flag,0,0.599803,149
+6000,2,13.16,tree,miss_extra_word_common,max upload size flag,0,1.270496,2071
+6000,2,13.16,tree,miss_extra_word_common,max upload size flag,1,1.264036,2071
+6000,2,13.16,baseline,miss_extra_word_common,max upload size flag,1,0.592862,149
+6000,2,13.16,baseline,miss_extra_word_common,max upload size flag,2,0.601200,149
+6000,2,13.16,tree,miss_extra_word_common,max upload size flag,2,1.300619,2071
+6000,2,13.16,tree,miss_extra_word_common,max upload size flag,3,1.286929,2071
+6000,2,13.16,baseline,miss_extra_word_common,max upload size flag,3,0.588319,149
+6000,2,13.16,baseline,miss_extra_word_common,max upload size flag,4,0.586438,149
+6000,2,13.16,tree,miss_extra_word_common,max upload size flag,4,1.265125,2071
+6000,2,13.16,baseline,miss_paraphrase_common,artifacts bucket name,0,0.480135,149
+6000,2,13.16,tree,miss_paraphrase_common,artifacts bucket name,0,1.221742,1669
+6000,2,13.16,tree,miss_paraphrase_common,artifacts bucket name,1,1.244531,1669
+6000,2,13.16,baseline,miss_paraphrase_common,artifacts bucket name,1,0.516979,149
+6000,2,13.16,baseline,miss_paraphrase_common,artifacts bucket name,2,0.495038,149
+6000,2,13.16,tree,miss_paraphrase_common,artifacts bucket name,2,1.274509,1669
+6000,2,13.16,tree,miss_paraphrase_common,artifacts bucket name,3,1.286882,1669
+6000,2,13.16,baseline,miss_paraphrase_common,artifacts bucket name,3,0.517710,149
+6000,2,13.16,baseline,miss_paraphrase_common,artifacts bucket name,4,0.508168,149
+6000,2,13.16,tree,miss_paraphrase_common,artifacts bucket name,4,1.248142,1669
+6000,2,13.16,baseline,miss_paraphrase_common,Redis cache eviction,0,0.491549,149
+6000,2,13.16,tree,miss_paraphrase_common,Redis cache eviction,0,1.004761,1735
+6000,2,13.16,tree,miss_paraphrase_common,Redis cache eviction,1,1.007329,1735
+6000,2,13.16,baseline,miss_paraphrase_common,Redis cache eviction,1,0.491052,149
+6000,2,13.16,baseline,miss_paraphrase_common,Redis cache eviction,2,0.493230,149
+6000,2,13.16,tree,miss_paraphrase_common,Redis cache eviction,2,1.002762,1735
+6000,2,13.16,tree,miss_paraphrase_common,Redis cache eviction,3,1.005004,1735
+6000,2,13.16,baseline,miss_paraphrase_common,Redis cache eviction,3,0.501656,149
+6000,2,13.16,baseline,miss_paraphrase_common,Redis cache eviction,4,0.496387,149
+6000,2,13.16,tree,miss_paraphrase_common,Redis cache eviction,4,1.006049,1735
+6000,2,13.16,baseline,peak_rss,,0,,139460608
+6000,2,13.16,tree,peak_rss,,0,,141672448
+6000,3,8.66,warm-up,warm,E4127,0,2.686082,562
+6000,3,8.66,tree,startup,initialize,0,0.058875,0
+6000,3,8.66,baseline,startup,initialize,0,0.064512,0
+6000,3,8.66,tree,first (searched first),E4127,0,1.709183,562
+6000,3,8.66,baseline,first (searched second),E4127,0,1.685990,562
+6000,3,8.66,tree,rare,E4127,0,0.282969,562
+6000,3,8.66,baseline,rare,E4127,0,0.277462,562
+6000,3,8.66,baseline,rare,E4127,1,0.274908,562
+6000,3,8.66,tree,rare,E4127,1,0.277651,562
+6000,3,8.66,tree,rare,E4127,2,0.283950,562
+6000,3,8.66,baseline,rare,E4127,2,0.274632,562
+6000,3,8.66,baseline,rare,E4127,3,0.276752,562
+6000,3,8.66,tree,rare,E4127,3,0.276749,562
+6000,3,8.66,tree,rare,E4127,4,0.277367,562
+6000,3,8.66,baseline,rare,E4127,4,0.276097,562
+6000,3,8.66,tree,rare,SUP-48213,0,0.249773,445
+6000,3,8.66,baseline,rare,SUP-48213,0,0.257531,445
+6000,3,8.66,baseline,rare,SUP-48213,1,0.259340,445
+6000,3,8.66,tree,rare,SUP-48213,1,0.256260,445
+6000,3,8.66,tree,rare,SUP-48213,2,0.249920,445
+6000,3,8.66,baseline,rare,SUP-48213,2,0.248553,445
+6000,3,8.66,baseline,rare,SUP-48213,3,0.246727,445
+6000,3,8.66,tree,rare,SUP-48213,3,0.245770,445
+6000,3,8.66,tree,rare,SUP-48213,4,0.250534,445
+6000,3,8.66,baseline,rare,SUP-48213,4,0.251567,445
+6000,3,8.66,tree,rare,ctx-artifacts-euw3-7f2a,0,0.218044,536
+6000,3,8.66,baseline,rare,ctx-artifacts-euw3-7f2a,0,0.217820,536
+6000,3,8.66,baseline,rare,ctx-artifacts-euw3-7f2a,1,0.220010,536
+6000,3,8.66,tree,rare,ctx-artifacts-euw3-7f2a,1,0.224481,536
+6000,3,8.66,tree,rare,ctx-artifacts-euw3-7f2a,2,0.223157,536
+6000,3,8.66,baseline,rare,ctx-artifacts-euw3-7f2a,2,0.215866,536
+6000,3,8.66,baseline,rare,ctx-artifacts-euw3-7f2a,3,0.222854,536
+6000,3,8.66,tree,rare,ctx-artifacts-euw3-7f2a,3,0.234434,536
+6000,3,8.66,tree,rare,ctx-artifacts-euw3-7f2a,4,0.225482,536
+6000,3,8.66,baseline,rare,ctx-artifacts-euw3-7f2a,4,0.218783,536
+6000,3,8.66,tree,common,self,0,0.223169,4335
+6000,3,8.66,baseline,common,self,0,0.222497,4335
+6000,3,8.66,baseline,common,self,1,0.227543,4335
+6000,3,8.66,tree,common,self,1,0.226603,4335
+6000,3,8.66,tree,common,self,2,0.223217,4335
+6000,3,8.66,baseline,common,self,2,0.224638,4335
+6000,3,8.66,baseline,common,self,3,0.225348,4335
+6000,3,8.66,tree,common,self,3,0.231596,4335
+6000,3,8.66,tree,common,self,4,0.224259,4335
+6000,3,8.66,baseline,common,self,4,0.223578,4335
+6000,3,8.66,tree,common,return,0,0.228790,4939
+6000,3,8.66,baseline,common,return,0,0.237318,4939
+6000,3,8.66,baseline,common,return,1,0.235151,4939
+6000,3,8.66,tree,common,return,1,0.232790,4939
+6000,3,8.66,tree,common,return,2,0.236200,4939
+6000,3,8.66,baseline,common,return,2,0.228984,4939
+6000,3,8.66,baseline,common,return,3,0.231166,4939
+6000,3,8.66,tree,common,return,3,0.231213,4939
+6000,3,8.66,tree,common,return,4,0.230381,4939
+6000,3,8.66,baseline,common,return,4,0.233151,4939
+6000,3,8.66,tree,common,import,0,0.237211,4524
+6000,3,8.66,baseline,common,import,0,0.236690,4524
+6000,3,8.66,baseline,common,import,1,0.234432,4524
+6000,3,8.66,tree,common,import,1,0.240633,4524
+6000,3,8.66,tree,common,import,2,0.248375,4524
+6000,3,8.66,baseline,common,import,2,0.249238,4524
+6000,3,8.66,baseline,common,import,3,0.250121,4524
+6000,3,8.66,tree,common,import,3,0.250473,4524
+6000,3,8.66,tree,common,import,4,0.244263,4524
+6000,3,8.66,baseline,common,import,4,0.246002,4524
+6000,3,8.66,tree,multi,the staging DB port,0,0.398524,1569
+6000,3,8.66,baseline,multi,the staging DB port,0,0.396519,1569
+6000,3,8.66,baseline,multi,the staging DB port,1,0.393931,1569
+6000,3,8.66,tree,multi,the staging DB port,1,0.395667,1569
+6000,3,8.66,tree,multi,the staging DB port,2,0.394375,1569
+6000,3,8.66,baseline,multi,the staging DB port,2,0.393546,1569
+6000,3,8.66,baseline,multi,the staging DB port,3,0.396142,1569
+6000,3,8.66,tree,multi,the staging DB port,3,0.396926,1569
+6000,3,8.66,tree,multi,the staging DB port,4,0.393711,1569
+6000,3,8.66,baseline,multi,the staging DB port,4,0.392954,1569
+6000,3,8.66,tree,multi,failed with exit code,0,0.460169,3572
+6000,3,8.66,baseline,multi,failed with exit code,0,0.460347,3572
+6000,3,8.66,baseline,multi,failed with exit code,1,0.440178,3572
+6000,3,8.66,tree,multi,failed with exit code,1,0.435845,3572
+6000,3,8.66,tree,multi,failed with exit code,2,0.433899,3572
+6000,3,8.66,baseline,multi,failed with exit code,2,0.436165,3572
+6000,3,8.66,baseline,multi,failed with exit code,3,0.434835,3572
+6000,3,8.66,tree,multi,failed with exit code,3,0.437286,3572
+6000,3,8.66,tree,multi,failed with exit code,4,0.444312,3572
+6000,3,8.66,baseline,multi,failed with exit code,4,0.435947,3572
+6000,3,8.66,tree,multi,Renamed parse_header to,0,0.324472,410
+6000,3,8.66,baseline,multi,Renamed parse_header to,0,0.330647,410
+6000,3,8.66,baseline,multi,Renamed parse_header to,1,0.335909,410
+6000,3,8.66,tree,multi,Renamed parse_header to,1,0.347571,410
+6000,3,8.66,tree,multi,Renamed parse_header to,2,0.322579,410
+6000,3,8.66,baseline,multi,Renamed parse_header to,2,0.315263,410
+6000,3,8.66,baseline,multi,Renamed parse_header to,3,0.322519,410
+6000,3,8.66,tree,multi,Renamed parse_header to,3,0.317611,410
+6000,3,8.66,tree,multi,Renamed parse_header to,4,0.315116,410
+6000,3,8.66,baseline,multi,Renamed parse_header to,4,0.316358,410
+6000,3,8.66,tree,miss_identifier,streamChunkedV3,0,0.556841,708
+6000,3,8.66,baseline,miss_identifier,streamChunkedV3,0,0.229661,149
+6000,3,8.66,baseline,miss_identifier,streamChunkedV3,1,0.231557,149
+6000,3,8.66,tree,miss_identifier,streamChunkedV3,1,0.561779,708
+6000,3,8.66,tree,miss_identifier,streamChunkedV3,2,0.585911,708
+6000,3,8.66,baseline,miss_identifier,streamChunkedV3,2,0.247696,149
+6000,3,8.66,baseline,miss_identifier,streamChunkedV3,3,0.250357,149
+6000,3,8.66,tree,miss_identifier,streamChunkedV3,3,0.589665,708
+6000,3,8.66,tree,miss_identifier,streamChunkedV3,4,0.587925,708
+6000,3,8.66,baseline,miss_identifier,streamChunkedV3,4,0.247259,149
+6000,3,8.66,tree,miss_identifier,decodeFrameHeader,0,0.577058,2071
+6000,3,8.66,baseline,miss_identifier,decodeFrameHeader,0,0.233761,149
+6000,3,8.66,baseline,miss_identifier,decodeFrameHeader,1,0.235739,149
+6000,3,8.66,tree,miss_identifier,decodeFrameHeader,1,0.585569,2071
+6000,3,8.66,tree,miss_identifier,decodeFrameHeader,2,0.580508,2071
+6000,3,8.66,baseline,miss_identifier,decodeFrameHeader,2,0.245946,149
+6000,3,8.66,baseline,miss_identifier,decodeFrameHeader,3,0.243682,149
+6000,3,8.66,tree,miss_identifier,decodeFrameHeader,3,0.576962,2071
+6000,3,8.66,tree,miss_identifier,decodeFrameHeader,4,0.578114,2071
+6000,3,8.66,baseline,miss_identifier,decodeFrameHeader,4,0.248514,149
+6000,3,8.66,tree,miss_identifier,refresh_token,0,0.606465,726
+6000,3,8.66,baseline,miss_identifier,refresh_token,0,0.252398,149
+6000,3,8.66,baseline,miss_identifier,refresh_token,1,0.254176,149
+6000,3,8.66,tree,miss_identifier,refresh_token,1,0.608320,726
+6000,3,8.66,tree,miss_identifier,refresh_token,2,0.608889,726
+6000,3,8.66,baseline,miss_identifier,refresh_token,2,0.259349,149
+6000,3,8.66,baseline,miss_identifier,refresh_token,3,0.254591,149
+6000,3,8.66,tree,miss_identifier,refresh_token,3,0.615601,726
+6000,3,8.66,tree,miss_identifier,refresh_token,4,0.614566,726
+6000,3,8.66,baseline,miss_identifier,refresh_token,4,0.256946,149
+6000,3,8.66,tree,miss_question,What port is the staging database on?,0,0.753049,1844
+6000,3,8.66,baseline,miss_question,What port is the staging database on?,0,0.338276,149
+6000,3,8.66,baseline,miss_question,What port is the staging database on?,1,0.350682,149
+6000,3,8.66,tree,miss_question,What port is the staging database on?,1,0.764574,1844
+6000,3,8.66,tree,miss_question,What port is the staging database on?,2,0.739576,1844
+6000,3,8.66,baseline,miss_question,What port is the staging database on?,2,0.336325,149
+6000,3,8.66,baseline,miss_question,What port is the staging database on?,3,0.345392,149
+6000,3,8.66,tree,miss_question,What port is the staging database on?,3,0.744139,1844
+6000,3,8.66,tree,miss_question,What port is the staging database on?,4,0.737000,1844
+6000,3,8.66,baseline,miss_question,What port is the staging database on?,4,0.337874,149
+6000,3,8.66,tree,miss_question,Which test in the ledger suite fails intermittently?,0,1.041876,1371
+6000,3,8.66,baseline,miss_question,Which test in the ledger suite fails intermittently?,0,0.380838,149
+6000,3,8.66,baseline,miss_question,Which test in the ledger suite fails intermittently?,1,0.374976,149
+6000,3,8.66,tree,miss_question,Which test in the ledger suite fails intermittently?,1,1.027357,1371
+6000,3,8.66,tree,miss_question,Which test in the ledger suite fails intermittently?,2,1.032877,1371
+6000,3,8.66,baseline,miss_question,Which test in the ledger suite fails intermittently?,2,0.379918,149
+6000,3,8.66,baseline,miss_question,Which test in the ledger suite fails intermittently?,3,0.393490,149
+6000,3,8.66,tree,miss_question,Which test in the ledger suite fails intermittently?,3,1.067108,1371
+6000,3,8.66,tree,miss_question,Which test in the ledger suite fails intermittently?,4,1.054959,1371
+6000,3,8.66,baseline,miss_question,Which test in the ledger suite fails intermittently?,4,0.386581,149
+6000,3,8.66,tree,miss_question,What is the name of the bucket the artifacts go to?,0,1.274082,2000
+6000,3,8.66,baseline,miss_question,What is the name of the bucket the artifacts go to?,0,0.365195,149
+6000,3,8.66,baseline,miss_question,What is the name of the bucket the artifacts go to?,1,0.361252,149
+6000,3,8.66,tree,miss_question,What is the name of the bucket the artifacts go to?,1,1.272802,2000
+6000,3,8.66,tree,miss_question,What is the name of the bucket the artifacts go to?,2,1.260930,2000
+6000,3,8.66,baseline,miss_question,What is the name of the bucket the artifacts go to?,2,0.352216,149
+6000,3,8.66,baseline,miss_question,What is the name of the bucket the artifacts go to?,3,0.357465,149
+6000,3,8.66,tree,miss_question,What is the name of the bucket the artifacts go to?,3,1.255205,2000
+6000,3,8.66,tree,miss_question,What is the name of the bucket the artifacts go to?,4,1.261628,2000
+6000,3,8.66,baseline,miss_question,What is the name of the bucket the artifacts go to?,4,0.360444,149
+6000,3,8.66,tree,miss_typo,stagng DB port,0,1.311740,2014
+6000,3,8.66,baseline,miss_typo,stagng DB port,0,0.382802,149
+6000,3,8.66,baseline,miss_typo,stagng DB port,1,0.376201,149
+6000,3,8.66,tree,miss_typo,stagng DB port,1,1.320346,2014
+6000,3,8.66,tree,miss_typo,stagng DB port,2,1.325676,2014
+6000,3,8.66,baseline,miss_typo,stagng DB port,2,0.387152,149
+6000,3,8.66,baseline,miss_typo,stagng DB port,3,0.396254,149
+6000,3,8.66,tree,miss_typo,stagng DB port,3,1.346696,2014
+6000,3,8.66,tree,miss_typo,stagng DB port,4,1.357800,2014
+6000,3,8.66,baseline,miss_typo,stagng DB port,4,0.395231,149
+6000,3,8.66,tree,miss_typo,Redis eviction polciy,0,1.316472,1578
+6000,3,8.66,baseline,miss_typo,Redis eviction polciy,0,0.473587,149
+6000,3,8.66,baseline,miss_typo,Redis eviction polciy,1,0.484360,149
+6000,3,8.66,tree,miss_typo,Redis eviction polciy,1,1.311210,1578
+6000,3,8.66,tree,miss_typo,Redis eviction polciy,2,1.294423,1578
+6000,3,8.66,baseline,miss_typo,Redis eviction polciy,2,0.469780,149
+6000,3,8.66,baseline,miss_typo,Redis eviction polciy,3,0.466579,149
+6000,3,8.66,tree,miss_typo,Redis eviction polciy,3,1.301002,1578
+6000,3,8.66,tree,miss_typo,Redis eviction polciy,4,1.293901,1578
+6000,3,8.66,baseline,miss_typo,Redis eviction polciy,4,0.463274,149
+6000,3,8.66,tree,miss_typo,webhook signing seccret,0,1.514858,527
+6000,3,8.66,baseline,miss_typo,webhook signing seccret,0,0.420650,149
+6000,3,8.66,baseline,miss_typo,webhook signing seccret,1,0.426699,149
+6000,3,8.66,tree,miss_typo,webhook signing seccret,1,1.535316,527
+6000,3,8.66,tree,miss_typo,webhook signing seccret,2,1.538766,527
+6000,3,8.66,baseline,miss_typo,webhook signing seccret,2,0.422551,149
+6000,3,8.66,baseline,miss_typo,webhook signing seccret,3,0.423984,149
+6000,3,8.66,tree,miss_typo,webhook signing seccret,3,1.545462,527
+6000,3,8.66,tree,miss_typo,webhook signing seccret,4,1.578851,527
+6000,3,8.66,baseline,miss_typo,webhook signing seccret,4,0.444250,149
+6000,3,8.66,tree,miss_extra_word,staging DB port number,0,1.515316,2096
+6000,3,8.66,baseline,miss_extra_word,staging DB port number,0,0.490640,149
+6000,3,8.66,baseline,miss_extra_word,staging DB port number,1,0.477717,149
+6000,3,8.66,tree,miss_extra_word,staging DB port number,1,1.536015,2096
+6000,3,8.66,tree,miss_extra_word,staging DB port number,2,1.519373,2096
+6000,3,8.66,baseline,miss_extra_word,staging DB port number,2,0.492667,149
+6000,3,8.66,baseline,miss_extra_word,staging DB port number,3,0.496088,149
+6000,3,8.66,tree,miss_extra_word,staging DB port number,3,1.521658,2096
+6000,3,8.66,tree,miss_extra_word,staging DB port number,4,1.516909,2096
+6000,3,8.66,baseline,miss_extra_word,staging DB port number,4,0.495540,149
+6000,3,8.66,tree,miss_extra_word,Redis eviction policy production,0,1.347924,505
+6000,3,8.66,baseline,miss_extra_word,Redis eviction policy production,0,0.541828,149
+6000,3,8.66,baseline,miss_extra_word,Redis eviction policy production,1,0.542638,149
+6000,3,8.66,tree,miss_extra_word,Redis eviction policy production,1,1.296320,505
+6000,3,8.66,tree,miss_extra_word,Redis eviction policy production,2,1.300938,505
+6000,3,8.66,baseline,miss_extra_word,Redis eviction policy production,2,0.537791,149
+6000,3,8.66,baseline,miss_extra_word,Redis eviction policy production,3,0.528860,149
+6000,3,8.66,tree,miss_extra_word,Redis eviction policy production,3,1.298175,505
+6000,3,8.66,tree,miss_extra_word,Redis eviction policy production,4,1.301877,505
+6000,3,8.66,baseline,miss_extra_word,Redis eviction policy production,4,0.557263,149
+6000,3,8.66,tree,miss_extra_word,webhook signing secret location,0,1.425603,539
+6000,3,8.66,baseline,miss_extra_word,webhook signing secret location,0,0.509875,149
+6000,3,8.66,baseline,miss_extra_word,webhook signing secret location,1,0.508299,149
+6000,3,8.66,tree,miss_extra_word,webhook signing secret location,1,1.365976,539
+6000,3,8.66,tree,miss_extra_word,webhook signing secret location,2,1.353341,539
+6000,3,8.66,baseline,miss_extra_word,webhook signing secret location,2,0.504253,149
+6000,3,8.66,baseline,miss_extra_word,webhook signing secret location,3,0.500187,149
+6000,3,8.66,tree,miss_extra_word,webhook signing secret location,3,1.348216,539
+6000,3,8.66,tree,miss_extra_word,webhook signing secret location,4,1.409548,539
+6000,3,8.66,baseline,miss_extra_word,webhook signing secret location,4,0.510279,149
+6000,3,8.66,tree,miss_none,kubernetes ingress annotations,0,1.061292,149
+6000,3,8.66,baseline,miss_none,kubernetes ingress annotations,0,0.409747,149
+6000,3,8.66,baseline,miss_none,kubernetes ingress annotations,1,0.412080,149
+6000,3,8.66,tree,miss_none,kubernetes ingress annotations,1,1.047159,149
+6000,3,8.66,tree,miss_none,kubernetes ingress annotations,2,1.050834,149
+6000,3,8.66,baseline,miss_none,kubernetes ingress annotations,2,0.406647,149
+6000,3,8.66,baseline,miss_none,kubernetes ingress annotations,3,0.405671,149
+6000,3,8.66,tree,miss_none,kubernetes ingress annotations,3,1.050160,149
+6000,3,8.66,tree,miss_none,kubernetes ingress annotations,4,1.047288,149
+6000,3,8.66,baseline,miss_none,kubernetes ingress annotations,4,0.413449,149
+6000,3,8.66,tree,miss_none,GraphQL resolver dataloader,0,1.198442,149
+6000,3,8.66,baseline,miss_none,GraphQL resolver dataloader,0,0.422269,149
+6000,3,8.66,baseline,miss_none,GraphQL resolver dataloader,1,0.443939,149
+6000,3,8.66,tree,miss_none,GraphQL resolver dataloader,1,1.255223,149
+6000,3,8.66,tree,miss_none,GraphQL resolver dataloader,2,1.236001,149
+6000,3,8.66,baseline,miss_none,GraphQL resolver dataloader,2,0.413881,149
+6000,3,8.66,baseline,miss_none,GraphQL resolver dataloader,3,0.408210,149
+6000,3,8.66,tree,miss_none,GraphQL resolver dataloader,3,1.196116,149
+6000,3,8.66,tree,miss_none,GraphQL resolver dataloader,4,1.190373,149
+6000,3,8.66,baseline,miss_none,GraphQL resolver dataloader,4,0.415975,149
+6000,3,8.66,tree,miss_none,kubernetes liveness probe timeout,0,1.343395,149
+6000,3,8.66,baseline,miss_none,kubernetes liveness probe timeout,0,0.528515,149
+6000,3,8.66,baseline,miss_none,kubernetes liveness probe timeout,1,0.538904,149
+6000,3,8.66,tree,miss_none,kubernetes liveness probe timeout,1,1.324790,149
+6000,3,8.66,tree,miss_none,kubernetes liveness probe timeout,2,1.325496,149
+6000,3,8.66,baseline,miss_none,kubernetes liveness probe timeout,2,0.526521,149
+6000,3,8.66,baseline,miss_none,kubernetes liveness probe timeout,3,0.533619,149
+6000,3,8.66,tree,miss_none,kubernetes liveness probe timeout,3,1.362799,149
+6000,3,8.66,tree,miss_none,kubernetes liveness probe timeout,4,1.396894,149
+6000,3,8.66,baseline,miss_none,kubernetes liveness probe timeout,4,0.560444,149
+6000,3,8.66,tree,miss_paraphrase,intermittently failing test,0,1.311289,477
+6000,3,8.66,baseline,miss_paraphrase,intermittently failing test,0,0.334120,149
+6000,3,8.66,baseline,miss_paraphrase,intermittently failing test,1,0.319287,149
+6000,3,8.66,tree,miss_paraphrase,intermittently failing test,1,1.282223,477
+6000,3,8.66,tree,miss_paraphrase,intermittently failing test,2,1.228360,477
+6000,3,8.66,baseline,miss_paraphrase,intermittently failing test,2,0.325455,149
+6000,3,8.66,baseline,miss_paraphrase,intermittently failing test,3,0.316434,149
+6000,3,8.66,tree,miss_paraphrase,intermittently failing test,3,1.211715,477
+6000,3,8.66,tree,miss_paraphrase,intermittently failing test,4,1.214773,477
+6000,3,8.66,baseline,miss_paraphrase,intermittently failing test,4,0.313098,149
+6000,3,8.66,tree,miss_paraphrase,build artifacts S3 bucket,0,1.335654,653
+6000,3,8.66,baseline,miss_paraphrase,build artifacts S3 bucket,0,0.537813,149
+6000,3,8.66,baseline,miss_paraphrase,build artifacts S3 bucket,1,0.545125,149
+6000,3,8.66,tree,miss_paraphrase,build artifacts S3 bucket,1,1.354833,653
+6000,3,8.66,tree,miss_paraphrase,build artifacts S3 bucket,2,1.345639,653
+6000,3,8.66,baseline,miss_paraphrase,build artifacts S3 bucket,2,0.534219,149
+6000,3,8.66,baseline,miss_paraphrase,build artifacts S3 bucket,3,0.529002,149
+6000,3,8.66,tree,miss_paraphrase,build artifacts S3 bucket,3,1.345785,653
+6000,3,8.66,tree,miss_paraphrase,build artifacts S3 bucket,4,1.330113,653
+6000,3,8.66,baseline,miss_paraphrase,build artifacts S3 bucket,4,0.526127,149
+6000,3,8.66,tree,miss_paraphrase,password hash algorithm,0,0.981605,535
+6000,3,8.66,baseline,miss_paraphrase,password hash algorithm,0,0.355684,149
+6000,3,8.66,baseline,miss_paraphrase,password hash algorithm,1,0.351012,149
+6000,3,8.66,tree,miss_paraphrase,password hash algorithm,1,0.988559,535
+6000,3,8.66,tree,miss_paraphrase,password hash algorithm,2,1.022481,535
+6000,3,8.66,baseline,miss_paraphrase,password hash algorithm,2,0.386388,149
+6000,3,8.66,baseline,miss_paraphrase,password hash algorithm,3,0.380082,149
+6000,3,8.66,tree,miss_paraphrase,password hash algorithm,3,0.987892,535
+6000,3,8.66,tree,miss_paraphrase,password hash algorithm,4,0.982213,535
+6000,3,8.66,baseline,miss_paraphrase,password hash algorithm,4,0.350179,149
+6000,3,8.66,tree,miss_typo_carried,allkeys-lru,0,0.600194,149
+6000,3,8.66,baseline,miss_typo_carried,allkeys-lru,0,0.251912,149
+6000,3,8.66,baseline,miss_typo_carried,allkeys-lru,1,0.251020,149
+6000,3,8.66,tree,miss_typo_carried,allkeys-lru,1,0.602819,149
+6000,3,8.66,tree,miss_typo_carried,allkeys-lru,2,0.601317,149
+6000,3,8.66,baseline,miss_typo_carried,allkeys-lru,2,0.250386,149
+6000,3,8.66,baseline,miss_typo_carried,allkeys-lru,3,0.255131,149
+6000,3,8.66,tree,miss_typo_carried,allkeys-lru,3,0.621932,149
+6000,3,8.66,tree,miss_typo_carried,allkeys-lru,4,0.619919,149
+6000,3,8.66,baseline,miss_typo_carried,allkeys-lru,4,0.260620,149
+6000,3,8.66,tree,miss_typo_carried,aragon2id,0,0.558274,149
+6000,3,8.66,baseline,miss_typo_carried,aragon2id,0,0.267968,149
+6000,3,8.66,baseline,miss_typo_carried,aragon2id,1,0.259539,149
+6000,3,8.66,tree,miss_typo_carried,aragon2id,1,0.517675,149
+6000,3,8.66,tree,miss_typo_carried,aragon2id,2,0.516025,149
+6000,3,8.66,baseline,miss_typo_carried,aragon2id,2,0.258111,149
+6000,3,8.66,baseline,miss_typo_carried,aragon2id,3,0.260261,149
+6000,3,8.66,tree,miss_typo_carried,aragon2id,3,0.523496,149
+6000,3,8.66,tree,miss_typo_carried,aragon2id,4,0.519824,149
+6000,3,8.66,baseline,miss_typo_carried,aragon2id,4,0.257915,149
+6000,3,8.66,tree,miss_typo_carried,streamimg flag,0,0.965812,700
+6000,3,8.66,baseline,miss_typo_carried,streamimg flag,0,0.364198,149
+6000,3,8.66,baseline,miss_typo_carried,streamimg flag,1,0.337929,149
+6000,3,8.66,tree,miss_typo_carried,streamimg flag,1,0.958024,700
+6000,3,8.66,tree,miss_typo_carried,streamimg flag,2,0.968039,700
+6000,3,8.66,baseline,miss_typo_carried,streamimg flag,2,0.339258,149
+6000,3,8.66,baseline,miss_typo_carried,streamimg flag,3,0.347080,149
+6000,3,8.66,tree,miss_typo_carried,streamimg flag,3,0.966071,700
+6000,3,8.66,tree,miss_typo_carried,streamimg flag,4,0.977816,700
+6000,3,8.66,baseline,miss_typo_carried,streamimg flag,4,0.361940,149
+6000,3,8.66,tree,miss_extra_word_common,webhook signing secret owner,0,1.306030,536
+6000,3,8.66,baseline,miss_extra_word_common,webhook signing secret owner,0,0.547266,149
+6000,3,8.66,baseline,miss_extra_word_common,webhook signing secret owner,1,0.512082,149
+6000,3,8.66,tree,miss_extra_word_common,webhook signing secret owner,1,1.235013,536
+6000,3,8.66,tree,miss_extra_word_common,webhook signing secret owner,2,1.233076,536
+6000,3,8.66,baseline,miss_extra_word_common,webhook signing secret owner,2,0.508413,149
+6000,3,8.66,baseline,miss_extra_word_common,webhook signing secret owner,3,0.508015,149
+6000,3,8.66,tree,miss_extra_word_common,webhook signing secret owner,3,1.240347,536
+6000,3,8.66,tree,miss_extra_word_common,webhook signing secret owner,4,1.251507,536
+6000,3,8.66,baseline,miss_extra_word_common,webhook signing secret owner,4,0.508096,149
+6000,3,8.66,tree,miss_extra_word_common,max upload size flag,0,1.265904,2071
+6000,3,8.66,baseline,miss_extra_word_common,max upload size flag,0,0.582590,149
+6000,3,8.66,baseline,miss_extra_word_common,max upload size flag,1,0.578398,149
+6000,3,8.66,tree,miss_extra_word_common,max upload size flag,1,1.252731,2071
+6000,3,8.66,tree,miss_extra_word_common,max upload size flag,2,1.270985,2071
+6000,3,8.66,baseline,miss_extra_word_common,max upload size flag,2,0.586570,149
+6000,3,8.66,baseline,miss_extra_word_common,max upload size flag,3,0.577856,149
+6000,3,8.66,tree,miss_extra_word_common,max upload size flag,3,1.254963,2071
+6000,3,8.66,tree,miss_extra_word_common,max upload size flag,4,1.259152,2071
+6000,3,8.66,baseline,miss_extra_word_common,max upload size flag,4,0.582381,149
+6000,3,8.66,tree,miss_paraphrase_common,artifacts bucket name,0,1.196127,1669
+6000,3,8.66,baseline,miss_paraphrase_common,artifacts bucket name,0,0.465762,149
+6000,3,8.66,baseline,miss_paraphrase_common,artifacts bucket name,1,0.470326,149
+6000,3,8.66,tree,miss_paraphrase_common,artifacts bucket name,1,1.182007,1669
+6000,3,8.66,tree,miss_paraphrase_common,artifacts bucket name,2,1.185546,1669
+6000,3,8.66,baseline,miss_paraphrase_common,artifacts bucket name,2,0.461824,149
+6000,3,8.66,baseline,miss_paraphrase_common,artifacts bucket name,3,0.461541,149
+6000,3,8.66,tree,miss_paraphrase_common,artifacts bucket name,3,1.191386,1669
+6000,3,8.66,tree,miss_paraphrase_common,artifacts bucket name,4,1.202542,1669
+6000,3,8.66,baseline,miss_paraphrase_common,artifacts bucket name,4,0.468968,149
+6000,3,8.66,tree,miss_paraphrase_common,Redis cache eviction,0,0.971110,1735
+6000,3,8.66,baseline,miss_paraphrase_common,Redis cache eviction,0,0.474767,149
+6000,3,8.66,baseline,miss_paraphrase_common,Redis cache eviction,1,0.482377,149
+6000,3,8.66,tree,miss_paraphrase_common,Redis cache eviction,1,0.975821,1735
+6000,3,8.66,tree,miss_paraphrase_common,Redis cache eviction,2,0.967712,1735
+6000,3,8.66,baseline,miss_paraphrase_common,Redis cache eviction,2,0.478884,149
+6000,3,8.66,baseline,miss_paraphrase_common,Redis cache eviction,3,0.474528,149
+6000,3,8.66,tree,miss_paraphrase_common,Redis cache eviction,3,0.960449,1735
+6000,3,8.66,tree,miss_paraphrase_common,Redis cache eviction,4,0.966109,1735
+6000,3,8.66,baseline,miss_paraphrase_common,Redis cache eviction,4,0.472226,149
+6000,3,8.66,tree,peak_rss,,0,,138936320
+6000,3,8.66,baseline,peak_rss,,0,,137527296
+6000,4,4.69,warm-up,warm,E4127,0,2.568196,562
+6000,4,4.69,baseline,startup,initialize,0,0.057264,0
+6000,4,4.69,tree,startup,initialize,0,0.064360,0
+6000,4,4.69,baseline,first (searched first),E4127,0,1.695760,562
+6000,4,4.69,tree,first (searched second),E4127,0,1.705044,562
+6000,4,4.69,baseline,rare,E4127,0,0.285263,562
+6000,4,4.69,tree,rare,E4127,0,0.284622,562
+6000,4,4.69,tree,rare,E4127,1,0.283562,562
+6000,4,4.69,baseline,rare,E4127,1,0.286513,562
+6000,4,4.69,baseline,rare,E4127,2,0.288022,562
+6000,4,4.69,tree,rare,E4127,2,0.285959,562
+6000,4,4.69,tree,rare,E4127,3,0.286860,562
+6000,4,4.69,baseline,rare,E4127,3,0.279485,562
+6000,4,4.69,baseline,rare,E4127,4,0.283540,562
+6000,4,4.69,tree,rare,E4127,4,0.284143,562
+6000,4,4.69,baseline,rare,SUP-48213,0,0.254178,445
+6000,4,4.69,tree,rare,SUP-48213,0,0.250534,445
+6000,4,4.69,tree,rare,SUP-48213,1,0.255463,445
+6000,4,4.69,baseline,rare,SUP-48213,1,0.255325,445
+6000,4,4.69,baseline,rare,SUP-48213,2,0.255199,445
+6000,4,4.69,tree,rare,SUP-48213,2,0.254059,445
+6000,4,4.69,tree,rare,SUP-48213,3,0.253828,445
+6000,4,4.69,baseline,rare,SUP-48213,3,0.255776,445
+6000,4,4.69,baseline,rare,SUP-48213,4,0.257056,445
+6000,4,4.69,tree,rare,SUP-48213,4,0.257638,445
+6000,4,4.69,baseline,rare,ctx-artifacts-euw3-7f2a,0,0.224862,536
+6000,4,4.69,tree,rare,ctx-artifacts-euw3-7f2a,0,0.225890,536
+6000,4,4.69,tree,rare,ctx-artifacts-euw3-7f2a,1,0.225094,536
+6000,4,4.69,baseline,rare,ctx-artifacts-euw3-7f2a,1,0.227980,536
+6000,4,4.69,baseline,rare,ctx-artifacts-euw3-7f2a,2,0.225410,536
+6000,4,4.69,tree,rare,ctx-artifacts-euw3-7f2a,2,0.224977,536
+6000,4,4.69,tree,rare,ctx-artifacts-euw3-7f2a,3,0.225079,536
+6000,4,4.69,baseline,rare,ctx-artifacts-euw3-7f2a,3,0.225291,536
+6000,4,4.69,baseline,rare,ctx-artifacts-euw3-7f2a,4,0.227793,536
+6000,4,4.69,tree,rare,ctx-artifacts-euw3-7f2a,4,0.226852,536
+6000,4,4.69,baseline,common,self,0,0.230047,4335
+6000,4,4.69,tree,common,self,0,0.230768,4335
+6000,4,4.69,tree,common,self,1,0.235523,4335
+6000,4,4.69,baseline,common,self,1,0.238181,4335
+6000,4,4.69,baseline,common,self,2,0.229902,4335
+6000,4,4.69,tree,common,self,2,0.234857,4335
+6000,4,4.69,tree,common,self,3,0.237216,4335
+6000,4,4.69,baseline,common,self,3,0.241879,4335
+6000,4,4.69,baseline,common,self,4,0.234896,4335
+6000,4,4.69,tree,common,self,4,0.234411,4335
+6000,4,4.69,baseline,common,return,0,0.242674,4939
+6000,4,4.69,tree,common,return,0,0.241720,4939
+6000,4,4.69,tree,common,return,1,0.241623,4939
+6000,4,4.69,baseline,common,return,1,0.239845,4939
+6000,4,4.69,baseline,common,return,2,0.238848,4939
+6000,4,4.69,tree,common,return,2,0.241077,4939
+6000,4,4.69,tree,common,return,3,0.242552,4939
+6000,4,4.69,baseline,common,return,3,0.235236,4939
+6000,4,4.69,baseline,common,return,4,0.234432,4939
+6000,4,4.69,tree,common,return,4,0.233369,4939
+6000,4,4.69,baseline,common,import,0,0.249134,4524
+6000,4,4.69,tree,common,import,0,0.244192,4524
+6000,4,4.69,tree,common,import,1,0.247373,4524
+6000,4,4.69,baseline,common,import,1,0.242648,4524
+6000,4,4.69,baseline,common,import,2,0.243392,4524
+6000,4,4.69,tree,common,import,2,0.241895,4524
+6000,4,4.69,tree,common,import,3,0.242303,4524
+6000,4,4.69,baseline,common,import,3,0.243841,4524
+6000,4,4.69,baseline,common,import,4,0.241276,4524
+6000,4,4.69,tree,common,import,4,0.244507,4524
+6000,4,4.69,baseline,multi,the staging DB port,0,0.380677,1569
+6000,4,4.69,tree,multi,the staging DB port,0,0.386026,1569
+6000,4,4.69,tree,multi,the staging DB port,1,0.387829,1569
+6000,4,4.69,baseline,multi,the staging DB port,1,0.379449,1569
+6000,4,4.69,baseline,multi,the staging DB port,2,0.379888,1569
+6000,4,4.69,tree,multi,the staging DB port,2,0.385023,1569
+6000,4,4.69,tree,multi,the staging DB port,3,0.376856,1569
+6000,4,4.69,baseline,multi,the staging DB port,3,0.385999,1569
+6000,4,4.69,baseline,multi,the staging DB port,4,0.385416,1569
+6000,4,4.69,tree,multi,the staging DB port,4,0.383791,1569
+6000,4,4.69,baseline,multi,failed with exit code,0,0.454718,3572
+6000,4,4.69,tree,multi,failed with exit code,0,0.445147,3572
+6000,4,4.69,tree,multi,failed with exit code,1,0.449193,3572
+6000,4,4.69,baseline,multi,failed with exit code,1,0.443134,3572
+6000,4,4.69,baseline,multi,failed with exit code,2,0.441765,3572
+6000,4,4.69,tree,multi,failed with exit code,2,0.450420,3572
+6000,4,4.69,tree,multi,failed with exit code,3,0.441096,3572
+6000,4,4.69,baseline,multi,failed with exit code,3,0.453428,3572
+6000,4,4.69,baseline,multi,failed with exit code,4,0.440779,3572
+6000,4,4.69,tree,multi,failed with exit code,4,0.446055,3572
+6000,4,4.69,baseline,multi,Renamed parse_header to,0,0.323989,410
+6000,4,4.69,tree,multi,Renamed parse_header to,0,0.320047,410
+6000,4,4.69,tree,multi,Renamed parse_header to,1,0.321362,410
+6000,4,4.69,baseline,multi,Renamed parse_header to,1,0.327699,410
+6000,4,4.69,baseline,multi,Renamed parse_header to,2,0.321280,410
+6000,4,4.69,tree,multi,Renamed parse_header to,2,0.327329,410
+6000,4,4.69,tree,multi,Renamed parse_header to,3,0.332162,410
+6000,4,4.69,baseline,multi,Renamed parse_header to,3,0.331048,410
+6000,4,4.69,baseline,multi,Renamed parse_header to,4,0.332140,410
+6000,4,4.69,tree,multi,Renamed parse_header to,4,0.331338,410
+6000,4,4.69,baseline,miss_identifier,streamChunkedV3,0,0.242615,149
+6000,4,4.69,tree,miss_identifier,streamChunkedV3,0,0.578449,708
+6000,4,4.69,tree,miss_identifier,streamChunkedV3,1,0.584411,708
+6000,4,4.69,baseline,miss_identifier,streamChunkedV3,1,0.248106,149
+6000,4,4.69,baseline,miss_identifier,streamChunkedV3,2,0.241055,149
+6000,4,4.69,tree,miss_identifier,streamChunkedV3,2,0.581083,708
+6000,4,4.69,tree,miss_identifier,streamChunkedV3,3,0.575134,708
+6000,4,4.69,baseline,miss_identifier,streamChunkedV3,3,0.233512,149
+6000,4,4.69,baseline,miss_identifier,streamChunkedV3,4,0.242790,149
+6000,4,4.69,tree,miss_identifier,streamChunkedV3,4,0.579789,708
+6000,4,4.69,baseline,miss_identifier,decodeFrameHeader,0,0.237629,149
+6000,4,4.69,tree,miss_identifier,decodeFrameHeader,0,0.559986,2071
+6000,4,4.69,tree,miss_identifier,decodeFrameHeader,1,0.569884,2071
+6000,4,4.69,baseline,miss_identifier,decodeFrameHeader,1,0.228623,149
+6000,4,4.69,baseline,miss_identifier,decodeFrameHeader,2,0.228073,149
+6000,4,4.69,tree,miss_identifier,decodeFrameHeader,2,0.570691,2071
+6000,4,4.69,tree,miss_identifier,decodeFrameHeader,3,0.566274,2071
+6000,4,4.69,baseline,miss_identifier,decodeFrameHeader,3,0.235997,149
+6000,4,4.69,baseline,miss_identifier,decodeFrameHeader,4,0.234356,149
+6000,4,4.69,tree,miss_identifier,decodeFrameHeader,4,0.581308,2071
+6000,4,4.69,baseline,miss_identifier,refresh_token,0,0.251186,149
+6000,4,4.69,tree,miss_identifier,refresh_token,0,0.599951,726
+6000,4,4.69,tree,miss_identifier,refresh_token,1,0.601586,726
+6000,4,4.69,baseline,miss_identifier,refresh_token,1,0.249662,149
+6000,4,4.69,baseline,miss_identifier,refresh_token,2,0.252427,149
+6000,4,4.69,tree,miss_identifier,refresh_token,2,0.601334,726
+6000,4,4.69,tree,miss_identifier,refresh_token,3,0.598677,726
+6000,4,4.69,baseline,miss_identifier,refresh_token,3,0.249737,149
+6000,4,4.69,baseline,miss_identifier,refresh_token,4,0.252810,149
+6000,4,4.69,tree,miss_identifier,refresh_token,4,0.599682,726
+6000,4,4.69,baseline,miss_question,What port is the staging database on?,0,0.324911,149
+6000,4,4.69,tree,miss_question,What port is the staging database on?,0,0.702782,1844
+6000,4,4.69,tree,miss_question,What port is the staging database on?,1,0.691363,1844
+6000,4,4.69,baseline,miss_question,What port is the staging database on?,1,0.319380,149
+6000,4,4.69,baseline,miss_question,What port is the staging database on?,2,0.314000,149
+6000,4,4.69,tree,miss_question,What port is the staging database on?,2,0.698335,1844
+6000,4,4.69,tree,miss_question,What port is the staging database on?,3,0.697784,1844
+6000,4,4.69,baseline,miss_question,What port is the staging database on?,3,0.320129,149
+6000,4,4.69,baseline,miss_question,What port is the staging database on?,4,0.318542,149
+6000,4,4.69,tree,miss_question,What port is the staging database on?,4,0.698474,1844
+6000,4,4.69,baseline,miss_question,Which test in the ledger suite fails intermittently?,0,0.363089,149
+6000,4,4.69,tree,miss_question,Which test in the ledger suite fails intermittently?,0,1.005210,1371
+6000,4,4.69,tree,miss_question,Which test in the ledger suite fails intermittently?,1,1.001561,1371
+6000,4,4.69,baseline,miss_question,Which test in the ledger suite fails intermittently?,1,0.364050,149
+6000,4,4.69,baseline,miss_question,Which test in the ledger suite fails intermittently?,2,0.363813,149
+6000,4,4.69,tree,miss_question,Which test in the ledger suite fails intermittently?,2,1.003442,1371
+6000,4,4.69,tree,miss_question,Which test in the ledger suite fails intermittently?,3,0.994855,1371
+6000,4,4.69,baseline,miss_question,Which test in the ledger suite fails intermittently?,3,0.363792,149
+6000,4,4.69,baseline,miss_question,Which test in the ledger suite fails intermittently?,4,0.364316,149
+6000,4,4.69,tree,miss_question,Which test in the ledger suite fails intermittently?,4,0.983198,1371
+6000,4,4.69,baseline,miss_question,What is the name of the bucket the artifacts go to?,0,0.354556,149
+6000,4,4.69,tree,miss_question,What is the name of the bucket the artifacts go to?,0,1.234448,2000
+6000,4,4.69,tree,miss_question,What is the name of the bucket the artifacts go to?,1,1.260298,2000
+6000,4,4.69,baseline,miss_question,What is the name of the bucket the artifacts go to?,1,0.357376,149
+6000,4,4.69,baseline,miss_question,What is the name of the bucket the artifacts go to?,2,0.360510,149
+6000,4,4.69,tree,miss_question,What is the name of the bucket the artifacts go to?,2,1.253072,2000
+6000,4,4.69,tree,miss_question,What is the name of the bucket the artifacts go to?,3,1.233511,2000
+6000,4,4.69,baseline,miss_question,What is the name of the bucket the artifacts go to?,3,0.352243,149
+6000,4,4.69,baseline,miss_question,What is the name of the bucket the artifacts go to?,4,0.359388,149
+6000,4,4.69,tree,miss_question,What is the name of the bucket the artifacts go to?,4,1.236481,2000
+6000,4,4.69,baseline,miss_typo,stagng DB port,0,0.385793,149
+6000,4,4.69,tree,miss_typo,stagng DB port,0,1.314531,2014
+6000,4,4.69,tree,miss_typo,stagng DB port,1,1.339041,2014
+6000,4,4.69,baseline,miss_typo,stagng DB port,1,0.391790,149
+6000,4,4.69,baseline,miss_typo,stagng DB port,2,0.389680,149
+6000,4,4.69,tree,miss_typo,stagng DB port,2,1.325867,2014
+6000,4,4.69,tree,miss_typo,stagng DB port,3,1.316531,2014
+6000,4,4.69,baseline,miss_typo,stagng DB port,3,0.391361,149
+6000,4,4.69,baseline,miss_typo,stagng DB port,4,0.390501,149
+6000,4,4.69,tree,miss_typo,stagng DB port,4,1.328322,2014
+6000,4,4.69,baseline,miss_typo,Redis eviction polciy,0,0.466855,149
+6000,4,4.69,tree,miss_typo,Redis eviction polciy,0,1.285301,1578
+6000,4,4.69,tree,miss_typo,Redis eviction polciy,1,1.292291,1578
+6000,4,4.69,baseline,miss_typo,Redis eviction polciy,1,0.468185,149
+6000,4,4.69,baseline,miss_typo,Redis eviction polciy,2,0.464833,149
+6000,4,4.69,tree,miss_typo,Redis eviction polciy,2,1.295154,1578
+6000,4,4.69,tree,miss_typo,Redis eviction polciy,3,1.288768,1578
+6000,4,4.69,baseline,miss_typo,Redis eviction polciy,3,0.463424,149
+6000,4,4.69,baseline,miss_typo,Redis eviction polciy,4,0.467121,149
+6000,4,4.69,tree,miss_typo,Redis eviction polciy,4,1.282611,1578
+6000,4,4.69,baseline,miss_typo,webhook signing seccret,0,0.419116,149
+6000,4,4.69,tree,miss_typo,webhook signing seccret,0,1.520166,527
+6000,4,4.69,tree,miss_typo,webhook signing seccret,1,1.514984,527
+6000,4,4.69,baseline,miss_typo,webhook signing seccret,1,0.422858,149
+6000,4,4.69,baseline,miss_typo,webhook signing seccret,2,0.419213,149
+6000,4,4.69,tree,miss_typo,webhook signing seccret,2,1.528900,527
+6000,4,4.69,tree,miss_typo,webhook signing seccret,3,1.529372,527
+6000,4,4.69,baseline,miss_typo,webhook signing seccret,3,0.420726,149
+6000,4,4.69,baseline,miss_typo,webhook signing seccret,4,0.418993,149
+6000,4,4.69,tree,miss_typo,webhook signing seccret,4,1.520977,527
+6000,4,4.69,baseline,miss_extra_word,staging DB port number,0,0.471854,149
+6000,4,4.69,tree,miss_extra_word,staging DB port number,0,1.471597,2096
+6000,4,4.69,tree,miss_extra_word,staging DB port number,1,1.467426,2096
+6000,4,4.69,baseline,miss_extra_word,staging DB port number,1,0.469215,149
+6000,4,4.69,baseline,miss_extra_word,staging DB port number,2,0.469627,149
+6000,4,4.69,tree,miss_extra_word,staging DB port number,2,1.460486,2096
+6000,4,4.69,tree,miss_extra_word,staging DB port number,3,1.461829,2096
+6000,4,4.69,baseline,miss_extra_word,staging DB port number,3,0.466794,149
+6000,4,4.69,baseline,miss_extra_word,staging DB port number,4,0.466883,149
+6000,4,4.69,tree,miss_extra_word,staging DB port number,4,1.464004,2096
+6000,4,4.69,baseline,miss_extra_word,Redis eviction policy production,0,0.525775,149
+6000,4,4.69,tree,miss_extra_word,Redis eviction policy production,0,1.278095,505
+6000,4,4.69,tree,miss_extra_word,Redis eviction policy production,1,1.285624,505
+6000,4,4.69,baseline,miss_extra_word,Redis eviction policy production,1,0.535709,149
+6000,4,4.69,baseline,miss_extra_word,Redis eviction policy production,2,0.533692,149
+6000,4,4.69,tree,miss_extra_word,Redis eviction policy production,2,1.290765,505
+6000,4,4.69,tree,miss_extra_word,Redis eviction policy production,3,1.277323,505
+6000,4,4.69,baseline,miss_extra_word,Redis eviction policy production,3,0.525339,149
+6000,4,4.69,baseline,miss_extra_word,Redis eviction policy production,4,0.530959,149
+6000,4,4.69,tree,miss_extra_word,Redis eviction policy production,4,1.283210,505
+6000,4,4.69,baseline,miss_extra_word,webhook signing secret location,0,0.505717,149
+6000,4,4.69,tree,miss_extra_word,webhook signing secret location,0,1.357008,539
+6000,4,4.69,tree,miss_extra_word,webhook signing secret location,1,1.366743,539
+6000,4,4.69,baseline,miss_extra_word,webhook signing secret location,1,0.506897,149
+6000,4,4.69,baseline,miss_extra_word,webhook signing secret location,2,0.505559,149
+6000,4,4.69,tree,miss_extra_word,webhook signing secret location,2,1.361443,539
+6000,4,4.69,tree,miss_extra_word,webhook signing secret location,3,1.365316,539
+6000,4,4.69,baseline,miss_extra_word,webhook signing secret location,3,0.514738,149
+6000,4,4.69,baseline,miss_extra_word,webhook signing secret location,4,0.518906,149
+6000,4,4.69,tree,miss_extra_word,webhook signing secret location,4,1.361472,539
+6000,4,4.69,baseline,miss_none,kubernetes ingress annotations,0,0.409600,149
+6000,4,4.69,tree,miss_none,kubernetes ingress annotations,0,1.045850,149
+6000,4,4.69,tree,miss_none,kubernetes ingress annotations,1,1.058035,149
+6000,4,4.69,baseline,miss_none,kubernetes ingress annotations,1,0.410648,149
+6000,4,4.69,baseline,miss_none,kubernetes ingress annotations,2,0.405794,149
+6000,4,4.69,tree,miss_none,kubernetes ingress annotations,2,1.045872,149
+6000,4,4.69,tree,miss_none,kubernetes ingress annotations,3,1.073683,149
+6000,4,4.69,baseline,miss_none,kubernetes ingress annotations,3,0.448656,149
+6000,4,4.69,baseline,miss_none,kubernetes ingress annotations,4,0.433397,149
+6000,4,4.69,tree,miss_none,kubernetes ingress annotations,4,1.073322,149
+6000,4,4.69,baseline,miss_none,GraphQL resolver dataloader,0,0.420767,149
+6000,4,4.69,tree,miss_none,GraphQL resolver dataloader,0,1.250370,149
+6000,4,4.69,tree,miss_none,GraphQL resolver dataloader,1,1.225840,149
+6000,4,4.69,baseline,miss_none,GraphQL resolver dataloader,1,0.412593,149
+6000,4,4.69,baseline,miss_none,GraphQL resolver dataloader,2,0.427639,149
+6000,4,4.69,tree,miss_none,GraphQL resolver dataloader,2,1.208514,149
+6000,4,4.69,tree,miss_none,GraphQL resolver dataloader,3,1.229798,149
+6000,4,4.69,baseline,miss_none,GraphQL resolver dataloader,3,0.413792,149
+6000,4,4.69,baseline,miss_none,GraphQL resolver dataloader,4,0.409800,149
+6000,4,4.69,tree,miss_none,GraphQL resolver dataloader,4,1.176011,149
+6000,4,4.69,baseline,miss_none,kubernetes liveness probe timeout,0,0.533206,149
+6000,4,4.69,tree,miss_none,kubernetes liveness probe timeout,0,1.336048,149
+6000,4,4.69,tree,miss_none,kubernetes liveness probe timeout,1,1.334876,149
+6000,4,4.69,baseline,miss_none,kubernetes liveness probe timeout,1,0.526962,149
+6000,4,4.69,baseline,miss_none,kubernetes liveness probe timeout,2,0.527372,149
+6000,4,4.69,tree,miss_none,kubernetes liveness probe timeout,2,1.315848,149
+6000,4,4.69,tree,miss_none,kubernetes liveness probe timeout,3,1.323813,149
+6000,4,4.69,baseline,miss_none,kubernetes liveness probe timeout,3,0.523551,149
+6000,4,4.69,baseline,miss_none,kubernetes liveness probe timeout,4,0.519569,149
+6000,4,4.69,tree,miss_none,kubernetes liveness probe timeout,4,1.348704,149
+6000,4,4.69,baseline,miss_paraphrase,intermittently failing test,0,0.314137,149
+6000,4,4.69,tree,miss_paraphrase,intermittently failing test,0,1.213045,477
+6000,4,4.69,tree,miss_paraphrase,intermittently failing test,1,1.259751,477
+6000,4,4.69,baseline,miss_paraphrase,intermittently failing test,1,0.319732,149
+6000,4,4.69,baseline,miss_paraphrase,intermittently failing test,2,0.313991,149
+6000,4,4.69,tree,miss_paraphrase,intermittently failing test,2,1.193426,477
+6000,4,4.69,tree,miss_paraphrase,intermittently failing test,3,1.192131,477
+6000,4,4.69,baseline,miss_paraphrase,intermittently failing test,3,0.314920,149
+6000,4,4.69,baseline,miss_paraphrase,intermittently failing test,4,0.315488,149
+6000,4,4.69,tree,miss_paraphrase,intermittently failing test,4,1.194823,477
+6000,4,4.69,baseline,miss_paraphrase,build artifacts S3 bucket,0,0.528526,149
+6000,4,4.69,tree,miss_paraphrase,build artifacts S3 bucket,0,1.343766,653
+6000,4,4.69,tree,miss_paraphrase,build artifacts S3 bucket,1,1.349702,653
+6000,4,4.69,baseline,miss_paraphrase,build artifacts S3 bucket,1,0.563507,149
+6000,4,4.69,baseline,miss_paraphrase,build artifacts S3 bucket,2,0.546790,149
+6000,4,4.69,tree,miss_paraphrase,build artifacts S3 bucket,2,1.355164,653
+6000,4,4.69,tree,miss_paraphrase,build artifacts S3 bucket,3,1.350702,653
+6000,4,4.69,baseline,miss_paraphrase,build artifacts S3 bucket,3,0.531911,149
+6000,4,4.69,baseline,miss_paraphrase,build artifacts S3 bucket,4,0.533737,149
+6000,4,4.69,tree,miss_paraphrase,build artifacts S3 bucket,4,1.349899,653
+6000,4,4.69,baseline,miss_paraphrase,password hash algorithm,0,0.351945,149
+6000,4,4.69,tree,miss_paraphrase,password hash algorithm,0,0.992840,535
+6000,4,4.69,tree,miss_paraphrase,password hash algorithm,1,1.017064,535
+6000,4,4.69,baseline,miss_paraphrase,password hash algorithm,1,0.356249,149
+6000,4,4.69,baseline,miss_paraphrase,password hash algorithm,2,0.353588,149
+6000,4,4.69,tree,miss_paraphrase,password hash algorithm,2,0.979191,535
+6000,4,4.69,tree,miss_paraphrase,password hash algorithm,3,0.977836,535
+6000,4,4.69,baseline,miss_paraphrase,password hash algorithm,3,0.353743,149
+6000,4,4.69,baseline,miss_paraphrase,password hash algorithm,4,0.350539,149
+6000,4,4.69,tree,miss_paraphrase,password hash algorithm,4,0.972794,535
+6000,4,4.69,baseline,miss_typo_carried,allkeys-lru,0,0.247866,149
+6000,4,4.69,tree,miss_typo_carried,allkeys-lru,0,0.600693,149
+6000,4,4.69,tree,miss_typo_carried,allkeys-lru,1,0.609910,149
+6000,4,4.69,baseline,miss_typo_carried,allkeys-lru,1,0.251721,149
+6000,4,4.69,baseline,miss_typo_carried,allkeys-lru,2,0.251123,149
+6000,4,4.69,tree,miss_typo_carried,allkeys-lru,2,0.598097,149
+6000,4,4.69,tree,miss_typo_carried,allkeys-lru,3,0.614797,149
+6000,4,4.69,baseline,miss_typo_carried,allkeys-lru,3,0.252191,149
+6000,4,4.69,baseline,miss_typo_carried,allkeys-lru,4,0.252565,149
+6000,4,4.69,tree,miss_typo_carried,allkeys-lru,4,0.621657,149
+6000,4,4.69,baseline,miss_typo_carried,aragon2id,0,0.261458,149
+6000,4,4.69,tree,miss_typo_carried,aragon2id,0,0.548694,149
+6000,4,4.69,tree,miss_typo_carried,aragon2id,1,0.530613,149
+6000,4,4.69,baseline,miss_typo_carried,aragon2id,1,0.262011,149
+6000,4,4.69,baseline,miss_typo_carried,aragon2id,2,0.258667,149
+6000,4,4.69,tree,miss_typo_carried,aragon2id,2,0.520933,149
+6000,4,4.69,tree,miss_typo_carried,aragon2id,3,0.513302,149
+6000,4,4.69,baseline,miss_typo_carried,aragon2id,3,0.260555,149
+6000,4,4.69,baseline,miss_typo_carried,aragon2id,4,0.257234,149
+6000,4,4.69,tree,miss_typo_carried,aragon2id,4,0.531041,149
+6000,4,4.69,baseline,miss_typo_carried,streamimg flag,0,0.337790,149
+6000,4,4.69,tree,miss_typo_carried,streamimg flag,0,0.953851,700
+6000,4,4.69,tree,miss_typo_carried,streamimg flag,1,0.953751,700
+6000,4,4.69,baseline,miss_typo_carried,streamimg flag,1,0.351091,149
+6000,4,4.69,baseline,miss_typo_carried,streamimg flag,2,0.340207,149
+6000,4,4.69,tree,miss_typo_carried,streamimg flag,2,0.958791,700
+6000,4,4.69,tree,miss_typo_carried,streamimg flag,3,0.956319,700
+6000,4,4.69,baseline,miss_typo_carried,streamimg flag,3,0.341445,149
+6000,4,4.69,baseline,miss_typo_carried,streamimg flag,4,0.338144,149
+6000,4,4.69,tree,miss_typo_carried,streamimg flag,4,0.952878,700
+6000,4,4.69,baseline,miss_extra_word_common,webhook signing secret owner,0,0.506976,149
+6000,4,4.69,tree,miss_extra_word_common,webhook signing secret owner,0,1.230964,536
+6000,4,4.69,tree,miss_extra_word_common,webhook signing secret owner,1,1.229828,536
+6000,4,4.69,baseline,miss_extra_word_common,webhook signing secret owner,1,0.512714,149
+6000,4,4.69,baseline,miss_extra_word_common,webhook signing secret owner,2,0.513057,149
+6000,4,4.69,tree,miss_extra_word_common,webhook signing secret owner,2,1.241269,536
+6000,4,4.69,tree,miss_extra_word_common,webhook signing secret owner,3,1.232947,536
+6000,4,4.69,baseline,miss_extra_word_common,webhook signing secret owner,3,0.510095,149
+6000,4,4.69,baseline,miss_extra_word_common,webhook signing secret owner,4,0.508084,149
+6000,4,4.69,tree,miss_extra_word_common,webhook signing secret owner,4,1.230881,536
+6000,4,4.69,baseline,miss_extra_word_common,max upload size flag,0,0.581663,149
+6000,4,4.69,tree,miss_extra_word_common,max upload size flag,0,1.260179,2071
+6000,4,4.69,tree,miss_extra_word_common,max upload size flag,1,1.261472,2071
+6000,4,4.69,baseline,miss_extra_word_common,max upload size flag,1,0.582218,149
+6000,4,4.69,baseline,miss_extra_word_common,max upload size flag,2,0.588430,149
+6000,4,4.69,tree,miss_extra_word_common,max upload size flag,2,1.279269,2071
+6000,4,4.69,tree,miss_extra_word_common,max upload size flag,3,1.292724,2071
+6000,4,4.69,baseline,miss_extra_word_common,max upload size flag,3,0.594385,149
+6000,4,4.69,baseline,miss_extra_word_common,max upload size flag,4,0.617517,149
+6000,4,4.69,tree,miss_extra_word_common,max upload size flag,4,1.323511,2071
+6000,4,4.69,baseline,miss_paraphrase_common,artifacts bucket name,0,0.503127,149
+6000,4,4.69,tree,miss_paraphrase_common,artifacts bucket name,0,1.265896,1669
+6000,4,4.69,tree,miss_paraphrase_common,artifacts bucket name,1,1.221202,1669
+6000,4,4.69,baseline,miss_paraphrase_common,artifacts bucket name,1,0.474653,149
+6000,4,4.69,baseline,miss_paraphrase_common,artifacts bucket name,2,0.493029,149
+6000,4,4.69,tree,miss_paraphrase_common,artifacts bucket name,2,1.224255,1669
+6000,4,4.69,tree,miss_paraphrase_common,artifacts bucket name,3,1.223295,1669
+6000,4,4.69,baseline,miss_paraphrase_common,artifacts bucket name,3,0.479331,149
+6000,4,4.69,baseline,miss_paraphrase_common,artifacts bucket name,4,0.472869,149
+6000,4,4.69,tree,miss_paraphrase_common,artifacts bucket name,4,1.201772,1669
+6000,4,4.69,baseline,miss_paraphrase_common,Redis cache eviction,0,0.480174,149
+6000,4,4.69,tree,miss_paraphrase_common,Redis cache eviction,0,0.976822,1735
+6000,4,4.69,tree,miss_paraphrase_common,Redis cache eviction,1,0.979500,1735
+6000,4,4.69,baseline,miss_paraphrase_common,Redis cache eviction,1,0.480276,149
+6000,4,4.69,baseline,miss_paraphrase_common,Redis cache eviction,2,0.485593,149
+6000,4,4.69,tree,miss_paraphrase_common,Redis cache eviction,2,0.989778,1735
+6000,4,4.69,tree,miss_paraphrase_common,Redis cache eviction,3,0.972382,1735
+6000,4,4.69,baseline,miss_paraphrase_common,Redis cache eviction,3,0.478618,149
+6000,4,4.69,baseline,miss_paraphrase_common,Redis cache eviction,4,0.483893,149
+6000,4,4.69,tree,miss_paraphrase_common,Redis cache eviction,4,0.974136,1735
+6000,4,4.69,baseline,peak_rss,,0,,137117696
+6000,4,4.69,tree,peak_rss,,0,,138723328
