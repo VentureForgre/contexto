@@ -353,14 +353,18 @@ def build_script(seed: int, turns: int, turn_bytes: int, bound: int) -> tuple[Sc
 
 
 # Scoring: exact match after normalization, as spikes/m0/fidelity/scoring.py, except that an answer
-# line may be written in markdown (contexto.bench.script.score names this difference).
+# line may be written in markdown, and that lines in a blockquote or a fenced code block are not read
+# (contexto.bench.script.score names both differences).
 
 _TRIM = " \t\r\n\"'`*_.,;:!"  # the spike's, plus "*" and "_": markdown emphasis; no generated answer has either
-# After the leading "-", "*" and spaces are dropped (as the spike does): any blockquote marks, then a list
-# marker ("-", "*", "+", or a number of up to three digits with "." or ")"), then emphasis or code marks
-# ("*", "_", "`") on both sides of the id. The id ends in a letter or digit, so its own underscores stay.
-_ANSWER_LINE = re.compile(r"^(?:>\s*)*(?:(?:[-*+]|\d{1,3}[.)])\s+)?[*_`]*(q_[a-z0-9_]*[a-z0-9])[*_`]*"
+# After the leading "-", "*" and spaces are dropped (as the spike does): a list marker ("-", "*", "+", or a
+# number of up to three digits with "." or ")"), then emphasis or code marks ("*", "_", "`") on both sides
+# of the id. The id ends in a letter or digit, so its own underscores stay.
+_ANSWER_LINE = re.compile(r"^(?:(?:[-*+]|\d{1,3}[.)])\s+)?[*_`]*(q_[a-z0-9_]*[a-z0-9])[*_`]*"
                           r"\s*[:=]\s*(.*?)\s*$")
+# A code fence: three or more backticks or tildes, at any indentation (a fence in a list item is
+# indented). A backtick fence's info string holds no backtick (CommonMark), else the line is inline code.
+_FENCE = re.compile(r"^(`{3,}|~{3,})(.*)$")
 
 
 def normalize(text: str | None) -> str:
@@ -371,17 +375,46 @@ def normalize(text: str | None) -> str:
     return " ".join(text.strip(_TRIM).casefold().split()).strip(_TRIM)
 
 
+def _fence(line: str) -> tuple[str, int] | None:
+    """The fence character and length of a line that opens or closes a code fence, else None."""
+    match = _FENCE.match(line)
+    if match is None or (match.group(1)[0] == "`" and "`" in match.group(2)):
+        return None
+    return match.group(1)[0], len(match.group(1))
+
+
 def parse_answers(text: str) -> dict[str, str]:
     """Parse ``q_<id>: <answer>`` lines (``=`` also separates). The last line for an id wins; other
-    lines are ignored. A line may be markdown: in a blockquote, a list item or a numbered item, with
-    ``**``, ``__`` or backticks around the id or the separator, so ``**q_a_01**: x``, ``1. q_a_01: x``
-    and ``> `q_a_01`: x`` all give ``x``. The answer is kept as written; ``normalize`` trims the marks
+    lines are ignored. A line may be markdown: a list item or a numbered item, with ``**``, ``__`` or
+    backticks around the id or the separator, so ``**q_a_01**: x``, ``1. q_a_01: x`` and
+    ``- `q_a_01`: x`` all give ``x``. The answer is kept as written; ``normalize`` trims the marks
     around it (``**q_a_01:** x`` gives ``** x``, and ``- `q_a_01: x``` gives ``x` ``; both normalize to
-    ``x``). The spike read only ``q_<id>: x`` after leading ``-``, ``*`` and spaces; what it read is
-    read the same."""
+    ``x``).
+
+    Two kinds of line are never answers, because markdown marks their text as quoted rather than the
+    reply's own: a line in a blockquote (starting with ``>``, also after a list marker), and a line in
+    a fenced code block (from a line of three or more backticks or tildes to a line of at least as many
+    of the same character and nothing else; a fence may open after a list marker; a fence never closed
+    runs to the end of the text). So a
+    note or file the reply quotes after its answers cannot override them. The spike read only
+    ``q_<id>: x`` after leading ``-``, ``*`` and spaces, and also inside a code fence; every other line
+    it read is read the same."""
     answers: dict[str, str] = {}
-    for line in text.splitlines():
-        match = _ANSWER_LINE.match(line.strip().lstrip("-* "))
+    fence: tuple[str, int] | None = None
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if fence is not None:
+            mark = _fence(stripped)
+            if mark is not None and mark[0] == fence[0] and mark[1] >= fence[1] and not stripped.strip(mark[0]):
+                fence = None
+            continue
+        line = stripped.lstrip("-* ")
+        if (mark := _fence(line)) is not None:  # also a fence opened in a list item ("- ```")
+            fence = mark
+            continue
+        if line.startswith(">") or stripped.startswith(">"):
+            continue
+        match = _ANSWER_LINE.match(line)
         if match:
             answers[match.group(1)] = match.group(2)
     return answers

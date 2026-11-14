@@ -582,16 +582,20 @@ def _norm_set(text: str | None) -> str:
 def score(probes: Sequence[Probe], answers_text: str) -> dict[str, Any]:
     """Score an answers text (``q_id: answer`` lines) against the probes. No model judge.
 
-    The rules are the acceptance runs' (``spikes/m0/fidelity/l2f.py::score``) with two deliberate
-    differences. First, a probe with no answer line, or an empty answer, is never correct. The spike
-    reads a missing answer to a ``set`` probe as the empty set, so a ``set`` probe whose expected
-    answer is ``none`` scored correct when the arm said nothing at all. Second, an answer line may be
-    written in markdown (``d27.parse_answers``): in a blockquote, a list or numbered item, with
-    ``**``, ``__`` or backticks around the id, the separator or the answer, as in ``**q_a_01**: x``,
-    ``1. q_a_01: x`` or ``- `q_a_01: x```; the spike dropped those lines, so an answer Claude Code
-    wrote in markdown (its system prompt asks for it) counted as no answer. Every line the spike
-    read is read the same, and ``normalize`` also trims ``*`` and ``_``, which no generated answer
-    contains. Otherwise unchanged: a ``value``
+    The rules are the acceptance runs' (``spikes/m0/fidelity/l2f.py::score``) with three deliberate
+    differences. First, a probe with no answer line, or an
+    empty answer, is never correct. The spike reads a missing answer to a ``set`` probe as the empty
+    set, so a ``set`` probe whose expected answer is ``none`` scored correct when the arm said nothing
+    at all. Second, an answer line may be written in markdown (``d27.parse_answers``): a list or
+    numbered item, with ``**``, ``__`` or backticks around the id, the separator or the answer, as in
+    ``**q_a_01**: x``, ``1. q_a_01: x`` or ``- `q_a_01: x```; the spike dropped those lines, so an
+    answer Claude Code wrote in markdown (its system prompt asks for it) counted as no answer. Third,
+    a line in a blockquote (``> q_a_01: x``) or in a fenced code block is not an answer, since
+    markdown marks it as quoted text, so a note or file the reply quotes after its answers cannot
+    override them (the spike read a line in a code fence, and never a ``>`` line). A reply that puts
+    all its answers in a code fence therefore scores none of them. Every other line the spike read is
+    read the same, and ``normalize`` also trims ``*`` and ``_``, which no generated answer contains.
+    Table rows (``| q_a_01 | x |``) and headings are not read. Otherwise unchanged: a ``value``
     answer is right when it equals the expected answer after normalization, a ``set`` answer when
     its ids are the expected ids in any order, and a wrong ``value`` answer that equals one of the
     probe's older values is also counted stale. Returns the totals, the Wilson 95% interval, the

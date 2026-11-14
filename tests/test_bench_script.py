@@ -877,8 +877,6 @@ ANSWER_LINES = [
     ("+ q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
     ("1. q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
     ("12) **q_a_001**: nickel-1771", "nickel-1771", "nickel-1771"),
-    ("> q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
-    ("> - q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
     ("q_a_001: **nickel-1771**", "**nickel-1771**", "nickel-1771"),
     ("q_a_001: _nickel-1771_", "_nickel-1771_", "nickel-1771"),
     # Not answer lines.
@@ -886,13 +884,19 @@ ANSWER_LINES = [
     ("q_a_001 is nickel-1771", None, None),
     ("Q_A_001: nickel-1771", None, None),
     ("1.5 q_a_001: nickel-1771", None, None),
+    # A blockquote marks text as someone else's (a quoted note or file), so a quoted line is no answer.
+    ("> q_a_001: nickel-1771", None, None),
+    ("> - q_a_001: nickel-1771", None, None),
+    ("> > `q_a_001`: nickel-1771", None, None),
+    ("- > q_a_001: nickel-1771", None, None),
 ]
 
 
 @pytest.mark.parametrize(("line", "given", "normalized"), ANSWER_LINES)
 def test_answer_lines_in_markdown_are_read(line, given, normalized):
     """The second deliberate difference from the spike's scoring (see ``script.score``): an answer line
-    may carry a blockquote, a list marker, a number, and emphasis or code around the id or the answer."""
+    may carry a list marker, a number, and emphasis or code around the id or the answer; a quoted line
+    is not read."""
     from contexto.bench import d27
 
     parsed = d27.parse_answers(f"preamble\n{line}\nclosing words")
@@ -908,7 +912,43 @@ def test_markdown_answers_are_scored_and_the_last_line_for_an_id_wins(v2):
         expected = 0 if not given else 1
         assert script.score([probe], text)["correct"] == expected, line
     assert script.score([probe], f"**{probe.id}**: {probe.answer}\n1. {probe.id}: wrong-0")["correct"] == 0
-    assert script.score([probe], f"{probe.id}: wrong-0\n> `{probe.id}`: {probe.answer}")["correct"] == 1
+    assert script.score([probe], f"{probe.id}: wrong-0\n1. `{probe.id}`: {probe.answer}")["correct"] == 1
+    # Quoted or fenced text after the answer does not override it.
+    for after in (f"> {probe.id}: wrong-0", f"```\n{probe.id}: wrong-0\n```"):
+        assert script.score([probe], f"{probe.id}: {probe.answer}\nThe file said:\n{after}")["correct"] == 1
+
+
+FENCED = [
+    # (text, what parse_answers reads). The answer before any fence is q_a_01: nickel.
+    ("```\nq_a_01: POISON\n```", "nickel"),
+    ("```text\nq_a_01: POISON\n```", "nickel"),
+    ("~~~\nq_a_01: POISON\n~~~", "nickel"),
+    ("   ```yaml\nq_a_01: POISON\n   ```", "nickel"),
+    ("- item\n  ```\n  q_a_01: POISON\n  ```", "nickel"),  # a fence inside a list item
+    ("- ```\n  q_a_01: POISON\n  ```", "nickel"),  # a fence that opens a list item
+    ("````\n```\nq_a_01: POISON\n````", "nickel"),  # a shorter fence does not close a longer one
+    ("~~~\n```\nq_a_01: POISON\n~~~", "nickel"),  # nor does one of the other character
+    ("```\nq_a_01: POISON", "nickel"),  # a fence never closed runs to the end of the text
+    ("```\nq_a_01: POISON\n```\nq_a_01: copper", "copper"),  # after the closing fence lines are read again
+    ("```q_a_01: copper```", "copper```"),  # backticks in a backtick fence's info string: inline code, read
+    ("``\nq_a_01: copper\n``", "copper"),  # two backticks are no fence
+]
+
+
+@pytest.mark.parametrize(("after", "given"), FENCED)
+def test_answer_lines_in_a_fenced_code_block_are_not_read(after, given):
+    """The third deliberate difference from the spike's scoring (``script.score``): a fenced code block
+    holds code or a quoted file, not the reply's answers."""
+    from contexto.bench import d27
+
+    assert d27.parse_answers(f"q_a_01: nickel\n{after}\nclosing words") == {"q_a_01": given}
+
+
+def test_a_quoted_line_after_the_answer_does_not_override_it():
+    from contexto.bench import d27
+
+    assert d27.parse_answers("q_a_01: nickel\nThe file said:\n> q_a_01: POISON") == {"q_a_01": "nickel"}
+    assert d27.parse_answers("> q_a_01: POISON") == {}
 
 
 def test_score_never_counts_a_missing_answer_correct(spike):
