@@ -102,7 +102,19 @@ def test_memory_store_returns_a_copy():
 
 def test_the_validated_fields_are_exactly_the_contracts():
     # D69 added start_text (rule 19), optional like head_rule; test_project_start covers its shape and resume.
-    assert set(EPOCH_FIELDS) == set(RECORD) and set(EPOCH_OPTIONAL_FIELDS) == {"head_rule", "start_text", "untrusted"}
+    assert set(EPOCH_FIELDS) == set(RECORD) and set(EPOCH_OPTIONAL_FIELDS) == {
+        "head_rule", "in_turn", "start_text", "untrusted", "document_costs"}  # D61, D63, D69
+
+
+@pytest.mark.parametrize("value", [[], [[1, "a" * 32]], [[1, "A" * 32, 5]], [[1, "a" * 31, 5]], [[-1, "a" * 32, 5]],
+                                   [[1, "a" * 32, True]], [[1, "a" * 32, 5]] * 65, {"k": 1}])
+def test_document_costs_is_optional_and_bounded(store, value):
+    # D63: the measured costs of PDFs whose pages are not certain, [size, digest, tokens] each, at most 64.
+    good = [[73_348, "0" * 32, 24_500], [20_000, "f" * 32, 10_000]]
+    store.set_epoch({**RECORD, "document_costs": good})
+    assert store.epoch_record()["document_costs"] == good
+    with pytest.raises(ValueError):
+        store.set_epoch({**RECORD, "document_costs": value})
 
 
 @pytest.mark.parametrize("value", ["2", 2.0, True, -1])

@@ -139,7 +139,7 @@ tool's own output is bright, and the planted fact is amber. In a turn line the t
 and `received`, are bright too. The top bar says "synthetic session" for the whole loop.
 
 The note line is there from the start of the loop, so a viewer that stops at time 0 shows it and not
-an empty terminal. The terminal is 33 rows and the recording is 37, so the last frame runs from the
+an empty terminal. The terminal is 35 rows and the recording is 39, so the last frame runs from the
 `contexto: session` line to the last reply. A viewer that does not animate, or one with reduced motion
 set, shows that last frame.
 

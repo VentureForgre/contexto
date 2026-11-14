@@ -19,6 +19,10 @@ The corpora, all synthetic, built in memory with a fixed page key so page ids re
   that changes), with a conversation in view.
 - ``many``: 60 short pages that share words, so a reply lists further pages and cuts the list.
 
+D63 (PR #274) changed the coverage line every reply ends with, on purpose: the file is the one
+recorded at b0e2dbc with that line replaced, and every strict reply then equals what this script
+writes on that branch, byte for byte (the misses keep their recorded reply, the fallback aside).
+
 Rewrite the file only when strict search is changed on purpose:
 
     PYTHONPATH=src python tests/fixtures/make_search_golden.py

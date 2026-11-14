@@ -25,6 +25,8 @@ install it and how to start it.
   number defined, which are measured and which estimated, and what counts as a fault.
 - [standing-rules.md](standing-rules.md): how a rule you give once stays in view after its turn is
   paged out.
+- [in-turn-paging.md](in-turn-paging.md): how a long tool loop or a subagent stays under the bound:
+  what a paged tool result looks like, how the model reads it back, and how to turn it off.
 - [project-memory.md](project-memory.md): what a new session carries from the earlier sessions of
   its project, what the model is shown, and how to see, remove or turn it off.
 - [mcp-tools.md](mcp-tools.md): the five MCP tools the model gets, how search ranks, and the recall

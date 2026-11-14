@@ -1,7 +1,8 @@
 """What D63 (in-turn paging) must deliver, one test per scenario and dialect.
 
-Each test fails at v0.5.24, where the engine pages only at a turn start. The engine pull request fills
-in ``inturn/stubs.py`` and removes the xfail marks. ``targets.unmet`` lists every target a run misses;
+Each test failed at v0.5.24, where the engine paged only at a turn start. D63 fills in
+``inturn/stubs.py`` and meets them for Claude Code; the Codex ones stay marked xfail, since Codex in-turn
+paging is not built (``contexto.codex.ResponsesDialect.in_turn`` is None). ``targets.unmet`` lists every target a run misses;
 ``targets.py`` states each rule, and ``test_inturn_engines.py`` shows, for each rule, an engine that
 breaks it and fails.
 
@@ -23,7 +24,7 @@ from inturn import harness, scripts, targets  # noqa: E402
 
 CASES = [(name, dialect) for name in scripts.BUILDERS for dialect in scripts.build(name, tiny=True).dialects]
 NOT_BUILT = pytest.mark.xfail(strict=True, raises=AssertionError, reason="D63: in-turn paging not built")
-BOTH = pytest.mark.parametrize("dialect", ["claude", "codex"])
+BOTH = pytest.mark.parametrize("dialect", ["claude", pytest.param("codex", marks=NOT_BUILT)])
 
 
 def check(name: str, dialect: str) -> None:
@@ -31,42 +32,35 @@ def check(name: str, dialect: str) -> None:
     assert not problems, f"{name} on {dialect}:\n" + "\n".join(problems)
 
 
-@NOT_BUILT
 @BOTH
 def test_loop120_stays_under_the_bound(dialect):
     check("loop120", dialect)
 
 
-@NOT_BUILT
 @BOTH
 def test_large_results_stay_under_the_bound(dialect):
     check("large", dialect)
 
 
-@NOT_BUILT
 @BOTH
 def test_many_small_results_stay_under_the_bound(dialect):
     check("small", dialect)
 
 
-@NOT_BUILT
 def test_a_subagents_loop_stays_under_the_bound():
     check("subagent", "claude")
 
 
-@NOT_BUILT
 @BOTH
 def test_results_with_images_stay_under_the_bound(dialect):
     check("images", dialect)
 
 
-@NOT_BUILT
 @BOTH
 def test_a_long_loop_between_short_turns_stays_under_the_bound(dialect):
     check("multiturn", dialect)
 
 
-@NOT_BUILT
 @BOTH
 def test_parallel_calls_reminders_and_custom_tool_calls_stay_under_the_bound(dialect):
     check("mixed", dialect)

@@ -784,8 +784,10 @@ def test_an_index_past_its_budget_accounts_for_the_whole_turns_it_omits():
 def _past_budget(dialect: str) -> None:
     run = harness.run(scripts.build("multiturn", quick=True), dialect, index_budget=40)
     assert run.sent and run.metrics()["requests_with_an_unnamed_result"] == 0
-    # (storage itself reports only that v0.5.24 has no stubs hook: the baseline's hook is empty by design)
-    assert targets.unmet_by_rule(run)["storage"] == ["stubs.find_stubs is not filled in, so no stub was checked"]
+    # D63 fills in stubs.find_stubs, so storage checks every stub it finds (at v0.5.24 it reported only that
+    # the hook was empty): Claude Code's has nothing unmet; Codex in-turn paging is not built, so it has none
+    storage = targets.unmet_by_rule(run).get("storage")
+    assert storage == (None if dialect == "claude" else ["no stub was found in any forwarded request"])
 
 
 def test_the_omission_line_needs_a_count_the_store_bears_out_and_the_whole_turn_gone():
