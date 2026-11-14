@@ -1222,7 +1222,8 @@ def test_the_committed_sample_report_and_charts_regenerate_byte_for_byte(tmp_pat
     commit the result."""
     generator = sample_generator()
     run = generator.build(tmp_path)
-    assert sorted(p.name for p in generator.OUT.iterdir()) == sorted(generator.FILES.values())
+    committed_files = sorted(p.relative_to(generator.OUT).as_posix() for p in generator.OUT.rglob("*") if p.is_file())
+    assert committed_files == sorted(generator.FILES.values())
     for name, committed in generator.FILES.items():
         assert (run / name).read_bytes() == (generator.OUT / committed).read_bytes(), (
             f"{name} differs from tests/fixtures/{generator.OUT.name}/{committed}")
@@ -1235,9 +1236,13 @@ def test_the_committed_sample_cannot_be_taken_for_a_result():
     label = "Figures invented by a test generator: no model was run"
     assert generator.LABEL == label and "invented" in generator.OUT.name
     assert not (FIXTURES / "bench_report").exists()
-    for committed in generator.FILES.values():
-        assert "invented" in committed
+    assert "invented" in generator.FILES["results.md"]
+    # The charts keep the report's names, so that the Markdown's links resolve where it is committed.
+    for name, committed in generator.FILES.items():
+        assert committed == name or name == "results.md"
     text = (generator.OUT / generator.FILES["results.md"]).read_text(encoding="utf-8")
+    for target in re.findall(r"\]\(([^)]+)\)", text):
+        assert (generator.OUT / target).is_file(), target
     assert text.splitlines()[0] == f"# Contexto benchmark results: {label}"
     assert "- Model: invented-figures-no-model-was-run." in text
     assert f"## What this run shows\n\nThis run is labelled: {label}.\n" in text
