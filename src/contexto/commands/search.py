@@ -66,7 +66,8 @@ def register(subparsers) -> None:
                     "earlier: null when the session has no project view, else searched, skipped, "
                     "not_searched, in_view_skipped and sessions, each with session (its id), label (what "
                     "--from takes), date, total (its matches), in_view (lines in view at its last request: "
-                    "turn, role (user, assistant or tool_result) and text; on no page, so not recallable) and "
+                    "turn, role (user, assistant, tool_result or fold_note) and text; on no page, so not recallable) "
+                    "and "
                     "hits (its best pages, as above).")
     parser.add_argument("words", nargs="+", metavar="WORDS", help="words to find, in any order and case")
     add_session_option(parser)

@@ -981,8 +981,13 @@ _FOLD_NOTE_START = "[Contexto folded "
 
 
 def _window_role(entry: dict[str, Any]) -> str:
+    """The role a line of an earlier window is shown with. Only a user entry can be a fold note (D63's
+    ``with_note`` puts it in the turn-start user message), so the model's or a tool's text never takes
+    Contexto's label (reviews of #287 round 3)."""
     text = entry.get("text")
-    return FOLD_NOTE_ROLE if isinstance(text, str) and text.startswith(_FOLD_NOTE_START) else entry["role"]
+    if entry["role"] == "user" and isinstance(text, str) and text.startswith(_FOLD_NOTE_START):
+        return FOLD_NOTE_ROLE
+    return entry["role"]
 
 
 def _window_matches(entries: Sequence[dict[str, Any]], query: str) -> list[tuple[int, int, int, int, str, str]]:
