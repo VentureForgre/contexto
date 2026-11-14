@@ -409,7 +409,9 @@ def log_unwritable_message(error: BaseException) -> str:
     code = errno.errorcode.get(getattr(error, "errno", None) or 0, type(error).__name__)
     advice = (f"Free space on the disk that holds {HOME_HINT}." if code in DISK_FULL
               else f"Check the session directory under {HOME_HINT}.")
-    return (f"the session log could not be written ({code}), so `contexto stats` and the summary below miss "
+    # No "summary below": none follows when the session directory itself is gone (PR #263 review A).
+    gone = ": the session directory is gone" if code == "ENOENT" else ""
+    return (f"the session log could not be written ({code}{gone}), so `contexto stats` and the exit summary miss "
             f"what happened from here on. {advice}")
 
 
@@ -456,7 +458,9 @@ class _Tally:
         self._pages_start: int | None = None
         self._pages_stop: int | None = None
         self._stopped = False  # this run's proxy_stop line was seen
-        self._started_at: datetime | None = None  # this run's proxy_start time
+        # True while the launch lines held before this run's proxy_start are replayed into it: a stop
+        # among them was written before this run started, so it is another run's.
+        self.replaying_held = False
         # Compaction (Claude Code only). ``undetectable`` holds why the log could not have shown one.
         self.messages_api = False  # a Messages request was seen: the compaction check applies
         self.compactions = 0
@@ -493,7 +497,6 @@ class _Tally:
         self.run_open = True
         self._pages_start = self._number(event.get("pages"))
         self._stopped, self._pages_stop = False, None  # a stop line belongs to the run it follows, not this one
-        self._started_at = _when(event.get("ts"))
 
     def _close_run(self, pages_after: int | None) -> None:
         """End the open run: its time, and the pages the store gained in it. The gain is the proxy's own
@@ -560,9 +563,10 @@ class _Tally:
                 self.ignored += 1
         elif name == "proxy_stop":
             # Interleaved launches: another run's stop, logged while no run is open or (among the launch lines
-            # held and replayed after this run's start) before this run started, is not this run's.
-            started = self._started_at
-            if self.run_open and not (started is not None and at is not None and at < started):
+            # held and replayed after this run's start) before this run's proxy_start, is not this run's. By
+            # the order of the lines, not their times: a clock that steps back during a run must not lose
+            # the run's gain (PR #263 review A, round 3).
+            if self.run_open and not self.replaying_held:
                 self._stopped, self._pages_stop = True, self._number(event.get("pages"))
         elif name == "exit":
             self._close_run(None)
@@ -861,15 +865,21 @@ def _fault_report(tally: _Tally, session_id: str, earlier_run: bool) -> dict[str
     store_errors = [{k: v for k, v in entry.items() if k != "page_id"} for entry in tally.store_errors.values()]
     messages = [store_fault_message(entry, session_id, past=not now) for entry in tally.store_errors.values()]
     if messages or tally.entered:
-        count = f"{tally.unpaged:,} request{'' if tally.unpaged == 1 else 's'} went out unpaged"
+        # No count when no request was flagged (a store that failed only where no request is built, such
+        # as the recall room under the bound): "0 requests went out unpaged" read oddly (PR #263 review A).
+        count = ""
+        if tally.unpaged:
+            count = f"{tally.unpaged:,} request{'' if tally.unpaged == 1 else 's'} went out unpaged"
         if tally.largest_unpaged:
             count += f", the largest {size_text(tally.largest_unpaged)}"
         if now:
-            status = f"Paging has not resumed{f' since {tally.since}' if tally.since else ''}: {count}."
+            since = f" since {tally.since}" if tally.since else ""
+            status = f"Paging has not resumed{since}{f': {count}' if count else ''}."
         elif earlier_run:
-            status = f"That was in an earlier run, which ended with paging stopped ({count}); a new run pages again."
+            status = (f"That was in an earlier run, which ended with paging stopped{f' ({count})' if count else ''}; "
+                      "a new run pages again.")
         else:
-            status = f"Paging has resumed; meanwhile {count}."
+            status = f"Paging has resumed{f'; meanwhile {count}' if count else ''}."
         messages = [*messages[:-1], f"{messages[-1]} {status}"] if messages else [status]
     return {
         "total": sum(tally.fault_events.values()),
@@ -923,8 +933,10 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
                 if last_run:
                     tally = _Tally()
                 tally.start_run(event)
+                tally.replaying_held = True
                 for earlier in held:
                     tally.line(earlier)
+                tally.replaying_held = False
                 held, between = [], False
                 tally.line(event)
             elif between:
@@ -1205,8 +1217,10 @@ def render(out: dict[str, Any], *, brief: bool = False) -> list[str]:
             lines.append(f"  log         {_n(log['unreadable_lines'], 'line')} of the log could not be read "
                          "(cut short or damaged), so the numbers above may be low")
         if log["ignored_values"]:
-            lines.append(f"  log         {_n(log['ignored_values'], 'value')} in the log were not what their field "
-                         "holds (damage) and were left out, so the numbers above may be low")
+            verb = ("was not what its field holds (damage) and was" if log["ignored_values"] == 1
+                    else "were not what their field holds (damage) and were")
+            lines.append(f"  log         {_n(log['ignored_values'], 'value')} in the log {verb} left out, so the "
+                         "numbers above may be low")
     return lines
 
 
@@ -1273,8 +1287,9 @@ def exit_summary(home: Path, session_id: str, cli: str, elapsed_s: float, *, qui
             # The store warning was raised while the store was failing and held until now, so it reads
             # as if paging were still stopped. The summary's faults line says it resumed; without the
             # summary this line does.
-            lines.append(f"contexto: paging resumed before {cli} exited; meanwhile "
-                         f"{_n(degraded['unpaged_requests'], 'request')} went out unpaged.")
+            unpaged = degraded["unpaged_requests"]
+            lines.append(f"contexto: paging resumed before {cli} exited"
+                         + (f"; meanwhile {_n(unpaged, 'request')} went out unpaged." if unpaged else "."))
     elif requests["model"]:
         more = f" (`contexto stats {session_id}` shows all {out['runs']} runs)" if out["runs"] > 1 else ""
         lines += [head + more, *render(out, brief=True)]
@@ -1292,7 +1307,8 @@ def exit_summary(home: Path, session_id: str, cli: str, elapsed_s: float, *, qui
     if faults["total"] and lines and requests["model"] and not quiet:
         state = ""
         if degraded["entered"] or degraded["unpaged_requests"]:
-            state = (f": {_n(degraded['unpaged_requests'], 'request')} went out unpaged, and paging "
+            unpaged = degraded["unpaged_requests"]
+            state = (f": {f'{_n(unpaged, 'request')} went out unpaged, and ' if unpaged else ''}paging "
                      f"{'had not resumed at exit' if degraded['now'] else 'resumed before exit'}")
         lines.append(f"  faults      {fault_summary(faults)}{state}; details: contexto stats {session_id}")
     unsaid = {name: count for name, count in faults["events"].items() if name not in NOTICED_EVENTS}

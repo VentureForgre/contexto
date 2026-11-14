@@ -735,5 +735,3 @@ def test_codex_logs_its_exit_when_a_held_notice_cannot_be_printed(tmp_path, monk
     events = [json.loads(line)["event"] for line in
               (tmp_path / "ctx" / "sessions" / "cp1" / "log.jsonl").read_text().splitlines()]
     assert events[-1] == "exit"
-
-

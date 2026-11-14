@@ -324,8 +324,9 @@ def read_settings_file(path: Path) -> SettingsFile:
     device at that path is never read; at most ``SETTINGS_FILE_LIMIT`` bytes; decoded as UTF-8 with a
     byte order mark accepted, as Claude Code accepts one, and UTF-16LE read when it starts with its own
     byte order mark, as Claude Code reads it (both measured on 2.1.322, D70); parsed with
-    ``contexto.canonical.loads_bounded``, as Claude Code parses it (measured on 2.1.322, PR #258): an
-    integer past Python's 4,300-digit limit is read, as JavaScript's Infinity (``_json_int``), and
+    ``contexto.canonical.loads_bounded``, as Claude Code parses it (measured on 2.1.322,
+    spikes/m2/providers/README.md): an integer past Python's 4,300-digit limit is read, as
+    JavaScript's Infinity (``_json_int``), and
     ``NaN``, ``Infinity`` and ``-Infinity``, which are not JSON, make the file not valid JSON
     (``_json_constant``).
 
@@ -335,13 +336,13 @@ def read_settings_file(path: Path) -> SettingsFile:
     and cannot read them either. A file that is there and that Contexto did not read gives
     ``problem``: it is not a regular file, it is larger than the limit, it cannot be read, or it is
     not valid JSON (not UTF-8, a syntax error, nested too deep), or its ``env`` is there and is not
-    an object (Claude Code 2.1.322 then loads nothing from the file, PR #258: not its
+    an object (Claude Code 2.1.322 then loads nothing from the file, spikes/m2/providers/README.md: not its
     ``apiKeyHelper`` either; only ``env``'s type is checked here). Such a file is not
     evidence that a setting is off, since Claude Code may read it differently; the cloud-provider
     guard refuses on it (``cloud_provider``) unless it was read whole, is not valid JSON, and its text
     could not name a switch (``may_name_provider``): Claude Code does not load a file with a comment,
     a trailing comma or another syntax error (measured on 2.1.322, D70), or with ``NaN`` or an ``env``
-    that is not an object (PR #258), so such a file turns no switch on."""
+    that is not an object (spikes/m2/providers/README.md), so such a file turns no switch on."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except (OSError, ValueError):  # missing, not permitted, a symlink loop, a name the system rejects
@@ -397,7 +398,8 @@ def _json_int(text: str) -> int | float:
 
 def _json_constant(name: str) -> float:
     """``NaN``, ``Infinity`` and ``-Infinity`` are not JSON. Python accepts them; Claude Code 2.1.322
-    loads nothing from a file that holds one (PR #258), so the file is not valid JSON here either."""
+    loads nothing from a file that holds one (D70-serve-probes.md §3, spikes/m2/providers/README.md), so
+    the file is not valid JSON here either."""
     raise ValueError(f"{name} is not JSON")
 
 
