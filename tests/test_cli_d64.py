@@ -270,6 +270,21 @@ def test_version_command_and_short_flag_print_what_the_version_flag_prints(capsy
     assert code == 0 and out == long.out and err == ""
 
 
+def test_all_three_print_the_git_revision_of_a_git_install(capsys, monkeypatch):
+    """After #256 `--version` names the revision of an install made from a git URL; `-V` and `contexto
+    version` must print the same line, or the changelog's "as --version does" would be false."""
+    line = f"contexto {contexto.__version__} (git main, commit d38e87d2)"
+    monkeypatch.setattr(contexto, "_git_install", lambda: " (git main, commit d38e87d2)")
+    printed = []
+    for argv in (["--version"], ["-V"]):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argv)
+        assert exc.value.code == 0
+        printed.append(capsys.readouterr().out)
+    code, out, _ = run(capsys, "version")
+    assert code == 0 and printed == [line + "\n"] * 2 and out == line + "\n"
+
+
 def test_version_is_listed_in_the_top_level_help_and_needs_no_store(home, capsys):
     with pytest.raises(SystemExit):
         cli.main(["--help"])
