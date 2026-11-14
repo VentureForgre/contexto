@@ -19,10 +19,10 @@ Queries (``needs`` returns them with the statement each must find):
 - ``paraphrase``, ``toolloop`` and ``concluded``: the question does not contain the key, so the
   query is the question's content words (``contexto.bench.model.words``: runs of letters and digits
   of three or more characters, without the function words and the words of the generator's fixed
-  texts), in the order they appear, without its instruction words (``instruction_words``: the words
-  of the fixed phrases the generator wraps every such question in, such as "earlier in this
-  conversation" and "Answer with the value only", that ``words`` does not already drop). They are
-  found from the generator's own tables (``ATTRIBUTES``, ``SCENARIOS``): what of the question is
+  texts), in the order they appear, without its instruction words (``instruction_words``: the
+  tokens of the fixed phrases the generator wraps every such question in, such as "earlier in this
+  conversation" and "Answer with the name only"). They
+  are found from the generator's own tables (``ATTRIBUTES``, ``SCENARIOS``): what of the question is
   not the table's text is the wrapper. Contexto's search returns a page only when it holds every word
   of the query, so a question whose words are not all on the plant's page finds nothing, and that is
   what the rule reports. For ``concluded`` the statement to find is the assistant's ``DECISION``
@@ -89,15 +89,18 @@ def _table_part(question: str) -> str | None:
 
 
 def instruction_words(probe: Probe) -> frozenset[str]:
-    """The content words of the fixed phrases a new-class question is wrapped in: the words of what is
-    left of the question once its table text (``_table_part``) is taken out, less any word the table
-    text also has. Empty for the other classes, and for a question with no table text in it."""
+    """The tokens of the fixed phrases a new-class question is wrapped in: every run of letters and
+    digits left of the question once its table text (``_table_part``) is taken out, less any the table
+    text also has. Raw tokens, not only the counted content words, so that a pair such as "the name"
+    from "Answer with the name only" is never tried. Empty for the other classes, and for a question
+    with no table text in it."""
     if probe.cls not in NEW_CLASSES:
         return frozenset()
     own = _table_part(probe.question)
     if own is None:
         return frozenset()
-    return words(probe.question.replace(own, " ", 1)) - words(own)
+    wrapper = probe.question.replace(own, " ", 1).casefold()
+    return frozenset(_TOKEN.findall(wrapper)) - frozenset(_TOKEN.findall(own.casefold()))
 
 
 def rule_words(probe: Probe) -> list[str]:

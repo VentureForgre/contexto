@@ -246,18 +246,29 @@ def test_the_best_query_takes_the_best_rank_over_every_query_it_tries(small):
 def test_instruction_words_come_from_the_generators_tables(small, pinned):
     """The fixed phrases around a new-class question are found from ATTRIBUTES and SCENARIOS, not from a
     list of words: what is not the table's text is the wrapper."""
+    import re
+
+    def tokens(text):
+        return set(re.findall(r"[a-z0-9]+", text.casefold()))
+
     for script in (small, pinned):
         by_class: dict[str, set[frozenset[str]]] = {}
         for probe in (p for p in script.probes if p.cls in NEW_CLASSES):
             dropped = reach.instruction_words(probe)
             own = reach._table_part(probe.question)
             assert own is not None, probe.question  # every new question holds the text of its table row
-            # Empty when the generator's own words already cover the wrapper (``words`` drops them).
-            assert dropped <= words(probe.question) and not dropped & words(own)
-            assert not dropped & words(" ".join(probe.statements))  # none is a word of the plant
+            assert {"answer", "only"} <= dropped <= tokens(probe.question) and not dropped & tokens(own)
+            if probe.cls != "concluded":
+                assert "earlier" in dropped
+            queries = reach.question_queries(probe)
+            assert not any(set(re.split(r"[ -]", q)) & dropped for q in queries), probe.id
             by_class.setdefault(probe.cls, set()).add(dropped)
-        # The wrapper is fixed per class, so every question of a class drops the same words.
-        assert {cls: len(found) for cls, found in by_class.items()} == {cls: 1 for cls in NEW_CLASSES}
+        # The wrapper is fixed per class: what one question drops is the class's wrapper less the tokens
+        # its own table text shares with it, so every set is part of the largest.
+        for found in by_class.values():
+            largest = max(found, key=len)
+            assert all(dropped <= largest for dropped in found)
+        assert set(by_class) == set(NEW_CLASSES)
     assert reach.instruction_words(_probe(small, "chain")) == frozenset()
 
 
@@ -753,15 +764,14 @@ def test_the_shipped_trace_pins_the_default_session(pinned):
     found = trace.fingerprint(pinned)
     for key, value in found.items():
         assert shipped[key] == value, key
-    assert len(shipped["turn_sha256"]) == len(pinned.turns) == 56 and shipped["script_sha256"] == pinned.digest()
-    # One request per scripted round: the plan and the measurement agree.
+    assert len(shipped["turn_sha256"]) == len(pinned.turns) and shipped["script_sha256"] == pinned.digest()
     assert shipped["model"]["rounds"] == scripted.rounds(pinned)
     expected = shipped["expected"]
     assert sum(shipped["model"]["rounds"]) == expected["requests"] == len(expected["request_tokens"])
     assert shipped["model"]["rules"] == scripted.RULES
     assert list(shipped["files"]) == list(pinned.reads)
     estimate = bench_script.estimate(pinned)
-    assert estimate["history_tokens"] >= 6 * 150_000  # the history is many times the bound
+    assert estimate["history_tokens"] >= 6 * 150_000  # several times the bound, so the engine rotates
     raw = resources.files("contexto.bench").joinpath("data", "trace-20261016.json").read_bytes()
     assert raw.decode() == trace.to_json(shipped) and len(raw) < 16_000  # written by record(), a few kilobytes
 

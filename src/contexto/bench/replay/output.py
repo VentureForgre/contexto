@@ -398,9 +398,8 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
         "statements still in the request. \"Best query from the question's words\" tries each single content word "
         "of the question and each pair of adjacent content words, every pair with a space and with a hyphen, and "
         "counts the probe when the best of them puts the page in the top 3; for the first five classes the rule's "
-        "query is "
-        "already taken from the question, so there it repeats \"in the top 3\". Which query a model makes is for "
-        "the live run.",
+        "query is already taken from the question, so there it repeats \"in the top 3\". Which query a model makes "
+        "is for the live run.",
         "",
         "| " + " | ".join(table[0]) + " |", "|" + "---|" * len(table[0]),
         *["| " + " | ".join(row) + " |" for row in table[1:]],
