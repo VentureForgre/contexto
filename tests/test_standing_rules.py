@@ -33,8 +33,10 @@ def test_the_instructions_give_the_pin_arguments_and_stay_short():
     assert '{"kind": "obligation", "text": ...}' in mcp.INSTRUCTIONS
     # Both texts are sent on every request: by the estimator the D51 sentence adds 90 tokens to the
     # instructions (122 to 212) and 79 to the pin line (40 to 119); D69's clause that only the user's own
-    # words are pinned (review B, finding 8) adds 38 (212 to 250) and 28 (119 to 147).
-    assert len(mcp.INSTRUCTIONS) <= 880 and len(RULE_LINES[2]) <= 520
+    # words are pinned (review B, finding 8) adds 38 (212 to 250) and 28 (119 to 147); D69's earlier sessions
+    # (review B on PR 2, finding 1 d) add 14 to the pin line (147 to 161) and 14 to the instructions of a
+    # server with a project view (251 to 265 with D65's search sentence; without one they are as they were).
+    assert len(mcp.INSTRUCTIONS) <= 880 and len(RULE_LINES[2]) <= 565 and len(mcp.PROJECT_INSTRUCTIONS) <= 930
 
 
 def test_the_pin_description_names_only_kinds_the_tool_accepts():

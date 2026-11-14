@@ -1046,7 +1046,10 @@ def test_head_follows_contexto_tool_bytes():
     # The head is derived (intake 2026-10-16 09:42Z): the measured 47,600 plus Contexto's own tool
     # definitions' byte change at 3.0 bytes per token. If the definitions change, update
     # budget.CONTEXTO_TOOL_BYTES (and the head with it) before any live approval.
-    from contexto.mcp import INSTRUCTIONS, TOOLS
+    # Every session the launcher starts has a project view (D69), the acceptance run included, so the head
+    # holds the project tool list and instructions.
+    from contexto.mcp import PROJECT_INSTRUCTIONS as INSTRUCTIONS
+    from contexto.mcp import PROJECT_TOOLS as TOOLS
 
     as_sent = [{"name": "mcp__contexto__" + t["name"], "description": t["description"], "input_schema": t["inputSchema"]}
                for t in TOOLS]
@@ -1054,7 +1057,7 @@ def test_head_follows_contexto_tool_bytes():
     assert measured == budget.CONTEXTO_TOOL_BYTES, f"Contexto's tool definitions are {measured} bytes; update budget.HEAD"
     instructions = len(INSTRUCTIONS.encode("utf-8"))  # in Claude Code's system prompt, so in the head too (D51)
     assert instructions == budget.CONTEXTO_INSTRUCTIONS_BYTES, f"the MCP instructions are {instructions} bytes"
-    assert budget.HEAD == budget.Params().head == 47_982
+    assert budget.HEAD == budget.Params().head == 48_144
     assert budget.HEAD == budget.HEAD_MEASURED + math.ceil(
         (budget.CONTEXTO_TOOL_BYTES - budget.CONTEXTO_TOOL_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN) + math.ceil(
         (budget.CONTEXTO_INSTRUCTIONS_BYTES - budget.CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN)
@@ -1064,7 +1067,7 @@ def test_the_preamble_base_follows_the_fixed_lines():
     from contexto.store.recall import DEFAULT_LINES
     from contexto.tokens import estimate_tokens
 
-    assert budget.Params().preamble_base == estimate_tokens("\n".join(DEFAULT_LINES)) == 446
+    assert budget.Params().preamble_base == estimate_tokens("\n".join(DEFAULT_LINES)) == 460
 
 
 def test_tool_rounds_are_calibrated_on_live_run_3():

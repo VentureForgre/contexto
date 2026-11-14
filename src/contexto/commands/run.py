@@ -54,8 +54,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--no-project-memory", action="store_true",
                         help="keep this session out of project memory: it carries nothing from the earlier "
                              "sessions of this directory's project (a resumed session stops sending what it "
-                             "carried: at once before its first rotation; after it, from its next rotation) and "
-                             "gives nothing to "
+                             "carried: at once before its first rotation; after it, from its next rotation), "
+                             "cannot search them, and gives nothing to "
                              f"later ones (also {PROJECT_MEMORY_ENV}=0, false, off or no). The session records "
                              "it, so resuming it later stays off without this option")
     parser.add_argument("--no-in-turn-paging", action="store_true",

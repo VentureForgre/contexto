@@ -2,7 +2,9 @@
 
 `contexto_search` (the MCP tool the model calls) and `contexto search` (the command you run) use the
 same search over a session's paged-out turns. This page says what a query matches, what happens when
-nothing matches every word, and what search cannot do.
+nothing matches every word, and what search cannot do. A search of the project's earlier sessions
+(`scope: "project"`, `contexto search --project`) matches their pages on every word only
+([Searching earlier sessions](project-memory.md#searching-earlier-sessions)).
 
 Search reads words only. It uses no embeddings and makes no model call, and the same store and query
 always give the same result.

@@ -885,9 +885,15 @@ recorded in `docs/DECISIONS.md`. Left: the open items listed under "Open follow-
 which is the maintainer's call.
 
 D69 (project memory): the first pull request, #279 (carry-over, rule 19, the off switch, the start
-line, `contexto project show|forget`), is under review, unreleased. Left: the second pull request, search
-and recall across a project's earlier sessions (`contexto_search` and `contexto_recall`) with the
-measurements of what a later session can reach and what it costs.
+line, `contexto project show|forget`), is merged, unreleased. The second, search and recall
+across a project's earlier sessions (`scope: "project"`, `session`, `--project`, `--from`) with the
+zero-spend measurements, is pull request #287 (branch `claude/d69-search-pr2`, on main at 65f33e4f):
+both reviewers approved, and B2's round-2 notes are fixed on the branch (an earlier session's stub
+row escapes `\n`, a search lets go of each session's page records once their rows are made, an
+earlier page's recall opens with a block that says whose page it is, and the docs state what
+"created before" rests on). After the rebase onto D63 (#274) the tool-list golden is main's at
+65f33e4f, the replies fixture is re-recorded with the pages-held path, and the measurement's first
+session runs 70 turns so it still rotates three times; D69's measured numbers are re-run. Not merged.
 
 D63 (in-turn paging): merged (#268, #274), unreleased. Left: its live check (under "Needs the
 owner") and its follow-ups above.

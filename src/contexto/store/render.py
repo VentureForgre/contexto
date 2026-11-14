@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from contexto.canonical import loads_bounded
-from contexto.store.search import Query, matching_lines
+from contexto.store.search import Query, matching_lines, text_matches
 
 RECALL_LIMIT = 32_000  # characters per contexto_recall call, at most
 DEFAULT_RECALL_LIMIT = 12_000  # characters per call before the engine has recorded the window
@@ -306,6 +306,33 @@ def match_lines(text: str, query: str | Query, context: int = MATCH_CONTEXT, per
         stop = min(end, start + width)
         shown.append((start, stop, n in first_match, text[start:stop] + (" ..." if stop < end else "")))
     return shown, len(chosen)
+
+
+def retained_matches(entries: list[dict[str, Any]], query: str | Query, *,
+                     asked: bool = True) -> list[tuple[int, int, int, int, str]]:
+    """The matching lines of a retained-window snapshot's ``entries`` (``{turn, message_index, role, text}``,
+    contract PR #125), newest first: ``(turn, message_index, start, end, line)``, every matching line of
+    each entry that matches as a page does (D34), with no context, ``text[start:end]`` the part shown.
+
+    With ``asked`` (the current session's own window) the newest turn's user entries are left out: they
+    are the question being asked, not a statement (B22, PR #143). An ended session's last window has no
+    question being asked, so its search passes ``asked=False`` (D69)."""
+    q = Query.parse(query) if isinstance(query, str) else query
+    if q is None:
+        return []
+    found = []
+    newest = max((e["turn"] for e in entries), default=None)
+    for entry in entries:
+        if asked and entry["turn"] == newest and entry["role"] == "user":
+            continue
+        if not text_matches(entry["text"], q):
+            continue
+        every = entry["text"].count("\n") + 1  # ALL matching lines: the newest are chosen by the caller
+        shown, _ = match_lines(entry["text"], q, context=0, per_page=every)
+        found += [(entry["turn"], entry["message_index"], start, end, text) for start, end, is_match, text in shown
+                  if is_match]
+    found.sort(key=lambda m: (m[0], m[1], m[2]), reverse=True)
+    return found
 
 
 def matching_line_starts(text: str, query: str | Query) -> list[int]:

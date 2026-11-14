@@ -176,7 +176,8 @@ def test_the_help_names_the_option_the_variable_and_what_a_resume_does(capsys):
     assert "--no-project-memory" in text and "CONTEXTO_PROJECT_MEMORY" in text
     assert "0, false, off or no" in text
     assert "resuming it later stays off without this option" in text
-    assert "search" not in text.split("keep this session out of project memory", 1)[1].split("stays off", 1)[0]
+    assert "(a resumed session stops sending what it carried: at once before its first rotation; after it, from " \
+           "its next rotation), cannot search them, and gives nothing to later ones" in text
 
 
 def test_the_resume_command_keeps_the_option():
@@ -299,12 +300,12 @@ def notice(store) -> tuple[str, list[dict]]:
     return err.getvalue(), events(store.home, store.session_id)[before:]
 
 
-def test_the_line_with_nothing_carried_says_so_and_promises_nothing_else(home, root):
+def test_the_line_with_nothing_carried_says_so_and_that_the_sessions_can_be_searched(home, root):
     for n, sid in enumerate(("one", "two", "three"), 1):
         new_session(home, sid, root, n).pin("decision", f"not a main pin {n}")
     said, logged = notice(new_session(home, "reader", root, 9))
-    assert said == f"contexto: project memory: 0 records carried from 3 earlier sessions in {root} {HINT}\n"
-    assert "search" not in said
+    assert said == (f"contexto: project memory: 0 records carried from 3 earlier sessions in {root}; they can be "
+                    f"searched {HINT}\n")
     assert logged == [{"event": "project_memory", "on": True, **ZEROS, "earlier": 3}]
 
 
@@ -318,7 +319,8 @@ def test_the_line_counts_one_session_and_one_record_in_the_singular(home, root):
     lone = repo(root.parent, "other")
     new_session(home, "empty", lone, 1)
     said, _ = notice(new_session(home, "reader2", lone, 9))
-    assert said == f"contexto: project memory: 0 records carried from 1 earlier session in {lone} {HINT}\n"
+    assert said == (f"contexto: project memory: 0 records carried from 1 earlier session in {lone}; it can be "
+                    f"searched {HINT}\n")
 
 
 def test_the_line_says_how_many_sessions_were_skipped(home, root):
@@ -441,8 +443,8 @@ def test_a_root_that_would_break_the_line_is_quoted(home, tmp_path):
     assert said.count("\n") == 1 and "\x1b" not in said
     spaced = repo(tmp_path, "my repo")  # a printable path is shown as it is
     new_session(home, "before2", spaced, 1)
-    assert f"0 records carried from 1 earlier session in {spaced} {HINT}" in notice(new_session(home, "reader2", spaced,
-                                                                                               9))[0]
+    searched = f"0 records carried from 1 earlier session in {spaced}; it can be searched {HINT}"
+    assert searched in notice(new_session(home, "reader2", spaced, 9))[0]
 
 
 @pytest.mark.parametrize("where", ["project", "carried"])
@@ -588,3 +590,4 @@ def test_a_resume_from_another_project_says_the_session_stays_in_its_own(home, r
     assert said == (f"contexto: project memory: session x stays in the project it was started in, {sandbox}; it "
                     f"neither carries from nor gives to {root}\n")
     assert notice(launcher.open_session(home, "x", sandbox))[0] == ""  # back in its own project: no such line
+

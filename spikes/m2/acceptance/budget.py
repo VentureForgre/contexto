@@ -41,13 +41,15 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 # ceil(452 / 3.0) = 47,932. D63 (search and recall cover tool results paged out of the running turn) grew
 # the definitions to 3,439: 47,600 + ceil(696 / 3.0) + ceil(452 / 3.0) = 47,983; naming the turn a page
 # was written in instead of "this turn" took them to 3,435: 47,600 + ceil(692 / 3.0) + ceil(452 / 3.0) =
-# 47,982.
+# 47,982. D69's search of earlier sessions gives every launched session (it has a project view) the
+# project tool list and instructions, 3,872 and 926 bytes: 47,600 + ceil(1,129 / 3.0) + ceil(500 / 3.0) =
+# 48,144.
 # test_head_follows_contexto_tool_bytes fails when either changes without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
-CONTEXTO_TOOL_BYTES = 3_435  # D65 3,070; D69 3,285; D63 adds tool results paged out inside a turn
+CONTEXTO_TOOL_BYTES = 3_872  # D65 3,070; D69 3,285; D63 3,435; D69's project tool list (scope, session)
 CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE = 426  # main c8f0b08 (unchanged until D51)
-CONTEXTO_INSTRUCTIONS_BYTES = 878  # D65 747; D69 adds whose words are pinned
+CONTEXTO_INSTRUCTIONS_BYTES = 926  # D65 747; D69 878; the project instructions (no pin from an earlier session)
 HEAD = (HEAD_MEASURED
         + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
         + math.ceil((CONTEXTO_INSTRUCTIONS_BYTES - CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN))
@@ -56,7 +58,8 @@ HEAD = (HEAD_MEASURED
 def fixed_preamble_tokens() -> int:
     """The pinned text's fixed opening lines (``contexto.store.recall.DEFAULT_LINES``) by the engine's
     estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it,
-    409 with D69's clause on whose words are pinned, 446 with D63's on hits paged out inside a turn."""
+    409 with D69's clause on whose words are pinned, 446 with D63's on hits paged out inside a turn, 460 with D69's on a search or recall of an earlier
+    session."""
     from contexto.store.recall import DEFAULT_LINES
     from contexto.tokens import estimate_tokens
 

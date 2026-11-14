@@ -32,7 +32,8 @@ install it and how to start it.
 - [in-turn-paging.md](in-turn-paging.md): how a long tool loop or a subagent stays under the bound:
   what a paged tool result looks like, how the model reads it back, and how to turn it off.
 - [project-memory.md](project-memory.md): what a new session carries from the earlier sessions of
-  its project, what the model is shown, and how to see, remove or turn it off.
+  its project, what the model is shown, how it can search their pages, and how to see, remove or
+  turn it off.
 - [mcp-tools.md](mcp-tools.md): the five MCP tools the model gets, how search ranks, and the recall
   budget.
 - [search.md](search.md): what a search query matches, the approximate matches search falls back to

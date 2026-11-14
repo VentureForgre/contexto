@@ -968,7 +968,8 @@ def project_memory_line(root: Path, earlier: int, carried: int, sources: int, sk
                         sent: int | None = None) -> str | None:
     """The start line about project memory, None when the project has no earlier session: how many records
     this session carries and from how many of the ``earlier`` sessions (``sources``), or that it carries
-    none; when only ``sent`` of the ``carried`` records fit the pin budget, that the rest did not; how many
+    none and that the earlier sessions can be searched; when only ``sent`` of the ``carried`` records fit
+    the pin budget, that the rest did not; how many
     of the project's sessions were ``skipped`` as damaged or unreadable; the project's directory; and how
     to list the records or turn this off. A path that is not printable as it is (a line break, an escape
     sequence) is quoted, so it cannot forge a line or drive the terminal."""
@@ -981,7 +982,10 @@ def project_memory_line(root: Path, earlier: int, carried: int, sources: int, sk
     if sent is not None and sent < carried:
         records = (f"{sent} of {carried} records carried ({carried - sent} did not fit the pin budget; contexto state "
                    "lists them all)")
-    text = f"{records} from {sources} of {sessions} in {where}" if carried else f"{records} from {sessions} in {where}"
+    if carried:
+        text = f"{records} from {sources} of {sessions} in {where}"
+    else:  # nothing carried: the earlier sessions are still there to search (D69)
+        text = f"{records} from {sessions} in {where}; {'it' if earlier == 1 else 'they'} can be searched"
     if skipped:
         text += f"; {skipped} session{'' if skipped == 1 else 's'} skipped as damaged or unreadable"
     return f"project memory: {text} (list: contexto project show; off: --no-project-memory)"
