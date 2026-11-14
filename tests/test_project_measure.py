@@ -4,15 +4,18 @@ one project through the real launcher store, the real engine and the real MCP se
 
 - Two sessions: which of the first session's rules and decisions are in the second's first request, which
   are absent and why, which the preamble holds after the second's first rotation, that no unpinned fact is
-  in its window, how many facts one project-scope search reaches (and a session-scope one: none), and the
-  sizes of the start text, the preamble and the first request with project memory on and off.
+  in its window, how many facts one project-scope search reaches (and a session-scope one: none), the
+  facts said in the first session's last turns among them (on no page, found in its last window), and the
+  sizes of the start text, the preamble and the first request with project memory on and off. The same
+  two sessions on Codex's Responses API (``two_codex``) carry the same records and reach the same facts.
 - Five sessions: the exact still-open set at the fifth session's start, in order and marked with its
   session, after closures and replacements made through the MCP server in later sessions; the facts of
   each earlier session one search reaches; and the omitted line when the carried set is over the budget.
 - The bound: every request of the later sessions at or under it, by the engine's estimate and the stub's
   count, with the carried text present; every search charged by the one rule, and no room below zero.
 - Fifty earlier sessions: the time project memory adds to a session's start and the latency of searches,
-  cold and warm, in process (``test_fifty_earlier_sessions_time``, deselect it with ``-k "not fifty"``).
+  cold and warm, in process, also with each earlier session's last window about 220 KB
+  (``test_fifty_earlier_sessions_time``, deselect it with ``-k "not fifty"``).
 
 Every number is printed (``pytest -s``) and, when ``CONTEXTO_MEASURE_OUT`` names a file, written to it as
 JSON. The content is synthetic and fixed, so every count is the same on every run; the times are not, and
@@ -35,6 +38,7 @@ from pathlib import Path
 import pytest
 
 from contexto import launcher, mcp
+from contexto.canonical import canonical_bytes
 from contexto.rewrite import MESSAGES, RewriteEngine, compose_preamble
 from contexto.store import SessionStore
 from contexto.store import project as project_module
@@ -43,6 +47,7 @@ from contexto.tokens import estimate_tokens
 from synthetic_project import (
     CONFIG,
     MARK,
+    RESPONSES,
     Decision,
     Fact,
     Plan,
@@ -156,7 +161,7 @@ TAIL = facts("T", 2)  # said in the first session's last turns, which are never 
 class Two:
     first: Session
     second: Session
-    off: Session
+    off: Session | None
     root: Path
 
 
@@ -324,6 +329,54 @@ def test_two_sessions_the_bound_and_the_charges(two):
     show("two_sessions.bound", numbers)
 
 
+# Two sessions on Codex (the Responses API) ----------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def two_codex(tmp_path_factory, clean_env):
+    """The two-session script as Codex sends it: the same plans, pins, closures and searches."""
+    base = tmp_path_factory.mktemp("two-codex")
+    home, root = base / "contexto-home", repo(base)
+    first = Session(home, session_id("codex", 1), root, dialect=RESPONSES).run(
+        Plan(rules=RULES, decisions=DECISIONS, facts=FACTS, closes=CLOSED, turns=50, tail=TAIL))
+    first.end()
+    keys = tuple(f.key for f in FACTS + TAIL)
+    second = Session(home, session_id("codex", 2), root, dialect=RESPONSES).run(Plan(searches=keys, turns=40))
+    second.end()
+    return Two(first, second, None, root)
+
+
+def test_two_codex_sessions_carry_the_open_records_and_one_search_reaches_every_fact(two_codex):
+    first, second = two_codex.first, two_codex.second
+    assert all(call.result["isError"] is False for call in first.calls + second.calls)
+    assert len(first.rotations()) >= 3 and first.paged_turns() < len(first.turn_starts)
+    assert min(fact_turns(first, TAIL)) >= first.paged_turns() > max(fact_turns(first, FACTS))
+    start = second.state.start_text
+    window = second.text(0)
+    names = [r.name for r in RULES] + [d.name for d in DECISIONS]
+    present = [n for n in names if n in window]
+    assert present == [r.name for r in RULES if r.name not in CLOSED] + ["DECISION02Q", "DECISION03Q"]
+    assert [name for _, _, _, name in carried_lines(start)] == ["RULE05Q", "RULE03Q", "RULE02Q", "RULE00Q",
+                                                                 "DECISION03Q", "DECISION02Q"]
+    assert second.start_line == (f"contexto: project memory: 6 records carried from 1 of 1 earlier session in "
+                                 f"{two_codex.root} (list: contexto project show; off: --no-project-memory)")
+    assert [f.key for f in FACTS + TAIL if f.value in window] == []
+    project, tail = reached(second, "project", FACTS), reached(second, "project", TAIL)
+    assert project == [f.key for f in FACTS] and tail == [f.key for f in TAIL]
+    assert reached(second, "session", FACTS + TAIL) == []
+    assert second.rotations() and max(row.real for row in second.rows) <= CONFIG.bound
+    assert max(row.estimate for row in second.rows) <= CONFIG.bound
+    assert all(MARK in second.text(i) for i in range(len(second.rows))) and not OFF_PATH & every_event(second)
+    charges = check_charges(second)
+    show("two_sessions_codex", {
+        "present_in_first_request": present, "facts": len(FACTS), "reached_project_scope": len(project),
+        "tail_facts_reached_project_scope": len(tail), "first_session_turns": len(first.turn_starts),
+        "first_session_turns_paged": first.paged_turns(), "start_text_tokens": estimate_tokens(start),
+        "requests": len(second.rows), "rotations": len(second.rotations()),
+        "largest_real": max(row.real for row in second.rows),
+        "largest_estimate": max(row.estimate for row in second.rows), "bound": CONFIG.bound,
+        "estimate_error_requests": estimate_errors(second), **charges})
+
+
 # Five sessions ---------------------------------------------------------------------------------------
 
 def five_plans() -> list[Plan]:
@@ -483,7 +536,9 @@ REPEATS = 5
 # Generous ceilings (seconds) for a loaded CI runner; facts.md measured about 50 ms (start line, cold),
 # 8 ms (session scope, cold) and 620 ms (project scope, cold) on a machine at load average 27 to 50.
 CEILINGS = {"start_added_cold": 5.0, "start_added_warm": 2.0, "session_search_cold": 2.0,
-            "session_search_warm": 2.0, "project_search_cold": 30.0, "project_search_warm": 15.0}
+            "session_search_warm": 2.0, "project_search_cold": 30.0, "project_search_warm": 15.0,
+            "project_search_large_windows_cold": 30.0, "project_search_large_windows_warm": 15.0}
+WINDOW_ENTRIES = 110  # of about 2 KB each: a last window of about 220 KB, as a long session leaves it
 QUERY = "deploy key"  # on two pages of every session of the project, so every earlier session matches
 
 
@@ -670,6 +725,28 @@ def test_fifty_earlier_sessions_time(tmp_path, clean_env, monkeypatch):
         add("project_search_one_key_warm", one)
         store.release()
 
+    # The same searches once each earlier session's last window is large: its retained.json, which the
+    # engine wrote from two short turns above, replaced by one of WINDOW_ENTRIES entries, one of which
+    # holds the query, so every earlier session has a line in view when it ended as well as its pages.
+    small_windows = [(home / "sessions" / session_id("fifty", n) / "retained.json").stat().st_size
+                     for n in range(EARLIER)]
+    for n in range(EARLIER):
+        entries = [{"turn": 3 + i, "message_index": 10 + i, "role": "assistant",
+                    "text": f"window line {i} of session {n}\n{FILL}"} for i in range(WINDOW_ENTRIES)]
+        entries[-1]["text"] += f"\nthe deploy key in view was key-{n}-window"
+        (home / "sessions" / session_id("fifty", n) / "retained.json").write_bytes(
+            canonical_bytes({"stamp": 9, "epoch": 1, "k": 4, "entries": entries}))
+    large_windows = (home / "sessions" / session_id("fifty", 0) / "retained.json").stat().st_size
+    for _ in range(REPEATS):
+        store, server = searcher(home, current)
+        cold, result, event = search(store, server, "project")
+        assert event["earlier_in_view_hits"] > 0 and "key-49-window" in result["content"][0]["text"]
+        add("project_search_large_windows_cold", cold)
+        for _ in range(2):
+            warm, _, _ = search(store, server, "project")
+            add("project_search_large_windows_warm", warm)
+        store.release()
+
     load_after = os.getloadavg()
     medians = {name: median_ms(values) for name, values in sorted(times.items())}
     margins = {}
@@ -695,6 +772,8 @@ def test_fifty_earlier_sessions_time(tmp_path, clean_env, monkeypatch):
         "start_text_omitted": cut, "start_text_tokens": estimate_tokens(seen["text"]),
         "start_text_shown_by_kind": {kind: sum(k == kind for _, k, _, _ in carried_lines(seen["text"]))
                                      for kind in ("obligation", "decision")},
+        "retained_bytes_each_as_built": [min(small_windows), max(small_windows)],
+        "retained_bytes_each_large": large_windows,
         "repeats": REPEATS, "medians_ms": medians, "ceilings": margins,
         "samples_ms": {name: [round(v * 1000, 2) for v in values] for name, values in sorted(times.items())},
         "load_average_before": [round(x, 2) for x in load_before],
