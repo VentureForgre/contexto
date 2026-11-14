@@ -468,8 +468,7 @@ def test_forget_session_takes_the_session_out_of_the_project(three, capsys, home
     lines = out.splitlines()
     assert lines[:3] == [f"Project: {root}", f"Project id: {project_id(root)}",
                          "Sessions to take out of project memory (1): later sessions of this project will carry "
-                         "nothing from them; what they closed or replaced stays closed or replaced."]
-    assert "search" not in out
+                         "nothing from them or search them; what they closed or replaced stays closed or replaced."]
     assert lines[3].split() == ["ID", "CREATED", "LAST", "ACTIVITY", "PAGES", "RECORDS", "CARRIED", "NOTES"]
     assert lines[4].split() == ["s1", iso(at(1)), iso(last_activity(s1.dir)), "1", "2", "1"]
     assert lines[5:] == ["forgot session s1", "Forgot 1 session.",
