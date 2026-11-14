@@ -1856,6 +1856,7 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     if in_tool_loop and n > previous_n and config.in_turn_paging and _dialect().in_turn is not None:
         room_margin = inturn.fresh_margin(inturn.view(messages, state, _dialect())[previous_n:], estimator,
                                           _dialect())
+        state = inturn.note_room_low(messages, state, config, sent_estimate + room_margin, events)
     state = replace(state, hashes=hashes, last_sent_bytes=sent, room_margin=room_margin,
                     last_sent_media=sent_media(sent_items), last_estimate=sent_estimate,
                     last_sent_media_keys=media_keys(split_media(sent_items)[1]),

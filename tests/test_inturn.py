@@ -1759,6 +1759,31 @@ def test_with_usage_never_arriving_no_batch_rewrites_right_after_another():
     assert not [e for e in batches(cli) if e["unseen_results_stubbed"]]
 
 
+@pytest.mark.parametrize("usage", [False, True], ids=["usage-missing", "usage"])
+def test_a_room_under_min_turn_room_while_usage_is_missing_is_logged_once_per_turn(usage):
+    # Reviewer B at 26cba5ad, L3: at the defaults with a 28,000 head and usage never arriving, 55 of 151
+    # requests published a room under min_turn_room (the estimate, never corrected, rides up to the bound
+    # since a batch then rewrites only over it), and nothing logged it.
+    config = Config()
+    cli = Cli(memory(), config, head_bytes=int(28_000 * BYTES))
+    if not usage:
+        cli.engine.observe_usage = lambda *args, **kwargs: []
+    for turn in range(2):
+        cli.prompt(f"Read every module, pass {turn}.")
+        cli.loop(70, lambda r: output(f"m-{turn}-{r}", RESULT))
+    low = [(s, e) for s in cli.sent for e in s.events
+           if e["event"] == "turn_room_low" and e.get("reason") == "usage_missing"]
+    if usage:
+        assert not low and min(s.room for s in cli.sent) >= config.min_turn_room
+        return
+    assert min(s.room for s in cli.sent) < config.min_turn_room
+    assert len(low) == 2 and cli.sent.index(low[0][0]) < 71 <= cli.sent.index(low[1][0])  # once in each turn
+    for s, e in low:
+        assert e["room"] < e["min_turn_room"] == config.min_turn_room and e["room"] <= max(0, s.room)
+    first = cli.sent.index(low[0][0])
+    assert min(s.room for s in cli.sent[:first]) >= config.min_turn_room  # the first such request logs it
+
+
 def test_after_a_resync_the_note_is_rebuilt_within_its_cap():
     # Reviewer A at 15293e9c, finding 2: clipped kept the folds pages that still held and dropped the
     # rest, and each fold they stood for was then named in the note until the next fold: 31,309 bytes at

@@ -950,6 +950,22 @@ def read_line(config: Any) -> int:
     return config.bound - 2 * (config.min_turn_room // OUTPUT_ALLOWANCE_SHARE)
 
 
+def note_room_low(messages: list[dict], state: Any, config: Any, used: int, events: list[dict]) -> Any:
+    """D63 (Reviewer B at 26cba5ad, L3): while usage is missing (the previous request's has not arrived,
+    so the estimate is never corrected) a loop request's published room, ``bound - used - headroom_floor``,
+    can fall under ``min_turn_room`` with nothing paged for it, since a batch rewrites the prefix only over
+    the bound then. Logged as ``turn_room_low`` with ``reason: "usage_missing"``, once per turn (with the
+    small bound's own ``in_turn_small_bound``, whichever comes first)."""
+    room = config.bound - used - config.headroom_floor
+    start = _rw().turn_starts(messages)[-1]
+    if (state.pending_usage is None or room >= config.min_turn_room or start >= len(messages) - 1
+            or state.inturn.room_low == start + 1):
+        return state
+    events.append({"event": "turn_room_low", "epoch": state.epoch, "reason": "usage_missing",
+                   "room": max(0, room), "min_turn_room": config.min_turn_room})
+    return replace(state, inturn=state.inturn._replace(room_low=start + 1))
+
+
 def _tightness(request: dict, messages: list[dict], sent: list[dict], state: Any, config: Any, estimator: Any,
                dialect: Any) -> tuple[int, bool]:
     """(the head's tokens, whether the bound is tight): tight when it leaves less than two
