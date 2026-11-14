@@ -43,7 +43,8 @@ estimated from bytes, and which planted facts search can reach. It cannot show a
 cache reads or real token counts
 ([what the replay shows](#what-the-replay-shows-and-what-it-cannot)).
 
-With no key, see what a live run would cost before you start one:
+With no key, see how many tokens a live run plans, by class, before you start one (the dollar
+figures below price that plan):
 
 ```sh
 contexto bench --dry-run --model claude-haiku-5-5 --seeds 10 --repeats 3
@@ -54,7 +55,9 @@ prices. The run below is estimated at about $14 expected and about $456 in the p
 (about $602 with `--cache-ttl 1h`), from the dry run's plan priced at the shipped price table ([the
 minimum run](#the-minimum-run-that-makes-the-claim-testable) says how). Those are estimates, not a
 ceiling: the ceiling is `--budget-tokens`, and the run refuses to start without one at or above the
-dry run's worst case in tokens:
+dry run's worst case in tokens. The most a run can be billed within that budget is the budget priced
+at the model's highest per-token rate (output): about $1,496 for the run below (598,290,000 tokens at
+$2.50 per million on claude-haiku-5-5) and about $5,010 for the Opus run (250,500,000 at $20.00):
 
 ```sh
 export ANTHROPIC_API_KEY=...        # or --key-helper COMMAND, or --settings FILE
@@ -252,8 +255,11 @@ Every way the arms differ is written into the manifest's `arm_differences`. In s
   Its auto-compaction is left at Claude Code's default.
 - Only `plain`: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is set, and its base URL is the meter.
 - Both Claude Code arms have a base URL on 127.0.0.1. Claude Code behaves differently when its base
-  URL is not the vendor's host (read in the 2.1.322 bundle), in both arms alike; a plain session
-  sent straight to the vendor would not.
+  URL is not the vendor's host (read in the 2.1.322 bundle): it leaves fields out of the billing line
+  of its system prompt, sends request-class headers only when asked, and does not send the
+  `x-cc-context-compacted` and `x-cc-compaction-request` headers it sends to the vendor's host around
+  a compaction. This is the same in both arms; a plain session sent straight to the vendor would
+  differ.
 - Both Claude Code arms run with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`. Without it, a subagent
   the model started in the background reported back with a run and a `result` of its own, and every
   later reply was scored against the wrong turn: in one stub test, 0 of 72 answers counted while the
@@ -546,8 +552,8 @@ from Claude Code 2.1.322 against a stub. The plan assumes a 3,000-token summary 
 re-attached files per compaction, which errs toward more spend; the replay's modelled plain line
 uses a 7,920-token summary and nothing re-attached, which errs toward plain Claude Code (see
 [below](#what-the-replay-shows-and-what-it-cannot)). The two serve different ends, a budget and a
-lower bound on plain Claude Code's request size, so they are kept apart. The Opus expected figure scales the Haiku calibration by
-1.381, the ratio of the recorded Opus run's Contexto arm to run #4's (4,726,388 against 3,422,988
+lower bound on plain Claude Code's request size, so they are kept apart. The Opus expected figure
+scales the Haiku calibration by 1.381, the ratio of the recorded Opus run's Contexto arm to run #4's (4,726,388 against 3,422,988
 tokens), and the plain arm by the same factor [assumed]. The worst case counts every input token as
 a cache write with a 10% margin and reserves 32,000 output tokens per Claude Code request and 8,192
 per full-arm request. It is a planning figure, not a ceiling: Claude Code may ask for up to 128,000
@@ -623,7 +629,7 @@ Synthetic session, no model: the pinned replay (seed 20261016, protocol `v2`, bo
 through the real proxy to a fake upstream on 127.0.0.1. The Contexto line is estimated from the
 bytes of each request the proxy sent, not counted by a tokenizer. The full-context and plain Claude
 Code lines are modelled from the script, not run. Contexto's drops are its 14 rotations: old turns
-moved to the store, word for word and still recallable through search. Plain Claude Code's drops
+moved to the store, word for word, where the search tool can reach them. Plain Claude Code's drops
 are its 8 modelled compactions: old turns replaced by a summary. Peaks: Contexto 116,067 estimated
 tokens, plain Claude Code 140,512 and full context 977,481. The full-context line sets the y axis
 near 1M tokens, so the other two lines look flatter than they are; the bound is the dotted line.

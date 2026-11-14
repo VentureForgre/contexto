@@ -3678,7 +3678,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     erring toward plain Claude Code). A replay cannot show answer accuracy, cache reads, real token
     counts, or what a real CLI or model does, and says so.
   - **The replay's head carries fixed synthetic tool text** (#289, 93b40c1d). D69 (#279) lengthened
-    the `contexto_pin` tool description by 213 bytes (+71 estimated tokens on every request) and the
+    the `contexto_pin` tool description by 215 bytes (+71 estimated tokens on every request) and the
     preamble's pin rule by 100 bytes (+34 estimated tokens a request from the first rotation, +56
     from the third, where the fake upstream prices the preamble as log text); together they moved
     each rotation from turn 33 on one turn earlier, so turn 46 was no longer paged before the

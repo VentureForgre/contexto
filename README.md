@@ -26,10 +26,11 @@ moving the oldest turns to disk, word for word, and giving the model tools to se
 
 Plain Claude Code compacting on its own was not run in these sessions. `contexto bench` runs
 Contexto, full context and plain Claude Code set to compact at the same bound (at its defaults,
-Claude Code on a 1M-token window would compact near 967,000 tokens) on the same generated session
+Claude Code on a 1M-token window would compact near 967,000 tokens, so not at all in this session)
+on the same generated session
 for seeds you choose, with your own key; its replay needs no key ([benchmark](docs/bench.md)). It
 is on `main` and not yet in a release (releases are cut by hand and batched under D67): from a
-checkout, run `uv run contexto bench --replay`.
+checkout, run `uv run contexto bench --replay`. No live multi-seed run has been made yet.
 
 ## Install
 
