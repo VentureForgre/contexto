@@ -522,15 +522,17 @@ class NoticeLog:
         # D64: store failures first, because on a full disk the write below fails as well.
         for key, message in fault_notices(event, getattr(self.store, "session_id", None)):
             self._once(key, "warning: " + message)
+        # D69: read before the write below, so a failed write keeps the hint a later bound notice gives
+        # (review B round 9, N23).
+        inners = [event, *(event.get("transform_events") or [])]
+        for inner in inners:
+            if isinstance(inner, dict) and inner.get("event") == "start_text" and isinstance(inner.get("tokens"), int):
+                self.start_text_tokens = inner["tokens"]
         try:
             self.store.log(event)
         except OSError as exc:
             self._once("log_unwritable", "warning: " + log_unwritable_message(exc))
             raise
-        inners = [event, *(event.get("transform_events") or [])]
-        for inner in inners:
-            if isinstance(inner, dict) and inner.get("event") == "start_text" and isinstance(inner.get("tokens"), int):
-                self.start_text_tokens = inner["tokens"]
         for inner in inners:
             if not isinstance(inner, dict):
                 continue
