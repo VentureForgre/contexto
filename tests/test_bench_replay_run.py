@@ -19,6 +19,7 @@ import dataclasses
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -29,13 +30,13 @@ from pathlib import Path
 
 import pytest
 
-from contexto import __version__, cli, mcp
+from contexto import __version__, cli
 from contexto.bench import script as bench_script
 from contexto.bench.model import NEW_CLASSES, Script
 from contexto.bench.modes import replay as replay_mode
 from contexto.bench.replay import client, lines, output, reach, scripted, session, trace
 from contexto.commands import bench as bench_command
-from contexto.store import SessionStore
+from contexto.store import SessionStore, recall
 
 SHORT = ["--protocol", "d27", "--replay-turns", "8"]  # 14 turns, about 3 seconds
 
@@ -530,20 +531,25 @@ def test_the_replay_connects_to_loopback_only(pinned_run, short_run):
 
 
 def test_a_proxy_change_needs_only_the_trace_recorded_again(monkeypatch, tmp_path):
-    """Reviewer A's repro of finding 2: one word of an MCP tool description made longer grows every
-    request. Against the shipped trace the replay fails, saying what differed, the command that records
-    the trace again and what to check in its diff; recorded again into a file the tests are pointed at,
-    every check of a pinned run passes."""
-    tools = copy.deepcopy(mcp.TOOLS)
-    tool = next(t for t in tools if "a short note on" in t["description"])
-    tool["description"] = tool["description"].replace("a short note on", "a short note saying")
-    monkeypatch.setattr(mcp, "TOOLS", tools)
+    """Reviewer A's repro of finding 2, on what the proxy injects: one word of the preamble's pin rule
+    made longer grows every request from the first rotation, the first to carry the preamble. (A tool's
+    wording no longer reaches the replay's head: test_the_head_does_not_move_with_tool_wording.) Against
+    the shipped trace the replay fails, saying what differed, the command that records the trace again
+    and what to check in its diff; recorded again into a file the tests are pointed at, every check of a
+    pinned run passes."""
+    rule = next(line for line in recall.DEFAULT_LINES if "in their own messages" in line)
+    longer = rule.replace("in their own messages", "in their very own messages")
+    opening = tuple(longer if line == rule else line for line in recall.DEFAULT_LINES)
+    monkeypatch.setattr(recall, "DEFAULT_LINES", opening)
     shipped = trace.load_packaged()
     code, text, err = _run(["--replay"])
     assert code == 1 and "Pinned expectations: " in text and "Result: FAIL" in text
     requests = shipped["expected"]["requests"]
-    assert f"request_tokens: {requests} of {requests} differ; the first is number 1" in err
-    assert f"All {requests} differ, by +" in err and "(the head, the tool definitions)" in err
+    # The requests before the first rotation carry no preamble, so they are equal.
+    first = int(re.search(r"Requests 1 to (\d+) are equal", err).group(1))
+    assert 0 < first < requests
+    assert f"request_tokens: {requests - first} of {requests} differ; the first is number {first + 1}" in err
+    assert f"Requests 1 to {first} are equal and the difference starts at number {first + 1}" in err
     assert err.startswith("The measurements differ from the pinned trace in ")
     for said in ("record the trace again, from the repository's root:",
                  "contexto bench --replay --record-trace src/contexto/bench/data/trace-20261016.json --force",
@@ -566,7 +572,8 @@ def test_a_proxy_change_needs_only_the_trace_recorded_again(monkeypatch, tmp_pat
     # re-record that this test could not see. It reads the trace now; run it against the recorded one.
     parts = _test_module("test_bench_replay")
     parts.test_the_head_is_synthetic_text_of_a_realistic_size()
-    assert recorded["expected"]["head_tokens"] != shipped["expected"]["head_tokens"]  # the head did grow
+    assert recorded["expected"]["head_tokens"] == shipped["expected"]["head_tokens"]  # the head did not move
+    assert recorded["expected"]["request_tokens"][:first] == shipped["expected"]["request_tokens"][:first]
 
 
 # A session that is not the pinned one
