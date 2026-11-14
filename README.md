@@ -9,8 +9,9 @@ moving the oldest turns to disk, word for word, and giving the model tools to se
   however long the session runs. The turns removed to make room stay on disk word for word, not as
   a summary. On `main` this holds inside a long tool loop too (the requests the CLI sends while
   the model calls tools, before it answers you; [in-turn paging](docs/in-turn-paging.md)). A
-  request can still pass it in a Codex tool loop, on v0.5.24 in any tool loop, or with an oversized
-  prompt ([limitations](#known-limitations)).
+  request can still pass it, for example in a Codex tool loop, on v0.5.24 in any tool loop, with
+  in-turn paging switched off, in a loop with nothing left to page, with very dense tool output at a
+  tight bound, or with an oversized prompt ([limitations](#known-limitations)).
 - **Recall no worse than full context on a scripted recall test.** In a scripted synthetic
   session (acceptance run 4) on claude-haiku-5-5, Contexto answered 52 of 54 recall questions. The
   same model given the whole history of about 426,000 tokens answered 47. That is one session and
@@ -233,6 +234,9 @@ The full list, with sources, is in [docs/limitations.md](docs/limitations.md).
   ([in-turn paging](docs/in-turn-paging.md)); whether an account that enforces preserved thinking
   accepts that has not been checked live. Codex tool loops, and every tool loop on v0.5.24, are sent
   whole, so a very long one can pass the bound (logged `over_bound`); the next turn start rotates.
+  On `main` a Claude Code loop can still pass it with paging off (`--no-in-turn-paging`), when
+  nothing is left to page (`in_turn_exhausted`), or at a tight bound with tool output denser than
+  1.5 bytes a token (50 KB results reached 64,184 of 60,000 in review).
   A turn start can also pass it: a prompt too
   large for the bound (`bound_too_small`), a failing store, or a low estimate before the first count.
 - **Tested scope.** Recall was measured with one synthetic session script, on two models, at one

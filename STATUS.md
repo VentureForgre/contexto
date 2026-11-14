@@ -184,12 +184,15 @@ only when it could not fit. A batch strips the thinking from its first changed m
 of the request, on that request and every later one of the turn; thinking before that point and in
 later messages passes byte for byte. Off switch: `contexto run --no-in-turn-paging`,
 `CONTEXTO_IN_TURN_PAGING=0` or `contexto serve --no-in-turn-paging`. Reviewed by two reviewer agents
-over six rounds; no model was called.
+on every head (Reviewer A posted verdicts at seven commits of #274, Reviewer B at six); no model was
+called.
 
 - Before, at v0.5.24 (main b0e2dbc, the replay harness of PR #268, bound 150,000): one prompt and
   120 tool rounds of 6,400 tokens (`loop120`) sent a largest request of 812,301 tokens, with 104
   `over_bound` from the estimate and 104 from usage and 0 pages; main's engine with paging off sends
-  812,479 (D63's "before", 178 tokens a request more from the tool text D65, D69 and D63 added). The
+  812,475 at main ea2e1dc8 (reviewer B's run on PR #295; D63's "before" records 812,479 at an earlier head; the 174 to 178 tokens
+  a request more come from the tool and preamble text D63 added, since f7c0f67c, which already has
+  D65 and D69, still gives 812,301). The
   recall room was 0 on 108 of the loop's 125 responses, and both late searches were refused. The
   subagent's side room was 0 on 132 of 154 publishes. The 2026-11-12 audit, on a script that is not
   in the repository, saw an estimate of 775,851 and 96 `over_bound`.
@@ -198,7 +201,7 @@ over six rounds; no model was called.
   109,720 in the six loop scenarios and 86,909 in `large`.
 - Cache: in-loop prefix rewrites stay under the harness's allowance (`loop120` 11 of 34.1,
   `subagent` 11 of 33.6, `small` 10 of 37.8, `multiturn` 7 of 23.2, `images` 5 of 17.6, `mixed` 3
-  of 11.9, `large` 0). The re-sent share of all input is 0.1% to 2.9%, and a loop's re-sent tokens
+  of 11.9, `large` 0). The re-sent share of all input is 0% (`large`, no rewrite) to 2.9%, and a loop's re-sent tokens
   under the breakpoint model are 0.12 to 0.48 of its cost ceiling (max of the loop's own tokens and
   the bound; the harness allows 1.0).
 - Thinking: once a turn's first batch has run, every later request of the turn has some of its
@@ -808,7 +811,7 @@ Still open:
   minimum-room rotation (A12) nothing to restore, so later turn starts keep their window (about 34,200 real, room 806,
   `turn_room_low` logged once); PR #232 review B's finding 1.
 
-## What is left (as of 2026-11-13)
+## What is left (as of 2026-11-14)
 
 Definition of done for this project: M2 acceptance passed on both CLIs (done), every release
 from v0.5.0 on published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
@@ -1068,10 +1071,13 @@ Needs the owner:
   seat-sized heads (O3).
 - In-turn paging (D63, on `main`, unreleased) keeps a Claude Code tool loop under the bound in every
   replay scenario. Every forwarded request is still checked before it is sent (D49): `over_bound`
-  with `in_tool_loop: true` means in-turn paging had nothing left to page (`in_turn_exhausted`), is
-  off, or is not available (Codex); at a turn start it goes with `bound_too_small` or means the
-  sizing did not hold. Its limits:
+  with `in_tool_loop: true` means, for example, that in-turn paging had nothing left to page
+  (`in_turn_exhausted`), is off, is not available (Codex), was outrun by output denser than its
+  count at a tight bound, or that the engine is degraded (rule 14); at a turn start it goes with
+  `bound_too_small` or means the sizing did not hold. Its limits:
   - Codex is unchanged: a Codex tool loop is sent whole, as at v0.5.24, and can pass the bound.
+  - v0.5.24, the latest release, does not have in-turn paging: a Claude Code tool loop there is sent
+    whole and can pass the bound, as the README says.
   - At a tight bound (bound 60,000 with a 20,000-token head, or a 92,000-token head at 150,000) a
     new result is read once only if the request fits with it counted at 1.5 bytes a token; a denser
     result can go over: 50 KB results at 1.2 bytes a token reached 64,184 of 60,000, logged
