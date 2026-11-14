@@ -28,10 +28,15 @@ What they guarantee:
     displays to;
   - a key of the dict a function of the same file returns, when the event unpacks a call to it, by
     bare name or on ``self`` or ``cls``, with ``**`` (``**self._sizes()``): read from that function's
-    ``return`` statements in the forms ``RETURNED_FIELDS`` reads (below);
+    ``return`` statements in the forms ``RETURNED_FIELDS`` reads (below). A call is resolved to the one
+    function Python would run, as far as the file shows it (the same rule for every call below): on
+    ``self`` or ``cls``, the method of the calling class or else of its bases, in method resolution
+    order, stopping with nothing at a base the file does not define; by bare name, a function nested in
+    the caller or in a function around it, else one at the top of the file, and nothing when the caller
+    or a function around it binds the name itself (a parameter, a local) first;
   - a key stored later on the same local variable (``v["key"] = ...``, ``v.update(key=...)``,
-    ``v.update({"key": ...})``, ``v.update(**local)``, ``v.setdefault("key", ...)``) when that
-    variable holds one event name in its function and is bound to nothing else there;
+    ``v.update({"key": ...})``, ``v.update(**local)``, ``v |= {"key": ...}``, ``v.setdefault("key",
+    ...)``) when that variable holds one event name in its function and is bound to nothing else there;
   - for an event listed in ``CARRIED_EVENTS``, whose dict is filled in by several functions of one
     file: a key stored on that dict in any function the scan follows it into. It is followed from the
     function that assigns it to a variable, into each function of the file it is passed to by a call
@@ -40,9 +45,12 @@ What they guarantee:
     renamed in one function or in all of them with no change here, and a variable of the same name
     that another function binds itself (a local, a loop variable) is not the event. A function that binds
     the variable to anything else as well (an assignment, ``+=``, a loop, ``with``, ``except ... as``, an
-    import, a ``match`` capture; not a comprehension's target, which is its own) is not followed: none of
-    the keys stored on the variable there is taken for a field, nothing is followed from it, and if it
-    stores a key on the variable or passes it on, the test fails and says to rename one of the two;
+    import, a ``match`` capture; not a comprehension's target, which is its own, and not ``|=``, which
+    updates the dict) is not followed: none of the keys stored on the variable there is taken for a
+    field, nothing is followed from it, and if it stores a key on the variable or passes it on, the test
+    fails and says to rename one of the two. A default for a missing dict (``entry = entry or {}``, ``if
+    entry is None: entry = {}``) is such a binding, but there the fix is to drop the default and pass the
+    dict: the scan does not follow the dict onto another name (``other = entry or {}``);
   - for an event listed in ``RETURNED_FIELDS``: a key of the dict that a function named there returns,
     when the returned value, or the element of the returned tuple the table names, is a dict display,
     a conditional expression of them, or a local variable assigned only dict displays (with the keys
@@ -61,7 +69,10 @@ What they guarantee:
   each field is looked for in that entry alone.
 - Fields, document to source, weakly. A field the document lists appears as a string literal or a
   keyword argument somewhere in a module that writes the event. This catches a field that was renamed
-  or removed; it does not prove that the field is written on that event.
+  or removed; it does not prove that the field is written on that event. A made-up field whose name is
+  a common word passes: a bullet ``- `conversation`: ...`` under ``degraded_leave`` is not reported,
+  because ``"conversation"`` is a string somewhere in rewrite.py. The check cannot be tightened to the
+  fields the scan reads without listing every field it cannot read in ``HELPER_FIELDS`` first.
 - Each entry states its writer, where it appears and its kind in one line, in a fixed vocabulary, and
   the document's section "Reading an entry" names every word of that vocabulary.
 - The index table under ``## Index`` has exactly one row per entry, in the entries' order, and each
@@ -94,13 +105,20 @@ What they do not guarantee:
   ``*``, one function it matches with a ``return`` the scan reads is enough: another that it matches and
   whose returns the scan cannot read is not read. A field the document lists that is in neither the
   scan nor that list is checked document to source only.
+- A call the scan does not resolve to one function of the file, by the rule above: a method that the
+  calling class gets from a base in another file, or from a base reached after one; a method that a
+  subclass in the file overrides, when the call is made in the base (``self`` may be the subclass); a
+  bare name the caller binds (a parameter, a local); a function of another file; and two hops
+  (``return self._inner()``). What such a function returns or stores is not read, except through the
+  parameter-name rule for ``CARRIED_EVENTS`` below.
 - That ``HELPER_FIELDS`` is right about the source. It is a list kept by hand. It only makes sure the
   document keeps the bullets it names. For a key stored on a variable that holds several event names,
   the test checks that the key is listed under one of them, not that it is listed under the right
   ones.
-- A ``CARRIED_EVENTS`` dict through a call the scan cannot resolve: a call on another object
-  (``owner.method(entry)``), a function of another file, a function passed as a value or bound with
-  ``functools.partial``, ``getattr(self, "_f")(entry)``, a local alias (``f = self._f``, then
+- A ``CARRIED_EVENTS`` dict under another local name (``other = entry``, ``other = entry or {}``): the
+  keys stored on ``other`` are not read. And the dict through a call the scan cannot resolve: the calls
+  of the item above, a call on another object (``owner.method(entry)``), a function passed as a value or
+  bound with ``functools.partial``, ``getattr(self, "_f")(entry)``, a local alias (``f = self._f``, then
   ``f(entry)``), arguments unpacked with ``*`` or ``**`` (``self._f(*args)``, ``self._f(**{"rec":
   entry})``), a lambda's parameter, a method of a class defined inside a function, and the dict stored on
   an attribute (``self.current = entry``). There the scan goes by the name alone: a parameter with the
@@ -289,6 +307,8 @@ class Module:
     sites: list[Site] = field(default_factory=list)
     functions: dict[str, Function] = field(default_factory=dict)  # scope -> the function
     classes: set[str] = field(default_factory=set)  # the scopes that are classes
+    # class scope -> its bases as written: a bare name, or None for any other expression (``mod.Base``)
+    bases: dict[str, tuple[str | None, ...]] = field(default_factory=dict)
     calls: list[Call] = field(default_factory=list)
     returns: list[tuple[str, ast.expr]] = field(default_factory=list)  # (scope, the value a ``return`` gives)
     stores: list[tuple[str, str, str, int]] = field(default_factory=list)  # (scope, variable, key, line)
@@ -341,6 +361,32 @@ class Module:
                 found = self.local_strings[(where, variable)]
                 return frozenset(found) if found else None
         return None
+
+    def _base(self, scope: str, base: str | None) -> str:
+        """The class scope a base of the class ``scope`` names, looked up where the class is defined, then at
+        the top of the module; for a base the module does not define, ``?`` and its name."""
+        parts = scope.split(".")[:-1]
+        for size in range(len(parts), -1, -1) if base is not None else ():
+            if (found := ".".join([*parts[:size], base])) in self.classes:
+                return found
+        return f"?{base or ''}"
+
+    def mro(self, scope: str, seen: frozenset[str] = frozenset()) -> list[str]:
+        """The method resolution order of the class ``scope`` (C3, as Python computes it) as far as the module
+        defines its classes. A base the module does not define stands for itself alone, as ``?`` and its name;
+        an order Python would reject, or a loop, ends with ``?``."""
+        if scope not in self.classes or scope in seen:
+            return [scope if scope.startswith("?") else "?"]
+        bases = [self._base(scope, base) for base in self.bases.get(scope, ()) if base != "object"]
+        orders = [self.mro(base, seen | {scope}) for base in bases] + [bases]
+        out = [scope]
+        while orders := [order for order in orders if order]:
+            head = next((order[0] for order in orders if not any(order[0] in other[1:] for other in orders)), None)
+            if head is None:
+                return [*out, "?"]
+            out.append(head)
+            orders = [order[1:] if order[0] == head else order for order in orders]
+        return out
 
 
 def _string(node: ast.AST | None) -> str | None:
@@ -471,6 +517,8 @@ class _Scan(ast.NodeVisitor):
         self._scope.append(node.name)
         if isinstance(node, ast.ClassDef):
             self.module.classes.add(self.scope)
+            self.module.bases[self.scope] = tuple(base.id if isinstance(base, ast.Name) else None
+                                                  for base in node.bases)
         else:
             static = any(isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list)
             positional = tuple(arg.arg for arg in (*node.args.posonlyargs, *node.args.args))
@@ -603,6 +651,13 @@ class _Scan(ast.NodeVisitor):
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         if isinstance(node.target, ast.Subscript) and _string(node.target.slice) != "event":
             self._assign(node.target, node.value)  # x["key"] += ... stores the key
+        elif isinstance(node.target, ast.Name) and isinstance(node.op, ast.BitOr):
+            # on a dict, x |= {...} updates it in place, as x.update({...}) does: the keys are stored on it. On a
+            # string it is an error, and a variable that held anything else is not a dict the scan reads anyway
+            fields: list[tuple[str, int]] = []
+            spreads: list[str] = []
+            _spread(node.value, fields, spreads)
+            self._store(node.target, fields, spreads)
         else:  # a name, or x["event"], is no longer the string or the dict it was assigned
             self._unknown(node.target)
         self.generic_visit(node)
@@ -710,19 +765,30 @@ class Carry:
 
 
 def _callees(module: Module, call: Call) -> list[Function]:
-    """The functions of the module that ``call`` can reach."""
+    """The function of the module that ``call`` reaches, if the scan knows it. ``self.name`` and ``cls.name`` are
+    looked up in the calling class and then its bases, in method resolution order, as far as the module defines
+    them: when the order reaches a base the module does not define, that base may define the method, so the call
+    reaches nothing the scan knows. A bare name is looked up in the calling function and those around it, then
+    at the top of the module, and reaches nothing when one of those functions binds the name itself (a
+    parameter, a local) before a function of that name is found."""
     parts = call.scope.split(".") if call.scope != "<module>" else []
     outer = [".".join(parts[:size]) for size in range(len(parts), 0, -1)]  # the enclosing scopes, innermost first
     if call.on_self:
         own = next((scope for scope in outer if scope in module.classes), None)
-        if own is not None and f"{own}.{call.name}" in module.functions:
-            return [module.functions[f"{own}.{call.name}"]]
-        return [function for scope, function in module.functions.items()  # a base class in the same module
-                if scope.endswith(f".{call.name}") and scope.rpartition(".")[0] in module.classes]
-    for scope in (*(f"{scope}.{call.name}" for scope in outer if scope not in module.classes), call.name):
-        if scope in module.functions:
-            return [module.functions[scope]]
-    return []
+        for scope in module.mro(own) if own is not None else ():
+            if scope not in module.classes:
+                return []
+            if f"{scope}.{call.name}" in module.functions:
+                return [module.functions[f"{scope}.{call.name}"]]
+        return []
+    for scope in outer:
+        if scope in module.classes:  # a class body's names are not seen from the functions in it
+            continue
+        if f"{scope}.{call.name}" in module.functions:
+            return [module.functions[f"{scope}.{call.name}"]]
+        if module.binds(scope, call.name):
+            return []
+    return [module.functions[call.name]] if call.name in module.functions else []
 
 
 def _passes(module: Module, scope: str, variable: str) -> list[tuple[tuple[str, str], str]]:
@@ -931,7 +997,10 @@ def rebound_carriers(modules: list[Module], tables: Tables) -> list[str]:
                 f"also holds the `{carry.event}` dict there ({carry.because(variable, scope)}), so the scan cannot "
                 f"tell which keys stored on `{variable}` in {scope}, or passed on with it from there, are fields of "
                 f"`{carry.event}`. {fix} another name in {scope}; add no bullet to {DOC_NAME} for a key stored on "
-                f"the other value. See CARRIED_EVENTS in {TEST_NAME}")
+                f"the other value. If the other value is a default for a missing dict (`{variable} = {variable} or "
+                f"{{}}`, or `if {variable} is None: {variable} = {{}}`), drop the default and pass the dict instead: "
+                f"the scan does not follow the dict onto another name (`other = {variable} or {{}}`), so a key stored "
+                f"there would not be read. See CARRIED_EVENTS in {TEST_NAME}")
     return problems
 
 
@@ -1806,6 +1875,69 @@ class Handler:
     assert set(fields) == {"size", "status", "ended"}
     assert "(on `target`, which holds the `shared` dict there: it is read from the enclosing Handler.fill;" in (
         fields["ended"].how)
+    # x |= {...} updates the dict in place, as x.update({...}) does
+    merged = LINE_SOURCE.replace("    entry.update(ending())\n",
+                                 "    entry.update(ending())\n    entry |= {'merged': 1}\n")
+    assert set(_line_fields(merged)) == LINE_FIELDS | {"merged"}
+    assert rebound_carriers([scan_source(merged, "line.py")], SAMPLE) == []
+
+
+CARRIED = Tables(carried_events=frozenset({("line.py", "shared")}))
+INHERITED_SOURCE = '''
+class Base:
+    def _note(self, rec):
+        rec["noted"] = 1
+
+class Handler(Base):
+    def line(self, log):
+        entry = {"event": "shared", "size": 1}
+        self._note(entry)
+        log(entry)
+
+class Other(Base):
+    def _note(self, row):
+        row["other_only"] = 1
+'''
+
+
+def test_a_call_on_self_reaches_the_calling_class_s_method_in_resolution_order_and_no_other():
+    def _inherited(source: str) -> dict[str, Known]:
+        return written_fields([scan_source(source, "line.py")], CARRIED)[("shared", "line.py")]
+
+    # Handler inherits Base._note; Other's override is never what Handler runs
+    fields = _inherited(INHERITED_SOURCE)
+    assert set(fields) == {"size", "noted"}
+    assert "Handler.line passes it at line.py:9" in fields["noted"].how
+    # with the parameter name of a function that holds the dict, the override is taken for it by that name alone,
+    # and the message says so (see CARRIED_EVENTS)
+    guessed = _inherited(INHERITED_SOURCE.replace("row", "rec"))
+    assert set(guessed) == {"size", "noted", "other_only"}
+    assert "(on `rec`, a parameter of Other._note. The scan takes it for the `shared` dict because" in (
+        guessed["other_only"].how)
+    # a class of the file between Handler and Base that overrides it is what Handler runs
+    middle = INHERITED_SOURCE.replace("class Handler(Base):", '''class Middle(Base):
+    def _note(self, item):
+        item["middle"] = 1
+
+class Handler(Middle):''')
+    assert set(_inherited(middle)) == {"size", "middle"}
+    # the order is Python's: Handler(Left, Right) with both on Base runs Right's before Base's
+    diamond = INHERITED_SOURCE.replace("class Handler(Base):", '''class Left(Base):
+    pass
+
+class Right(Base):
+    def _note(self, item):
+        item["right"] = 1
+
+class Handler(Left, Right):''')
+    assert set(_inherited(diamond)) == {"size", "right"}
+    # a base the file does not define comes first in the order and may define it: nothing is read
+    for bases in ("Mixin, Base", "mixins.Mixin, Base"):
+        external = INHERITED_SOURCE.replace("class Handler(Base):", f"class Handler({bases}):")
+        assert set(_inherited(external)) == {"size"}, bases
+    # after the method is found, a base the file does not define is not looked at
+    assert set(_inherited(INHERITED_SOURCE.replace("class Handler(Base):", "class Handler(Base, Mixin):"))) == {
+        "size", "noted"}
 
 
 def test_an_unrelated_variable_with_the_carrier_name_is_not_the_event():
@@ -1862,6 +1994,15 @@ def copy(rec):
 
 def mark(rec):
     rec["copied"] = 1
+'''), ("entry", 17, '''
+def copy(entry=None):
+    entry = entry or {}
+    entry["copied"] = 1
+'''), ("entry", 18, '''
+def copy(entry=None):
+    if entry is None:
+        entry = {}
+    entry["copied"] = 1
 ''')):
         module = scan_source(calling + helper, "line.py")
         # none of what is stored on the variable in that function, or passed on from it, is taken for a field
@@ -1870,8 +2011,10 @@ def mark(rec):
             f"line.py:{line} binds `{name}` in copy to another value, but `{name}` also holds the `shared` dict there "
             f"(line passes it at line.py:5), so the scan cannot tell which keys stored on `{name}` in copy, or passed "
             f"on with it from there, are fields of `shared`. Give the other value another name in copy; add no "
-            f"bullet to docs/events.md for a key stored on the other value. See CARRIED_EVENTS in "
-            f"tests/test_events_doc.py"], helper
+            f"bullet to docs/events.md for a key stored on the other value. If the other value is a default for a "
+            f"missing dict (`{name} = {name} or {{}}`, or `if {name} is None: {name} = {{}}`), drop the default and "
+            f"pass the dict instead: the scan does not follow the dict onto another name (`other = {name} or {{}}`), "
+            f"so a key stored there would not be read. See CARRIED_EVENTS in tests/test_events_doc.py"], helper
     # a rebinding that neither stores a key on the variable nor passes it on is harmless
     assert rebound_carriers([scan_source(calling + "\ndef copy(rec):\n    rec = len(rec)\n", "line.py")], SAMPLE) == []
     # the function that builds the dict is held to the same rule
@@ -2019,6 +2162,45 @@ def sizes():
     assert set(fields) == {"port", "pages", "budget", "room"}  # not what a call on another object returns
     assert fields["pages"].how == ("returned at server.py:8 by Server._pages, whose result Server.start unpacks "
                                    "into the event with ** at server.py:4")
+
+
+def test_an_unpacked_call_reaches_the_function_the_caller_runs_and_no_other():
+    def fields(source: str) -> set[str]:
+        return set(written_fields([scan_source(source, "m.py")], NONE)[("started", "m.py")])
+
+    sibling = '''
+class Base:
+    def _pages(self):
+        return {"pages": 1}
+
+class Proxy(Base):
+    def start(self, log):
+        log({"event": "started", "port": 1, **self._pages()})
+
+class Other(Base):
+    def _pages(self):
+        return {"other_only": 1}
+'''
+    assert fields(sibling) == {"port", "pages"}  # Proxy runs Base._pages, never Other's
+    override = sibling.replace("class Proxy(Base):",
+                               "class Proxy(Base):\n    def _pages(self):\n        return {'own': 1}\n")
+    assert fields(override) == {"port", "own"}
+    # a base in another file may define it: nothing is read, whatever the file's other classes define
+    assert fields(sibling.replace("class Proxy(Base):", "class Proxy(Imported):")) == {"port"}
+    shadowed = '''
+def start(log, sizes):
+    log({"event": "started", "port": 1, **sizes()})
+
+def sizes():
+    return {"budget": 1}
+'''
+    assert fields(shadowed) == {"port"}  # the parameter, not the function of the module
+    local = shadowed.replace("def start(log, sizes):\n", "def start(log, table):\n    sizes = table.get\n")
+    assert fields(local) == {"port"}
+    assert fields(shadowed.replace("def start(log, sizes):", "def start(log):")) == {"port", "budget"}
+    nested = shadowed.replace("def start(log, sizes):\n", "def start(log, sizes):\n    def sizes():\n"
+                                                          "        return {'inner': 1}\n")
+    assert fields(nested) == {"port", "inner"}  # a function nested in the caller comes first
 
 
 def test_a_key_stored_on_a_variable_that_holds_two_events_must_be_named_in_helper_fields():
