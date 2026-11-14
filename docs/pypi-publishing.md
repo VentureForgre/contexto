@@ -12,8 +12,9 @@ There is no API token to create, store or rotate. PyPI trusts the `pypi` job of 
 ## 1. Check the `pypi` environment and its `main` branch rule
 
 The GitHub environment `pypi` already exists. It was created on 2026-11-13 with deployment limited
-to the branch `main` ("Selected branches and tags", one branch rule `main`), no required reviewer
-and no wait timer (D67). Check that this is still so before you register anything on PyPI.
+to the branch `main` ("Selected branches and tags", one branch rule `main`), no required reviewer,
+no wait timer, and administrators not allowed to bypass its rules (D67). Check that this is still so
+before you register anything on PyPI.
 
 In the repository: Settings > Environments > `pypi`. Under "Deployment branches and tags" it must
 say "Selected branches and tags" with one rule, the branch `main`.
@@ -21,20 +22,22 @@ say "Selected branches and tags" with one rule, the branch `main`.
 Or from a shell:
 
 ```sh
-gh api repos/VentureForgre/contexto/environments/pypi --jq '{name, protection_rules: [.protection_rules[].type], deployment_branch_policy}'
+gh api repos/VentureForgre/contexto/environments/pypi --jq '{name, can_admins_bypass, protection_rules: [.protection_rules[].type], deployment_branch_policy}'
 gh api repos/VentureForgre/contexto/environments/pypi/deployment-branch-policies --jq '[.branch_policies[] | {name, type}]'
 ```
 
 The expected output:
 
 ```
-{"deployment_branch_policy":{"custom_branch_policies":true,"protected_branches":false},"name":"pypi","protection_rules":["branch_policy"]}
+{"can_admins_bypass":false,"deployment_branch_policy":{"custom_branch_policies":true,"protected_branches":false},"name":"pypi","protection_rules":["branch_policy"]}
 [{"name":"main","type":"branch"}]
 ```
 
 If the first command answers 404, or the second lists anything but the one branch `main`, put it
 right first: Settings > Environments > New environment, named `pypi`; Deployment branches and tags
-> "Selected branches and tags" > Add deployment branch or tag rule > branch `main`.
+> "Selected branches and tags" > Add deployment branch or tag rule > branch `main`. If
+`can_admins_bypass` is `true`, clear "Allow administrators to bypass configured protection rules" on
+the same page.
 
 Why this comes first. PyPI checks three things in the job's token: the repository, the workflow's
 file name and the environment name. It does not check the branch. A run started from a branch
@@ -99,7 +102,8 @@ runs. Only a repository admin can change an environment's rules.
   which is cancelled. So approve or reject promptly.
 
 A reviewer is also the only thing that would stop a tag pushed by hand. Tags must not be pushed by
-hand: a `vX.Y.Z` tag on a commit of `main` could be reattached and published, and with no required
+hand: a `vX.Y.Z` tag on a commit of `main`'s first-parent chain could be reattached and published,
+and a reattach builds the tagged commit's own tree with its own build script. With no required
 reviewer nothing stops it. A version on PyPI can never be taken back.
 
 ## 4. Turn the switch on
@@ -175,10 +179,25 @@ published under another name. Using a fallback means changing the name in every 
   reports a wrong version;
 - `PROJECT` and the environment `url` in `.github/workflows/release.yml`;
 - the package-check and install-check scripts in `.github/scripts/`;
-- `tests/test_packaging.py` and `tests/test_release_workflow.py`;
+- `tests/test_packaging.py`, `tests/test_release_workflow.py`, `tests/test_release_pypi_publish.py`
+  and `tests/test_version_revision.py`;
 - `docs/pypi-description.md` and the other documents.
 
+Some hits are not the distribution name and stay as they are: `M2-contexto-proxy.md`, the file name
+of the milestone contract, wherever it is cited; the proxy's thread name in `src/contexto/proxy.py`;
+and the name of a test in `tests/test_settings_trust.py`.
+
 Then register a new pending publisher for the new name and cut a new release.
+
+**Release tags could be protected by a ruleset.** This is an option for the owner, not a step. A
+tag ruleset on `v*` that blocks updates and deletions, with no bypass actor, stops anyone from
+moving or deleting a release tag. Nothing legitimate breaks: the `release` job only creates tags.
+Blocking creation as well would need the workflow's `GITHUB_TOKEN` allowed to bypass, and a run
+from any branch holds that token too, so it adds little. Against a tag pushed by hand, the reattach
+and `pypi` jobs accept only a tag on `main`'s first-parent chain, the commits `main` itself has
+pointed at. A rebase merge puts each of a branch's commits on that chain, so the check does not
+cover it. The project squashes by convention; turning rebase merging and merge commits off is the
+owner's setting.
 
 **A version is permanent.** PyPI never accepts a file name twice: "PyPI does not allow for a
 filename to be reused, even once a project has been deleted and recreated." A file name is the

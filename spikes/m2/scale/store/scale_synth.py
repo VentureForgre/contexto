@@ -12,6 +12,10 @@ distractors: each query ``q`` lands on a page with probability ``distractor_rate
 of real Claude Code turns containing ``q`` (``calibration.json``, from ``scale_calibrate.py``),
 raised to ``floor``. The background of turn ``t`` and its distractor draws depend only on ``t``
 and the seed, never on ``n_pages``; only plant positions scale with the session.
+
+``extra`` (D65, off by default) plants more facts than ``scale_probes.FACTS``: the pages those plants
+land on change, every other page stays the same, and with no ``extra`` the corpus is the one every
+earlier result was measured on.
 """
 
 from __future__ import annotations
@@ -223,9 +227,11 @@ def near_sentences(t: int, floor: float, seed: int) -> list[str]:
     return out
 
 
-def plants_for(t: int, n_pages: int) -> list[tuple[Fact, int, Plant]]:
-    """The plants on page ``t`` of an ``n_pages`` session: (fact, index of the plant, plant)."""
-    return [(f, i, p) for f in FACTS for i, p in enumerate(f.plants) if planted_turn(p.at, n_pages) == t]
+def plants_for(t: int, n_pages: int, extra: tuple[Fact, ...] = ()) -> list[tuple[Fact, int, Plant]]:
+    """The plants on page ``t`` of an ``n_pages`` session: (fact, index of the plant, plant). ``extra``
+    facts (D65) come after ``FACTS``, so the plants of ``FACTS`` keep their order."""
+    return [(f, i, p) for f in (*FACTS, *extra) for i, p in enumerate(f.plants)
+            if planted_turn(p.at, n_pages) == t]
 
 
 def rename_mentions(t: int, n_pages: int, seed: int) -> list[str]:
@@ -299,17 +305,19 @@ def _thinking(rng: random.Random) -> dict[str, Any]:
 
 
 def session_turn(t: int, n_pages: int, *, seed: int = 7, floor: float = 0.0,
-                 target: tuple[int, int] = TARGET_TOKENS, sizes: str = "spike") -> list[dict[str, Any]]:
+                 target: tuple[int, int] = TARGET_TOKENS, sizes: str = "spike",
+                 extra: tuple[Fact, ...] = ()) -> list[dict[str, Any]]:
     """Turn ``t`` (0-based) of an ``n_pages`` session, as the engine pages it (Messages API). ``sizes``
     "spike" draws the token goal from ``target`` (the original spike); "calibration" from the real turn
-    sizes (``calibrated_goal``). The rest of the turn's random draws are the same either way."""
+    sizes (``calibrated_goal``). The rest of the turn's random draws are the same either way. ``extra``
+    facts are planted as well (D65); a turn none of them lands on is the same turn as without them."""
     rng = random.Random(f"turn:{seed}:{t}")
     goal = rng.randrange(*target)
     if sizes == "calibration":
         goal = calibrated_goal(t, seed)
     elif sizes != "spike":
         raise ValueError(f"unknown page sizes {sizes!r}")
-    plants = plants_for(t, n_pages)
+    plants = plants_for(t, n_pages, extra)
     near = near_sentences(t, floor, seed)
     mentions = rename_mentions(t, n_pages, seed)
     user = _prose(rng, 1, 4)
