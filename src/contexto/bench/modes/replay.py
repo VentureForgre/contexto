@@ -34,9 +34,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from contexto.bench import modes
-
 FLAG = "--replay"
+# The options only a replay takes (the mode contract, ``contexto.bench.modes``): given without --replay,
+# contexto bench refuses them (exit 2) instead of running another mode, so ``contexto bench --dump-trace
+# DIR`` never starts the live run with the user's key. A mode that later needs --force too shares it
+# with ``modes.add_option`` and takes it out of this list.
+OWN_OPTIONS = ("--replay-turns", "--dump-trace", "--record-trace", "--force")
 MIN_TURNS = 4  # the generator's own minimum of d27 content turns
 # Everything a replay or a live run writes into --out (the shared output schema): a directory that holds
 # any of them already holds results, which a replay must not overwrite.
@@ -68,8 +71,8 @@ def add_arguments(parser) -> None:
     parser.add_argument("--record-trace", type=Path, default=None, metavar="FILE",
                         help="with --replay, for maintainers: replay and write the trace file (hashes and expected "
                              "measurements) to FILE. The shipped trace is written this way, never by hand")
-    modes.add_option(parser, "--force", action="store_true",
-                     help="with --replay --record-trace: replace FILE when it exists")
+    parser.add_argument("--force", action="store_true",
+                        help="with --replay --record-trace: replace FILE when it exists")
 
 
 def _error(message: str) -> None:
