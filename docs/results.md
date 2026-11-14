@@ -9,7 +9,7 @@ record it comes from.
 
 Each acceptance run is a scripted session whose history grows well past the bound. Its
 probe turns ask 54 questions about details spread through that history. The same questions then go
-to the same model with the whole history in its context (the baseline).
+to the same model with the whole history in its context (the full-context baseline, "the baseline" below).
 
 | Run | Result | Record |
 |---|---|---|

@@ -51,7 +51,7 @@ compaction never fires, and accuracy equals full context.
   to, is on.
 - CLIProxyAPI compatibility (D35, PR #210) and upstream affinity (D36, PR #212, deployed on the
   owner's proxy and verified for cache reuse). Guide: `docs/cliproxyapi.md`.
-- README and docs (2026-11-12, D68): the README was 772 lines and is 250. Its reference sections are
+- README and docs (2026-11-12, D68): the README was 772 lines and is 252. Its reference sections are
   in `docs/*.md` (index `docs/README.md`), the Results table in `docs/results.md` and the full
   limitations list in `docs/limitations.md`. `tests/test_docs_links.py` checks every relative link
   and heading anchor in the tracked Markdown files. The README states recall as no worse than full

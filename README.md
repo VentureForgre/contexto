@@ -33,7 +33,8 @@ pipx install \
   https://github.com/VentureForgre/contexto/releases/download/v0.5.24/contexto-0.5.24-py3-none-any.whl
 ```
 
-Contexto is not on PyPI: `pip install contexto` installs an unrelated project. Checking the
+Contexto is not on PyPI yet: `pip install contexto` installs an unrelated project, and the name
+it will be published under, `contexto-proxy`, has no release there. Checking the
 download before you install, other ways to install, and uninstalling: [docs/install.md](docs/install.md).
 
 ## Quickstart
@@ -76,7 +77,8 @@ Your upstream must be the vendor's API with an API key, or a CLIProxyAPI instanc
   same question applies there. Whether your plan allows either is for you to check against its
   terms, and the risk to the account is yours.
 - **Sessions that end before the compaction point, when a large request is fine for you.** Apart
-  from compaction after about an hour idle, they do not compact, with or without Contexto
+  from Claude Code compacting a conversation of 200,000 tokens or more after about an hour idle,
+  they do not compact, with or without Contexto
   ([comparison](#why-not-compaction-a-1m-window-or-the-memory-tool)).
 - **Work that needs every old detail in view at once.** The model sees a paged-out turn only when
   it runs a search for it.
@@ -107,7 +109,7 @@ out**. In their place the model sees the **page index**, which holds the opening
 turn, and the **pinned state**: the decisions, obligations and facts the model recorded with the
 `contexto_pin` tool. The room left for conversation turns is the **window budget**: the bound, minus
 the headroom (at least the floor), minus the fixed overhead of every request (the CLI's system prompt and tool
-definitions).
+definitions, the turns Contexto carries forward, the page index and the pinned state).
 
 The model reads paged-out turns back with MCP tools: `contexto_search` finds turns by the words they
 contain, and `contexto_recall` returns one word for word, in parts if it is long. The proxy rotates
