@@ -12,7 +12,7 @@ the scripts are a pure function of their parameters.
 
 | | |
 |---|---|
-| Code | main `b0e2dbc244bb13d3109ee2b293575e4eacd1053f` (v0.5.24), with only `spikes/m2/inturn/` added |
+| Code | main `b0e2dbc244bb13d3109ee2b293575e4eacd1053f` (v0.5.24), with only `spikes/m2/inturn/` added. The harness imports `contexto`, so on a later main it measures that code: on main `93b40c1d` every row is the same except `multiturn`'s turn-start rewrite (below) |
 | Engine | `RewriteEngine` with the default `Config`: bound 150,000, headroom floor 25,000, `min_turn_room` 12,000 |
 | Store | `SessionStore` in a temporary directory: real page files, epoch record, turn room and side rooms |
 | MCP tools | `contexto.mcp.Server` on a second handle of the same store, called in-process |
@@ -235,7 +235,9 @@ and after thinking that is missing (on Codex, reasoning items).
 Today every loop request is an append, so nothing is invalidated or re-sent and no thinking is
 removed in flight, and the two cache models agree: each request's newest breakpoint is a few blocks
 after the previous request's. The one rewrite is `multiturn`'s turn start after the loop: it
-invalidates the whole loop and re-sends 1,507 tokens on Claude Code (1,102 on Codex). The request it
+invalidates the whole loop and re-sends 1,507 tokens on Claude Code (1,102 on Codex; on main
+`93b40c1d`, 1,539 and 1,134, and total input 31,253,274 and 31,126,888, 32 more re-sent and 192
+more in all from main's changes after v0.5.24). The request it
 sends is 16,817 tokens; 15,101, the head, are read from the cache through the system breakpoint, and
 209 are the new prompt, which the engine joins to its index message (Codex: 14,865, the head 13,538,
 the prompt 225).
@@ -336,7 +338,7 @@ the estimate of the rotated request was 22,727 and the upstream counted 16,817 (
 | Items forwarded at turn 5's start | 2 of 230 | 5 of 347 |
 | First request of turn 5 | 16,817 | 14,865 |
 | Cache invalidated by that rewrite | 536,573 | 537,948 |
-| Re-sent tokens at that rewrite | 1,507 | 1,102 |
+| Re-sent tokens at that rewrite | 1,507 (1,539 on main `93b40c1d`) | 1,102 (1,134) |
 | Largest request of turns 5 and 6 | 24,226 | 22,378 |
 | Room at turn 5's start, before the send and after the response | 102,273 and 108,012 | 104,798 and 109,936 |
 | Scripted results in the last request / in pages byte for byte / lost | 4 / 106 / 0 | 4 / 106 / 0 |
