@@ -244,7 +244,8 @@ requests come from that process ([docs/maintainer-process.md](docs/maintainer-pr
 [docs/README.md](docs/README.md) indexes everything under `docs/`. Setup: [Install](docs/install.md),
 [Claude Code](docs/claude-code.md), [Codex](docs/codex.md), [CLIProxyAPI](docs/cliproxyapi.md),
 [`contexto run`](docs/run-reference.md). Use: [Sessions](docs/sessions.md), [MCP tools](docs/mcp-tools.md),
-[Search](docs/search.md), [Rules you give once](docs/standing-rules.md), [FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
+[Search](docs/search.md), [Rules you give once](docs/standing-rules.md), [Project memory](docs/project-memory.md),
+[FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
 Evidence: [Results](docs/results.md), [Limitations](docs/limitations.md), [CLI updates](docs/cli-updates.md),
 [changelog](CHANGELOG.md).
 

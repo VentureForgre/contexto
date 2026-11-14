@@ -373,6 +373,42 @@ def _series_label(name: str, series: Mapping[str, Any]) -> tuple[str, str]:
     return str(series.get("label") or LABELS.get(name, name)), f" ({BASIS_WORDS.get(basis, basis)})"
 
 
+def _meets(box: tuple[float, float, float, float], points: Sequence[tuple[float, float]]) -> bool:
+    """Whether a line through ``points`` (in pixels) enters ``box`` (left, top, right, bottom): each
+    segment is clipped to the box (Liang and Barsky); a single point is a segment of length 0."""
+    left, top, right, bottom = box
+    for (ax, ay), (bx, by) in zip(points, points[1:]) if len(points) > 1 else [(p, p) for p in points]:
+        low, high = 0.0, 1.0
+        for p, q in ((ax - bx, ax - left), (bx - ax, right - ax), (ay - by, ay - top), (by - ay, bottom - ay)):
+            if p == 0:
+                if q < 0:
+                    break
+            elif p < 0:
+                low = max(low, q / p)
+            else:
+                high = min(high, q / p)
+            if low > high:
+                break
+        else:
+            return True
+    return False
+
+
+def _bound_label_place(label: str, baseline: float,
+                       lines: Sequence[Sequence[tuple[float, float]]]) -> tuple[float, str | None]:
+    """Where the bound's label is drawn, as ``(x, text-anchor)``: at the left end of the bound line, or
+    at its right end when a series crosses the left place and none crosses the right one. Its halo
+    hides a line under it, so a crossing series would lose a piece of its line. The place is the
+    label's estimated box (12 pixels above the baseline, 3 below) widened by a marker's size."""
+    width, pad = text_width(label), 5.0
+    for x, anchor in ((LINE_LEFT + 8.0, None), (LINE_LEFT + LINE_PLOT_WIDTH - 8.0, "end")):
+        left = x - width if anchor else x
+        box = (left - pad, baseline - 12 - pad, left + width + pad, baseline + 3 + pad)
+        if not any(_meets(box, line) for line in lines):
+            return x, anchor
+    return LINE_LEFT + 8.0, None
+
+
 def request_size_svg(results: Mapping[str, Any]) -> str:
     """The request-size chart of a results file (live or replay), as SVG text."""
     series = _series_of(results)
@@ -426,9 +462,12 @@ def request_size_svg(results: Mapping[str, Any]) -> str:
         body.append(_el("g", children=[
             _marker(shape, px(h), py(size), colour, f"{words}: request of {size:,} tokens at {h:,} tokens of history")
             for h, size in marked], data_markers=name))
-    body.append(_el("text", f"bound: {bound:,} tokens", x=_n(LINE_LEFT + 8), y=_n(py(bound) - 7), font_size=12,
-                    fill=INK, stroke=SURFACE, stroke_width=4, paint_order="stroke", stroke_linejoin="round",
-                    data_bound_label=bound))
+    label = f"bound: {bound:,} tokens"
+    drawn = [[(px(h), py(size)) for h, size in s["points"]] for s in series.values()]
+    label_x, anchor = _bound_label_place(label, py(bound) - 7, drawn)
+    body.append(_el("text", label, x=_n(label_x), y=_n(py(bound) - 7), font_size=12,
+                    **({"text_anchor": anchor} if anchor else {}), fill=INK, stroke=SURFACE, stroke_width=4,
+                    paint_order="stroke", stroke_linejoin="round", data_bound_label=bound))
     empty = [f"The {_series_label(name, s)[0]} series{_series_label(name, s)[1]} has no points, so it is not drawn."
              for name, s in (results.get("request_series") or {}).items()
              if isinstance(s, dict) and name not in series]
