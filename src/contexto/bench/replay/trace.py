@@ -45,8 +45,10 @@ KIND = "contexto-bench-replay-trace"
 # 952,957 estimated tokens of history, 6.35 times the bound.
 PINNED = {"seed": 20261016, "protocol": "v2", "bound": 150_000, "turn_bytes": 40_000, "turns": 40}
 RATES = {"log_bytes_per_token": upstream.LOG_BYTES_PER_TOKEN, "other_bytes_per_token": upstream.OTHER_BYTES_PER_TOKEN,
-         "log_text_min_bytes": upstream.LOG_TEXT_MIN_BYTES}
-REACH_FIELDS = ("id", "paged", "queries", "reachable", "rank", "in_view", "covered", "word_rank")
+         "log_text_min_bytes": upstream.LOG_TEXT_MIN_BYTES, "tool_result_text_is_log_text": True}
+ROUNDING = 2  # tokens a request's size moves by from rounding up its two parts (trace._where)
+REACH_FIELDS = ("id", "paged", "queries", "reachable", "rank", "in_view", "covered", "returned", "best_rank",
+                "best_query")
 
 
 class TraceError(ValueError):
@@ -61,17 +63,38 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# The sections a trace must have, and the JSON type of each.
+SECTIONS = {"script": dict, "turn_bytes": list, "turn_sha256": list, "files": dict, "model": dict, "client": dict,
+            "expected": dict}
+_JSON_TYPES = {dict: "an object", list: "a list"}
+
+
+def _json_type(value: Any) -> str:
+    for kind, name in ((dict, "an object"), (list, "a list"), (str, "a string"), (bool, "true or false"),
+                       ((int, float), "a number")):
+        if isinstance(value, kind):
+            return name
+    return "null"
+
+
 def parse(text: str) -> dict[str, Any]:
     try:
         data = json.loads(text)
     except ValueError as exc:
         raise TraceError(f"the trace is not JSON: {exc}") from exc
-    if not isinstance(data, dict) or data.get("kind") != KIND or data.get("format") != FORMAT:
-        raise TraceError(f"not a replay trace of format {FORMAT}")
-    missing = [key for key in ("script", "turn_bytes", "turn_sha256", "files", "model", "client", "expected")
-               if key not in data]
+    if not isinstance(data, dict):
+        raise TraceError(f"not a replay trace: the file holds {_json_type(data)}, not an object")
+    if data.get("kind") != KIND:
+        raise TraceError(f"not a replay trace: its kind is {data.get('kind')!r}, not {KIND!r}")
+    if data.get("format") != FORMAT:
+        raise TraceError(f"a replay trace of format {data.get('format')!r}; this build reads format {FORMAT}")
+    missing = [key for key in SECTIONS if key not in data]
     if missing:
         raise TraceError(f"the trace has no {', '.join(missing)}")
+    wrong = [f"{key} is {_json_type(data[key])}, not {_JSON_TYPES[kind]}" for key, kind in SECTIONS.items()
+             if not isinstance(data[key], kind)]
+    if wrong:
+        raise TraceError(f"the trace is damaged: {'; '.join(wrong)}")
     return data
 
 
@@ -80,6 +103,8 @@ def load_packaged(seed: int = PINNED["seed"]) -> dict[str, Any]:
     source = resources.files("contexto.bench").joinpath("data", file_name(seed))
     try:
         text = source.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise TraceError(f"the pinned trace {file_name(seed)} is not UTF-8 text, so it is damaged") from exc
     except (OSError, ValueError) as exc:
         raise TraceError(f"this build has no pinned trace {file_name(seed)} ({type(exc).__name__})") from exc
     return parse(text)
@@ -124,10 +149,13 @@ def check(trace: dict[str, Any], script: Script, turns: int) -> None:
                      f"{trace['turn_bytes'][index]:,} bytes with SHA-256 {str(trace['turn_sha256'][index])[:16]} in "
                      f"the trace, and {size:,} bytes with SHA-256 {digest[:16]} from the generator"))
     for path, pinned_file in found["files"].items():
-        if trace["files"].get(path) != pinned_file:
+        if path not in trace["files"]:
+            raise TraceError(refuse.format(what=f"the generator gives the file {path}, which the trace does not have"))
+        if trace["files"][path] != pinned_file:
             raise TraceError(refuse.format(what=f"the file {path} differs"))
-    if set(trace["files"]) != set(found["files"]):
-        raise TraceError(refuse.format(what="the list of files differs"))
+    for path in trace["files"]:
+        if path not in found["files"]:
+            raise TraceError(refuse.format(what=f"the trace has the file {path}, which the generator does not give"))
     if trace.get("script_sha256") != found["script_sha256"]:
         raise TraceError(refuse.format(what="the turns are the same but the probes, answers or decisions differ"))
     if trace["model"].get("steps_sha256") != found["model"]["steps_sha256"]:
@@ -186,8 +214,27 @@ def differences(pinned: Any, found: Any, name: str = "") -> list[str]:
         a = pinned[first] if first < len(pinned) else "nothing"
         b = found[first] if first < len(found) else "nothing"
         return [f"{name}: {changed} of {max(len(pinned), len(found))} differ; the first is number {first + 1}, "
-                f"expected {a}, measured {b}"]
+                f"expected {a}, measured {b}" + _where(pinned, found, first)]
+    if type(pinned) is not type(found) and (isinstance(pinned, (dict, list)) or isinstance(found, (dict, list))):
+        return [f"{name}: expected {_json_type(pinned)}, measured {_json_type(found)}"]
     return [] if pinned == found else [f"{name}: expected {pinned!r}, measured {found!r}"]
+
+
+def _where(pinned: list[Any], found: list[Any], first: int) -> str:
+    """For two lists of request sizes: where the difference is, which says what changed. Sizes are
+    rounded up part by part, so a change of the same bytes in every request moves each by up to
+    ``ROUNDING`` tokens more or less."""
+    if len(pinned) != len(found) or not all(isinstance(v, int) for v in [*pinned, *found]):
+        return ""
+    deltas = [b - a for a, b in zip(pinned, found)]
+    if all(deltas) and max(deltas) - min(deltas) <= ROUNDING:
+        by = f"{min(deltas):+,}" if min(deltas) == max(deltas) else f"{min(deltas):+,} to {max(deltas):+,}"
+        return (f". All {len(pinned)} differ, by {by} tokens: something every request carries changed by the "
+                "same bytes (the head, the tool definitions)")
+    if first:
+        return (f". Requests 1 to {first} are equal and the difference starts at number {first + 1}: what the "
+                "proxy sends changed from there (paging, a rotation, a search reply)")
+    return ". The first request differs too, by another amount than the later ones"
 
 
 def build(script: Script, turns: int, measured: Any, version: str) -> dict[str, Any]:
@@ -199,8 +246,27 @@ def build(script: Script, turns: int, measured: Any, version: str) -> dict[str, 
                    "turn_bytes": script.turn_size, "turns": turns},
         **fingerprint(script),
         "expected": expected(measured),
-        "recorded_with": {"contexto": version, "python": platform.python_version()},
+        "recorded_with": {"contexto": version, "commit": source_commit(), "python": platform.python_version()},
     }
+
+
+def source_commit() -> str | None:
+    """The git commit of the checkout this package runs from, with ``+changes`` when its tracked files
+    differ from that commit, or None outside a checkout. Only ``record`` asks: a replay itself starts
+    no process."""
+    import subprocess
+
+    root = Path(__file__).resolve().parents[4]
+    if not (root / ".git").exists():
+        return None
+    try:
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              timeout=10, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return head + ("+changes" if dirty else "") if head else None
 
 
 def to_json(trace: dict[str, Any]) -> str:

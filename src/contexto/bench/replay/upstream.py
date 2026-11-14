@@ -6,12 +6,16 @@ the model API would be, behind the proxy.
 
 For each ``POST /v1/messages`` it
 
-1. prices the request it received (``model_tokens``): a text of ``LOG_TEXT_MIN_BYTES`` bytes or more
-   in a user message (a text block, or the text of a tool result) is pasted log text and counts
-   ``LOG_BYTES_PER_TOKEN`` bytes per token, the rate M0 measured for this generated log text; every
-   other byte of the request's compact JSON counts ``OTHER_BYTES_PER_TOKEN`` bytes per token. These
-   are the rates of ``spikes/m2/acceptance/stubrun.py``. There is no tokenizer here, so this is a
-   modelled count, not a real one; the proxy's estimator learns from it as it would from real usage;
+1. prices the request it received (``model_tokens``): a text block of ``LOG_TEXT_MIN_BYTES`` bytes or
+   more in a user message is pasted log text, and so is the text of a tool result at any size (the
+   replay's tool results are the files the tool-loop turn reads and the search tool's replies, which
+   are log lines with a few lines of framing; counting the framing as log text errs toward larger
+   requests). Log text counts ``LOG_BYTES_PER_TOKEN`` bytes per token, the rate M0 measured for this
+   generated log text; every other byte of the request's compact JSON counts
+   ``OTHER_BYTES_PER_TOKEN`` bytes per token. These are the rates of
+   ``spikes/m2/acceptance/stubrun.py``, which has no tool results. There is no tokenizer here, so this
+   is a modelled count, not a real one; the proxy's estimator learns from it as it would from real
+   usage;
 2. looks for a compaction in the request (``compaction_markers``);
 3. checks the request against the Messages API's rules that need no model (``check_request``): roles
    alternating from the user, every tool result answering a tool call of the message before it and
@@ -58,23 +62,24 @@ def _size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
-def _is_log(text: Any) -> bool:
-    return isinstance(text, str) and len(text.encode("utf-8")) >= LOG_TEXT_MIN_BYTES
+def _is_log(text: Any, minimum: int) -> bool:
+    return isinstance(text, str) and len(text.encode("utf-8")) >= minimum
 
 
-def _without_log(content: Any) -> tuple[Any, int]:
-    """``content`` with its log texts emptied, and the bytes of log text taken out."""
-    if _is_log(content):
+def _without_log(content: Any, minimum: int = LOG_TEXT_MIN_BYTES) -> tuple[Any, int]:
+    """``content`` with its log texts (``minimum`` bytes or more) emptied, and the bytes taken out.
+    Inside a tool result any text is log text."""
+    if _is_log(content, minimum):
         return "", len(content.encode("utf-8"))
     if not isinstance(content, list):
         return content, 0
     blocks, taken = [], 0
     for block in content:
-        if isinstance(block, dict) and block.get("type") == "text" and _is_log(block.get("text")):
+        if isinstance(block, dict) and block.get("type") == "text" and _is_log(block.get("text"), minimum):
             taken += len(block["text"].encode("utf-8"))
             block = {**block, "text": ""}
         elif isinstance(block, dict) and block.get("type") == "tool_result":
-            inner, n = _without_log(block.get("content"))
+            inner, n = _without_log(block.get("content"), 1)
             if n:
                 taken += n
                 block = {**block, "content": inner}
