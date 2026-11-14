@@ -552,10 +552,12 @@ def test_requests_with_no_record_are_in_the_upper_cost_bound_and_named(tmp_path)
     out = no_record_run(tmp_path / "run")
     results = report.build([out])
     full, contexto, total = results["arms"]["full"], results["arms"]["contexto"], results["all_requests"]
-    assert full["no_record"] == {"unanswered": 1, "torn": 1, "reserved_tokens": 166_692 + 20_836,
+    assert full["no_record"] == {"unanswered": 1, "torn": 1, "in_flight": 0, "reserved_tokens": 166_692 + 20_836,
                                  "without_reservation": 0}
-    assert contexto["no_record"] == {"unanswered": 1, "torn": 0, "reserved_tokens": 50_000, "without_reservation": 0}
-    assert total["no_record"] == {"unanswered": 2, "torn": 2, "reserved_tokens": 166_692 + 20_836 + 50_000 + 7_000,
+    assert contexto["no_record"] == {"unanswered": 1, "torn": 0, "in_flight": 0, "reserved_tokens": 50_000,
+                                     "without_reservation": 0}
+    assert total["no_record"] == {"unanswered": 2, "torn": 2, "in_flight": 0,
+                                  "reserved_tokens": 166_692 + 20_836 + 50_000 + 7_000,
                                   "without_reservation": 0}
     for model in prices.models(TABLE):
         def kept(tokens: int, model: str = model) -> float:
@@ -592,6 +594,46 @@ def test_a_torn_record_counted_by_no_run_leaves_only_a_lower_bound(tmp_path):
     assert results["arms"]["full"]["cost_upper"] is not None  # the arm's own were counted
     cost = report.render(results).split("## Cost at published prices")[1]
     assert "nothing bounds the cost of 1 of them" in cost
+
+
+def test_requests_the_journal_has_with_no_record_are_in_the_upper_bound_and_named(tmp_path):
+    """#286 Reviewer A lows 1 and 2 at 99ee7b07: a request in flight when a run was killed, or whose
+    record was cut short, is in the manifest's ``in_flight`` (from the reservation journal); the
+    report counts it at its reservation in the arm's and the total's upper figure, and a torn record
+    the journal counts (``counted_from: "journal"``) is not counted a second time."""
+    out = no_record_run(tmp_path / "run")
+    data = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    torn = {"file": "requests.jsonl", "bytes": 20, "found": "2026-11-14T00:00:00Z", "action": "moved",
+            "moved_to": "requests.jsonl.torn-3", "counted_from": "journal"}
+    data["torn_lines"].append(torn)
+    data["in_flight"] = [{"arm": "full", "seed": 3, "repeat": 0, "attempt": 0, "n": 7, "reserved_tokens": 82_208},
+                         {"arm": "full", "seed": 3, "repeat": 0, "attempt": 0, "n": 8, "reserved_tokens": 1_000}]
+    data["requests_in_flight"], data["in_flight_tokens"] = 2, 83_208
+    (out / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+    results = report.build([out])
+    full, total = results["arms"]["full"], results["all_requests"]
+    assert full["no_record"] == {"unanswered": 1, "torn": 1, "in_flight": 2,
+                                 "reserved_tokens": 166_692 + 20_836 + 83_208, "without_reservation": 0}
+    assert total["no_record"]["in_flight"] == 2 and total["no_record"]["torn"] == 2
+    assert total["no_record"]["reserved_tokens"] == 166_692 + 20_836 + 50_000 + 7_000 + 83_208
+    for model in prices.models(TABLE):
+        before = report.build([no_record_run(tmp_path / f"before-{model}")])["all_requests"]["cost_upper"][model]
+        assert total["cost_upper"][model] == pytest.approx(before + prices.reservation_cost(83_208, model, TABLE))
+    cost = report.render(results).split("## Cost at published prices")[1]
+    assert "2 requests were in flight (or their records cut short) when a run was killed" in cost
+    assert "2 more requests were in flight (or their records cut short) when a run was killed" in cost
+
+
+@pytest.mark.parametrize("value", [[{"arm": "full", "seed": 3, "repeat": 0, "attempt": 0, "n": 1}],
+                                   [{"arm": "full", "seed": 3, "repeat": 0, "attempt": 0, "n": 1,
+                                     "reserved_tokens": -1}], "x"])
+def test_the_in_flight_list_is_checked(tmp_path, value):
+    out = no_record_run(tmp_path / "run")
+    data = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    data["in_flight"] = value
+    (out / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(records.RecordError):
+        records.read_run(out)
 
 
 @pytest.mark.parametrize(("where", "value"), [("unit", -1), ("attempt", "1"), ("torn", {"counted_tokens": -5}),

@@ -88,7 +88,12 @@ def test_every_unit_completes_and_the_manifest_has_the_shared_fields(run, script
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",  # no background task, so one result per turn
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",  # the caller's own opt-out, kept for both arms and recorded
         "settings": {"permissions": {"allow": ["Read"]}}}
-    assert len(manifest["arm_differences"]) == 7 and len(manifest["metering"]) == 6
+    assert len(manifest["arm_differences"]) == 7 and len(manifest["metering"]) == 7
+    journal = manifest["metering"][-1]  # #286 Reviewer A low 2 at 99ee7b07: the kill gap is closed by the journal
+    for words in ("reservations.jsonl", "in flight", "spent_tokens at its reservation", "in_flight",
+                  "counted_tokens null"):
+        assert words in journal, words
+    assert (manifest["in_flight"], manifest["requests_in_flight"], manifest["in_flight_tokens"]) == ([], 0, 0)
     background = next(line for line in manifest["arm_differences"] if "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" in line)
     assert background.startswith("Both Claude Code arms alike")
     for words in ("removes the run_in_background parameter", "Agent and Bash", "about 770 characters", "2.1.322",
@@ -115,8 +120,11 @@ def test_every_unit_completes_and_the_manifest_has_the_shared_fields(run, script
         assert unit["toolloop_requests"] == 11 and unit["over_bound"] == 0
     assert (run.out / "scripts" / f"seed-{SEED}.json").read_text(encoding="utf-8") == script.to_json()
     assert sorted(p.name for p in run.out.iterdir()) == [
-        ".lock", "charts", "manifest.json", "probes.jsonl", "requests.jsonl", "results.json", "results.md",
-        "scripts"]  # results and charts: the report (contexto.bench.report) is written at the end of the run
+        ".lock", "charts", "manifest.json", "probes.jsonl", "requests.jsonl", "reservations.jsonl", "results.json",
+        "results.md", "scripts"]  # results and charts: the report (contexto.bench.report) is written at the end
+    # The reservation journal: one line per record, each matched by it (no request got no response here).
+    journal = [json.loads(x) for x in (run.out / "reservations.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(journal) == len(run.lines("requests.jsonl"))
     assert (run.out / ".lock").read_bytes() == b""  # the run's lock: an empty file
 
 
@@ -203,9 +211,9 @@ def test_the_meter_agrees_with_contextos_own_session_log(run):
 
 def test_nothing_private_is_written_printed_or_on_a_command_line(run):
     files = [p for p in run.out.rglob("*") if p.is_file()]
-    # manifest, probes, requests, one script, the empty lock file, and the report's results.json,
-    # results.md and two charts: all of them are searched.
-    assert len(files) == 9, sorted(p.name for p in files)
+    # manifest, probes, requests, the reservation journal, one script, the empty lock file, and the
+    # report's results.json, results.md and two charts: all of them are searched.
+    assert len(files) == 10, sorted(p.name for p in files)
     haystacks = {f"file {p.relative_to(run.out)}": p.read_text(encoding="utf-8") for p in files}
     haystacks["printed"] = run.printed
     # The one process whose command line is the helper command is the helper itself (/bin/sh -c COMMAND).

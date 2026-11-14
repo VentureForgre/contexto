@@ -28,9 +28,11 @@ What is counted:
   (``prices.reservation_cost``). Without a reservation the cost is only a lower bound, and says so.
 - A request that has no record also bounds the cost: one the upstream got and never answered
   (``unanswered_tokens`` on each attempt in the manifest) and one whose record a killed run cut short
-  (``counted_tokens`` in ``torn_lines``). The live run kept their reservations as spent, because the
-  provider may have billed them, and the upper figure adds them at the model's highest price. A torn
-  record whose fragment named no unit is in the total over every request only.
+  (``counted_tokens`` in ``torn_lines``), and one the reservation journal has with no record, in flight
+  when a run was killed or its record cut short (``in_flight`` in the manifest). The live run kept
+  their reservations as spent, because the provider may have billed them, and the upper figure adds
+  them at the model's highest price. A torn record whose fragment named no unit is in the total over
+  every request only; one the journal counts (``counted_from: "journal"``) is counted as in flight.
 
 - A session whose manifest entry gives no count of its request records (``records.Run.unchecked``)
   is named under "What was run": only a count shows a lost request record, so without one a record
@@ -183,6 +185,8 @@ def _group(runs: Sequence[records.Run]) -> dict[str, _Group]:
             group.kept[key] = _unit_kept(unit)
         for entry in manifest.get("torn_lines") or []:
             _place_torn(group, entry)
+        for entry in manifest.get("in_flight") or []:
+            _place_in_flight(group, entry)
         for row in run.probes:
             group.probes.setdefault(records.unit_key(row), {})[row["id"]] = row
         for row in run.requests:
@@ -196,7 +200,7 @@ def _group(runs: Sequence[records.Run]) -> dict[str, _Group]:
 
 
 def _nothing_kept() -> dict[str, int]:
-    return {"unanswered": 0, "torn": 0, "reserved_tokens": 0, "without_reservation": 0}
+    return {"unanswered": 0, "torn": 0, "in_flight": 0, "reserved_tokens": 0, "without_reservation": 0}
 
 
 def _unit_kept(unit: Mapping[str, Any]) -> dict[int, dict[str, int]]:
@@ -216,6 +220,8 @@ def _place_torn(group: _Group, entry: Mapping[str, Any]) -> None:
     them, else against the model's total only."""
     if entry["file"] != "requests.jsonl" or entry["action"] != "moved":
         return  # a probe line, or a whole record that only lost its newline (counted by its record)
+    if entry.get("counted_from") == "journal":
+        return  # counted with the journal's requests in flight (``_place_in_flight``)
     key = (entry.get("arm"), entry.get("seed"), entry.get("repeat"))
     if key in group.units and isinstance(entry.get("attempt"), int):
         kept = group.kept.setdefault(key, {}).setdefault(entry["attempt"], _nothing_kept())
@@ -228,11 +234,26 @@ def _place_torn(group: _Group, entry: Mapping[str, Any]) -> None:
         kept["reserved_tokens"] += entry["counted_tokens"]
 
 
+def _place_in_flight(group: _Group, entry: Mapping[str, Any]) -> None:
+    """Count a request the reservation journal has with no record against its unit and attempt."""
+    key = (entry.get("arm"), entry.get("seed"), entry.get("repeat"))
+    if key in group.units and isinstance(entry.get("attempt"), int):
+        kept = group.kept.setdefault(key, {}).setdefault(entry["attempt"], _nothing_kept())
+    else:
+        kept = group.kept_unplaced
+    kept["in_flight"] += 1
+    reserved = entry.get("reserved_tokens")
+    if isinstance(reserved, int) and not isinstance(reserved, bool):
+        kept["reserved_tokens"] += reserved
+    else:
+        kept["without_reservation"] += 1
+
+
 def _no_record(group: _Group, keys: Iterable[Key], which: str = "all") -> dict[str, int]:
     """The requests of ``keys`` that have no record: ``unanswered`` (no response from the upstream),
-    ``torn`` (a record a killed run cut short), the tokens reserved for them and how many carry no
-    reservation. ``which`` is ``all`` attempts, the ``final`` one (the attempt the manifest names) or
-    the ``earlier`` ones."""
+    ``torn`` (a record a killed run cut short), ``in_flight`` (a journal entry with no record), the
+    tokens reserved for them and how many carry no reservation. ``which`` is ``all`` attempts, the
+    ``final`` one (the attempt the manifest names) or the ``earlier`` ones."""
     out = _nothing_kept()
     for key in keys:
         at = records.attempt(group.units[key]) if key in group.units else 0
@@ -1212,7 +1233,7 @@ def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str
 
 def _no_record_words(kept: Mapping[str, int]) -> list[str]:
     """The paragraph on requests that have no record, when there are any."""
-    if not kept["unanswered"] and not kept["torn"]:
+    if not kept["unanswered"] and not kept["torn"] and not kept["in_flight"]:
         return []
     parts = []
     if kept["unanswered"]:
@@ -1220,7 +1241,10 @@ def _no_record_words(kept: Mapping[str, int]) -> list[str]:
                      "failed or closed before a status line)")
     if kept["torn"]:
         parts.append(f"a killed run cut short {_plural(kept['torn'], 'request record')}")
-    many = kept["unanswered"] + kept["torn"] > 1
+    if kept["in_flight"]:
+        parts.append(f"{_plural(kept['in_flight'], 'request')} had been sent with no whole record when a run was "
+                     "killed (in flight, or the record cut short)")
+    many = kept["unanswered"] + kept["torn"] + kept["in_flight"] > 1
     said = ", and ".join(parts)
     return [f"{said[0].upper()}{said[1:]}, so "
             f"{'they have' if many else 'it has'} no record in the table above. The live run kept "
@@ -1338,13 +1362,17 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, 
                          "table, and is an upper bound if no request used more than its reservation. The cost is "
                          "between the two.")
     for arm, k in kept.items():
-        many = k["unanswered"] + k["torn"] > 1
+        many = k["unanswered"] + k["torn"] + k["in_flight"] > 1
         parts = []
         if k["unanswered"]:
             parts.append(f"{_plural(k['unanswered'], 'request')} got no response from the upstream")
         if k["torn"]:
             parts.append(f"{_plural(k['torn'], 'request record')} {'were' if k['torn'] > 1 else 'was'} cut short "
                          "by a killed run")
+        if k["in_flight"]:
+            parts.append(f"{_plural(k['in_flight'], 'request')} {'were' if k['in_flight'] > 1 else 'was'} in flight "
+                         f"(or {'their records' if k['in_flight'] > 1 else 'its record'} cut short) when a run was "
+                         "killed")
         line = (f"- {label(arm)}: {' and '.join(parts)}, so {'they have' if many else 'it has'} no record. The live "
                 f"run counted {'their reservations' if many else 'its reservation'}, {k['reserved_tokens']:,} tokens, "
                 f"as spent, because the provider may have billed {'them' if many else 'it'}; the higher figure adds "
@@ -1389,6 +1417,10 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, 
             if k["torn"]:
                 parts.append(f"{_plural(k['torn'], 'more request record')} {'were' if k['torn'] > 1 else 'was'} cut "
                              "short")
+            if k["in_flight"]:
+                parts.append(f"{_plural(k['in_flight'], 'more request')} {'were' if k['in_flight'] > 1 else 'was'} "
+                             f"in flight (or {'their records' if k['in_flight'] > 1 else 'its record'} cut short) "
+                             "when a run was killed")
             without = u["without_reservation"] + k["without_reservation"]
             every = every.removesuffix(".") + "; " + " and ".join(parts) + (
                 f"; their reservations bring the cost to at most {_usd(total['cost_upper'][first])}."

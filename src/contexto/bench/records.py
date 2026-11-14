@@ -45,8 +45,13 @@ What the live run (``contexto.bench.runner``) adds and this module reads:
   (absent means 0): requests the upstream got and never answered, which have no record, and the
   reservations the run kept as spent for them.
 - ``torn_lines`` in the manifest: the lines a resumed run found cut short by a killed run. A request
-  record it moved aside carries ``counted_tokens``, the reservation the run counted for it, and the
-  unit (``arm``, ``seed``, ``repeat``, ``attempt``) when the fragment named it.
+  record it moved aside carries ``counted_tokens``, the reservation the run counted for it (null when
+  nothing bounded it), or ``counted_from: "journal"`` when the reservation journal counts it instead,
+  and the unit (``arm``, ``seed``, ``repeat``, ``attempt``) when the fragment named it.
+- ``in_flight`` in the manifest: the requests the reservation journal has with no record (in flight
+  when a run was killed, or the record cut short), each with its unit, attempt, ``n`` and
+  ``reserved_tokens``, which the run counted as spent; ``requests_in_flight`` and ``in_flight_tokens``
+  sum them.
 - A unit's ``status`` is ``running`` only while a run is in progress or after it was killed; such
   a directory is refused, naming the session, with what to do (the same command resumes the run
   and records the unit).
@@ -270,7 +275,11 @@ _MANIFEST: dict[str, Check] = {
 _TORN = _object({"file": _string(), "action": _string()},
                 optional={"bytes": _integer(0), "counted_tokens": _integer(0, nullable=True), "arm": _string(),
                           "seed": _integer(0), "repeat": _integer(0), "attempt": _integer(0)})
-_MANIFEST_OPTIONAL: dict[str, Check] = {"label": _label, "torn_lines": _or_null(_list_of(_TORN))}
+_IN_FLIGHT = _object({"arm": _string(), "seed": _integer(0), "repeat": _integer(0), "attempt": _integer(0),
+                      "n": _integer(0), "reserved_tokens": _integer(0)})
+_MANIFEST_OPTIONAL: dict[str, Check] = {"label": _label, "torn_lines": _or_null(_list_of(_TORN)),
+                                        "in_flight": _or_null(_list_of(_IN_FLIGHT)),
+                                        "requests_in_flight": _integer(0), "in_flight_tokens": _integer(0)}
 
 
 def _check_manifest(data: dict[str, Any]) -> None:

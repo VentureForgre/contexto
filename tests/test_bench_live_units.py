@@ -104,6 +104,8 @@ class Upstream(BaseHTTPRequestHandler):
                                   "headers": {k.lower(): v for k, v in self.headers.items()},
                                   "header_list": [(k.lower(), v) for k, v in self.headers.items()]})
         answer = Upstream.answer
+        if answer.get("on_receive"):  # called as the request arrives, before any answer
+            answer["on_receive"]()
         if answer.get("close"):  # read the request, then close the connection with no response
             self.close_connection = True
             return
@@ -168,8 +170,10 @@ def upstream():
     server.server_close()
 
 
-def metered(upstream: str, tmp_path: Path, budget: int | None = None, arm: str = "plain", **options):
-    ledger = bench_meter.Ledger(tmp_path / "requests.jsonl", budget)
+def metered(upstream: str, tmp_path: Path, budget: int | None = None, arm: str = "plain", journal: bool = False,
+            **options):
+    ledger = bench_meter.Ledger(tmp_path / "requests.jsonl", budget,
+                                journal=tmp_path / bench_meter.JOURNAL_NAME if journal else None)
     meter = bench_meter.Meter(upstream, ledger, arm=arm, seed=5, repeat=1, model="m", history=[10, 20, 30],
                               bound=500, attempt=2, **options)
     meter.start()
@@ -295,6 +299,101 @@ def test_the_guard_refuses_the_request_that_could_pass_the_budget(upstream, tmp_
     assert ledger.spent == 1_019 <= ledger.budget and ledger.remaining == reserve - 1
     assert bench_meter.read_spent(tmp_path / "requests.jsonl") == 1_019
     assert bench_meter.read_spent(tmp_path / "missing.jsonl") == 0
+
+
+def journal_lines(tmp_path: Path) -> list[dict]:
+    try:
+        return [json.loads(x) for x in (tmp_path / bench_meter.JOURNAL_NAME).read_text(encoding="utf-8").splitlines()]
+    except FileNotFoundError:
+        return []
+
+
+def test_each_billed_request_is_in_the_journal_before_it_goes_upstream(upstream, tmp_path):
+    """#286 Reviewer A low 2 at 99ee7b07: a request in flight when the runner was killed was billed and
+    counted nowhere. The meter now writes the request's journal line before the upstream gets a byte."""
+    meter, ledger = metered(upstream, tmp_path, journal=True)
+    seen: list[list[dict]] = []
+    Upstream.answer = {"chunks": USAGE_EVENTS, "on_receive": lambda: seen.append(journal_lines(tmp_path))}
+    body = json.dumps({"max_tokens": 64, "messages": [{"role": "user", "content": "x" * 300}]}).encode()
+    reserved = math.ceil(len(body) / bench_meter.RESERVE_BYTES_PER_TOKEN) + 64
+    for _ in range(3):
+        assert post(meter, "/v1/messages", body)[0] == 200
+    post(meter, "/v1/messages/count_tokens", body)  # not billed: no line
+    meter.stop()
+    line = {"arm": "plain", "seed": 5, "repeat": 1, "attempt": 2, "reserved_tokens": reserved}
+    expected = [{**line, "n": n} for n in range(3)]
+    assert journal_lines(tmp_path) == expected
+    assert seen[:3] == [expected[:1], expected[:2], expected[:3]]  # each one's line was there as it arrived
+    journal = bench_meter.load_journal(tmp_path)
+    assert journal.in_flight == [] and journal.unanswered == {} and journal.attempts == {("plain", 5, 1, 2)}
+    assert ledger.spent == 3 * 1_019 == bench_meter.read_spent(tmp_path / "requests.jsonl")
+
+
+def test_a_request_with_no_response_gets_a_second_journal_line_with_what_was_kept(upstream, tmp_path):
+    meter, ledger = metered(upstream, tmp_path, journal=True)
+    Upstream.answer = {"close": True}
+    body = json.dumps({"max_tokens": 64, "messages": []}).encode()
+    reserved = math.ceil(len(body) / bench_meter.RESERVE_BYTES_PER_TOKEN) + 64
+    assert post(meter, "/v1/messages", body)[0] == 502
+    meter.stop()
+    assert meter.unanswered == 1
+    unit = {"arm": "plain", "seed": 5, "repeat": 1, "attempt": 2, "n": 0}
+    assert journal_lines(tmp_path) == [{**unit, "reserved_tokens": reserved},
+                                       {**unit, "unanswered": True, "kept_tokens": reserved}]
+    journal = bench_meter.load_journal(tmp_path)
+    assert journal.in_flight == [] and journal.unanswered == {("plain", 5, 1, 2): [reserved]}
+    assert ledger.spent == reserved == journal.unanswered_tokens
+
+
+def test_a_request_whose_journal_line_cannot_be_written_is_not_forwarded(upstream, tmp_path):
+    meter, ledger = metered(upstream, tmp_path, journal=True)
+    (tmp_path / bench_meter.JOURNAL_NAME).mkdir()  # a directory: the line cannot be appended
+    status, _, data = post(meter, "/v1/messages", b'{"messages": []}')
+    meter.stop()
+    assert status == 500 and b"journal" in data and Upstream.received == []
+    assert ledger.reserved == 0 and ledger.spent == 0 and meter.refused == 1 and meter.records == []
+
+
+def test_the_guard_stays_exact_with_concurrent_requests_and_every_one_is_journalled(upstream, tmp_path):
+    """Twelve requests at once against a budget that holds a few reservations: the guard never lets
+    what is spent and reserved pass the budget, each forwarded request has one journal line, and every
+    line is matched by its record, so a resumed run would count nothing more."""
+    body = json.dumps({"max_tokens": 1_000, "messages": [{"role": "user", "content": "x" * 1_500}]}).encode()
+    reserve = math.ceil(len(body) / bench_meter.RESERVE_BYTES_PER_TOKEN) + 1_000
+    meter, ledger = metered(upstream, tmp_path, budget=4 * reserve, journal=True)
+    Upstream.answer = {"chunks": USAGE_EVENTS, "pause": 0.05}
+    peak, lock = [0], threading.Lock()
+    real_reserve = ledger.reserve
+
+    def watched(tokens: int) -> bool:
+        ok = real_reserve(tokens)
+        with lock:
+            peak[0] = max(peak[0], ledger.spent + ledger.reserved)
+        return ok
+
+    ledger.reserve = watched
+    statuses: list[int] = []
+
+    def one() -> None:
+        try:
+            statuses.append(post(meter, "/v1/messages", body)[0])
+        except (http.client.HTTPException, OSError):
+            statuses.append(0)
+
+    threads = [threading.Thread(target=one) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    meter.stop()
+    forwarded = len(Upstream.received)
+    assert 1 <= forwarded < 12 and statuses.count(200) == forwarded and ledger.stop == "budget"
+    assert peak[0] <= ledger.budget and ledger.spent <= ledger.budget and ledger.reserved == 0
+    lines = journal_lines(tmp_path)
+    assert len(lines) == forwarded and len({x["n"] for x in lines}) == forwarded  # one line each, none refused
+    journal = bench_meter.load_journal(tmp_path)
+    assert journal.in_flight == [] and journal.unanswered == {}
+    assert ledger.spent == forwarded * 1_019 == bench_meter.read_spent(tmp_path / "requests.jsonl")
 
 
 def test_a_401_on_a_model_path_halts_the_run_and_other_statuses_are_only_recorded(upstream, tmp_path):

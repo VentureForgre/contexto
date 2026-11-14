@@ -1014,7 +1014,7 @@ def test_the_help_names_the_mode_and_its_options(capsys):
 # Every name a replay or a live run writes into --out, written out from the shared output schema
 # (schemas.md): not read from the package, so a name dropped from replay_mode.OUTPUT_NAMES fails here.
 RESULT_NAMES = ("manifest.json", "requests.jsonl", "probes.jsonl", "reach.jsonl", "results.json", "results.md",
-                "scripts", "charts", "store")
+                "scripts", "charts", "store", "reservations.jsonl")
 
 
 def test_the_refused_names_are_the_output_schemas():

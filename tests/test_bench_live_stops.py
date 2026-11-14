@@ -532,6 +532,12 @@ def test_a_torn_request_record_is_counted_in_the_spend_at_its_reservation(tmp_pa
     (torn,) = runner.repair_torn(out)
     assert (torn["counted_tokens"], torn["counted_from"]) == (12_000, "largest_in_file")
     assert "arm" not in torn
+    # The first record of a directory, cut before its reservation, with no journal (#286 Reviewer A low 1
+    # at 99ee7b07): nothing stands in for it, so it is not called counted; the report's cost is a lower bound.
+    requests.write_text('{"arm": "full", "se', encoding="utf-8")
+    (torn,) = runner.repair_torn(out)
+    assert (torn["counted_tokens"], torn["counted_from"]) == (None, "nothing_in_file")
+    assert runner.recorded_spend(out, {"units": [], "torn_lines": [torn]}) == 0
     # A whole record that lost only its newline is counted by its record, and a probe fragment counts nothing.
     requests.write_text(whole + record(2, 15_000), encoding="utf-8")
     (out / "probes.jsonl").write_text('{"arm": "full", "seed": 3, "repe', encoding="utf-8")
@@ -539,6 +545,98 @@ def test_a_torn_request_record_is_counted_in_the_spend_at_its_reservation(tmp_pa
     assert added["action"] == "newline_added" and "counted_tokens" not in added
     assert probe["action"] == "moved" and "counted_tokens" not in probe
     assert runner.recorded_spend(out, {"units": [], "torn_lines": [added, probe]}) == 3 * 7
+
+
+def journal_line(n: int, reserved: int, **extra) -> str:
+    import json
+
+    return json.dumps({"arm": "full", "seed": 3, "repeat": 0, "attempt": 1, "n": n, "reserved_tokens": reserved,
+                       **extra}) + "\n"
+
+
+def request_record(n: int, reserved: int) -> str:
+    import json
+
+    return json.dumps({"arm": "full", "seed": 3, "repeat": 0, "attempt": 1, "reserved_tokens": reserved,
+                       "model": "m", "n": n, "turn": 0, "main": True, "history_tokens": 10, "uncached": 5,
+                       "cache_write": 0, "cache_read": 0, "output": 2, "status": 200, "compaction": False,
+                       "basis": "measured"})
+
+
+@pytest.mark.parametrize("cut", [1, 20, 70, 95, -2])
+def test_a_torn_record_the_journal_has_is_counted_once_at_its_own_reservation(tmp_path, cut):
+    """#286 Reviewer A low 1 at 99ee7b07: the first record of a new directory, cut before its reservation,
+    was counted at 0. With the reservation journal, the torn request is the journal's entry with no
+    record, counted at its own reservation wherever the cut falls; the torn line itself counts nothing,
+    so the request is not counted twice."""
+    from contexto.bench import meter as bench_meter
+    from contexto.bench import runner
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / bench_meter.JOURNAL_NAME).write_text(journal_line(0, 82_208), encoding="utf-8")
+    record = request_record(0, 82_208)
+    (out / "requests.jsonl").write_text(record[:cut], encoding="utf-8")
+    (torn,) = runner.repair_torn(out)
+    assert torn["counted_from"] == "journal" and "counted_tokens" not in torn
+    manifest = {"units": [], "torn_lines": [torn]}
+    assert runner.recorded_spend(out, manifest) == 82_208
+    runner.apply_journal(manifest, bench_meter.load_journal(out))
+    assert manifest["in_flight"] == [{"arm": "full", "seed": 3, "repeat": 0, "attempt": 1, "n": 0,
+                                      "reserved_tokens": 82_208}]
+    assert (manifest["requests_in_flight"], manifest["in_flight_tokens"]) == (1, 82_208)
+    # A second resume recomputes the same figure from the files; nothing is added to it.
+    assert runner.repair_torn(out) == [] and runner.recorded_spend(out, manifest) == 82_208
+
+
+def test_a_fragment_no_journal_entry_can_start_is_counted_as_before(tmp_path):
+    """A torn record whose start no entry in flight matches (another unit's, or a run from before the
+    journal) keeps the reservation its fragment holds."""
+    from contexto.bench import meter as bench_meter
+    from contexto.bench import runner
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / bench_meter.JOURNAL_NAME).write_text(journal_line(0, 9_000) + journal_line(1, 500), encoding="utf-8")
+    (out / "requests.jsonl").write_text(request_record(0, 9_000) + "\n" + request_record(1, 15_000)[:120],
+                                        encoding="utf-8")
+    (torn,) = runner.repair_torn(out)
+    assert (torn["counted_tokens"], torn["counted_from"]) == (15_000, "reservation")
+    # The journal's own entry 1 (500 reserved) has no record either: it is counted, and the fragment too.
+    assert runner.recorded_spend(out, {"units": [], "torn_lines": [torn]}) == 7 + 500 + 15_000
+
+
+def test_the_journal_decides_what_an_attempt_kept_for_requests_with_no_response(tmp_path):
+    """The killed run may have written the manifest one request behind its journal, or the journal one
+    line behind the manifest. For an attempt the journal covers, its lines decide: a request that got no
+    response counts at what was kept for it, and one whose second line was never written counts at its
+    reservation, once either way. An attempt from before the journal keeps the manifest's count."""
+    from contexto.bench import meter as bench_meter
+    from contexto.bench import runner
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "requests.jsonl").write_text(request_record(0, 9_000) + "\n", encoding="utf-8")
+    journal = (journal_line(0, 9_000) + journal_line(1, 4_000) + journal_line(1, 0, unanswered=True, kept_tokens=4_000)
+               + journal_line(2, 6_000) + '{"arm": "full", "se')
+    (out / bench_meter.JOURNAL_NAME).write_text(journal, encoding="utf-8")
+    unit = {"arm": "full", "seed": 3, "repeat": 0, "attempt": 1, "status": "running",
+            "requests_unanswered": 2, "unanswered_tokens": 10_000,  # n 2 was noted, its journal line was not
+            "attempts": [{"attempt": 0, "requests_unanswered": 1, "unanswered_tokens": 3_000},  # before the journal
+                         {"attempt": 1, "requests_unanswered": 2, "unanswered_tokens": 10_000}]}
+    manifest = {"units": [unit]}
+    assert runner.recorded_spend(out, manifest) == 7 + 3_000 + 4_000 + 6_000
+    runner.apply_journal(manifest, bench_meter.load_journal(out))
+    assert (unit["requests_unanswered"], unit["unanswered_tokens"]) == (1, 4_000)
+    assert unit["attempts"] == [{"attempt": 0, "requests_unanswered": 1, "unanswered_tokens": 3_000},
+                                {"attempt": 1, "requests_unanswered": 1, "unanswered_tokens": 4_000}]
+    assert manifest["in_flight"] == [{"arm": "full", "seed": 3, "repeat": 0, "attempt": 1, "n": 2,
+                                      "reserved_tokens": 6_000}]
+    assert runner.recorded_spend(out, manifest) == 7 + 3_000 + 4_000 + 6_000  # the same after it, once each
+    # A torn journal line is moved aside and costs nothing: its request was never forwarded.
+    (torn,) = runner.repair_torn(out)
+    assert (torn["file"], torn["action"]) == (bench_meter.JOURNAL_NAME, "moved") and "counted_from" not in torn
+    assert runner.recorded_spend(out, manifest) == 7 + 3_000 + 4_000 + 6_000
 
 
 def test_torn_lines_are_left_alone_in_a_directory_that_is_not_a_live_run(env, tmp_path, script):
