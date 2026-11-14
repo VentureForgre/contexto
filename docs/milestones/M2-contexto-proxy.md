@@ -1709,7 +1709,7 @@ checked. The routine for testing a new version is `docs/cli-updates.md`.
 the proxy alone, for tests), `contexto serve` (the standing service, D70; also `--print-settings`,
 `--print-mcp-config`, `--rotate-token`, `--status`), `contexto mcp`, `contexto sessions list|show <id>`,
 `contexto sessions prune`, `contexto recall <page id>`, `contexto search <words>`, `contexto state`.
-Exit codes and `--help` documented in README.
+Exit codes are documented in `docs/exit-codes.md`; each command has `--help`.
 
 Store-reading commands (D57). A session is named by its id or a unique prefix of it (an exact id
 wins; a prefix of several ids is an error naming them, exit 1) in `--session` and `CONTEXTO_SESSION`

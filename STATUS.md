@@ -1,7 +1,8 @@
 # Contexto status
 
-Updated 2026-11-06 by claude (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
-D48 to D61, live acceptance run #4, and deleting the v0.1.0 to v0.4.0 releases, D62). Decisions taken and still open, with reasons:
+Updated 2026-11-12 by claude (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
+D48 to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0 releases, D62, and the README
+rewrite, D68). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -50,6 +51,13 @@ compaction never fires, and accuracy equals full context.
   to, is on.
 - CLIProxyAPI compatibility (D35, PR #210) and upstream affinity (D36, PR #212, deployed on the
   owner's proxy and verified for cache reuse). Guide: `docs/cliproxyapi.md`.
+- README and docs (2026-11-12, D68): the README was 772 lines and is 263. Its reference sections are
+  in `docs/*.md` (index `docs/README.md`), the Results table in `docs/results.md` and the full
+  limitations list in `docs/limitations.md`. `tests/test_docs_links.py` checks every relative link
+  and heading anchor in the tracked Markdown files. The README states recall as no worse than full
+  context on a scripted test, and cost as depending on the model and on cache hits.
+  The repository's About box (description and twelve topics) matches it since 2026-11-14; the old
+  values are in D68.
 
 ## QA run and fix round (2026-11-05 to 2026-11-06, v0.5.9 to v0.5.24)
 
@@ -341,8 +349,11 @@ tool loops. B27 (`docs/research/M2-haiku-100k-tier.md`): replaying run #3 at bou
 model's behavior held fixed kept every request under the tier, for a modeled 45.7 percent lower
 cost, with 9 rotations instead of 6; accuracy at that bound is unmeasured and long tool loops can
 still cross it. Decision: no default change and no live run (the owner's seats run Opus 5.5,
-which has no price step); the README gives `--bound 125000` as a Haiku tip with those caveats. Limits: one synthetic session, one
-run, one model.
+which has no price step); `docs/run-reference.md` gives `--bound 125000` as a Haiku tip with those caveats. Limits: one synthetic session, one
+run, one model. The saving in money is Haiku 5.5's price step: the same token counts at flat rates
+cost more through Contexto (modeled: 34 percent more at Haiku 5.5 base rates, 66 percent more at
+Opus 5.5 rates) when every plain request hits the cache; with the baseline arm's two measured
+misses plain costs more in both (section added to the record 2026-11-12, D68).
 
 ## Usage against plain Codex (Codex acceptance run, zero-spend analysis)
 
@@ -551,6 +562,10 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   overheads in the start warning, `pdf_uncertain` only when the PDF is the cause).
 - D62: the v0.1.0 to v0.4.0 releases and tags are deleted, because their source archives held the
   owner's proxy hostname; their commits stay on `main`.
+- D68: the README is rewritten for a first-time reader (what it does, three numbers with their
+  limits, install and start on the first screen; who it is not for; a comparison with compaction, a
+  1M window and Claude Code's memory), with recall stated as no worse than full context and cost as
+  model-dependent; the reference, results and limitations moved under `docs/`.
 
 ## Open follow-ups
 
@@ -606,12 +621,12 @@ D61 (#250, v0.5.24). Live acceptance run #4 passed on v0.5.20. Left: the open fo
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
   cheaper in replays, but it shows the model less, so it needs an accuracy run first (A28).
-- A Haiku default bound of 125,000 (B27): only a README tip; accuracy at that bound unmeasured.
+- A Haiku default bound of 125,000 (B27): only a tip in `docs/run-reference.md`; accuracy at that bound unmeasured.
 - A search "follow" option for multihop chains (B26): the hops come from synthetic probes.
 - A live check of 150,000 on an OpenRig seat (D31 says revisit only if a seat shows a recall
   cost).
 - Answering Claude Code's `HEAD /api/hello` locally while the upstream comes from an untrusted
-  project file (D52): for now the README says to pin `--upstream` in such a repository.
+  project file (D52): for now `docs/troubleshooting.md` says to pin `--upstream` in such a repository.
 
 Needs the owner:
 - Live checks the fix round could not run at zero spend: D51's "keep it open until the user
