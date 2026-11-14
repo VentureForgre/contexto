@@ -114,7 +114,16 @@ ARM_DIFFERENCES = (
     "Both Claude Code arms alike run with CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1: Claude Code runs no subagent or "
     "shell command in the background, so a subagent the model starts runs in the foreground within its turn. "
     "Without it a background task's report starts a run of its own with its own result, and the replies of every "
-    "later turn would be matched to the wrong turn; a unit where that still happens stops as desync.",
+    "later turn would be matched to the wrong turn. What the variable changes in the requests (measured on Claude "
+    "Code 2.1.322 against a stub): it removes the run_in_background parameter from the Agent and Bash tool "
+    "definitions, and with it about 770 characters of their descriptions (405 of Agent's, among them the line "
+    "saying that subagents run in the background by default, and 366 of Bash's; 1,377 characters of tool "
+    "definitions with the parameters' own schemas), in both arms alike; the system prompt is the same. So both "
+    "arms differ from plain Claude Code's default, in which subagents run in the background. Claude Code's "
+    "documentation says that MCP tasks and the Monitor tool still run in the background with the variable set; "
+    "the Monitor tool is not among the tools these sessions are given, and the one MCP server (Contexto's, in the "
+    "contexto arm) declares tools only, no tasks, but a unit in which either runs in the background, or in which "
+    "any other result answers no turn, stops as desync.",
     "Every arm alike runs under the same runaway caps (see runaway_caps): a unit stops when one script turn asks "
     "for more billed requests than the per-turn cap, when a turn gets more failed responses than their own cap, "
     "or when the unit would pass its token cap, twice its own arm's planned worst case unless --max-unit-tokens "

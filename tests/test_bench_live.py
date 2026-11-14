@@ -91,6 +91,9 @@ def test_every_unit_completes_and_the_manifest_has_the_shared_fields(run, script
     assert len(manifest["arm_differences"]) == 7 and len(manifest["metering"]) == 4
     background = next(line for line in manifest["arm_differences"] if "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" in line)
     assert background.startswith("Both Claude Code arms alike")
+    for words in ("removes the run_in_background parameter", "Agent and Bash", "about 770 characters", "2.1.322",
+                  "Monitor", "MCP", "desync"):
+        assert words in background, words
     # A bound under 67,000 cannot be matched: the smallest window is set, and the manifest says so.
     assert manifest["plain_compaction"]["variable"] == "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
     assert manifest["plain_compaction"]["value"] == 100_000 and manifest["plain_compaction"]["forced"] is False

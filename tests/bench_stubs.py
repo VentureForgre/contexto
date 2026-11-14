@@ -299,6 +299,9 @@ class StubModel:
                     "tool_errors": sum(1 for b in _tool_results(body.get("messages") or []) if b.get("is_error")),
                     "tool_choice": (body.get("tool_choice") or {}).get("type"),
                     "tools": [t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)],
+                    "background_tools": [t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)
+                                         and "run_in_background" in ((t.get("input_schema") or {})
+                                                                     .get("properties") or {})],
                     "cache_breakpoints": json.dumps(body.get("messages") or []).count('"cache_control"'),
                     "system_bytes": len(json.dumps(body.get("system") or "")),
                     "tools_bytes": len(json.dumps(body.get("tools") or [])),

@@ -152,6 +152,8 @@ def test_a_subagent_the_model_starts_runs_in_its_turn_with_the_real_claude(scrip
     run = _background_run(script, tmp_path, arms=("contexto", "plain"), keep_variable=True)
     assert run.code == 0, run.printed
     assert any(r["tools"] and "Agent" in r["tools"] for r in run.stub.messages_requests())
+    # The variable takes run_in_background out of every tool definition, in both arms.
+    assert all(not r["background_tools"] for r in run.stub.messages_requests()), run.stub.messages_requests()
     for arm in ("contexto", "plain"):
         unit = run.unit(arm)
         assert unit["status"] == "complete" and unit["concluded_ok"] == {d.probe: True for d in script.decisions}
@@ -166,4 +168,6 @@ def test_a_background_task_with_the_real_claude_stops_the_unit_as_desync(script,
     run = _background_run(script, tmp_path, arms=("plain",), keep_variable=False)
     unit = run.unit("plain")
     assert (unit["status"], unit["stop"]) == ("stopped", "desync"), unit
+    # Without it, the Agent and Bash tools offer run_in_background (Claude Code 2.1.322).
+    assert any({"Agent", "Bash"} <= set(r["background_tools"]) for r in run.stub.messages_requests())
     assert not run.lines("probes.jsonl") and run.code == 1

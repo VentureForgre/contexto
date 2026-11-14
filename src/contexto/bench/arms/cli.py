@@ -75,7 +75,10 @@ KEPT_NAMES = frozenset({"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"})
 # meter tell main requests, side requests and compactions apart without reading a request's content;
 # the meter removes them again (contexto.bench.meter). CLAUDE_CODE_DISABLE_BACKGROUND_TASKS (documented
 # on Claude Code's environment-variable page; read in the 2.1.322 bundle): no subagent or shell command
-# runs in the background, so no background task reports back with a run, and a result, of its own.
+# runs in the background, so no background task reports back with a run, and a result, of its own. On
+# 2.1.322 it removes run_in_background from the Agent and Bash tool definitions (about 770 characters of
+# their descriptions). MCP tasks and the Monitor tool are not covered by it; a result they would bring
+# answers no turn, and the session stops the unit as desync.
 ENV = {"DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 READ_TOOL = "Read"
 THRASHING = "Autocompact is thrashing"
