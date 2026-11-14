@@ -347,8 +347,8 @@ def read_settings_file(path: Path) -> SettingsFile:
     could not name a switch (``may_name_provider``): Claude Code does not load a file with a comment,
     a trailing comma or another syntax error (measured on 2.1.322, D70), or with ``NaN`` or an ``env``
     that is not an object (spikes/m2/providers/README.md), so such a file turns no switch on. The NUL
-    byte in that rule is the backstop for wide files that still do not parse: UTF-16BE, UTF-16LE without the mark, UTF-32,
-    and UTF-16LE with the mark and a syntax error."""
+    byte in that rule is the backstop for wide files that still do not parse: UTF-16BE, UTF-16LE
+    without the mark, UTF-32, and UTF-16LE with the mark and a syntax error."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except (OSError, ValueError):  # missing, not permitted, a symlink loop, a name the system rejects
