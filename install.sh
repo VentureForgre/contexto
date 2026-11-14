@@ -482,15 +482,16 @@ restore_hint() {
                 set -- "$@" "$old_url"
                 ;;
         esac
-        printf '%s\n' "To get $previous back: $(quoted "$@")" \
-            "v$previous has no SHA256SUMS, so this script cannot install it and that download is not" \
+        say "To get $previous back: $(quoted "$@")"
+        say "v$previous has no SHA256SUMS, so this script cannot install it, and that download is not" \
             "checksum-verified."
     elif [ "$base" = "$default_base" ]; then
-        printf '%s\n' "To get $previous back: curl -fsSL $script_url | sh -s -- --version $previous --with $restore_with"
+        say "To get $previous back: curl -fsSL $script_url | sh -s --" \
+            "--version $previous --with $restore_with"
     else
         # The script cannot know where this copy of it came from, so it names the options and the
         # base URL, not a command.
-        printf '%s\n' "To get $previous back, run this script again the same way, with --version $previous" \
+        say "To get $previous back, run this script again the same way, with --version $previous" \
             "--with $restore_with and CONTEXTO_INSTALL_BASE_URL=$base."
     fi
 }
