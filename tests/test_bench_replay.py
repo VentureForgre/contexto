@@ -522,6 +522,10 @@ def _breakpoints(count):
     (lambda b: b["messages"].insert(4, _effort()), None),  # before a user's prompt: no placement rule
     (lambda b: b["messages"].insert(1, _effort("low")), None),
     (_carried_after_a_rotation, None),
+    # #269 Reviewer A low 1 at 8ef2742e: the first turn is checked on the turns, with system messages set aside.
+    (lambda b: b["messages"].insert(0, _effort()), None),
+    (lambda b: b["messages"].__setitem__(0, _effort()), "messages.1.role: the first message must use the user role"),
+    (lambda b: b.update(messages=[_effort()]), "messages: at least one user or assistant message is required"),
     (_two_system_messages_in_a_row, None),
     (_after_server_tool_use, None),
     # Several system messages in a row are checked as one: their neighbours are the messages around the run.
