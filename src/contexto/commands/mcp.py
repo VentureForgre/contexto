@@ -39,7 +39,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "written to stdout.",
     )
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--session", help="session id (the exact id of an existing session)")
+    mode.add_argument("--session", help="session id (the full id of an existing session; a prefix is refused)")
     mode.add_argument("--serve", action="store_true",
                       help="find each tool call's session by asking the running `contexto serve`; for an MCP "
                       "server registered in Claude Code's own configuration")
@@ -63,6 +63,7 @@ def _megabytes(value: str) -> int:
 def run(args: argparse.Namespace) -> int:
     from contexto.mcp import UnopenedStore, serve_stdio
     from contexto.store import LockFileDamagedError, SessionStore
+    from contexto.store.sessions import named, starting_with
 
     # The same resolution as the other subcommands, and --home under the same rule (B24): a client that
     # writes --home=~/y without a shell gets the expanded absolute path, not a literal ./~/y.
@@ -72,7 +73,12 @@ def run(args: argparse.Namespace) -> int:
     try:
         # lexists: an entry that is there but cannot be opened (a dangling link) gets the store's own error
         if not os.path.lexists(session_dir(home, args.session)):
-            raise ValueError(f"no session {args.session!r} under {home / 'sessions'}")
+            # The CLI's MCP config carries the full id, so a prefix here is a hand-typed one: it is not
+            # resolved (the server would write another session's log and ledger), and the error names
+            # the session it starts, as `run` and `prune` do (D64).
+            starts = starting_with(home, args.session)
+            raise ValueError(f"no session {args.session!r} under {home / 'sessions'}"
+                             + (f" (it is the start of {named(starts)}; mcp needs the full id)" if starts else ""))
         store = SessionStore(home, args.session)
     except LockFileDamagedError as exc:  # each tool call says so, naming the file (D59)
         print(f"contexto mcp: {exc}", file=sys.stderr)

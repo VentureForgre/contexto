@@ -28,7 +28,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from typing import IO, Any, Protocol
 
-from contexto import serveclient
+from contexto import __version__, serveclient
 from contexto.canonical import loads_bounded, utf8
 from contexto.servecontract import CLOUD_PROVIDER_VARIABLES, MAX_TOOL_USE_ID_CHARS, cloud_provider_variables
 from contexto.store import LockFileDamagedError, PageUnreadableError
@@ -49,7 +49,7 @@ from contexto.store.render import (
 from contexto.store.search import SHOWN_IN_DETAIL, Query, text_matches
 
 SERVER_NAME = "contexto"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = __version__  # the package's, as `contexto version` prints it (D64); it was a fixed 0.1.0
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
