@@ -20,6 +20,11 @@ import sys
 from contexto.bench.modes import _live_options
 
 FLAG = None
+# The live run's options that --dry-run does not use, so they are refused beside any mode flag (the
+# contract in contexto.bench.modes). --model, --arms and --budget-tokens are not listed: the dry run
+# plans with them, so the plan of a live command is that command with --dry-run and without these.
+OWN_OPTIONS = ("--upstream", "--key-helper", "--settings", "--allow-git-out", "--work", "--keep-work", "--cache-ttl",
+               "--turn-timeout", "--max-turn-requests", "--max-unit-tokens", "--context-window")
 
 
 def add_arguments(parser) -> None:

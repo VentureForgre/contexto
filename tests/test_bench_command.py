@@ -101,9 +101,11 @@ def test_turn_kbytes_below_the_floor_is_refused(tmp_path, capsys):
 
 
 def test_contexto_does_not_import_the_generator_or_statistics_at_start():
+    # Mode modules are imported at every start by the contract (contexto.bench.modes), whichever modes
+    # this checkout has; nothing else of the benchmark may be.
     code = ("import sys\nfrom contexto import cli\ncli.build_parser()\n"
             "print(sorted(m for m in sys.modules if m.startswith('contexto.bench.') and m not in "
-            "('contexto.bench.model', 'contexto.bench.modes', 'contexto.bench.modes.script_only')))")
+            "('contexto.bench.model', 'contexto.bench.modes') and not m.startswith('contexto.bench.modes.')))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]"
 
@@ -287,6 +289,7 @@ OWN_DEFAULT_MODE = (
 
 
 def test_a_modes_own_option_is_refused_without_its_mode(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_live", OWN_DEFAULT_MODE)
     (tmp_path / "t_replay.py").write_text(OWN_FLAG_MODE, encoding="utf-8")
     # The replay mode's option without --t-replay would otherwise start the live run.

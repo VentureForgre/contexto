@@ -492,7 +492,8 @@ def run(config: Config, scripts: dict[int, Script] | None = None, *, stdout: Tex
                 stack.enter_context(out_lock(config.out))
             ready = prepare(config, scripts)
             if config.budget is None:
-                raise Refused("a live run needs --budget-tokens; 'contexto bench --dry-run' with the same options "
+                raise Refused("a live run needs --budget-tokens; 'contexto bench --dry-run' with the same --model, "
+                              "--arms, --seed, --seeds, --repeats, --bound, --protocol, --turn-kbytes and --out "
                               "prints the figure to pass")
             worst = ready["plan"]["total"].worst_total
             if ready["spent"] + worst > config.budget:

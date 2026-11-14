@@ -642,6 +642,23 @@ def test_dry_run_says_what_its_figures_are_and_calibrates_on_a_recorded_model(ca
     assert bench_plan.model_factor("claude-haiku-5-5") == bench_plan.model_factor(None) == 1.0
 
 
+def test_the_live_runs_own_options_are_refused_beside_a_mode_and_the_plan_options_are_not(capsys, monkeypatch):
+    from contexto.bench.modes import live
+
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    for option, value in (("--key-helper", "cat key"), ("--upstream", "http://127.0.0.1:9"), ("--work", "w"),
+                          ("--max-turn-requests", "5"), ("--max-unit-tokens", "5"), ("--keep-work", None)):
+        assert option in live.OWN_OPTIONS
+        assert main(["bench", "--dry-run", "--model", "claude-haiku-5-5", option, *([value] if value else [])]) == 2
+        err = capsys.readouterr().err
+        assert f"{option} belongs to the live run" in err and "leave it out with --dry-run" in err
+    # What the plan depends on is shared: the dry run of a live command keeps these.
+    assert main(["bench", "--dry-run", "--model", "claude-haiku-5-5", "--arms", "full", "--budget-tokens",
+                 "10000000"]) == 0
+    assert "--budget-tokens 10,000,000 covers the worst case" in capsys.readouterr().out
+
+
 def test_the_live_run_refuses_to_start_without_what_it_needs(capsys, monkeypatch, tmp_path):
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
