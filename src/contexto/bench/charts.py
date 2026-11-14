@@ -30,7 +30,8 @@ file is always well-formed.
 The same results file gives the same bytes on every Python version from 3.12 to 3.15: which
 characters count as wide comes from a table in this module (``WIDE``, East Asian Width W or F in
 Unicode 17.0), not from the running Python's Unicode tables, which differ between versions for
-recently assigned characters. Words are split only at a space, tab, carriage return or line feed.
+recently assigned characters. A wide character at or above U+1F000 (an emoji) counts as three
+narrow characters, the others as two. Words are split only at a space, tab, carriage return or line feed.
 
 Geometry, for anyone checking a plotted point. Both charts are ``WIDTH`` wide. In the request-size
 chart a point ``(history, size)`` is drawn at ``x = LINE_LEFT + history / x_top * LINE_PLOT_WIDTH``
@@ -147,16 +148,25 @@ def _el(tag: str, text: str | None = None, children: Sequence[str] = (), **attrs
     return f"<{tag}{parts}>{''.join(children)}{escape(_clean(text)) if text is not None else ''}</{tag}>"
 
 
+# Wide characters from here on are emoji and other pictographs, which a colour emoji font draws wider
+# than two narrow characters: about 16 px at 11 px in Apple Color Emoji, where two units are 12.3 px.
+PICTOGRAPHS = 0x1F000
+
+
 def _units(ch: str) -> int:
-    """2 for a wide character (``WIDE``), else 1."""
+    """3 for a wide character at or above ``PICTOGRAPHS`` (an emoji), 2 for another wide character
+    (``WIDE``), else 1."""
     code = ord(ch)
     i = bisect.bisect_right(_WIDE_STARTS, code) - 1
-    return 2 if i >= 0 and code <= WIDE[i][1] else 1
+    if i < 0 or code > WIDE[i][1]:
+        return 1
+    return 3 if code >= PICTOGRAPHS else 2
 
 
 def text_width(text: str, size: int = 12) -> float:
     """An estimate of the width of ``text`` in pixels at a font size: ``CHAR_WIDTH`` per character
-    at 12px, in proportion at other sizes, and twice that for a wide (East Asian) character."""
+    at 12px, in proportion at other sizes, twice that for a wide (East Asian) character and three
+    times that for an emoji (``_units``)."""
     return sum(_units(ch) for ch in text) * CHAR_WIDTH * size / 12
 
 

@@ -132,7 +132,7 @@ The token classes of each arm are measured, and are priced here at every model i
 | claude-fable-5-2 | $0.1798 ($1.0785 over 6 sessions) | $0.6638 ($3.9827 over 6 sessions) | $0.4264 ($2.5584 over 6 sessions) |
 
 - Prices: https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-12, USD per million tokens.
-- Cache writes are priced at the 5-minute rate for every arm, because a request record does not carry its cache lifetime.
+- Cache writes are priced at the 5-minute rate for every arm, the cache lifetime the manifest records; a request record does not carry its own.
 - claude-haiku-5-5: Priced by prompt length. The page says a request whose prompt is over 100,000 tokens pays higher prices, that the prompt length counts all input tokens including cache reads and cache writes, and that each request is priced on its own. A prompt of exactly 100,000 tokens pays the lower row. That the higher row applies to the whole request, output included, is a reading of the page, which gives two complete price rows and has no wording about an excess; the page does not use the words "whole request". If that reading is wrong, change size_rule: "applies_to" to "excess" prices only the input above the threshold at the higher row, and "output" to "first_row" keeps output at the lower row.
 - Every request recorded, repeats and unfinished sessions included: 512 requests, 2,726,282 input and 34,560 output tokens, $0.1409 at the prices of claude-haiku-5-5.
 

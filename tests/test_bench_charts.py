@@ -657,10 +657,10 @@ def test_text_width_counts_wide_characters_twice():
 
 
 @pytest.mark.parametrize("ch, units", [
-    ("\u6f22", 2), ("\uac00", 2), ("\uff21", 2), ("\u3042", 2), ("\U0001f600", 2),
+    ("\u6f22", 2), ("\uac00", 2), ("\uff21", 2), ("\u3042", 2), ("\U0001f600", 3),
     # Assigned in Unicode 16 (Python 3.14 and later), unassigned before: wide by the module's own
     # table on every Python version, so the same text gives the same chart.
-    ("\U0001fae9", 2), ("\U0001fadc", 2),
+    ("\U0001fae9", 3), ("\U0001fadc", 3),
     ("a", 1), ("\u00e9", 1), ("\u0416", 1), ("\u2028", 1),
 ])
 def test_text_width_does_not_depend_on_the_pythons_unicode_tables(ch, units):
@@ -689,6 +689,18 @@ def test_a_note_in_wide_characters_is_wrapped_inside_the_chart():
     assert "".join(parts) == note and len(parts) > 1  # whole, on more than one line
     for element in lines:
         assert right_edge(element) <= charts.WIDTH - charts.MARGIN + 0.5, shown(element)
+
+
+def test_a_note_in_emoji_is_wrapped_inside_the_chart():
+    """#264 Reviewer B nit 1: an emoji is drawn about 16 px wide at 11 px (Apple Color Emoji), more than
+    two narrow characters, so a note of 80 of them ran past the right edge. Each line must fit at 16 px
+    per emoji."""
+    note = "\U0001fae9" * 80
+    root = parse(charts.request_size_svg(line_results(notes=[note])))
+    lines = [e for e in root.iter(f"{SVG}text") if e.get("font-size") == "11" and shown(e) and shown(e) in note]
+    assert "".join(shown(e) for e in lines) == note and len(lines) > 1
+    for element in lines:
+        assert float(element.get("x")) + 16 * len(shown(element)) <= charts.WIDTH - charts.MARGIN + 0.5
 
 
 def test_a_series_with_no_points_is_named_in_a_note_not_dropped_silently():

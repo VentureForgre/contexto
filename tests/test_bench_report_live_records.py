@@ -157,6 +157,22 @@ def test_every_attempt_counts_in_tokens_and_cost_and_the_retries_are_reported(tm
     assert "retried attempts included" in cost
 
 
+def test_an_unreadable_request_in_an_attempt_that_did_not_complete_is_in_the_retries(tmp_path):
+    """#264 Reviewer A nit 2: ``retries.unreadable`` and a retries upper bound above its cost."""
+    out = retried_run(tmp_path / "run")
+    path = out / "requests.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    i = next(i for i, r in enumerate(rows) if (r["arm"], r["seed"], r["attempt"]) == ("contexto", 1, 0))
+    rows[i] = unreadable(rows[i], 40_000)
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    retries = report.build([out])["arms"]["contexto"]["retries"]
+    assert (retries["requests"], retries["unreadable"]) == (3, 1)
+    for model in prices.models(TABLE):
+        assert retries["cost_upper"][model] > retries["cost"][model]
+        assert retries["cost_upper"][model] == pytest.approx(
+            retries["cost"][model] + prices.reservation_cost(40_000, model, TABLE))
+
+
 def test_the_request_series_is_drawn_from_the_attempt_that_completed(tmp_path):
     out = retried_run(tmp_path / "run")
     run = records.read_run(out)

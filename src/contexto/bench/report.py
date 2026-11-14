@@ -694,7 +694,8 @@ def _series(group: _Group) -> dict[str, Any]:
 
 
 def _plain_compaction(group: _Group, bound: int) -> dict[str, Any] | None:
-    units = [(key, unit) for key, unit in group.units.items() if key[0] == "plain"]
+    units = sorted(((key, unit) for key, unit in group.units.items() if key[0] == "plain"),
+                   key=lambda item: (group.seeds.index(item[0][1]), item[0][2]))  # not the manifest's order
     if not units:
         return None
     values = [v for _, unit in units for v in unit["compaction_pre_tokens"]]
@@ -1251,9 +1252,12 @@ def _lifetime_words(prices: Mapping[str, Any]) -> str:
     used = {ttl for d in lifetimes for ttls in d["by_arm"].values() for ttl in ttls} or {prices["cache_ttl"]}
     assumed = any(d["assumed"] for d in lifetimes)
     if len(used) == 1:
-        return (f"Cache writes are priced at the {_rate(sorted(used, key=_lifetime_order))} for every arm, because "
-                "a request record does not carry its cache lifetime."
-                + (" The manifest does not record a cache lifetime, so 5 minutes is assumed." if assumed else ""))
+        rate = _rate(sorted(used, key=_lifetime_order))
+        if assumed:
+            return (f"Cache writes are priced at the {rate} for every arm. A request record does not carry its cache "
+                    "lifetime and the manifest does not record a cache lifetime, so 5 minutes is assumed.")
+        return (f"Cache writes are priced at the {rate} for every arm, the cache lifetime the manifest records; a "
+                "request record does not carry its own.")
     parts = []
     for d in lifetimes:
         arms_at: dict[tuple[str, ...], list[str]] = {}
