@@ -313,3 +313,84 @@ def test_command_refuses_a_bad_version(tmp_path):
     (tmp_path / "CHANGELOG.md").write_text(GOOD, encoding="utf-8")
     result = _run("main", cwd=tmp_path)
     assert result.returncode == 2
+
+
+# --- code fences, as CommonMark reads them ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("line", ["```contexto``` is the command.", "````a ` b", "```py`"])
+def test_a_backtick_line_with_another_backtick_after_the_fence_opens_no_code_block(line):
+    # CommonMark: the info string of a backtick fence may not contain a backtick.
+    text = GOOD.replace("## Unreleased\n", f"## Unreleased\n\n{line}\n")
+    assert guard.problem(text, "0.6.0") is None
+
+
+def test_a_tilde_fence_may_have_backticks_in_its_info_string():
+    text = GOOD.replace("## Unreleased\n", "## Unreleased\n\n~~~ `x`\n")
+    message = guard.problem(text, "0.6.0")
+    assert message is not None and "never closed" in message
+
+
+def test_a_heading_inside_a_code_block_that_is_never_closed_is_pointed_at():
+    text = GOOD.replace("## Unreleased\n", "## Unreleased\n\n```\nAn example left open.\n")
+    message = guard.problem(text, "0.6.0")
+    assert message is not None
+    assert "line 8" in message and "line 5" in message and "never closed" in message
+    assert "Add the section" not in message and "no section" not in message
+
+
+def test_a_closed_code_block_holding_the_heading_is_still_an_example():
+    text = "# Changelog\n\n```\n## 0.7.0 (2026-11-13)\n\n- An example.\n```\n\n## 0.6.0 (2026-11-06)\n\n- Older.\n"
+    message = guard.problem(text, "0.7.0")
+    assert message is not None and "no section for 0.7.0" in message and "never closed" not in message
+
+
+@pytest.mark.parametrize(
+    ("opening", "not_closing", "closing"),
+    [("````", "```", "````"), ("```", "~~~", "```"), ("~~~", "```", "~~~~"), ("```", "```python", "```")],
+)
+def test_a_code_block_is_closed_only_by_a_matching_fence(opening, not_closing, closing):
+    block = f"{opening}\n{not_closing}\n## 0.7.0 (2026-11-13)\n\n- Inside the block.\n{closing}\n"
+    text = f"# Changelog\n\n{block}\n## 0.6.0 (2026-11-06)\n\n- Older.\n"
+    message = guard.problem(text, "0.7.0")
+    assert message is not None and "no section for 0.7.0" in message
+    assert guard.problem(text, "0.6.0") is None
+
+
+# --- versions compared as numbers ---------------------------------------------------------------------
+
+
+def test_versions_are_compared_as_numbers():
+    text = "# Changelog\n\n## 0.10.0 (2026-11-13)\n\n- A fix.\n\n## 0.9.0 (2026-11-06)\n\n- Older.\n"
+    # 0.10.0 is above the last release 0.9.0, so it was written for this release.
+    message = guard.problem(text, "0.11.0", last_released="v0.9.0")
+    assert 'change its heading to "## 0.11.0' in message and "Add the section" not in message
+    # 0.10.0 is the last release: a new section is needed.
+    message = guard.problem(text, "0.11.0", last_released="v0.10.0")
+    assert "Add the section" in message and "change its heading" not in message
+
+
+def test_a_version_is_not_a_prefix_of_another():
+    text = "# Changelog\n\n## 0.10.0 (2026-11-13)\n\n- Something.\n"
+    message = guard.problem(text, "0.1.0")
+    assert message is not None and "no section for 0.1.0" in message
+    assert "is not in the form" not in message
+    assert guard.problem("# Changelog\n\n## 0.1.0 (2026-11-13)\n\n- Something.\n", "0.10.0") is not None
+
+
+# --- why the heading must change ----------------------------------------------------------------------
+
+
+def test_the_reason_a_feat_merged_is_given_only_when_the_version_grew():
+    message = guard.problem(BUMP_GREW, "0.7.0", last_released="v0.6.0")
+    assert "grew because a feat: merged" in message
+
+
+@pytest.mark.parametrize(("section", "computed"), [("0.6.0", "0.5.25"), ("0.7.0", "0.6.0")])
+def test_a_computed_version_below_the_section_says_so(section, computed):
+    text = f"# Changelog\n\n## {section} (2026-11-13)\n\n- Something.\n\n## 0.5.24 (2026-11-06)\n\n- Older.\n"
+    for last in ("v0.5.24", None):
+        message = guard.problem(text, computed, last_released=last)
+        assert f'change its heading to "## {computed} (YYYY-MM-DD)"' in message
+        assert "grew" not in message and "feat:" not in message
+        assert f"{computed}, is lower than the section written, {section}" in message

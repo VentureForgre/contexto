@@ -207,12 +207,162 @@ def test_no_step_may_fail_and_let_the_job_go_on():
     for job in ("request", "release", "reattach", "pypi"):
         for function in ("always()", "failure()", "cancelled()"):
             assert function not in _steps(job), (job, function)
-    step_conditions = set(re.findall(r"^        if: (.*)$", _steps("release") + _steps("pypi"), flags=re.MULTILINE))
-    assert step_conditions == {
-        "steps.plan.outputs.released == 'true'",
-        "steps.plan.outputs.released == 'true' && hashFiles('dist/SHA256SUMS') != ''",
-        "steps.plan.outputs.upload_count != '0'",
-    }
+    assert not re.search(r"^\s*set \+", CODE, flags=re.MULTILINE)
+    assert "set +" not in CODE
+
+
+def _step_list(job):
+    """A job's steps, each as its lines without the indentation (comments already stripped)."""
+    steps = []
+    for line in _steps(job).splitlines()[1:]:
+        if line.startswith("      - "):
+            steps.append([line.strip()])
+        elif line.strip() and steps:
+            steps[-1].append(line.strip())
+    return steps
+
+
+def _step(job, name):
+    matches = [step for step in _step_list(job) if f"name: {name}" in step[0]]
+    assert len(matches) == 1, (job, name)
+    return matches[0]
+
+
+def _conditions(job):
+    """(step's first line, its `if`) for every step of `job` that has one."""
+    return [
+        (step[0], line.removeprefix("if: "))
+        for step in _step_list(job)
+        for line in step
+        if line.startswith("if: ")
+    ]
+
+
+RELEASED = "steps.plan.outputs.released == 'true'"
+
+
+def test_each_jobs_step_conditions_are_exactly_the_expected_ones():
+    # Per job: a condition copied into the wrong job names another job's step, is always false
+    # there, and switches the step off without a sound.
+    assert [condition for _, condition in _conditions("release")] == [
+        RELEASED, RELEASED, RELEASED, f"{RELEASED} && hashFiles('dist/SHA256SUMS') != ''", RELEASED, RELEASED,
+    ]
+    first = [step[0] for step in _step_list("release")]
+    unconditional = [name for name in first if name not in dict(_conditions("release"))]
+    assert unconditional == [
+        "- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "- uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7",
+        "- name: Put the pinned Python first on PATH for the build",
+        "- name: Compute the next version from Conventional Commits",
+    ]
+    assert _conditions("reattach") == [
+        ("- name: Attest the build provenance of the rebuilt sdist and wheel", "hashFiles('dist/SHA256SUMS') != ''"),
+    ]
+    assert _conditions("pypi") == [("- name: Upload to PyPI by trusted publishing", "steps.plan.outputs.upload_count != '0'")]
+    for job in ("disabled", "request", "pypi-disabled"):
+        assert _conditions(job) == [], job
+
+
+def test_every_run_block_is_bash_with_errexit():
+    # The default shell of a run block is `bash -e {0}`. A `shell:` key or a `defaults:` block could
+    # drop -e, and then a step's result is only that of its last command.
+    assert not re.search(r"^\s*(- )?shell:", CODE, flags=re.MULTILINE)
+    assert not re.search(r"^\s*defaults:", CODE, flags=re.MULTILINE)
+
+
+def test_the_concurrency_block_and_the_pypi_timeout_are_as_expected():
+    # A second dispatch waits; it never cancels a release between the tag push and the upload.
+    lines = CODE.splitlines()
+    start = lines.index("concurrency:")
+    assert lines[start : start + 3] == ["concurrency:", "  group: release", "  cancel-in-progress: false"]
+    assert _section(CODE, "concurrency").strip().splitlines() == ["group: release", "  cancel-in-progress: false"]
+    assert re.findall(r"^    timeout-minutes: (.*)$", JOBS["pypi"], flags=re.MULTILINE) == ["20"]
+
+
+def test_the_pypi_disabled_script_line_by_line():
+    assert _step("pypi-disabled", "Report that PyPI publishing is off") == [
+        "- name: Report that PyPI publishing is off",
+        "env:",
+        "ACTION: ${{ inputs.action }}",
+        f"TAG: {TAG_EXPRESSION}",
+        "run: |",
+        'why="PyPI publishing is off: the repository variable PYPI_PUBLISH_ENABLED is not set to true."',
+        'how="To turn it on, follow docs/pypi-publishing.md; then run this workflow with action=publish and tag $TAG."',
+        'if [ "$ACTION" = publish ]; then',
+        'echo "::error::$why $TAG was not published. $how"',
+        "exit 1",
+        "fi",
+        'echo "::notice::$why $TAG is on GitHub Releases only. $how"',
+    ]
+    assert len(_step_list("pypi-disabled")) == 1
+
+
+def test_the_pypi_jobs_checkout_download_and_tool_check_line_by_line():
+    steps = _step_list("pypi")
+    assert steps[0] == [
+        "- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "with:",
+        "fetch-depth: 0",
+        "persist-credentials: false",
+    ]
+    assert steps[1] == [
+        "- uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7",
+        "with:",
+        'version: "0.13.7"',
+        "enable-cache: false",
+    ]
+    # No pipes: a run block has no pipefail, so `gh --version | head -1` would pass without gh.
+    assert _step("pypi", "Check that gh, uv, python3 and sha256sum are on the runner") == [
+        "- name: Check that gh, uv, python3 and sha256sum are on the runner",
+        "run: |",
+        "gh --version",
+        "uv --version",
+        "python3 --version",
+        "sha256sum --version",
+    ]
+    assert _step("pypi", "Download the wheel, sdist and checksums from the GitHub Release") == [
+        "- name: Download the wheel, sdist and checksums from the GitHub Release",
+        "env:",
+        "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+        "run: |",
+        'mkdir "$RUNNER_TEMP/pypi-dist"',
+        'gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/pypi-dist" \\',
+        "--pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS",
+        'ls -l "$RUNNER_TEMP/pypi-dist"',
+    ]
+
+
+def test_the_scripts_run_with_an_isolated_python_and_the_guard_gets_the_last_release():
+    calls = re.findall(r"python3( [^.\n]*)\.github/scripts/", CODE)
+    assert calls and set(calls) == {" -I "}, calls
+    assert JOBS["pypi"].count("python3 -I .github/scripts/pypi-publish.py ") == 3
+    guard = _step("release", "Check that the changelog has a section for this version")
+    assert guard[-1] == 'run: python3 -I .github/scripts/changelog-check.py "$TAG" --last-released "$LAST"'
+    assert "LAST: ${{ steps.plan.outputs.last }}" in guard
+    assert 'echo "last=$last" >> "$GITHUB_OUTPUT"' in JOBS["release"]
+
+
+def test_the_release_and_reattach_jobs_build_with_the_same_pinned_python():
+    # release-build.sh repacks the sdist with the python3 first on PATH; the sdist's bytes can depend
+    # on that Python's version.
+    pin = _step("release", "Put the pinned Python first on PATH for the build")
+    assert pin == _step("reattach", "Put the pinned Python first on PATH for the build")
+    assert pin == [
+        "- name: Put the pinned Python first on PATH for the build",
+        "run: |",
+        "uv python install --no-bin 3.12",
+        "python=$(uv python find --managed-python 3.12)",
+        'mkdir "$RUNNER_TEMP/build-python"',
+        'ln -s "$python" "$RUNNER_TEMP/build-python/python3"',
+        'echo "$RUNNER_TEMP/build-python" >> "$GITHUB_PATH"',
+        '"$RUNNER_TEMP/build-python/python3" --version',
+    ]
+    for job in ("release", "reattach"):
+        names = [step[0] for step in _step_list(job)]
+        assert names[1].startswith("- uses: astral-sh/setup-uv@") and names[2] == pin[0], job
+        assert 'python-version: "3.12"' in _step_list(job)[1], job
+    assert JOBS["reattach"].index(pin[0]) < JOBS["reattach"].index("bash .github/scripts/release-build.sh")
+    assert JOBS["release"].index(pin[0]) < JOBS["release"].index("--no-commit --tag --push")
 
 
 def test_the_pypi_job_runs_after_the_release_job_and_never_after_a_cancel():
@@ -271,13 +421,46 @@ def test_no_job_but_those_that_sign_gets_an_oidc_token():
         assert "environment" not in JOBS[job]
 
 
+# Keys and flags that would carry a credential. The workflow's own two: the gh token, and the
+# permission to request an OIDC token.
+ALLOWED_KEYS = {"GH_TOKEN", "id-token"}
+CREDENTIAL_KEY = re.compile(r"^\s*(?:- )?([\w-]*(?:password|passwd|token|username|secret|api[_-]?key)[\w-]*):", re.I)
+CREDENTIAL_WORD = re.compile(
+    r"--(?:password|token|username|user)\b|\b(?:TWINE_\w+|UV_PUBLISH_\w+|PYPI_\w*TOKEN\w*|__token__|keyring)\b", re.I
+)
+
+
+def _credentials(text):
+    """The credential-bearing keys and flags in the code of `text`; comments do not count."""
+    found = []
+    for line in _code(text).splitlines():
+        key = CREDENTIAL_KEY.match(line)
+        if key and key.group(1) not in ALLOWED_KEYS:
+            found.append(key.group(1))
+        found += CREDENTIAL_WORD.findall(line)
+    return found
+
+
 def test_there_is_no_pypi_token_or_password_anywhere():
     assert set(re.findall(r"secrets\.([A-Za-z0-9_]+)", TEXT)) == {"GITHUB_TOKEN"}
-    lowered = TEXT.lower()
-    for word in ("twine", "uv_publish_token", "uv_publish_password", "uv_publish_username", "password", "__token__",
-                 "pypi_token", "pypi_api", "--token", "--username", "keyring"):
-        assert word not in lowered, word
+    assert _credentials(TEXT) == []
     assert "secrets." not in JOBS["pypi"].replace("secrets.GITHUB_TOKEN", "")
+    assert "twine" not in CODE.lower()
+
+
+def test_the_credential_check_reads_keys_and_flags_not_prose():
+    assert _credentials("      # No API token or password is stored anywhere.\n      - name: no password here\n") == []
+    for line in (
+        "          UV_PUBLISH_PASSWORD: x",
+        "          password: ${{ secrets.X }}",
+        "            uv publish --token x",
+        "            uv publish --username __token__",
+        "          TWINE_USERNAME: x",
+        "          PYPI_API_TOKEN: x",
+        "          pypi-token: x",
+        "            uv publish --password=x",
+    ):
+        assert _credentials(line + "\n"), line
 
 
 def test_the_pypi_job_fetches_no_tool_at_run_time():
