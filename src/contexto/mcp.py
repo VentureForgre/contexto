@@ -3,8 +3,9 @@
 When the session has a project view (D69: ``store.project()`` is not None when the server starts),
 ``contexto_search`` takes ``scope: "project"`` and ``contexto_recall`` takes ``session``, which reach
 the pages of the project's earlier sessions, read-only (``store.search_earlier``,
-``store.earlier_session``, ``store.earlier_page``). Without one the tool list and every reply are what
-they were before D69.
+``store.earlier_session``, ``store.earlier_page``); a search also shows the lines each earlier session
+still had in view when it ended (its last ``retained.json``), which no page holds and recall cannot
+read. Without one the tool list and every reply are what they were before D69.
 
 Claude Code spawns ``contexto mcp --session S`` from the launcher's ``--mcp-config``. The server
 speaks JSON-RPC 2.0, one message per line on stdin and stdout, and serves both protocol eras:
