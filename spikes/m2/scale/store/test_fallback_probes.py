@@ -723,11 +723,14 @@ def test_a_later_run_reuses_the_store(run, small, capsys):
 
 def test_compare_prints_what_each_folder_is_and_two_runs_as_one_table(run, tmp_path: Path, capsys):
     folder, _ = run
-    after = tmp_path / "after"
+    before, after = tmp_path / "before", tmp_path / "after"
+    shutil.copytree(folder, before)
     shutil.copytree(folder, after)
     env = json.loads((after / "env.json").read_text(encoding="utf-8"))
-    env["quality"]["search_approximate"] = True
-    (after / "env.json").write_text(json.dumps({**env, "label": "after"}), encoding="utf-8")
+    for side, found in ((before, False), (after, True)):  # whatever the tree under test has
+        env["quality"]["search_approximate"] = found
+        (side / "env.json").write_text(json.dumps({**env, "label": side.name}), encoding="utf-8")
+    folder = before
     capsys.readouterr()
     assert fallback_bench.main(["--compare", str(folder), str(after)]) == 0
     table = capsys.readouterr().out
@@ -817,7 +820,7 @@ def test_one_part_run_again_keeps_the_other_parts_record(run, tmp_path: Path, sa
     # a latency part from another store size is named as such
     assert env["latency"]["queries"] == {str(SMALL): [list(q) for q in fallback_bench.latency_queries(
         SessionStore(home, f"d65-{SMALL}"))]}
-    for change, named in (({"sizes": [37]}, "store size"), ({"search_approximate": True}, "`search_approximate`"),
+    for change, named in (({"sizes": [37]}, "store size"), ({"search_approximate": not env["latency"]["search_approximate"]}, "`search_approximate`"),
                           ({"src_matches_commit": False}, "uncommitted changes under src/")):
         (out / "before" / "env.json").write_text(json.dumps({**env, "latency": {**env["latency"], **change}}),
                                                  encoding="utf-8")
@@ -825,8 +828,9 @@ def test_one_part_run_again_keeps_the_other_parts_record(run, tmp_path: Path, sa
                    if "were not measured on the same" in line]
         assert len(warning) == 1 and named in warning[0], (change, warning)
         assert "has no it" not in warning[0]
-    (out / "before" / "env.json").write_text(
-        json.dumps({**env, "latency": {**env["latency"], "search_approximate": True}}), encoding="utf-8")
+    (out / "before" / "env.json").write_text(json.dumps(  # the wording, whatever the tree under test has
+        {**env, "quality": {**env["quality"], "search_approximate": False},
+         "latency": {**env["latency"], "search_approximate": True}}), encoding="utf-8")
     assert "`search_approximate` (the quality part's store does not have it, the latency part's has it)" in \
         fallback_bench.summarize(out / "before")
     assert not safe_home.exists()
