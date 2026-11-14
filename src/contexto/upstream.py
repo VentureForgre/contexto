@@ -310,7 +310,8 @@ class SettingsFile(NamedTuple):
 
     data: dict | None  # its JSON object; None when the file is missing or could not be read
     problem: str | None  # why a file that is there could not be read, as "is ..."; else None
-    # For a file with a ``problem``: whether it might set a cloud-provider switch. False only for a file
+    # For a file with a ``problem``: whether it might set a cloud-provider switch. False for a file whose
+    # ``env`` is not an object (it holds no switch, and Claude Code loads nothing from it), and for one
     # that was read whole but is not valid JSON, and whose text neither names ``CLAUDE_CODE_USE_`` nor
     # holds a NUL byte (a wide encoding hides the name) or a ``\u`` escape that could spell it.
     may_name_provider: bool = True
@@ -323,19 +324,24 @@ def read_settings_file(path: Path) -> SettingsFile:
     device at that path is never read; at most ``SETTINGS_FILE_LIMIT`` bytes; decoded as UTF-8 with a
     byte order mark accepted, as Claude Code accepts one, and UTF-16LE read when it starts with its own
     byte order mark, as Claude Code reads it (both measured on 2.1.322, D70); parsed with
-    ``contexto.canonical.loads_bounded``.
+    ``contexto.canonical.loads_bounded``, as Claude Code parses it (measured on 2.1.322, PR #258): an
+    integer past Python's 4,300-digit limit is read, as JavaScript's Infinity (``_json_int``), and
+    ``NaN``, ``Infinity`` and ``-Infinity``, which are not JSON, make the file not valid JSON
+    (``_json_constant``).
 
     ``data`` is the file's JSON object. An empty or blank file, and a document that is not an object,
     give an empty object: nothing can be set there. A file that does not exist, a directory, and a
     file this user cannot open give ``SettingsFile(None, None)``: Claude Code runs as the same user
     and cannot read them either. A file that is there and that Contexto did not read gives
     ``problem``: it is not a regular file, it is larger than the limit, it cannot be read, or it is
-    not valid JSON for Python (not UTF-8, a syntax error, nested too deep). Such a file is not
+    not valid JSON (not UTF-8, a syntax error, nested too deep), or its ``env`` is there and is not
+    an object (Claude Code 2.1.322 then loads nothing from the file, PR #258: not its
+    ``apiKeyHelper`` either; only ``env``'s type is checked here). Such a file is not
     evidence that a setting is off, since Claude Code may read it differently; the cloud-provider
     guard refuses on it (``cloud_provider``) unless it was read whole, is not valid JSON, and its text
     could not name a switch (``may_name_provider``): Claude Code does not load a file with a comment,
-    a trailing comma or another syntax error (measured on 2.1.322, D70), so such a file turns no
-    switch on."""
+    a trailing comma or another syntax error (measured on 2.1.322, D70), or with ``NaN`` or an ``env``
+    that is not an object (PR #258), so such a file turns no switch on."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except (OSError, ValueError):  # missing, not permitted, a symlink loop, a name the system rejects
@@ -364,12 +370,35 @@ def read_settings_file(path: Path) -> SettingsFile:
         # Claude Code 2.1.322 loads UTF-8, with or without a byte order mark, and UTF-16LE that starts
         # with one (measured, D70); it does not load UTF-16BE, UTF-16LE without the mark, or UTF-32.
         text = raw[2:].decode("utf-16-le") if raw.startswith(b"\xff\xfe") else raw.decode("utf-8-sig")
-        data = loads_bounded(text) if text.strip() else {}
+        data = loads_bounded(text, parse_int=_json_int, parse_constant=_json_constant) if text.strip() else {}
     except (ValueError, RecursionError):  # UnicodeDecodeError and JSONTooDeepError are ValueErrors
-        # A NUL byte: a wide encoding, in which the switch's name is not the UTF-8 bytes looked for.
-        return SettingsFile(None, "is not valid JSON",
-                            PROVIDER_PREFIX.encode() in raw or b"\\u" in raw or b"\x00" in raw)
+        return SettingsFile(None, "is not valid JSON", _may_name_provider(raw))
+    if isinstance(data, dict) and "env" in data and not isinstance(data["env"], dict):
+        return SettingsFile(None, "has an env that is not a JSON object, so Claude Code loads nothing from it", False)
     return SettingsFile(data if isinstance(data, dict) else {}, None)
+
+
+def _may_name_provider(raw: bytes) -> bool:
+    """Whether a settings file's bytes could set a cloud-provider switch (``SettingsFile.may_name_provider``).
+    A NUL byte: a wide encoding, in which the switch's name is not the UTF-8 bytes looked for."""
+    return PROVIDER_PREFIX.encode() in raw or b"\\u" in raw or b"\x00" in raw
+
+
+def _json_int(text: str) -> int | float:
+    """A JSON integer as JavaScript reads it. Python refuses to convert more digits than
+    ``sys.get_int_max_str_digits()`` (4,300); any such number is past the largest double, which
+    JavaScript reads as Infinity, and Claude Code 2.1.322 loads the file (a 5,000-digit integer, PR
+    #258: its base URL got every request)."""
+    try:
+        return int(text)
+    except ValueError:
+        return float("-inf" if text.startswith("-") else "inf")
+
+
+def _json_constant(name: str) -> float:
+    """``NaN``, ``Infinity`` and ``-Infinity`` are not JSON. Python accepts them; Claude Code 2.1.322
+    loads nothing from a file that holds one (PR #258), so the file is not valid JSON here either."""
+    raise ValueError(f"{name} is not JSON")
 
 
 class SettingsFiles:
@@ -544,11 +573,16 @@ def claude_env_value(name: str, *, env: Mapping[str, str] | None = None, cwd: Pa
 # D70: with one of these on, Claude Code 2.1.322 sent every request to that provider's own endpoint
 # (ANTHROPIC_BEDROCK_BASE_URL, ANTHROPIC_VERTEX_BASE_URL, ANTHROPIC_FOUNDRY_BASE_URL,
 # ANTHROPIC_BEDROCK_MANTLE_BASE_URL, ANTHROPIC_AWS_BASE_URL) and none to ANTHROPIC_BASE_URL, not even
-# HEAD /api/hello: 0 of the requests of 5 runs with the value 1 and 4 more with true.
+# HEAD /api/hello: 0 of the requests of 5 runs with the value 1 and 4 more with true. The sixth,
+# CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD, is in the 2.1.318 and 2.1.322 programs with this provider name
+# and on no documentation page; on 2.1.318 (D64, spikes/m2/providers, zero spend), set to 1 in the
+# environment or in a project's env block, it sent every request to ANTHROPIC_GOOGLE_CLOUD_BASE_URL and
+# none through the proxy.
 CLOUD_PROVIDER_KEYS = {"CLAUDE_CODE_USE_BEDROCK": "Amazon Bedrock", "CLAUDE_CODE_USE_VERTEX": "Google Vertex AI",
                        "CLAUDE_CODE_USE_FOUNDRY": "Microsoft Foundry",
                        "CLAUDE_CODE_USE_MANTLE": "Amazon Bedrock (Mantle)",
-                       "CLAUDE_CODE_USE_ANTHROPIC_AWS": "Claude Platform on AWS"}
+                       "CLAUDE_CODE_USE_ANTHROPIC_AWS": "Claude Platform on AWS",
+                       "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "Claude Platform on Google Cloud"}
 PLACE_NAMES = {"env": "the process environment",
                "settings:user": "the env block of your Claude Code user settings "
                                 "(~/.claude/settings.json, or settings.json in $CLAUDE_CONFIG_DIR)",
@@ -574,18 +608,18 @@ def cloud_provider(*, env: Mapping[str, str] | None = None, cwd: Path | None = N
     ``claude_settings_order`` (the main checkout's and the folder's project files, and the user's) and
     the managed settings file (``managed``, by default ``managed_settings_path``; file-based managed
     settings only). Precedence between them is not applied and neither is the folder's trust state:
-    Claude Code does not apply every file Contexto can read (measured on 2.1.322: a file holding
-    ``NaN`` or a schema error, any project file under ``--setting-sources user``, a project file's
-    ``env`` in ``-p`` mode while ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is set), so a file that says
-    off cannot be trusted to win, and a project file can only add a refusal. The accepted cost is a
-    refusal Claude Code would not have needed: the environment says on and a file Claude Code does
-    apply says off, or a file it ignores says on.
+    Claude Code does not apply every file Contexto can read (measured on 2.1.322: a file with a
+    schema error such as a wrong-typed ``permissions``, any project file under ``--setting-sources
+    user``, a project file's ``env`` in ``-p`` mode while ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is
+    set), so a file that says off cannot be trusted to win, and a project file can only add a
+    refusal. The accepted cost is a refusal Claude Code would not have needed: the environment says
+    on and a file Claude Code does apply says off, or a file it ignores says on.
 
     A settings file that is there and that Contexto could not read (``read_settings_file``: not a
-    regular file, over the size limit, not valid JSON for Python) is reported in ``unread`` and also
-    refuses the launch. It is not evidence that a switch is off: Claude Code has no such limit and
-    may parse the file differently. A file that does not exist, and one this user cannot open, pass:
-    Claude Code cannot read them either.
+    regular file, over the size limit, not valid JSON) is reported in ``unread`` and also refuses the
+    launch, unless it cannot name a switch (``SettingsFile.may_name_provider``). It is not evidence
+    that a switch is off: Claude Code has no such limit and may parse the file differently. A file
+    that does not exist, and one this user cannot open, pass: Claude Code cannot read them either.
 
     Not covered: managed settings that are not in that file, and ``CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST``
     (the docs say Claude Code then ignores these switches in settings files; not measured, so a switch
