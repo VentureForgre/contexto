@@ -512,8 +512,9 @@ min_turn_room`, 113,000 at the defaults.
      result, not another request field) reaches it, or that text carries the index's "older pages
      omitted; use contexto_search" line, with N at least 1 and at most the number of store pages the
      text does not name, the whole turn left (no 40-character run of its prompt or of any of its
-     answers that no other turn shares, whitespace and Unicode format characters removed, is anywhere
-     in that text, plain-text documents included), and the
+     answers that is found in no other turn's text, with whitespace, Unicode format characters and
+     combining marks removed, is anywhere in that text, plain-text documents included; a text shorter
+     than 40 characters counts only as a whole text part), and the
      result is stored byte for byte in some page. An index past its budget lists only the newest pages,
      so a correct long session needs the second way (v0.5.24 with a 40-token index fails 6 requests
      without it). A missing prompt alone is not evidence that a turn was paged: an engine that trims,
@@ -525,8 +526,9 @@ min_turn_room`, 113,000 at the defaults.
      pages than the store holds unnamed (`omit_turns_n0`, `omit_turns_n99`). The rule does not catch
      every form: a turn cut to fewer than 40 characters of each prompt and answer, with the omission
      line, passes, as does the open case itself (`omit_turns`, tested as passing). A correct engine
-     whose turns share text (every prompt "continue", a common template or answer opener) is not
-     failed: runs another turn shares are not counted. What remains open: an engine that
+     whose turns share text (every prompt "continue", "yes" or "ok", a common template or answer
+     opener, a final answer "Done.", a later prompt quoting an earlier one) is not failed: a turn's
+     runs found in another turn's text are not counted, and a short text counts only whole. What remains open: an engine that
      drops an earlier turn whole, prompt included, and writes an omission line the store bears out
      passes rule 3 for that turn; that is what a turn-start rotation past the index budget does, and
      the results stay stored and searchable. `system` (Codex `instructions`) is not read for page ids:

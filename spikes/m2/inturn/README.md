@@ -77,8 +77,9 @@ The research note gives the measured run times and the load they were measured a
      exception is a result of an earlier turn whose call is gone from the request too: it is accounted
      for only when the text the model reads (text parts of messages, not tool results or other request
      fields) names where it went: a page id there reaches it, or the whole turn left (no 40-character
-     run of its prompt or of any of its answers, whitespace removed, is anywhere in that text), that
-     text carries the index's
+     run of its prompt or of any of its answers that is found in no other turn's text, with whitespace,
+     format characters and combining marks removed, is anywhere in that text; a shorter text counts
+     only as a whole text part), that text carries the index's
      "(N older pages omitted; use contexto_search" line with N at least 1 and at most the store pages it
      does not name, and the result is stored byte for byte.
    - `page_id`: the store page that holds them. `None` only when every call is one of Contexto's own

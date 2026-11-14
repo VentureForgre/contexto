@@ -412,9 +412,9 @@ WINDOW = 40  # characters: a turn is still in view when any window this long of 
 
 
 def _bare(text: str) -> str:
-    """``text`` without whitespace and Unicode format characters (zero-width spaces and joiners), so
-    neither can hide a turn that is still in view."""
-    return "".join(c for c in text if not c.isspace() and unicodedata.category(c) != "Cf")
+    """``text`` without whitespace, Unicode format characters (zero-width spaces and joiners) and
+    non-spacing or enclosing marks (a combining grapheme joiner), so none can hide a turn still in view."""
+    return "".join(c for c in text if not c.isspace() and unicodedata.category(c) not in ("Cf", "Mn", "Me"))
 
 
 def _windows(texts: tuple[str, ...]) -> set[str]:
@@ -430,6 +430,17 @@ def _windows(texts: tuple[str, ...]) -> set[str]:
             found.update(t[i:i + WINDOW] for i in range(0, len(t) - WINDOW + 1, step))
             found.add(t[-WINDOW:])
     return found
+
+
+def _turn_left(turn: int, texts: list[tuple[str, ...]], haystack: str, parts: set[str]) -> bool:
+    """Rule 3: whether turn ``turn`` (``texts[turn]`` is its prompt and answers) has left the request whose
+    bare text is ``haystack`` and whose bare text parts are ``parts``. Only the turn's own runs count: a run
+    found anywhere in another turn's text (a recurring short prompt, a template, a quote of an earlier
+    prompt) says nothing about which turn is there. A run shorter than the window (a whole short text such
+    as "ok" or "Done.") counts only when it is a whole text part of the request, not inside other text."""
+    others = [_bare(x) for t, own in enumerate(texts) if t != turn for x in own]
+    mine = [w for w in _windows(texts[turn]) if not any(w in other for other in others)]
+    return not any((w in parts) if len(w) < WINDOW else (w in haystack) for w in mine)
 
 
 def _estimate(events: list[dict]) -> tuple[int | None, int | None]:
@@ -569,8 +580,9 @@ class _Play:
         request as well can be, and only when the text the model reads names where it went: a page id
         in the request's own text (a text part of a message, not a tool result and not another request
         field) reaches it; or the whole turn left (no 40-character run of its prompt or of any of its
-        answers that no other turn shares, whitespace and format characters removed, is anywhere in that
-        text), that text
+        answers that is found in no other turn's text, whitespace, format characters and combining marks
+        removed, is anywhere in that text; a run shorter than 40 characters counts only as a whole text
+        part), that text
         carries the index's "(N older pages omitted; use contexto_search" line with N at least 1 and at
         most the number of store pages it does not name, and the result is stored byte for byte in some
         page. An index past its budget lists only the newest pages, so a correct long session needs the
@@ -591,13 +603,11 @@ class _Play:
         unlisted = sum(1 for name in self.page_names if name[:-5] not in named)
         omitted = any(1 <= int(n) <= unlisted for n in OMITTED.findall(texts))
         haystack = _bare(texts)
-        turns = {turn: _windows((actor.prompts[turn], *actor.answers.get(turn, ()))) for turn in range(len(actor.prompts))}
+        parts = {_bare(x) for x in texts.split("\0")}
+        turn_texts = [(actor.prompts[t], *actor.answers.get(t, ())) for t in range(len(actor.prompts))]
 
         def left(turn: int) -> bool:
-            # No run of the turn's own prompt or answers is in view. Runs the turn shares with another turn
-            # (a recurring short prompt, a template, a common opener) say nothing about which turn is there.
-            others = set().union(*(w for t, w in turns.items() if t != turn))
-            return not any(w in haystack for w in turns[turn] - others)
+            return _turn_left(turn, turn_texts, haystack, parts)
 
         accounted = sum(1 for call_id in gone if call_id in reached or (
             omitted and left(actor.call_turn[call_id]) and actor.results[call_id] in self.paged.get(call_id, ())))
