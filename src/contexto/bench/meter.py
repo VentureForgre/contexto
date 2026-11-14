@@ -24,6 +24,14 @@ things, and nothing else:
   the conversation) are removed, unless the arm is ``plain`` and the real upstream is a vendor's
   host, where Claude Code sends them without being asked.
 
+Request headers are forwarded as received, a repeated header as often as it came; a response with
+no body (a 204 or 304, or the answer to ``HEAD``) is relayed with none.
+
+To a vendor's host Claude Code also adds ``x-cc-context-compacted`` and ``x-cc-compaction-request``
+on its own (it gates them on the base URL being the vendor's, read in the 2.1.322 bundle). Through
+the meter the base URL is 127.0.0.1, so neither Claude Code arm sends them; the manifest's
+``arm_differences`` says so.
+
 What it records, for each ``POST /v1/messages`` that got a response: the arm, seed, repeat and model
 of the unit, the request's order in the unit, the script turn in flight (the arm sets ``Meter.turn``
 before it sends a turn), whether it is a main request, the input tokens by class and the output
@@ -31,13 +39,28 @@ tokens from the response's ``usage``, the HTTP status, and whether it carried ou
 reads the request body in memory for ``max_tokens`` and the presence of a tool list, and keeps
 nothing of it. ``count_tokens`` and every other path are forwarded and not recorded.
 
+Usage that cannot be read. When a 2xx response to a billed request ends without a usage the meter
+can read in full (an encoded body, a stream cut short before its final ``message_delta`` usage, a
+body that is not JSON), the vendor may still have billed up to the request's ``max_tokens``. The
+record then carries ``usage_unreadable: true`` and ``reserved_tokens``, the request's reservation,
+and the request counts as that reservation (or what was read, if more) everywhere: in the guard, in
+the unit's tokens and when a resumed run reads ``requests.jsonl`` (``record_tokens``). The guard
+never counts less than a request could have cost.
+
 ``Ledger`` is the spend guard of the whole run. Before a billed request is forwarded the meter
 reserves its worst case: the request's bytes at 1.5 bytes per token, a rate that overstates every
 content this benchmark sends, plus the request's ``max_tokens``. If what is spent, what is reserved
 by requests in flight and this reservation together would pass the budget, the request is not
 forwarded: the client gets a local error, ``Ledger.stop`` becomes ``"budget"`` and the run ends. So
 the metered tokens cannot pass the budget unless a request costs more than its reservation. The
-first 401 or 403 on a model path sets ``Ledger.stop`` to ``"auth"``.
+first 401 or 403 on a model path sets ``Ledger.stop`` to ``"auth"``; after that nothing more is
+forwarded, ``count_tokens`` included.
+
+Runaway caps, per unit. A model that keeps calling tools can spend a unit's share of the budget in
+one turn. Each meter can be given ``turn_request_cap`` (the most billed requests in one script turn)
+and ``token_cap`` (the most tokens the unit may count, with requests in flight reserved as above).
+The request that would pass either is refused locally, ``Meter.unit_stop`` becomes ``"runaway"`` and the
+arm stops that unit; the run goes on with the next.
 """
 
 from __future__ import annotations
@@ -69,6 +92,7 @@ AFFINITY_HEADER = "x-session-affinity"
 HINT_HEADERS = frozenset({CLASS_HEADER, COMPACTION_HEADER, "x-claude-code-agent-type",
                           "x-claude-code-context-compacted", "x-claude-code-prev-tool-durations"})
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+NO_BODY_STATUSES = (204, 304)
 TOKEN_CLASSES = ("uncached", "cache_write", "cache_read", "output")
 USAGE_FIELDS = {"uncached": "input_tokens", "cache_write": "cache_creation_input_tokens",
                 "cache_read": "cache_read_input_tokens", "output": "output_tokens"}
@@ -94,13 +118,28 @@ def upstream_kind(url: str) -> str:
     """How the manifest names an upstream: ``anthropic``, ``local`` (this machine) or ``custom``.
     Never the host name."""
     host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    try:  # as the socket layer resolves it, and as contexto.proxy.is_vendor_host reads it
+        host = host.encode("idna").decode("ascii").lower().rstrip(".") if host else host
+    except UnicodeError:
+        return "custom"
     if host == "anthropic.com" or host.endswith(".anthropic.com"):
         return "anthropic"
     return "local" if host in LOOPBACK_HOSTS else "custom"
 
 
 def record_tokens(record: dict[str, Any]) -> int:
-    return sum(int(record.get(name) or 0) for name in TOKEN_CLASSES)
+    """The tokens a record counts: its four classes, or for a response whose usage could not be read,
+    the request's reservation when that is more."""
+    counted = sum(int(record.get(name) or 0) for name in TOKEN_CLASSES)
+    if record.get("usage_unreadable"):
+        reserved = record.get("reserved_tokens")
+        if isinstance(reserved, int) and not isinstance(reserved, bool):
+            counted = max(counted, reserved)
+    return counted
+
+
+def record_input(record: dict[str, Any]) -> int:
+    return sum(int(record.get(name) or 0) for name in ("uncached", "cache_write", "cache_read"))
 
 
 class Ledger:
@@ -177,6 +216,8 @@ class _UsageReader:
     def __init__(self, content_type: str | None) -> None:
         self.sse = "text/event-stream" in (content_type or "").lower()
         self.usage: dict[str, int] = {}
+        self.started = False  # SSE: message_start carried a usage
+        self.final = False  # the final usage arrived: a message_delta usage, or a whole JSON body's
         self._buffer = bytearray()
 
     def feed(self, chunk: bytes) -> None:
@@ -201,9 +242,16 @@ class _UsageReader:
                 body = json.loads(self._buffer)
             except ValueError:
                 body = None
-            if isinstance(body, dict):
-                self._take(body.get("usage"))
+            if isinstance(body, dict) and isinstance(body.get("usage"), dict):
+                self._take(body["usage"])
+                self.started = self.final = all(
+                    isinstance(body["usage"].get(f), int) for f in ("input_tokens", "output_tokens"))
         self._buffer.clear()
+
+    @property
+    def complete(self) -> bool:
+        """Whether the usage read is the response's whole usage."""
+        return self.started and self.final
 
     def _event(self, raw: bytes) -> None:
         data = b"\n".join(line[5:].lstrip(b" ") for line in raw.splitlines() if line.startswith(b"data:"))
@@ -215,8 +263,14 @@ class _UsageReader:
             return
         if isinstance(payload, dict):
             message = payload.get("message")
-            self._take(message.get("usage") if isinstance(message, dict) else None)
-            self._take(payload.get("usage"))
+            start = message.get("usage") if isinstance(message, dict) else None
+            if isinstance(start, dict):
+                self._take(start)
+                self.started = self.started or isinstance(start.get("input_tokens"), int)
+            if isinstance(payload.get("usage"), dict):
+                self._take(payload["usage"])
+                if payload.get("type") == "message_delta" and isinstance(payload["usage"].get("output_tokens"), int):
+                    self.final = True
 
     def _take(self, usage: Any) -> None:
         if isinstance(usage, dict):
@@ -299,7 +353,8 @@ class Meter:
     """The pass-through of one unit. ``turn`` is the script turn in flight, set by the arm."""
 
     def __init__(self, upstream: str, ledger: Ledger, *, arm: str, seed: int, repeat: int, model: str,
-                 history: list[int], bound: int, attempt: int = 0) -> None:
+                 history: list[int], bound: int, attempt: int = 0, turn_request_cap: int | None = None,
+                 token_cap: int | None = None) -> None:
         from contexto.proxy import HOP_BY_HOP, is_vendor_host  # here, so importing this module stays light
 
         parts = urlsplit(upstream)
@@ -322,6 +377,14 @@ class Meter:
         self.unreachable = 0  # requests that got no response from the upstream
         self.classes_seen = False  # a request carried Claude Code's request-class header
         self.auth_status: int | None = None
+        self.turn_request_cap, self.token_cap = turn_request_cap, token_cap
+        self.unit_stop: str | None = None  # "runaway": this unit must end (the run goes on)
+        self.unit_stop_reason: str | None = None
+        self.stopped = threading.Event()
+        self.usage_unreadable = 0  # records whose usage could not be read, counted at their reservation
+        self._arrived: dict[int | None, int] = {}  # billed requests that reached the meter, per turn
+        self._unit_spent = 0
+        self._unit_reserved = 0
         self._count = 0
         self._lock = threading.Lock()
         self._in_flight = 0
@@ -368,14 +431,61 @@ class Meter:
             self._count += 1
             return self._count - 1
 
+    def turn_requests(self, turn: int | None) -> int:
+        """Billed requests that reached the meter while ``turn`` was in flight, refused ones included."""
+        with self._lock:
+            return self._arrived.get(turn, 0)
+
+    def halt(self, stop: str, reason: str) -> None:
+        """End this unit (not the run): every later billed request is refused."""
+        with self._lock:
+            if self.unit_stop is None:
+                self.unit_stop, self.unit_stop_reason = stop, reason
+        self.stopped.set()
+
+    def admit(self, turn: int | None, reserved: int) -> bool:
+        """Count a billed request and check the unit's caps; reserve ``reserved`` against the token cap.
+        False, with the unit stopped, when the request would pass a cap."""
+        with self._lock:
+            self._arrived[turn] = count = self._arrived.get(turn, 0) + 1
+            if self.unit_stop is not None:
+                return False
+            reason = None
+            if self.turn_request_cap is not None and count > self.turn_request_cap:
+                where = f"turn {turn + 1}" if turn is not None else "one turn"
+                reason = (f"{where} asked for more than {self.turn_request_cap:,} requests (the per-turn cap); "
+                          "the model kept calling tools")
+            elif self.token_cap is not None and self._unit_spent + self._unit_reserved + reserved > self.token_cap:
+                reason = (f"the unit would have passed its cap of {self.token_cap:,} tokens "
+                          f"({self._unit_spent:,} counted when the next request was refused)")
+            if reason is None:
+                self._unit_reserved += reserved
+                return True
+            self.unit_stop, self.unit_stop_reason = "runaway", reason
+        self.stopped.set()
+        return False
+
+    def settle(self, reserved: int, record: dict[str, Any] | None) -> None:
+        with self._lock:
+            self._unit_reserved -= reserved
+            if record is not None:
+                self._unit_spent += record_tokens(record)
+
     def summary(self) -> dict[str, Any]:
-        """Counts over this unit's records, for the manifest."""
+        """Counts over this unit's records, for the manifest. A compaction request carries the whole
+        context, so ``max_input`` and ``over_bound`` count it with the main requests; it is also
+        counted on its own."""
         with self._lock:
             records = list(self.records)
-        inputs = [r["uncached"] + r["cache_write"] + r["cache_read"] for r in records if r["main"]]
-        return {"requests": len(records), "max_input": max(inputs, default=0),
-                "over_bound": sum(1 for x in inputs if x > self.bound),
-                "tokens": sum(record_tokens(r) for r in records)}
+        sized = [record_input(r) for r in records if r["main"] or r["compaction"]]
+        compactions = [r for r in records if r["compaction"]]
+        return {"requests": len(records), "max_input": max(sized, default=0),
+                "over_bound": sum(1 for x in sized if x > self.bound),
+                "tokens": sum(record_tokens(r) for r in records),
+                "compaction_requests": len(compactions),
+                "compaction_tokens": sum(record_tokens(r) for r in compactions),
+                "compaction_max_input": max((record_input(r) for r in compactions), default=0),
+                "usage_unreadable": sum(1 for r in records if r.get("usage_unreadable"))}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -437,23 +547,36 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             self._local_error(400, "contexto bench meter: malformed request framing")
             return
+        if owner.ledger.stop == "auth":  # the credential was refused: nothing more goes out with it
+            self._local_error(400, "contexto bench: the run was stopped (the credential was refused)")
+            return
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         model_path = self.command == "POST" and path in (MESSAGES_PATH, COUNT_TOKENS_PATH)
         billed = self.command == "POST" and path == MESSAGES_PATH
         received = {k.lower(): v for k, v in self.headers.items()}
-        headers = {k: v for k, v in self.headers.items() if k.lower() not in owner.hop_by_hop}
+        # A list, not a dict: a header sent twice is forwarded twice.
+        headers = [(k, v) for k, v in self.headers.items() if k.lower() not in owner.hop_by_hop]
+        drop = set()
         if model_path:
-            headers = {k: v for k, v in headers.items() if k.lower() != "accept-encoding"}
-            headers["Accept-Encoding"] = "identity"
+            drop.add("accept-encoding")
         if not owner.forward_affinity:
-            headers = {k: v for k, v in headers.items() if k.lower() != AFFINITY_HEADER}
+            drop.add(AFFINITY_HEADER)
         if not owner.forward_hints:
-            headers = {k: v for k, v in headers.items() if k.lower() not in HINT_HEADERS}
+            drop |= HINT_HEADERS
+        headers = [(k, v) for k, v in headers if k.lower() not in drop]
+        if model_path:
+            headers.append(("Accept-Encoding", "identity"))
         reserved, record = 0, None
         if billed:
             shape = _shape(body, received.get("content-encoding"))
             reserved = math.ceil(shape["bytes"] / RESERVE_BYTES_PER_TOKEN) + shape["max_tokens"]
+            if not owner.admit(owner.turn, reserved):
+                with owner._lock:
+                    owner.refused += 1
+                self._local_error(400, "contexto bench: this unit was stopped (a runaway cap)")
+                return
             if not owner.ledger.reserve(reserved):
+                owner.settle(reserved, None)
                 with owner._lock:
                     owner.refused += 1
                 self._local_error(400, "contexto bench: the run was stopped (token budget or credential)")
@@ -477,11 +600,15 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             if billed:
                 if reached and record is not None:
+                    if record.pop("_unreadable", False):
+                        record["usage_unreadable"], record["reserved_tokens"] = True, reserved
                     with owner._lock:
                         owner.records.append(record)
+                        owner.usage_unreadable += int(bool(record.get("usage_unreadable")))
                 else:
                     with owner._lock:
                         owner.unreachable += 1
+                owner.settle(reserved, record if reached else None)
                 owner.ledger.settle(reserved, record if reached else None)
         # The client sees the response complete only now, after its record is counted and written:
         # Claude Code sends its next request at once, and the guard must already know this one's cost.
@@ -492,7 +619,8 @@ class _Handler(BaseHTTPRequestHandler):
             except OSError:
                 self.close_connection = True
 
-    def _relay(self, body: bytes, headers: dict[str, str], record: dict[str, Any] | None) -> tuple[bool, bytes]:
+    def _relay(self, body: bytes, headers: list[tuple[str, str]],
+               record: dict[str, Any] | None) -> tuple[bool, bytes]:
         """Forward one request and relay its response, except its last bytes: the chunk terminator, or
         the last chunk of a response with a Content-Length. Returns whether the upstream answered, and
         those bytes for the caller to write (empty when the relay failed)."""
@@ -505,7 +633,7 @@ class _Handler(BaseHTTPRequestHandler):
                 watch.attach(conn)
                 conn.putrequest(self.command, owner.base_path + self.path, skip_host=True, skip_accept_encoding=True)
                 conn.putheader("Host", owner.netloc)
-                for name, value in headers.items():
+                for name, value in headers:
                     conn.putheader(name, value)
                 if body or self.command in ("POST", "PUT", "PATCH"):
                     conn.putheader("Content-Length", str(len(body)))
@@ -525,8 +653,11 @@ class _Handler(BaseHTTPRequestHandler):
             if record is not None:
                 record["status"] = response.status
             length = response.getheader("Content-Length")
-            chunked = length is None and self.command != "HEAD"
-            tail, held = b"", b""
+            no_body = (self.command == "HEAD" or response.status in NO_BODY_STATUSES
+                       or 100 <= response.status < 200)
+            chunked = length is None and not no_body
+            encoded = (response.getheader("Content-Encoding") or "identity").strip().lower() != "identity"
+            tail, held, whole = b"", b"", False
             try:
                 self.send_response_only(response.status, response.reason)
                 for name, value in response.getheaders():
@@ -537,7 +668,7 @@ class _Handler(BaseHTTPRequestHandler):
                 elif length is not None:
                     self.send_header("Content-Length", length)
                 self.end_headers()
-                while chunk := response.read1(65536):
+                while not no_body and (chunk := response.read1(65536)):
                     if reader is not None:
                         reader.feed(chunk)
                     if chunked:
@@ -547,14 +678,18 @@ class _Handler(BaseHTTPRequestHandler):
                         held = chunk
                     self.wfile.flush()
                 tail = b"0\r\n\r\n" if chunked else held
+                whole = True
             except (OSError, http.client.HTTPException):
                 # The upstream ended early or the client left: the client gets no terminator, and the
                 # record keeps whatever usage had arrived.
                 self.close_connection = True
             if reader is not None and record is not None:
-                reader.finish()
+                if not encoded:
+                    reader.finish()
                 for name, field in USAGE_FIELDS.items():
                     record[name] = int(reader.usage.get(field) or 0)
+                if 200 <= response.status < 300 and (encoded or not whole or not reader.complete):
+                    record["_unreadable"] = True  # counted at its reservation (see the module's docstring)
             return True, tail
         finally:
             watch.close()

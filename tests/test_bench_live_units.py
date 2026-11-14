@@ -100,12 +100,16 @@ class Upstream(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         body = self.rfile.read(int(self.headers.get("content-length") or 0))
         Upstream.received.append({"method": self.command, "path": self.path, "body": body,
-                                  "headers": {k.lower(): v for k, v in self.headers.items()}})
+                                  "headers": {k.lower(): v for k, v in self.headers.items()},
+                                  "header_list": [(k.lower(), v) for k, v in self.headers.items()]})
         answer = Upstream.answer
         self.send_response(answer.get("status", 200))
         for name, value in answer.get("headers", {"content-type": "text/event-stream"}).items():
             self.send_header(name, value)
         chunks = answer.get("chunks", [])
+        if answer.get("no_body"):  # a 204: headers only
+            self.end_headers()
+            return
         if answer.get("length"):
             self.send_header("content-length", str(sum(len(c) for c in chunks)))
         else:
@@ -121,6 +125,9 @@ class Upstream(BaseHTTPRequestHandler):
                     self.wfile.write(b"5\r\n: hi\n\r\n")
                     self.wfile.flush()
                     time.sleep(0.02)
+            if answer.get("cut"):  # the upstream closes without ending the response
+                self.close_connection = True
+                return
             if not answer.get("length"):
                 self.wfile.write(b"0\r\n\r\n")
         except OSError:
@@ -150,6 +157,7 @@ def upstream():
     Upstream.gone = threading.Event()
     server = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
     server.daemon_threads = True
+    server.handle_error = lambda *args: None  # a client that left early is part of some tests
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
@@ -202,7 +210,9 @@ def test_the_meter_forwards_unchanged_and_records_counts_only(upstream, tmp_path
     assert [json.loads(x) for x in written.splitlines()] == [record]
     assert "SECRET" not in written and KEY not in written
     assert ledger.spent == 1019 and ledger.reserved == 0
-    assert meter.summary() == {"requests": 1, "max_input": 1007, "over_bound": 1, "tokens": 1019}
+    assert meter.summary() == {"requests": 1, "max_input": 1007, "over_bound": 1, "tokens": 1019,
+                               "compaction_requests": 0, "compaction_tokens": 0, "compaction_max_input": 0,
+                               "usage_unreadable": 0}
 
 
 def test_the_meter_classifies_requests_from_claude_codes_headers_or_the_tool_list(upstream, tmp_path):
@@ -303,7 +313,9 @@ def test_a_stream_is_relayed_as_it_arrives_and_a_client_that_leaves_ends_it_upst
     assert Upstream.gone.wait(5), "the upstream connection was not closed when the client left"
     meter.stop()
     assert [(r["status"], r["uncached"], r["cache_read"]) for r in meter.records] == [(200, 7, 900)]
-    assert ledger.spent == 1_008  # what had been reported before the stream was cut
+    # The stream was cut before its final usage: the request counts as its reservation, not the 1,008
+    # tokens reported so far (the 2-byte body and the default max_tokens).
+    assert meter.records[0]["usage_unreadable"] and ledger.spent == 2 + bench_meter.DEFAULT_MAX_TOKENS
 
 
 def test_an_unreachable_upstream_is_a_local_502_and_no_record(tmp_path):
@@ -315,6 +327,137 @@ def test_an_unreachable_upstream_is_a_local_502_and_no_record(tmp_path):
     meter.stop()
     assert status == 502 and b"upstream unreachable" in data
     assert meter.records == [] and meter.unreachable == 1 and ledger.spent == 0 and ledger.reserved == 0
+
+
+def raw_exchange(meter, request: bytes) -> bytes:
+    """Send ``request`` as is and return every byte of the answer, until the meter closes."""
+    sock = socket.create_connection(("127.0.0.1", int(meter.url.rsplit(":", 1)[1])), timeout=10)
+    sock.sendall(request)
+    data = b""
+    try:
+        while chunk := sock.recv(65536):
+            data += chunk
+    except TimeoutError:
+        pass
+    sock.close()
+    return data
+
+
+def test_a_header_sent_twice_is_forwarded_twice(upstream, tmp_path):
+    meter, _ = metered(upstream, tmp_path)
+    body = b'{"messages": []}'
+    request = (b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+               b"anthropic-beta: one\r\nanthropic-beta: two\r\nX-Api-Key: k\r\n"
+               b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
+    assert raw_exchange(meter, request).startswith(b"HTTP/1.1 200")
+    meter.stop()
+    (got,) = Upstream.received
+    assert [v for k, v in got["header_list"] if k == "anthropic-beta"] == ["one", "two"]
+    assert [v for k, v in got["header_list"] if k == "accept-encoding"] == ["identity"]
+
+
+def test_a_204_is_relayed_with_no_body_and_no_chunking(upstream, tmp_path):
+    meter, _ = metered(upstream, tmp_path)
+    Upstream.answer = {"status": 204, "no_body": True, "headers": {"x-kept": "yes"}}
+    data = raw_exchange(meter, b"POST /api/ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+                               b"Content-Length: 0\r\n\r\n")
+    meter.stop()
+    head, _, rest = data.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 204") and b"x-kept: yes" in head.lower()
+    assert b"transfer-encoding" not in head.lower() and rest == b""
+
+
+def test_the_upstream_kind_reads_an_international_name_as_the_socket_layer_does():
+    # A soft hyphen maps away under IDNA: the meter treats this host as the vendor's, so the manifest does too.
+    assert bench_meter.upstream_kind("https://api.anthro\xadpic.com") == "anthropic"
+    assert bench_meter.upstream_kind("https://API.ANTHROPIC.COM.") == "anthropic"
+    assert bench_meter.upstream_kind("https://xn--nxasmq6b.example") == "custom"
+    assert bench_meter.upstream_kind("https://\u2025.example") == "custom"  # cannot be normalised
+
+
+def test_after_a_refused_credential_nothing_more_is_forwarded(upstream, tmp_path):
+    meter, ledger = metered(upstream, tmp_path)
+    Upstream.answer = {"status": 401, "chunks": [b'{"type":"error"}'], "length": True}
+    assert post(meter, "/v1/messages", b"{}")[0] == 401 and ledger.stop == "auth"
+    Upstream.answer = {"chunks": [b'{"input_tokens": 1}'], "length": True}
+    assert post(meter, "/v1/messages/count_tokens", b"{}")[0] == 400
+    assert post(meter, "/v1/messages", b"{}")[0] == 400
+    assert post(meter, "/api/other", b"{}")[0] == 400
+    meter.stop()
+    assert len(Upstream.received) == 1
+
+
+@pytest.mark.parametrize("answer", [
+    {"chunks": [b"\x1f\x8b compressed bytes"], "headers": {"content-type": "text/event-stream",
+                                                          "content-encoding": "gzip"}},
+    {"chunks": USAGE_EVENTS[:1], "cut": True},  # the upstream closes after message_start
+    {"chunks": USAGE_EVENTS[:1]},  # it ends the response cleanly, but with no final usage
+    {"chunks": [b"not json"], "length": True, "headers": {"content-type": "application/json"}},
+], ids=["encoded", "cut", "no-final-usage", "not-json"])
+def test_a_2xx_whose_usage_cannot_be_read_counts_as_its_whole_reservation(upstream, tmp_path, answer):
+    body = json.dumps({"max_tokens": 5_000, "messages": [{"role": "user", "content": "x" * 300}]}).encode()
+    reserve = -(-len(body) * 2 // 3) + 5_000
+    meter, ledger = metered(upstream, tmp_path, budget=10 * reserve)
+    Upstream.answer = answer
+    try:
+        post(meter, "/v1/messages", body)
+    except (http.client.HTTPException, OSError):
+        pass  # a cut stream: the client sees it end early
+    meter.stop()
+    (record,) = meter.records
+    assert record["usage_unreadable"] is True and record["reserved_tokens"] == reserve
+    assert ledger.spent == reserve and ledger.reserved == 0
+    assert bench_meter.read_spent(tmp_path / "requests.jsonl") == reserve  # a resumed run counts it the same
+    assert meter.summary()["usage_unreadable"] == 1 and meter.summary()["tokens"] == reserve
+
+
+def test_a_response_with_its_whole_usage_is_not_marked_unreadable(upstream, tmp_path):
+    meter, ledger = metered(upstream, tmp_path)
+    post(meter, "/v1/messages", b"{}")
+    Upstream.answer = {"status": 529, "chunks": [b'{"type":"error"}'], "length": True}
+    post(meter, "/v1/messages", b"{}")  # not a 2xx: nothing was billed
+    meter.stop()
+    assert [r.get("usage_unreadable") for r in meter.records] == [None, None] and ledger.spent == 1_019
+
+
+def test_compaction_requests_count_in_the_largest_input_and_over_the_bound(upstream, tmp_path):
+    meter, _ = metered(upstream, tmp_path)  # bound 500; each answer reports 1,007 input tokens
+    big = sse({"type": "message_start", "message": {"usage": {"input_tokens": 3, "cache_creation_input_tokens": 0,
+                                                              "cache_read_input_tokens": 1_997}}},
+              {"type": "message_delta", "delta": {}, "usage": {"output_tokens": 50}}, {"type": "message_stop"})
+    post(meter, "/v1/messages", b"{}", {"x-claude-code-request-class": "main"})
+    Upstream.answer = {"chunks": big}
+    post(meter, "/v1/messages", b"{}", {"x-claude-code-request-class": "compaction"})
+    Upstream.answer = {"chunks": USAGE_EVENTS}
+    post(meter, "/v1/messages", b"{}", {"x-claude-code-request-class": "auxiliary"})
+    meter.stop()
+    summary = meter.summary()
+    assert (summary["max_input"], summary["over_bound"]) == (2_000, 2)  # the side request is not counted
+    assert (summary["compaction_requests"], summary["compaction_tokens"], summary["compaction_max_input"]) == (
+        1, 2_050, 2_000)
+    assert summary["tokens"] == 1_019 + 2_050 + 1_019
+
+
+def test_a_unit_that_asks_for_too_many_requests_in_one_turn_is_stopped(upstream, tmp_path):
+    meter, ledger = metered(upstream, tmp_path, turn_request_cap=3)
+    meter.turn = 0
+    assert [post(meter, "/v1/messages", b"{}")[0] for _ in range(4)] == [200, 200, 200, 400]
+    assert meter.unit_stop == "runaway" and "more than 3 requests" in meter.unit_stop_reason and ledger.stop is None
+    meter.turn = 1
+    assert post(meter, "/v1/messages", b"{}")[0] == 400  # the unit stays stopped
+    meter.stop()
+    assert len(Upstream.received) == 3 and meter.turn_requests(0) == 4 and meter.turn_requests(1) == 1
+
+
+def test_a_unit_that_would_pass_its_token_cap_is_stopped_and_the_run_is_not(upstream, tmp_path):
+    body = json.dumps({"max_tokens": 1_000, "messages": []}).encode()
+    reserve = -(-len(body) * 2 // 3) + 1_000
+    meter, ledger = metered(upstream, tmp_path, budget=10**9, token_cap=1_019 + reserve - 1)
+    assert post(meter, "/v1/messages", body)[0] == 200
+    assert post(meter, "/v1/messages", body)[0] == 400
+    meter.stop()
+    assert meter.unit_stop == "runaway" and "cap of" in meter.unit_stop_reason
+    assert ledger.stop is None and ledger.reserved == 0 and ledger.spent == 1_019 and len(Upstream.received) == 1
 
 
 def test_history_tokens_follow_the_scripts_own_estimate():
