@@ -778,11 +778,13 @@ A `count_tokens` request has a [`count_tokens`](#count_tokens) event in its plac
 - `over_bound`: true when the estimate of what was sent exceeds the bound. An
   [`over_bound`](#over_bound) event precedes it.
 - `degraded`: true when the request was sent in degraded mode.
-- `in_turn_thinking`: on each request inside a tool loop from an [`in_turn_batch`](#in_turn_batch)
-  on (D63), whether or not there was thinking to remove. Each batch marks a stretch, from the first
-  message it changed to the end of the request, whose thinking is removed. The conversation's next
-  rotation clears the stretches, and the field is absent until a batch marks one again (a batch
-  whose `rotation` has reason `in_turn` marks one on the same request). Counts of the thinking blocks
+- `in_turn_thinking`: on a request inside a tool loop while the epoch has a stretch whose thinking
+  in-turn paging removes (D63), whether or not there is thinking in it. A batch that stubs results or
+  folds rounds marks a stretch, from the first message it changed to the end of the request. A batch
+  that only pages earlier turns marks none. A rotation clears the stretches, and that includes a
+  batch's own `in_turn` rotation. So a batch with `results_stubbed` and `rounds_folded` both 0 leaves
+  the field off its request and the rest of the loop. A batch that pages turns after stubbing can do
+  the same. Counts of the thinking blocks
   in the messages from `k` on, with no content: `kept_before` (before the first stretch), `stripped`
   (removed: in a stretch, or in a message that already existed when the epoch began, as rule 2
   strips), `kept_between` (between two stretches) and `kept_after` (after the last one). All four
@@ -1680,7 +1682,8 @@ normally; only a killed launcher would leave Claude Code running and its tempora
 ## Service events
 
 `contexto serve` ([serve.md](serve.md)) writes these two in the log of each session it serves, as
-their own lines. Its engine's events go into the session's log as under `contexto run`, and so do
+their own lines. Its proxy's lines and its engine's events go into the session's log as under
+`contexto run`, and so do the MCP server's (`contexto mcp --serve`),
 [`affinity_salt_unavailable`](#affinity_salt_unavailable) and the exit-time
 [`mcp_tools_missing`](#mcp_tools_missing). The service's other events (its start and stop, the
 sessions it opens and closes, requests it refuses or cannot route) go to its own `serve.log`, not
