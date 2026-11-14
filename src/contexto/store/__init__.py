@@ -6,8 +6,9 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
 
 - ``pages/<page id>.json``: one immutable page per paged-out turn (see ``contexto.store.pages``).
   Search and the index read them through a per-process cache (``contexto.store.catalog``, D34).
-  ``search_earlier`` and ``earlier_page`` read the pages of the project's earlier sessions (D69),
-  without writing anything to those sessions (``contexto.store.project.EarlierPages``).
+  ``search_earlier`` and ``earlier_page`` read the pages of the project's earlier sessions (D69), and
+  ``search_earlier`` their last ``retained.json`` too, without writing anything to those sessions
+  (``contexto.store.project.EarlierPages``).
 - ``page.key``: the random per-store HMAC key for page ids. It never leaves the store.
 - ``ledger.jsonl`` (with ``ledger.lock`` and ``quarantine/``): the hash-chained session ledger.
   Opening a store repairs a crash-truncated tail and logs ``ledger_repaired``; other damage is
@@ -1110,7 +1111,8 @@ class SessionStore(LedgerOps):
 
     def search_earlier(self, query: str) -> EarlierSearch | None:
         """Search the earlier sessions of this session's project (``EarlierPages.search``: the newest
-        50, the best 3 pages of each with a match, newest session first); None when this session has no
+        50, the best 3 matches of each with one, its lines in view when it ended first, then its pages,
+        newest session first); None when this session has no
         project view. Strictly read-only in those sessions, and nothing about them is logged here."""
         project = self.project()
         return None if project is None else self._earlier.search(project, query)
