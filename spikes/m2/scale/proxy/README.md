@@ -707,9 +707,11 @@ What changed, in the harness only:
   Claude Code does: one for the session, one each for the first-request and 104-byte sends (two
   for the 104-byte sends since 2026-11-14; see "The 40 ms wait on Linux" below), one per client of
   the burst. A connection is opened before the request's clock starts, and a connect that fails
-  with EADDRNOTAVAIL is retried with a growing pause. The wait is 30 seconds in all for the run
-  (`run.PATIENCE`); until 2026-11-14 each connect had 30 seconds of its own, so a run on a machine
-  whose ports stayed used up took about 22 minutes to fail.
+  with EADDRNOTAVAIL is retried with a growing pause. The wait is 30 seconds of wall-clock time in
+  all for the run (`run.PATIENCE`): waits that overlap, as the burst's clients' do, count once, and
+  waits one after another add up. Until 2026-11-14 each connect had 30 seconds of its own, so a run
+  on a machine whose ports stayed used up took about 22 minutes to fail; for a while after that the
+  30 seconds were counted in thread-seconds, so 100 burst clients spent them in under half a second.
 - The fake upstream answers with `Connection: close` and closes first, so the TIME_WAIT of each of
   the proxy's upstream connections is on the upstream's listening port and holds no local port. The
   proxy reads each reply to its last chunk before either side closes, so what it does is unchanged.
@@ -748,8 +750,10 @@ only load on the ports, and no `test_launcher.py` failure was reproduced here.
 
 Reviewer B found that, once the driver kept its connections open, every request on GitHub's Ubuntu
 runners took about 41 ms more, whatever its size. macOS showed no such wait. **Finding: the wait is
-the proxy's.** It comes from how the proxy writes its responses, and a client that keeps its
-connection open to the proxy on Linux, as Claude Code does, meets it on every request.
+the proxy's, not the driver's** (issue [#284](https://github.com/VentureForgre/contexto/issues/284)).
+It comes from how the proxy writes its responses. [Inference] A client that keeps its connection
+open to the proxy on Linux, as Claude Code does, would meet it on every request; only the Python
+driver was measured.
 
 [Inference, from the code and the measurements below] The proxy's handler (`contexto.proxy._Handler`,
 a `BaseHTTPRequestHandler`) leaves Nagle's algorithm on, as `socketserver` does by default
@@ -780,10 +784,12 @@ run 43552340153 at 8e0dc259, on the four Ubuntu legs (Python 3.12 to 3.15, 4 CPU
 
 So about 40.5 ms of each request's added time on Ubuntu comes after the proxy has sent the
 response's headers, and it goes when the proxy's sockets have `TCP_NODELAY`. The fix belongs in the
-package (for example `disable_nagle_algorithm = True` on `_Handler`, or one write for the headers
-and the first chunk), which this PR does not change; it is recorded here for a separate issue.
-What it costs a real session was not measured: a real upstream's replies stream over seconds, and
-the wait is per response, not per chunk, in these measurements.
+package: `disable_nagle_algorithm = True` on `_Handler`. One write for the headers and the first
+chunk would remove only the first wait, since a later chunk written while an earlier one is not yet
+acknowledged can still be held. The harness does not change the package; issue
+[#284](https://github.com/VentureForgre/contexto/issues/284) records the fix. What it costs a real
+session was not measured: a real upstream's replies stream over seconds, and the fake upstream
+sends each reply at once, so whether the chunks of a stream wait as well was not tested.
 
 What the Ubuntu legs measure, before and after (Reviewer B's figures for the first two columns):
 

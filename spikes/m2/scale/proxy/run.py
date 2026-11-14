@@ -222,25 +222,34 @@ class Session:
 
 
 class ConnectPatience:
-    """The wait for a free local port that the connects of one run share (``CONNECT_PATIENCE_S`` in all).
-    A process starts with all of it (``run.py`` is one run per process), and ``short.measure`` calls
-    ``reset`` at the start of each run. The burst's clients take from it at once, so it holds a lock."""
+    """The wait for a free local port that the connects of one run share: ``CONNECT_PATIENCE_S`` of
+    wall-clock time in all. Waits that overlap count once, so the burst's clients, which wait at the
+    same time, each get the whole of what is left instead of a share of it, and waits one after another
+    add up. A process starts with all of it (``run.py`` is one run per process), and ``short.measure``
+    calls ``reset`` at the start of each run. The burst's clients take from it at once, so it holds a
+    lock. ``clock`` is for the tests."""
 
-    def __init__(self, seconds: float = CONNECT_PATIENCE_S) -> None:
+    def __init__(self, seconds: float = CONNECT_PATIENCE_S, clock: Any = None) -> None:
         self.seconds = seconds
-        self.left = seconds
+        self.clock = clock or time.monotonic
         self.lock = threading.Lock()
+        self.reset()
 
     def take(self, pause: float) -> float:
-        """Up to ``pause`` seconds of what is left (0 once it is spent), deducted before the caller sleeps."""
+        """How long to sleep, at most ``pause`` seconds (0 once the run's wait is spent). The time up to
+        the end of the waits already granted is free; only what goes past it is deducted."""
         with self.lock:
-            pause = max(0.0, min(pause, self.left))
-            self.left -= pause
-            return pause
+            now = self.clock()
+            covered = max(self.until, now)
+            extra = max(0.0, min(now + pause - covered, self.left))
+            self.left -= extra
+            self.until = covered + extra
+            return max(0.0, min(pause, self.until - now))
 
     def reset(self) -> None:
         with self.lock:
             self.left = self.seconds
+            self.until = float("-inf")  # the end of the waits granted so far
 
 
 PATIENCE = ConnectPatience()
@@ -257,7 +266,9 @@ class Client:
 
     Every connection has ``TCP_NODELAY`` set, so a request's headers and its body (two sends in
     ``http.client``) never wait for an ACK. ``http.client`` sets it too (in ``HTTPConnection.connect``, on
-    every Python CI runs); the driver sets it itself so its timings do not rest on that."""
+    every Python CI runs); the driver sets it itself so its timings do not rest on that. The 41 ms each
+    request waits on Linux is the proxy's, not the driver's: the proxy leaves Nagle on and writes a
+    response's headers and chunks separately (README.md, "The 40 ms wait on Linux"; issue #284)."""
 
     def __init__(self, port: int, timeout: float = 900) -> None:
         self.port, self.timeout = port, timeout
@@ -266,8 +277,9 @@ class Client:
 
     def connect(self) -> None:
         """Open a new connection. EADDRNOTAVAIL (no free local port) is retried with a growing pause, out of
-        the run's ``PATIENCE`` (``CONNECT_PATIENCE_S`` for all its connects together); once that is spent, or
-        on any other error, the error is raised at once."""
+        the run's ``PATIENCE`` (``CONNECT_PATIENCE_S`` of wall-clock time for all its connects together,
+        overlapping waits counted once); once that is spent, or on any other error, the error is raised
+        at once."""
         self.close()
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
         pause = 0.05
