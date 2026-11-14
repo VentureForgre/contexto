@@ -1770,7 +1770,7 @@ def test_a_room_under_min_turn_room_while_usage_is_missing_is_logged_once_per_tu
         cli.engine.observe_usage = lambda *args, **kwargs: []
     for turn in range(2):
         cli.prompt(f"Read every module, pass {turn}.")
-        cli.loop(70, lambda r: output(f"m-{turn}-{r}", RESULT))
+        cli.loop(70, lambda r, t=turn: output(f"m-{t}-{r}", RESULT))
     low = [(s, e) for s in cli.sent for e in s.events
            if e["event"] == "turn_room_low" and e.get("reason") == "usage_missing"]
     if usage:
