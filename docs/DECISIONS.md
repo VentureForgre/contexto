@@ -2704,6 +2704,89 @@ the owner's delegation. Open decisions are listed at the end with the options an
   so the next release follows v0.5.24. A backup of each release's notes, assets and tags is kept
   outside the repository. Old commits, pull request diffs and pull request comments still hold the
   hostname (D42).
+- **D68. The README is rewritten so a stranger can act on it in 30 seconds.** Claude, 2026-11-12,
+  under D0; docs only, no code and no contract rule changes. An audit of the README on main
+  (7d59e9b) found 772 lines, the headline number (52 of 54) first at line 57, the install command at
+  line 76, the statement that a subscription login is not a supported setup at line 511 (in the
+  FAQ), no latency figure, and no comparison with compaction, a 1M window or Claude Code's memory.
+  The README now opens with what Contexto does, three numbers with their limits, the install
+  command, `contexto run claude` and a recording, and says near the top who it is not for.
+  - **Three slices.** (1) PR #254 moved the reference sections into `docs/*.md` with an index
+    (`docs/README.md`) and a link check (`tests/test_docs_links.py`); the README went from 772 to
+    185 lines. (2) PR #259 adds the recording (`docs/assets/demo.svg`, its transcript `demo.txt`),
+    the request-size chart (`request-size-light.svg`, `request-size-dark.svg`) and the scripts that
+    make them (`spikes/readme/`). (3) This slice (PR #265) wrote the README (263 lines): the
+    first screen, who it is for and not for, a diagram, the comparison, what the user sees when it works and when it
+    fails, privacy, and a short limitations list. It moved the Results table and its cost paragraph
+    to `docs/results.md` and the full limitations list to `docs/limitations.md`, word for word, and
+    added the caveats below to both.
+  - **Claims policy.** A number appears with its limits (one session, one seed, measured or
+    modeled) and cites a record; nothing is shown that the tool did not print.
+    - Recall is presented as "no worse than full context on a scripted recall test", never as
+      better. In run #4 Contexto missed 2 probes and the baseline 7, none in common
+      (`docs/research/M2-acceptance-run4.md`, "Misses (ids only)"). The exact McNemar test on the 9
+      discordant probes gives p = 2 x (C(9,0) + C(9,1) + C(9,2)) / 2^9 = 2 x (1 + 9 + 36) / 512 =
+      0.18. On claude-opus-5-5 the baseline led, 54 against 53.
+    - Fewer input tokens are stated as fact (3,725,391 measured against 6,972,335, 46.6%). Cost is
+      stated as depending on the model and on cache hits. Run #3's cache-class counts
+      (`docs/research/M2-usage-savings-run3.md`, "By cache class": Contexto 88 uncached, 2,677,349
+      cache read, 1,047,954 cache write, 22,693 output; plain 48, 6,533,929, 438,358, 12,836) at
+      Haiku 5.5 base rates with no step cost $0.169 against $0.127 (34% more), and at Opus 5.5 rates
+      ($4 input, $20 output, $0.20 cache read, $5 cache write; `docs/research/M0-cost-model.md`,
+      "Prices and cache rules") $6.23 against $3.76 (66% more). The 49.7% saving exists because
+      Haiku 5.5 charges 5 times the rate over 100,000 tokens. With the baseline arm's two measured
+      cache misses, plain would cost more in both flat rows. The arithmetic is now in the record
+      ("The same token counts at other prices"), so the README cites a record, not its own sum.
+    - Claude Code's behaviour is quoted from its docs as fetched on 2026-11-12 (model-config,
+      context-window, memory, settings-reference). The README says that a session under about
+      967,000 tokens does not compact with or without Contexto, and names the one exception the
+      docs give: a conversation of 200,000 tokens or more left idle for about an hour on the
+      one-hour prompt cache is compacted by default (`idleCompaction`).
+  - **Calls made without the owner.**
+    - The `## Troubleshooting` heading stays in the README, because the program prints "See README,
+      Troubleshooting." (`toolcheck.py`) and "see README, 'contexto run'" (`launcher.py`), and
+      nothing under `src/` changes in a docs slice. The section points to
+      `docs/troubleshooting.md` and `docs/run-reference.md#contexto-run`.
+    - The link check is a pytest in the existing suite, not a new workflow.
+    - The diagram is Mermaid, which GitHub renders in both themes with no image file to keep.
+    - The chart is drawn from run #3's per-request CSV, the only run with a modeled full-history
+      size for every request. Its full-history line is the record's plain-run shape: turns 1 to 18
+      modeled, and for the six probe turns the baseline arm's measured `count_tokens` (435,590 to
+      438,406). The CSV's own probe-turn column, the "same request points" series that peaks at
+      493,902, is not plotted: the record says it overstates plain, because it carries the search
+      tool loops that only Contexto makes. Review of PR #259 found this.
+    - The recording is an animated SVG drawn by `spikes/readme/termsvg.py`, every row made only of
+      `<tspan>` pieces: WebKit (Safari, every iOS browser) stretched bare text beside a `<tspan>` to
+      the row's whole `textLength` and garbled the sizes. Review of PR #259 found this.
+    - The Python badge is static (3.12 to 3.15, from the classifiers and the CI matrix), because the
+      package is not on PyPI. The other two badges are CI on main and the licence.
+    - The README no longer has a `#results` anchor; `docs/faq.md` links `docs/results.md`. The
+      "What it includes" list left the README; each item is in a guide.
+    - The heading "Why not compaction, a 1M window or the memory tool?" keeps the words of the
+      owner's brief; the paragraph under it describes CLAUDE.md, auto memory and the API's memory
+      tool, each from its own docs page.
+    - The README is about 250 lines, not 200. Review asked for the subscription caveat before the
+      install command, one rule for who it is for, a plainer cost line, named runs, a definition of
+      a tool loop and a latency table; each added lines, and none was cut to reach a number.
+    - "Window budget" stays defined in the README although the README uses it once, because
+      `docs/mcp-tools.md` points to that definition.
+    - `docs/limitations.md` has five entries the moved list did not have (tool loops, recall is a
+      search, cost, latency, subscription logins), and the FAQ's cost answer says that cost depends
+      on the model.
+    - The recall bullet keeps the title "no worse than full context on a scripted recall test",
+      the owner's wording. A stranger-read review asked for "close to full context", because the
+      Opus run had full context one question ahead (54 against 53). The headline run had Contexto
+      ahead (52 against 47), and the Opus run is within the test's pass rule (within 2 overall, no
+      category more than 1 below), which the bullet now says.
+  - **Repository About box**, applied with `gh repo edit` on 2026-11-14, before this slice merged,
+    once both reviewers had approved the README it matches; no other repository setting changed.
+    Old values, to restore from: description "Long-running AI sessions and context management",
+    homepage empty, no topics. New description: "Local proxy that keeps each Claude Code and Codex
+    request under a fixed token bound, so the CLI does not reach its compaction point: old turns go
+    to disk word for word and the model searches them back." (Review changed "sessions" to "each
+    request": only each request is bounded.) New topics: `claude-code`, `codex`, `context-window`,
+    `compaction`, `context-management`, `llm-proxy`, `mcp`, `ai-agents`, `developer-tools`,
+    `python`, `anthropic`, `llm`.
 - **D70. `contexto serve`, gateway hint headers, and a cloud-provider guard.** Claude, 2026-11-12,
   under D0; contract change (Stack, Upstream resolution, main selection, the missing-tools and
   session-start checks, the `contexto run claude` checks). This entry is written in slices; the
@@ -2901,6 +2984,104 @@ the owner's delegation. Open decisions are listed at the end with the options an
     pending-call compaction whose key a side request used first was built in a test, not provoked
     with a real client. 2.1.322 is not in
     `TESTED_VERSIONS`: the routine of `docs/cli-updates.md` was not run on it here.
+
+- **D65. When no page holds every word, search returns approximate matches and says so.** Claude,
+  2026-11-14, under D0; contract change (`INSTRUCTIONS`, the `contexto_search` description and
+  `docs/milestones/M2-contexto-proxy.md`). Before, `contexto_search` and `contexto search` returned
+  nothing unless one paged-out turn held every word of the query (D34). An audit on 2026-11-12,
+  recorded in the work item's brief and not in this repository, found that 10 of 19 probe queries
+  missed on a small store: a paraphrase, a question, `refresh_token` for a page that says
+  `refreshToken`, a typo, one extra word, and two facts on two pages.
+
+  Now, when strict search has no hit, and in the tool nothing in the conversation still in view
+  matches either, a fallback runs. It has four steps, and a query can use several
+  ([docs/search.md](search.md)):
+  1. Stop words (89) and punctuation at the ends of a word are dropped.
+  2. A word written as an identifier (`_`, `-` or `.` inside, or camelCase) is compared with its
+     separators removed, so `refresh_token`, `refreshToken`, `refresh-token` and `refresh.token`
+     find each other. This does not apply to a number, a version or a date: `1.2` never finds `12`.
+  3. Pages are ranked by the inverse-document-frequency weight of the query words they hold. A page
+     is returned when it holds at least 30 percent of the query's weight. It is also returned,
+     whatever its share, when it holds a specific word (an identifier, a number, a path) that at
+     most half the pages hold. When the best page lacks some words, a second page that holds them
+     can follow it.
+  4. When no page holds a word of 6 to 40 letters as typed, one changed, added, dropped or swapped
+     letter is tolerated. Such a match counts at half weight, and the work is capped per query.
+
+  At most six distinct words are searched, the specific ones first. The tool shows 3 approximate
+  matches in detail and lists 10 more. `contexto search` shows up to `--limit` matches, at most 50.
+
+  Every reply says the matches are approximate. It names the words searched when some were dropped,
+  and under each page the words the page matched (`refresh_token as refreshToken` when the page
+  writes a word differently) and the ones it did not. `contexto search --json` (D64) carries the
+  same, with `approximate`, `searched`, and each hit's `matched` (including how each word matched)
+  and `missing`. The server `INSTRUCTIONS` and the tool description now describe this. The
+  standing-rule pinning wording that D51 measured is unchanged, and so is D41's open ranking text
+  cap.
+
+  The fallback runs only when strict search finds nothing, not when it finds "too few". A query
+  that some page holds every word of gets the same pages, in the same order, as before.
+  `tests/test_search_golden.py` holds this against ids and replies recorded at `b0e2dbc`, before
+  any fallback, and the acceptance runs depend on it. The cost is a stated limit: for 8 of the 192
+  probes, strict search returns pages without the expected one, so the fallback never runs. Six of
+  them are paraphrases in common words, such as `staging database port` against a page that says
+  "staging DB port", and two add a word that some other page holds. A "fewer than 3 hits" trigger
+  would reach at most the 2 of these 8 that strict search answers with one page (the other six get
+  7 to 25 pages), and it would change strict results.
+
+  It keeps to D34 in all but one place: no embeddings, no model call, no new dependency, and the
+  same store and query always give the same result. The exception is the typo step. D34 records
+  the owner's ruling against fuzzy matching ("not RAG"), which is why it rejected stemming. The
+  typo step is fuzzy matching for one letter only (`servers` finds `server`), and the brief asked
+  for it. It applies only to a word that no page holds as typed, so it never changes a strict
+  result.
+
+  Measured at zero spend on the 6,000-page synthetic store with
+  `spikes/m2/scale/store/fallback_bench.py`. The 192 probes are in `fallback_probes.py` (#266,
+  `a5ffbaa`), and the results are under `spikes/m2/scale/store/results/d65/`. The after run was at
+  `045cd599`, a local merge whose `src/` is #267 at `5280096`. The quality part was run again at
+  #267's merged head and gave the same rows.
+  Recall at 3, before and after (at 10 where it differs):
+
+  | class | probes | before | after |
+  |---|---:|---:|---:|
+  | exact | 15 | 15 | 15 |
+  | identifier | 23 | 0 | 20 (at 10: 21) |
+  | paraphrase | 42 | 0 | 34 |
+  | question | 30 | 0 | 26 |
+  | typo | 30 | 0 | 22 |
+  | extra word | 26 | 0 | 24 |
+  | two-page, both pages | 10 | 0 | 8 (at 10: 9) |
+
+  For the two-page class, either page is in the top 3 for 10 of 10. False hits on the 16 queries
+  that should find nothing: 0 before, 0 after. The probes are split into a half the rules were tuned
+  on and a held-out half. The held-out half scores lower on paraphrases (15 of 21 against 19 of 21)
+  and on two-page queries (3 of 5 against 5 of 5), higher on identifiers (12 of 12 against 8 of 11),
+  and the same on the rest. The results summary gives both halves.
+
+  Latency was timed through an MCP child over stdio, tree against a baseline child running `main`
+  at `ef15af03` in the same passes: 4 passes, medians, at load averages of 4.7 to 13.
+  - **Queries with a strict hit:** 0.26 to 0.42 s on both sides (ratio 1.00 to 1.01).
+  - **First search of a process:** 1.87 s against 1.85 s.
+  - **Queries strict search misses:** 0.63 to 1.43 s, against 0.26 to 0.59 s for the empty answer
+    they got before. By pass, that is 2.2 to 3.7 times; paraphrase is the costliest at 3.4 to 3.7.
+
+  The brief asked to keep latency in the audit's range: 0.13 to 0.25 s, and 0.9 s for a first
+  search. Strict hits and misses are both above it here, but the audit ran on a small store, so its
+  seconds cannot be compared with these. At 6,000 pages, D41 measured strict queries at 0.22 to
+  0.37 s and a first search at 1.49 s on an idle machine. Against those, strict hits here are 1.12 to
+  1.17 times idle (the before run: 1.15 to 1.23). A miss now does work: up to about 1.4 s at this
+  load, still under the first search of a process. The misses are the part that moved: 2.2 to 3.7
+  times what they cost before. That is outside the "same range" the brief asked for. It is accepted
+  because the cost lands only on queries that used to return nothing.
+
+  Options considered:
+  - **Falling back on "too few" hits:** rejected, for the reason above.
+  - **Returning every page that holds any word:** rejected. It gives false hits on queries that
+    should find nothing.
+  - **An edit distance over every word:** rejected. It costs too much at 6,000 pages and matches
+    short words falsely.
+  - **General stemming:** rejected by D34.
 
 - **D66. `contexto bench`: a benchmark an outsider can run, with plain Claude Code as an arm.**
   Claude, 2026-11-14, under D0; no contract change (the proxy and the launcher are unchanged). An

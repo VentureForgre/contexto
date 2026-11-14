@@ -14,6 +14,7 @@ import os
 
 from contexto.commands._common import EXIT_OK, add_session_option, fail, say_session
 from contexto.paths import contexto_home
+from contexto.stats import session_faults
 from contexto.store import SessionNotFoundError, SessionStore
 from contexto.store.ledger import LedgerError
 from contexto.store.pinned import GROUPS, pinned_items, render_state
@@ -29,7 +30,8 @@ def register(subparsers) -> None:
                     "list of records, newest first, with id, kind, body, created_at, owner, topic, stale and "
                     "conflict), conflicts (topic and record_ids), staleness_checked, and pages (the number "
                     "of turns paged out; null, with the error on stderr and exit 1, when they cannot be "
-                    "listed). stale is null when staleness_checked is false.")
+                    "listed), and faults (the store faults of the latest run, the object `contexto stats --json` "
+                    "gives under that key, docs/stats.md). stale is null when staleness_checked is false.")
     add_session_option(parser)
     form = parser.add_mutually_exclusive_group()
     form.add_argument("--raw", action="store_true",
@@ -48,7 +50,7 @@ def run(args: argparse.Namespace) -> int:
     say_session(session_id, how)
     store = SessionStore.open_existing(home, session_id)
     if args.json:
-        return run_json(store)
+        return run_json(store, home)
     try:
         if args.raw:
             print(store.state_text())
@@ -69,6 +71,9 @@ def run(args: argparse.Namespace) -> int:
               f"`contexto search --session {session_id} WORDS`.")
     else:
         print("No turns paged out yet.")
+    faults = session_faults(home, session_id)  # D64: a store that stopped paging in the latest run, and what to do
+    for message in faults["messages"]:
+        print(f"\n{'Warning' if faults['degraded']['now'] else 'Note'}: {message[0].upper()}{message[1:]}")
     return EXIT_OK
 
 
@@ -84,11 +89,13 @@ def page_count(store: SessionStore) -> int:
 JSON_GROUPS = dict(zip(GROUPS, ("open_obligations", "active_decisions", "verified_facts"), strict=True))
 
 
-def run_json(store: SessionStore) -> int:
+def run_json(store: SessionStore, home) -> int:
     """``state --json`` (D64): the records the text view lists, in its groups and order, with each record's
     text as it was pinned, and the page count. A ledger that cannot be read prints nothing on stdout; a
     pages directory that cannot be listed gives ``"pages": null``, the error line and exit 1, as
-    ``sessions show --json`` reports its page list."""
+    ``sessions show --json`` reports its page list. ``faults`` is the object ``contexto stats --json`` gives
+    under the same key (``contexto.stats.session_faults``): what made the store stop paging in the latest run,
+    whether it still is, and what to do."""
     session_id = store.session_id
     try:
         root = store.workdir()
@@ -108,5 +115,6 @@ def run_json(store: SessionStore) -> int:
         pages, unreadable = None, f"the pages of session {session_id} cannot be read: {e}"
     conflicts = [{"topic": c.topic, "record_ids": list(c.record_ids)} for c in state.conflicts]
     print(json.dumps({"session": session_id, "pinned": pinned, "conflicts": conflicts,
-                      "staleness_checked": root is not None, "pages": pages}, indent=2, sort_keys=True))
+                      "staleness_checked": root is not None, "pages": pages,
+                      "faults": session_faults(home, session_id)}, indent=2, sort_keys=True))
     return fail(unreadable) if unreadable else EXIT_OK

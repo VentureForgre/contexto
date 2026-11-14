@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 
@@ -24,6 +25,16 @@ def _mode(tmp_path, monkeypatch, name: str, source: str) -> None:
     monkeypatch.delitem(sys.modules, f"contexto.bench.modes.{name}", raising=False)
 
 
+def _only_script_only(tmp_path, monkeypatch) -> None:
+    """A build whose only mode is ``--script-only``, whichever modes this checkout has: the modes package
+    is searched in a directory that holds that one module. The tests of discovery itself start from it,
+    so they say the same thing as more modes are added to the package."""
+    installed = tmp_path / "installed-modes"
+    installed.mkdir()
+    shutil.copy(script_only.__file__, installed / "script_only.py")
+    monkeypatch.setattr(modes, "__path__", [str(installed)])
+
+
 @pytest.fixture(autouse=True)
 def _forget_test_modes():
     yield
@@ -34,12 +45,14 @@ def _forget_test_modes():
 # Without a mode
 
 
-def test_bench_without_a_mode_says_which_modes_this_build_has(capsys):
+def test_bench_without_a_mode_says_which_modes_this_build_has(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     assert cli.main(["bench"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.strip() == ("contexto bench: error: this build has no live run; the modes it has are "
-                                    "--script-only")
+    # The list is every mode installed, so it grows as modes are added; --script-only is always one.
+    assert captured.err.startswith("contexto bench: error: this build has no live run; the modes it has are ")
+    assert "--script-only" in captured.err.strip().split("the modes it has are ")[1].split(", ")
 
 
 def test_bench_is_listed_and_documents_its_options(capsys):
@@ -224,20 +237,25 @@ DEFAULT_MODE = (
 
 
 def test_a_mode_is_added_by_adding_a_module(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_hello", FLAG_MODE)
     (tmp_path / "_private.py").write_text("raise RuntimeError('never imported')\n", encoding="utf-8")
     (tmp_path / "t_notes.py").write_text("NOT_A_MODE = True\n", encoding="utf-8")  # no FLAG: skipped
-    assert [bench.mode_name(m) for m in bench.discover()] == ["script-only", "t-hello"]
+    names = [bench.mode_name(m) for m in bench.discover()]
+    assert "script-only" in names and "t-hello" in names and names == sorted(names)
+    assert "t-notes" not in names and not any("private" in name for name in names)
     assert cli.main(["bench", "--t-hello", "you", "--seed", "5"]) == 7
     assert capsys.readouterr().out == "hello you 5 v2\n"
     with pytest.raises(SystemExit):
         cli.main(["bench", "--help"])
     assert "t-hello mode" in capsys.readouterr().out
     assert cli.main(["bench"]) == 2
-    assert "--script-only, --t-hello" in capsys.readouterr().err
+    listed = capsys.readouterr().err.strip().split("the modes it has are ")[1].split(", ")
+    assert "--script-only" in listed and "--t-hello" in listed
 
 
 def test_the_default_mode_runs_when_no_mode_flag_is_given(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_live", DEFAULT_MODE)
     assert cli.main(["bench", "--bound", "9000"]) == 0
     assert capsys.readouterr().out == "live m-1 9000\n"
@@ -247,6 +265,7 @@ def test_the_default_mode_runs_when_no_mode_flag_is_given(tmp_path, monkeypatch,
 
 
 def test_exactly_one_mode_runs(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_hello", FLAG_MODE)
     assert cli.main(["bench", "--script-only", "--t-hello", "you", "--out", str(tmp_path / "out")]) == 2
     captured = capsys.readouterr()
@@ -278,6 +297,7 @@ OWN_DEFAULT_MODE = (
 
 
 def test_a_modes_own_option_is_refused_without_its_mode(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_live", OWN_DEFAULT_MODE)
     (tmp_path / "t_replay.py").write_text(OWN_FLAG_MODE, encoding="utf-8")
     # The replay mode's option without --t-replay would otherwise start the live run.
@@ -328,6 +348,7 @@ THIEF_MODE = (
 ])
 def test_a_mode_that_lists_an_option_it_did_not_add_is_a_mode_bug(tmp_path, monkeypatch, capsys, name, listed,
                                                                     says):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_live", OWN_DEFAULT_MODE)
     (tmp_path / "t_replay.py").write_text(OWN_FLAG_MODE, encoding="utf-8")
     (tmp_path / f"{name}.py").write_text(THIEF_MODE.replace("LISTED", repr(listed)), encoding="utf-8")
@@ -344,6 +365,7 @@ def test_a_mode_that_lists_an_option_it_did_not_add_is_a_mode_bug(tmp_path, monk
 
 
 def test_two_default_modes_are_refused(tmp_path, monkeypatch, capsys):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_live", DEFAULT_MODE)
     (tmp_path / "t_other.py").write_text(DEFAULT_MODE, encoding="utf-8")
     assert cli.main(["bench"]) == 2

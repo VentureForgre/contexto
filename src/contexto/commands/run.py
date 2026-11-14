@@ -44,6 +44,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--no-version-check", action="store_true",
                         help="do not compare the CLI's --version with the versions Contexto was tested with "
                              "(also CONTEXTO_NO_VERSION_CHECK=1)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="do not print the summary when the CLI exits; warnings are still printed "
+                             "(also CONTEXTO_QUIET=1)")
     parser.add_argument("cli", choices=["claude", "codex"], help="the CLI to run")
     parser.add_argument("cli_args", nargs=argparse.REMAINDER, help="arguments passed to the CLI unchanged")
     try:

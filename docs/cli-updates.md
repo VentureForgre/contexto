@@ -1,5 +1,7 @@
 # When Claude Code or Codex updates
 
+[Contexto](../README.md) / [Documentation](README.md)
+
 Contexto recognises parts of each CLI's requests by text the CLI writes. A CLI update can change that
 text without any error: the message falls into another class and may be paged when it should be
 carried, or carried when it could be paged. This page lists what Contexto depends on, what warns, and
@@ -213,6 +215,11 @@ Everything here is zero spend unless marked.
    `spikes/m2/permissions/permstub.py --claude-version <v>` (default, `--before`, and an `ask` rule
    for one tool, D44): all five calls should run, all five be refused, and only the asked one be
    refused.
+   `contexto stats` says "Claude Code did not compact" only for the versions in
+   `COMPACTION_MEASURED_ON` (`src/contexto/stats.py`), the ones the compaction summary's opening
+   sentence was captured on (the note above `CLAUDE_CODE_COMPACTION_SUMMARY` in
+   `src/contexto/rewrite.py`). Add a version to both only after capturing a `/compact` on it; a
+   test fails when the two lists differ. Until then stats prints "cannot be told" for that version.
 8. If something changed (a `hint_mismatch` in step 6 counts): update the signatures and their tests, re-run step 2 to measure what is
    carried and paged with the new text, and record a decision in `docs/DECISIONS.md`.
 9. Live acceptance (spends tokens, needs the owner's approval): `spikes/m2/acceptance`, as in live run

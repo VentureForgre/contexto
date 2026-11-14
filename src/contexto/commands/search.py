@@ -8,7 +8,7 @@ object (D64).
 
 When no page holds every word, the command prints approximate matches instead, as the tool does
 (D65, ``contexto.store.search.rank_approximate``): a note on stderr says so, followed by the words that
-were searched when not every word was (stop words dropped, or a query of more than six words), and under
+were searched when not every word was (stop words dropped, or more than six distinct words left), and under
 each page's index line a line names the words the page matched and the ones it did not. With
 ``--json`` the object then has ``approximate`` and ``searched``, and each hit ``matched`` and
 ``missing``; a strict result's object is as D64 made it.

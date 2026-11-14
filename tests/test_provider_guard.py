@@ -395,3 +395,36 @@ def test_a_refused_launch_reads_nothing_twice_and_decides_nothing_else(tree):
     write(tree["home"] / USER, json.dumps({"env": {BEDROCK: ["1"], "ANTHROPIC_BASE_URL": "http://user.invalid"}}))
     with pytest.raises(LaunchError):
         claude_launch_settings(None, tree["cwd"], {}, home=tree["home"], managed=tree["managed"])
+
+
+# The sixth switch (PR #258's spike) ---------------------------------------------------------------------
+
+GOOGLE_CLOUD = "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD"
+
+
+def test_the_switches_are_the_six_claude_code_reads():
+    """Read from the 2.1.318 and 2.1.322 programs (spikes/m2/providers); the five of D70 and
+    ``CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD``, which no documentation page names."""
+    assert sorted(CLOUD_PROVIDER_KEYS) == sorted([
+        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS", GOOGLE_CLOUD])
+    assert all(name.startswith(upstream.PROVIDER_PREFIX) for name in CLOUD_PROVIDER_KEYS)
+
+
+@pytest.mark.parametrize("where", ["env", "project"])
+def test_claude_platform_on_google_cloud_refuses_the_launch(tree, where):
+    """Measured on 2.1.318 (spikes/m2/providers, zero spend): with the switch at 1 in the environment or
+    in the project's ``env`` block, every request went to the provider's stub and none to the proxy."""
+    env = {GOOGLE_CLOUD: "1"} if where == "env" else {}
+    if where == "project":
+        write(tree["cwd"] / PROJECT, env_block('"1"', GOOGLE_CLOUD))
+    found = guard(tree, env)
+    assert found is not None and places(found) == {GOOGLE_CLOUD: ("env" if where == "env" else "settings:project",)}
+    assert "sends its requests to Claude Platform on Google Cloud" in cloud_provider_note(found)
+    with pytest.raises(LaunchError) as raised:
+        check_cloud_provider(tree["cwd"], env, home=tree["home"], managed=tree["managed"])
+    assert raised.value.code == EXIT_USAGE
+
+
+def test_claude_platform_on_google_cloud_off_does_not_refuse(tree):
+    assert guard(tree, {GOOGLE_CLOUD: "0"}) is None
