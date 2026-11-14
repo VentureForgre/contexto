@@ -112,7 +112,7 @@ SHA-256 pinned in the shipped trace, and sends the session through the real prox
 `contexto run` starts it) to a fake upstream on 127.0.0.1 that replies from a script. It exits 0
 when the bound held, the session log has no failure event and every measurement equals the trace;
 1 otherwise, with the differences. What it shows and cannot show is under
-[What the replay shows](#what-the-replay-shows-and-what-it-cannot). It took 3.0 seconds on a
+[What the replay shows](#what-the-replay-shows-and-what-it-cannot). It took 3.1 seconds on a
 loaded Mac.
 
 Replay options: `--replay-turns N` replays a session of another length (it then says it is not the
@@ -502,32 +502,37 @@ second model's accuracy and cost, not a verdict.
 
 ## What the replay shows, and what it cannot
 
-The pinned trace (`src/contexto/bench/data/trace-20261016.json`, 11,175 bytes) is seed 20261016,
+The pinned trace (`src/contexto/bench/data/trace-20261016.json`, 11,208 bytes) is seed 20261016,
 protocol `v2`, bound 150,000, with 40 `d27` content turns so the history runs well past the bound.
 Measured on the replay, every size estimated from bytes (1.8 bytes per token for log text, 3.0 for
 everything else):
 
 - 56 turns (48 content, 8 probe); 952,971 estimated tokens of content history, 6.35 times the bound
-  (956,104 with the probe turns); a synthetic head of 21,306.
-- 138 requests, the first 44,302 estimated tokens and the largest 116,306; 0 over the bound by the
-  fake upstream's count and 0 by the proxy's own log; 14 rotations; 47 pages stored; no failure
+  (956,104 with the probe turns); a synthetic head of 21,377.
+- 138 requests, the first 44,373 estimated tokens and the largest 116,067; 0 over the bound by the
+  fake upstream's count and 0 by the proxy's own log; 14 rotations; 46 pages stored; no failure
   event; no request carried a compaction summary or marker.
 - Search reachability, measured when the probe turns start. Under one fixed query per fact, the
-  store's strict search returns 48 of 72 planted facts, all 48 in the top 3, and 6 more are still in
-  view (54). The best query made from each question's own words (single words and adjacent pairs,
-  counted only on whole-word matches) puts 60 in the top 3.
+  store's strict search returns 43 of 72 planted facts, all 43 in the top 3, and 11 more are still
+  in view (54). The best query made from each question's own words (single words and adjacent
+  pairs, counted only on whole-word matches) puts 55 in the top 3.
 
 | Class | Probes | Paged | By the fixed query | Best query from the question's words |
 |---|---|---|---|---|
 | paged_only | 4 | 4 | 4 | 4 |
-| multihop | 8 | 7 | 7 | 7 |
-| chain | 30 | 27 | 27 | 27 |
+| multihop | 8 | 6 | 6 | 6 |
+| chain | 30 | 21 | 23 | 23 |
 | obligations | 6 | 4 | 4 | 4 |
 | distractor | 6 | 6 | 6 | 6 |
 | paraphrase | 6 | 6 | 0 | 6 |
 | concluded | 6 | 6 | 0 | 0 |
 | toolloop | 6 | 6 | 0 | 6 |
-| all | 72 | 66 | 48 | 60 |
+| all | 72 | 59 | 43 | 55 |
+
+A probe counts as paged only when every turn that states its fact is on a page; search needs only
+the statements the answer rests on. For two `chain` probes (`q_a_012` and `q_a_033`) the needed
+statement is paged and found while another statement of the same fact, in turn 46, is not paged, so
+`chain` has more found by the fixed query (23) than paged (21).
 
 These are a floor under mechanical queries, not what a model reaches. For the three new classes the
 fixed query is every content word of the question, and no page holds all of them, so that 0 says
@@ -540,9 +545,9 @@ that fallback answers 1 of the 18 queries the strict search finds nothing for: f
 (`paraphrase`) its reply shows the plant's line on the second of the three pages it shows in
 detail, beside two of the service's decoy lines. The table does not count it.
 
-Modelled from the script, not run: full context's last request would be 977,410 estimated tokens,
+Modelled from the script, not run: full context's last request would be 977,481 estimated tokens,
 and plain Claude Code compacting at the bound would compact 8 times with a largest request of
-140,441. The plain model takes the summary as 7,920 tokens (the mean of three measured summaries in
+140,512. The plain model takes the summary as 7,920 tokens (the mean of three measured summaries in
 [research/M0-proxy-measurements.md](research/M0-proxy-measurements.md)) and assumes that only the
 head, the summary and the current turn survive a compaction; anything re-attached would make plain
 Claude Code's requests larger, so the assumption errs toward plain Claude Code. The dry run's plan
@@ -556,24 +561,23 @@ model does, or what the proxy does with what only Claude Code sends (its session
 
 ## Request size against history length
 
-<img src="bench/request-size-synthetic.svg" width="800" alt="Line chart of request size against history length for the pinned replay, a synthetic session with no model. The x axis is the history so far, 0 to about 956,000 estimated tokens; the y axis is the request's input, 0 to 1 million tokens, with a dotted line at the bound of 150,000. The Contexto line (estimated) rises and drops 14 times and peaks at 116,306. The plain Claude Code line (modelled) rises and drops 8 times and peaks at 140,441. The full-context line (modelled) grows straight to 977,410.">
+<img src="bench/request-size-synthetic.svg" width="800" alt="Line chart of request size against history length for the pinned replay, a synthetic session with no model. The x axis is the history so far, 0 to about 956,000 estimated tokens; the y axis is the request's input, 0 to 1 million tokens, with a dotted line at the bound of 150,000. The Contexto line (estimated) rises and drops 14 times and peaks at 116,067. The plain Claude Code line (modelled) rises and drops 8 times and peaks at 140,512. The full-context line (modelled) grows straight to 977,481.">
 
 Synthetic session, no model: the pinned replay (seed 20261016, protocol `v2`, bound 150,000) sent
 through the real proxy to a fake upstream on 127.0.0.1. The Contexto line is estimated from the
 bytes of each request the proxy sent, not counted by a tokenizer. The full-context and plain Claude
 Code lines are modelled from the script, not run. Contexto's drops are its 14 rotations: old turns
 moved to the store, word for word and still recallable through search. Plain Claude Code's drops
-are its 8 modelled compactions: old turns replaced by a summary. Peaks: Contexto 116,306 estimated
-tokens, plain Claude Code 140,441 and full context 977,410. The full-context line sets the y axis
+are its 8 modelled compactions: old turns replaced by a summary. Peaks: Contexto 116,067 estimated
+tokens, plain Claude Code 140,512 and full context 977,481. The full-context line sets the y axis
 near 1M tokens, so the other two lines look flatter than they are; the bound is the dotted line.
 Each request of a turn, tool-loop rounds included, is plotted at that turn's history length.
 
 Made with `contexto bench --replay --out D` and `contexto bench --chart D/results.json` from
-`main` at c476834f, before any release had the command; the notes under the chart are the ones
-`--chart` writes. Its subtitle's `0.0.0+checkout` is the placeholder version every build from a
-checkout carries (`pyproject.toml`), not a release. The chart's own notes do not yet say that
-Contexto's drops are rotations and plain Claude Code's are compactions; a planned follow-up to the
-code adds that, and until then this caption says it.
+`main` at f5c8f29a, installed outside the checkout, before any release had the command; the notes
+under the chart are the ones `--chart` writes, its second note among them, which names the
+rotations and compactions with the run's three peaks. Its subtitle's `0.0.0+checkout` is the
+placeholder version every build from a checkout carries (`pyproject.toml`), not a release.
 
 ## The plain arm's compaction
 
