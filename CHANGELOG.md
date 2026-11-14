@@ -38,6 +38,12 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 - The session log has two new fields: `pages` on `proxy_start` and `proxy_stop` (the page files in
   the store), and `cli_session` on a Messages request's entry (whether it carried Claude Code's
   session id).
+- `contexto run claude` shows Contexto's numbers in Claude Code's status line, for example
+  `ctx 112k/150k · 41 paged · 3 recalls · 5 searches`, and `PAGING STOPPED` when the store fails.
+  It is added only when no settings file Claude Code reads has a status line of its own, because
+  Contexto's would replace it; `--no-statusline` or `CONTEXTO_NO_STATUSLINE=1` turns it off.
+  `contexto statusline` prints the line, so a status line script of your own can include it. See
+  docs/statusline.md.
 
 ## 0.5.24 (2026-11-06)
 

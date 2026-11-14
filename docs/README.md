@@ -19,6 +19,8 @@ install it and how to start it.
   where, and the commands that inspect and remove sessions.
 - [stats.md](stats.md): the summary `contexto run` prints at exit and `contexto stats`: every
   number defined, which are measured and which estimated, and what counts as a fault.
+- [statusline.md](statusline.md): Contexto's numbers in Claude Code's status line, when Contexto adds
+  it, how to turn it off, and how to call `contexto statusline` from a status line of your own.
 - [standing-rules.md](standing-rules.md): how a rule you give once stays in view after its turn is
   paged out.
 - [mcp-tools.md](mcp-tools.md): the five MCP tools the model gets, how search ranks, and the recall
