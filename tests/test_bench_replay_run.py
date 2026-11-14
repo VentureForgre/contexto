@@ -768,6 +768,37 @@ def test_options_a_replay_cannot_use_are_usage_errors(monkeypatch, capsys, tmp_p
     assert list(tmp_path.iterdir()) == []  # nothing dumped, nothing recorded
 
 
+@pytest.mark.parametrize("argv, option", [
+    (["--dump-trace", "d"], "--dump-trace"), (["--record-trace", "f"], "--record-trace"),
+    (["--replay-turns", "8"], "--replay-turns"), (["--force"], "--force"),
+    (["--script-only", "--dump-trace", "d"], "--dump-trace"),
+])
+def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path, argv, option):
+    """Reviewer B: without --replay these were ignored, so once the live mode merges `contexto bench
+    --dump-trace DIR` would have started a live run with the user's key. A stand-in live mode is installed
+    the way the live slice adds its module; it must never run."""
+    from contexto.bench import modes
+
+    live = tmp_path / "modes"
+    live.mkdir()
+    (live / "t_live.py").write_text("FLAG = None\ndef add_arguments(parser):\n    pass\n"
+                                    "def run(args):\n    raise AssertionError('the live run started')\n", "utf-8")
+    monkeypatch.setattr(modes, "__path__", [*modes.__path__, str(live)])
+    monkeypatch.delitem(sys.modules, "contexto.bench.modes.t_live", raising=False)
+    _no_replay(monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    try:
+        assert cli.main(["bench", *argv, "--out", str(work / "out")]) == 2
+    finally:
+        sys.modules.pop("contexto.bench.modes.t_live", None)
+    err = capsys.readouterr().err
+    assert f"{option} belongs to the replay mode; give --replay with it, or leave it out" in err
+    assert list(work.iterdir()) == []
+    assert set(replay_mode.OWN_OPTIONS) == {"--replay-turns", "--dump-trace", "--record-trace", "--force"}
+
+
 @pytest.mark.parametrize("bound", ["20000", "25000", "170001", "200000"])
 def test_a_bound_a_replay_cannot_take_names_the_range_it_takes(monkeypatch, capsys, bound):
     """Reviewer B: the refusal named `contexto run` options (--allow-large-bound, --headroom-floor) that
