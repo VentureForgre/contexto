@@ -94,7 +94,7 @@ SHA-256 pinned in the shipped trace, and sends the session through the real prox
 `contexto run` starts it) to a fake upstream on 127.0.0.1 that replies from a script. It exits 0
 when the bound held, the session log has no failure event and every measurement equals the trace;
 1 otherwise, with the differences. What it shows and cannot show is under
-[What the replay shows](#what-the-replay-shows-and-what-it-cannot). It took 3.1 seconds on a
+[What the replay shows](#what-the-replay-shows-and-what-it-cannot). It took 3.0 seconds on a
 loaded Mac.
 
 Replay options: `--replay-turns N` replays a session of another length (it then says it is not the
@@ -139,7 +139,16 @@ and never inside a git work tree).
 committed by accident; from a checkout, give an `--out` path outside it. One run at a time holds a lock on the output directory. A run is resumable:
 the same command with the same `--out` keeps the units the manifest records `complete` and runs the
 rest again; a different model, bound, protocol, turn size or first seed for that directory is
-refused. Every attempt's requests stay in the records, because they were billed.
+refused. Every attempt's requests stay in the records, because they were billed. A run killed in
+the middle of writing a record leaves a last line with no newline; on resume that line is set aside
+in `<file>.torn-<n>` and cut from the file, so the next record starts a line of its own, and the
+manifest's `torn_lines` says so. A request whose record was torn is not counted in the spend.
+
+A unit ends `complete`, `not_run` (the full arm's request does not fit the model's window) or
+`stopped` with the reason: among them `desync` (Claude Code printed a `result` that answers no
+turn), `runaway` (a cap below was passed), `api_error` (the upstream kept failing), `unmetered` (a
+turn sent no request through the meter), `timeout`, `budget` and `auth`. A stopped unit writes no
+probe lines; the same command with the same `--out` runs it again.
 
 ### `--report`
 
@@ -200,7 +209,13 @@ Every way the arms differ is written into the manifest's `arm_differences`. In s
 - Both Claude Code arms run with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`. Without it, a subagent
   the model started in the background reported back with a run and a `result` of its own, and every
   later reply was scored against the wrong turn: in one stub test, 0 of 72 answers counted while the
-  unit said `complete`. Any surplus `result` now stops the unit as `desync`.
+  unit said `complete`. On Claude Code 2.1.322 the variable removes the `run_in_background`
+  parameter from the Agent and Bash tool definitions, and with it about 771 characters of their
+  descriptions (405 of Agent's, 366 of Bash's), in both arms alike; so both differ from plain Claude
+  Code's default, in which subagents run in the background. It does not cover the Monitor tool or
+  MCP background tasks. These sessions are not given the Monitor tool, and Contexto's MCP server
+  declares no tasks, but a `result` from either, or any other `result` that answers no turn, stops
+  the unit as `desync`.
 - Every arm runs under the same runaway caps.
 - `full` is not Claude Code: a one-line system prompt, one declared tool with `tool_choice: none`
   when the script has a tool-loop turn, no thinking parameter, no beta header, `max_tokens` 8,192.
@@ -264,16 +279,23 @@ whitespace, quotes, backticks and markdown emphasis trimmed, inner whitespace co
 answer when its ids are the expected ids in any order. A wrong `value` answer that equals an older
 value of the same fact, or a planted decoy, is also counted stale.
 
-Two deliberate differences from the spike's scoring (`spikes/m0/fidelity/l2f.py::score`), applied
+Three deliberate differences from the spike's scoring (`spikes/m0/fidelity/l2f.py::score`), applied
 to every arm alike:
 
 1. A probe with no answer line, or an empty answer, is never correct. The spike read a missing
    answer to a `set` probe as the empty set, so a `set` probe whose answer is `none` scored correct
    when the arm said nothing.
-2. Answer lines written in markdown are read: in a blockquote, a bulleted or numbered item, with
-   `**`, `__` or backticks around the id, the separator or the answer. The spike dropped those lines,
-   so an answer Claude Code wrote in markdown counted as no answer. Every line the spike read is read
-   the same.
+2. Answer lines written in markdown are read: a bulleted or numbered item, with `**`, `__` or
+   backticks around the id, the separator or the answer (`**q_a_01**: x`, `1. q_a_01: x`,
+   `` - `q_a_01`: x ``). The spike dropped those lines, so an answer Claude Code wrote in markdown
+   counted as no answer.
+3. A line in a blockquote (`> q_a_01: x`) is never read: markdown marks it as quoted text, not the
+   reply's own. A line in a fenced code block is read, but an answer for the same id on a line
+   outside any fence wins over it wherever the two stand, so a note or file the reply quotes in a
+   fence after its answers cannot override them. A reply that writes all its answers in a fence is
+   still scored. The spike read fenced lines like any other.
+
+Every other line the spike read is read the same. Table rows and headings are not read.
 
 For `concluded` probes the report also counts how many decision replies were right in each arm, so
 a failed recall can be told apart from a wrong conclusion.
@@ -342,7 +364,10 @@ A live run spends your money, so it stops itself:
 - `--budget-tokens` is required and must be at least the dry run's worst case. It covers the whole
   output directory, earlier attempts included. Before each request leaves, the meter reserves its
   request bytes / 1.5 plus its `max_tokens`, and refuses a request that could pass the budget. A
-  response whose usage cannot be read counts as its reservation.
+  response whose usage cannot be read counts as its reservation. A request sent that got no response
+  (the connection failed or closed before a status line) may still have been billed, so its
+  reservation is kept as spent; each unit counts these in `requests_unanswered` and
+  `unanswered_tokens`. One whose connection was never made counts 0.
 - The first 401 or 403 stops the run.
 - Per unit: more than 60 answered requests in one script turn (`--max-turn-requests`; the recorded
   runs needed at most 6, the tool-loop turn needs 11), more than 200 failed responses in one turn
@@ -361,7 +386,8 @@ A live run spends your money, so it stops itself:
   manifest.json                 what was run: versions, model, bound, seeds, arms, every unit's status
   scripts/seed-<seed>.json      the generated script of each seed
   probes.jsonl                  live: one line per arm, seed, repeat and probe, for complete units
-  requests.jsonl                live and replay: one line per request that reached an upstream
+  requests.jsonl                live and replay: one line per request the upstream answered
+  *.torn-<n>                    live, after a resume: a torn last line set aside
   reach.jsonl                   replay: the search reachability of each planted fact
   results.json, results.md      the report
   charts/accuracy.svg           live: accuracy by arm with Wilson 95% intervals
@@ -418,14 +444,14 @@ Measured on the replay, every size estimated from bytes (1.8 bytes per token for
 everything else):
 
 - 56 turns (48 content, 8 probe); 952,971 estimated tokens of content history, 6.35 times the bound
-  (956,104 with the probe turns); a synthetic head of 21,277.
-- 138 requests, the largest 116,278 estimated tokens; 0 over the bound by the fake upstream's count
-  and 0 by the proxy's own log; 14 rotations; 47 pages stored; no failure event; no request carried
-  a compaction summary or marker.
-- Search reachability, measured when the probe turns start. Under one fixed query per fact, search
-  returns 48 of 72 planted facts, all 48 in the top 3, and 6 more are still in view (54). The best
-  query made from each question's own words (single words and adjacent pairs, counted only on
-  whole-word matches) puts 60 in the top 3.
+  (956,104 with the probe turns); a synthetic head of 21,306.
+- 138 requests, the first 44,302 estimated tokens and the largest 116,306; 0 over the bound by the
+  fake upstream's count and 0 by the proxy's own log; 14 rotations; 47 pages stored; no failure
+  event; no request carried a compaction summary or marker.
+- Search reachability, measured when the probe turns start. Under one fixed query per fact, the
+  store's strict search returns 48 of 72 planted facts, all 48 in the top 3, and 6 more are still in
+  view (54). The best query made from each question's own words (single words and adjacent pairs,
+  counted only on whole-word matches) puts 60 in the top 3.
 
 | Class | Probes | Paged | By the fixed query | Best query from the question's words |
 |---|---|---|---|---|
@@ -443,9 +469,16 @@ These are a floor under mechanical queries, not what a model reaches. For the th
 fixed query is every content word of the question, and no page holds all of them, so that 0 says
 nothing about the plants. Which query a model makes is for the live run.
 
-Modelled from the script, not run: full context's last request would be 977,381 estimated tokens,
+Reach is counted with the store's strict search (`SessionStore.search`), which counts a page only
+when it holds every word of the query, not with the reply of the `contexto_search` tool. Since D65
+the tool falls back to approximate matches when no page holds every word. On the pinned session
+that fallback answers 1 of the 18 queries the strict search finds nothing for: for `q_r_02`
+(`paraphrase`) its reply shows the plant's line on the second of the three pages it shows in
+detail, beside two of the service's decoy lines. The table does not count it.
+
+Modelled from the script, not run: full context's last request would be 977,410 estimated tokens,
 and plain Claude Code compacting at the bound would compact 8 times with a largest request of
-140,412. The plain model takes the summary as 7,920 tokens (the mean of three measured summaries in
+140,441. The plain model takes the summary as 7,920 tokens (the mean of three measured summaries in
 [research/M0-proxy-measurements.md](research/M0-proxy-measurements.md)) and assumes that only the
 head, the summary and the current turn survive a compaction; anything re-attached would make plain
 Claude Code's requests larger, so the assumption errs toward plain Claude Code.
@@ -521,9 +554,9 @@ run of that benchmark or only probes taken from it.
 
 ## Where the code is
 
-- `src/contexto/bench/`: `script.py` and `d27.py` (generator and scoring), `stats.py`, `arms/`,
-  `runner.py`, `meter.py`, `plan.py`, `credentials.py`, `records.py`, `prices.py`, `report.py`,
-  `charts.py`, `replay/`, and `modes/` (one module per mode).
+- `src/contexto/bench/`: `script.py`, `d27.py` and `model.py` (generator and scoring), `stats.py`,
+  `arms/`, `runner.py`, `meter.py`, `plan.py`, `credentials.py`, `records.py`, `prices.py`,
+  `report.py`, `charts.py`, `replay/`, and `modes/` (one module per mode).
 - `spikes/m2/acceptance/`: the harness of runs #1 to #4, kept as their frozen record. The package
   imports nothing from it; the generator was ported and tests prove the port identical.
 - `spikes/m2/scale/proxy/`: the scale harness, repaired under D66, whose 200-turn version runs in CI
