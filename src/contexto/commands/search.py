@@ -228,6 +228,9 @@ def search_earlier(store: SessionStore, query: str, after_hits: bool) -> None:
     if found.skipped:
         print(f"[{found.skipped} earlier session{'' if found.skipped == 1 else 's'} could not be read]",
               file=sys.stderr)
+    if found.in_view_skipped:  # their pages were searched (review A on D69, finding 7)
+        print("[1 earlier session's last window could not be read]" if found.in_view_skipped == 1 else
+              f"[{found.in_view_skipped} earlier sessions' last windows could not be read]", file=sys.stderr)
 
 
 def shown_turn(line: InViewLine) -> int:

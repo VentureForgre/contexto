@@ -1045,7 +1045,8 @@ class _EarlierPart:
     as the current session's in-view lines are; on no page, so with no offset),
     then its best pages, each shown as a hit of the current session is. When the room or the per-call
     limit cuts it, matches are left out from the end and one line says how many, and why. Then how many
-    older sessions were not searched and how many could not be read, when there are any; when an
+    older sessions were not searched, how many could not be read, and how many last windows could not
+    be read (their pages were searched), when there are any; when an
     in-view line is shown, the line that says it cannot be recalled; and when a page is shown, the line
     that says how to read on. With no match in any earlier session the part is one line saying so."""
 
@@ -1111,6 +1112,10 @@ class _EarlierPart:
                          "not searched]")
         if unread:
             lines.append(f"[{_count(unread, 'earlier session')} could not be read]")
+        windows = self.found.in_view_skipped  # their pages were searched (review A on D69, finding 7)
+        if windows:
+            lines.append("[1 earlier session's last window could not be read]" if windows == 1 else
+                         f"[{windows} earlier sessions' last windows could not be read]")
         if in_view:
             lines.append(EARLIER_IN_VIEW_NOTE)
         if shown > in_view:
