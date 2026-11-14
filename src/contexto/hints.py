@@ -169,7 +169,9 @@ def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None
     A settings file is discounted the same way (``contexto_set_hints_on``): an ``env`` block with the
     variable on beside the marker ``stripped`` is what ``contexto serve --print-settings`` prints,
     merged into that file (``docs/serve.md``'s VS Code recipe does so), so its ``1`` is the service's
-    and the next file or the environment decides.
+    and the next file or the environment decides whether the hints are the user's. Claude Code still
+    applies that ``1``, so an off value below such a file (in the environment, or the user file under a
+    project file) gives ``stripped``, not ``off``.
 
     "Off" is, when the hints are not on, one of ``0``, ``false``, ``no``, ``off`` in the process
     environment (unless it is an outer launch's, as above), in the user settings file, or in the
@@ -187,6 +189,12 @@ def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None
                              process_env=own, skip=contexto_set_hints_on)
     if env_truthy(found.value):
         return FORWARDED
+    # A discounted file still applies in Claude Code: when its on value is what Claude Code would run
+    # with, the hints are sent whatever off value lies below it, so they are removed, never left on.
+    applied = claude_env_value(HINT_HEADERS_KEY, env=env, cwd=cwd, home=home, files=files, managed=managed,
+                               process_env=own)
+    if env_truthy(applied.value):
+        return STRIPPED
     said = (env.get(HINT_HEADERS_KEY) if own else None,
             settings_file_env(files, user_settings_path(home, env), HINT_HEADERS_KEY),
             settings_file_env(files, managed, HINT_HEADERS_KEY))

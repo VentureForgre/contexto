@@ -455,7 +455,10 @@ The extension has no `--settings` flag. Its Claude Code reads the user settings 
 (`~/.claude/settings.json`, which the extension shares with the CLI) and the MCP servers saved at
 user scope. Close VS Code, start the service, then merge the printed settings into that file
 (keeping what is there and making it mode 0600, since it now holds the token) and add the MCP
-server at user scope:
+server at user scope. The user settings file applies to every Claude Code on the machine, so this
+also turns on Claude Code's gateway hint headers for a plain `claude` run outside the service: in a
+repository whose own settings name another base URL, that `claude` sends the hints there with no
+Contexto proxy to remove them. Undo the merge (below) if that matters to you.
 
 <!-- recipe: vscode-setup -->
 ```sh
@@ -551,7 +554,9 @@ waits until the service answers; the `trap` stops it with SIGTERM when the scrip
 `claude -p` succeeded or not, and the step fails if `claude -p` does. `--upstream` is explicit
 because a checked-out repository's `.claude/settings.json` could name another base URL. The
 service's stderr is in `$RUNNER_TEMP/contexto-serve.log`. Do not upload `$CONTEXTO_HOME` as an
-artifact: it holds the token, and the stores hold the conversation.
+artifact: it holds the token, and the stores hold the conversation. Set `CONTEXTO_REF` to a tag or
+commit, not a branch, once a release has `contexto serve`. Do not run the step on code from an
+untrusted pull request: Claude Code runs with the API key in that checkout.
 
 The test runs the step's `run` script with the real `claude` (2.1.322) under the shell GitHub uses
 (`bash --noprofile --norc -eo pipefail`), with the upstream pointed at the fake upstream and a stub
