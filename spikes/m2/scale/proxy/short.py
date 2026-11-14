@@ -12,7 +12,9 @@ What it measures, and what ``tests/test_scale_proxy_short.py`` holds to ``BUDGET
 - **The bound**: every upstream request's size, the events of ``run.BREAK_EVENTS``, every status.
 - **Added time per request**: the driver's send-to-last-byte time minus the time the fake upstream spent on
   the request (from its headers to its last event). That is the client's write of the body to the proxy, the
-  proxy's read, parse, transform and serialization, its connection to the upstream, and the relay back.
+  proxy's read, parse, transform and serialization, its connection to the upstream, and the relay back. On
+  Linux it also holds the proxy's wait of about 41 ms for a delayed ACK on a connection kept open (README.md,
+  "The 40 ms wait on Linux"; issue #284).
   Reported over every request of the session (median and p95), and for the session's first request alone,
   sent ``SMALL_SENDS`` times to a new proxy and as often straight to the fake upstream: the difference of
   those two medians is what the proxy adds to a request with no history. The same for ``TINY_BODY``, a
@@ -224,10 +226,14 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int 
                     tiny_direct, connections["tiny_direct"] = added_ms(upstream.upstream_port, upstream, TINY_BODY,
                                                                        "tinydirect", SMALL_SENDS, tiny_direct_headers)
                     # The same sends with TCP_NODELAY on the proxy's sockets, then back to the package as shipped.
-                    probe.call({"cmd": "nagle", "on": False})
+                    # The worker answers with the flag's new value: a command that stopped taking effect
+                    # would measure the package as shipped and call it TCP_NODELAY (#262 Reviewer A nit 2).
+                    if probe.call({"cmd": "nagle", "on": False}).get("disable_nagle_algorithm") is not True:
+                        raise RuntimeError("the worker did not set TCP_NODELAY on the proxy's sockets")
                     tiny_nodelay, connections["tiny_nodelay"] = added_ms(probe.port, upstream, TINY_BODY,
                                                                          "tinynodelay", SMALL_SENDS)
-                    probe.call({"cmd": "nagle", "on": True})
+                    if probe.call({"cmd": "nagle", "on": True}).get("disable_nagle_algorithm") is not False:
+                        raise RuntimeError("the worker did not set the proxy's sockets back to Nagle on")
                     progress.update(first_request_added_ms=round(statistics.median(small), 3) if small else None,
                                     first_request_direct_ms=round(statistics.median(direct), 3) if direct else None)
                     if clients:

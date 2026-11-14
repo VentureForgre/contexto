@@ -11,6 +11,7 @@ import json
 import socket
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -215,9 +216,15 @@ def test_the_wait_for_a_free_port_is_a_total_for_the_run(monkeypatch):
         calls.append(1)
         raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
 
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:  # one connect at a time: the clock moves with each wait
+        slept.append(seconds)
+        now[0] += seconds
+
     monkeypatch.setattr(http.client.HTTPConnection, "connect", no_port)
-    monkeypatch.setattr(run.time, "sleep", slept.append)
-    monkeypatch.setattr(run, "PATIENCE", run.ConnectPatience())
+    monkeypatch.setattr(run.time, "sleep", sleep)
+    monkeypatch.setattr(run, "PATIENCE", run.ConnectPatience(clock=lambda: now[0]))
     with pytest.raises(OSError):
         run.Client(9).connect()
     assert sum(slept) == pytest.approx(run.CONNECT_PATIENCE_S) and max(slept) <= 2.0
@@ -232,10 +239,60 @@ def test_the_wait_for_a_free_port_is_a_total_for_the_run(monkeypatch):
     assert sum(slept) == pytest.approx(2 * run.CONNECT_PATIENCE_S)
 
 
-def test_the_driver_sends_without_waiting_for_acks():
-    """Python's http.client writes a request's headers and its body in two sends. With Nagle's algorithm on,
-    the body waits for the headers' ACK, which Linux delays by 40 ms on a connection kept open: every
-    request on GitHub's Ubuntu runners took about 41 ms more once the driver kept its connections open."""
+def test_waits_that_overlap_count_once():
+    """#262 Reviewer B low 1: the burst's clients wait for a port at the same time. Counted in
+    thread-seconds, 100 of them spent the run's whole wait in under half a second; the wait is a window
+    of wall-clock time, and waits that overlap count once."""
+    now = [0.0]
+    patience = run.ConnectPatience(seconds=30.0, clock=lambda: now[0])
+    assert [patience.take(2.0) for _ in range(100)] == [2.0] * 100  # at once: 2 s of the 30 s
+    assert patience.left == pytest.approx(28.0)
+    now[0] = 1.0
+    assert patience.take(2.0) == 2.0 and patience.left == pytest.approx(27.0)  # 1 s of it overlaps
+    now[0] = 10.0
+    assert patience.take(30.0) == pytest.approx(27.0) and patience.left == 0  # one at a time: they add up
+    now[0] = 36.0  # inside the window already granted (to 37 s): free, and nothing is left to add
+    assert patience.take(2.0) == pytest.approx(1.0)
+    now[0] = 38.0
+    assert patience.take(0.05) == 0.0
+
+
+def test_every_client_of_a_burst_waits_out_the_runs_whole_wait(monkeypatch):
+    """With real threads and real sleeps: each of 20 clients short of a port waits about the whole of a
+    0.5 s window before it gives up, instead of a twentieth of it."""
+    def no_port(self):
+        raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", no_port)
+    monkeypatch.setattr(run, "PATIENCE", run.ConnectPatience(seconds=0.5))
+    waited: list[float] = []
+
+    def client() -> None:
+        start = time.monotonic()
+        with pytest.raises(OSError):
+            run.Client(9).connect()
+        waited.append(time.monotonic() - start)
+
+    threads = [threading.Thread(target=client) for _ in range(20)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert len(waited) == 20 and min(waited) >= 0.4, waited
+
+
+def test_the_driver_sends_without_waiting_for_acks(monkeypatch):
+    """The driver sets ``TCP_NODELAY`` on every connection itself, so that its timings do not rest on
+    ``http.client``, which sets it too (in ``HTTPConnection.connect`` on every Python CI runs). The
+    41 ms each request waits on Linux is the proxy's, not the driver's (README.md, "The 40 ms wait on
+    Linux"; issue #284). To show the driver's own line works, ``http.client`` here clears the option."""
+    real = http.client.HTTPConnection.connect
+
+    def connect_without_nodelay(self):
+        real(self)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 0)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", connect_without_nodelay)
     server = _KeepAliveServer()
     client = run.Client(server.port)
     try:
