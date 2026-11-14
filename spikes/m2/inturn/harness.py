@@ -435,11 +435,14 @@ def _windows(texts: tuple[str, ...]) -> set[str]:
 def _turn_left(turn: int, texts: list[tuple[str, ...]], haystack: str, parts: set[str]) -> bool:
     """Rule 3: whether turn ``turn`` (``texts[turn]`` is its prompt and answers) has left the request whose
     bare text is ``haystack`` and whose bare text parts are ``parts``. Only the turn's own runs count: a run
-    found anywhere in another turn's text (a recurring short prompt, a template, a quote of an earlier
-    prompt) says nothing about which turn is there. A run shorter than the window (a whole short text such
-    as "ok" or "Done.") counts only when it is a whole text part of the request, not inside other text."""
+    found anywhere in another turn's text (a template, a quote of an earlier prompt) says nothing about
+    which turn is there. A run shorter than the window is a whole short text (such as "ok" or "Done."): it
+    is set aside only when another turn has that same whole text (every prompt "continue"), and counts only
+    when it is a whole text part of the request, not inside other text."""
     others = [_bare(x) for t, own in enumerate(texts) if t != turn for x in own]
-    mine = [w for w in _windows(texts[turn]) if not any(w in other for other in others)]
+    whole = set(others)
+    mine = [w for w in _windows(texts[turn])
+            if (w not in whole if len(w) < WINDOW else not any(w in other for other in others))]
     return not any((w in parts) if len(w) < WINDOW else (w in haystack) for w in mine)
 
 

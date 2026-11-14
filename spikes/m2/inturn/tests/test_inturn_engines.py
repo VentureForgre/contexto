@@ -823,6 +823,12 @@ def test_text_two_turns_share_says_nothing_about_which_turn_is_in_view():
     assert left(0, short, "Run the tests now, ok? I am done.", "All pass.")  # "ok" inside other text is not turn 0
     assert not left(0, short, "ok", "Run the tests now.")  # "ok" as a whole text part is
     assert not left(0, short, "Run the tests now.", "Done.")  # so is "Done."
+    # Reviewer B at 59de142f: a short text inside another turn's text is still this turn's own.
+    kept = [("yes", "Done."), ("yes, now the docs", "Done. Docs fixed.")]
+    assert not left(0, kept, "yes", "Done.", *kept[1])  # turn 0 is whole in view
+    assert left(0, kept, *kept[1])
+    same = [("continue", "Done."), ("continue", "Done.")]
+    assert left(0, same, *same[1])  # all of turn 0's text is exactly another turn's: it cannot be told apart
 
 
 def test_format_characters_cannot_hide_a_turn_in_view():

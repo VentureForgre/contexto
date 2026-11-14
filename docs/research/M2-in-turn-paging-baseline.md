@@ -525,7 +525,9 @@ min_turn_room`, 113,000 at the defaults.
      `fake_omission_doc`, and the reviewers' probes), and one whose omission line claims 0 or more
      pages than the store holds unnamed (`omit_turns_n0`, `omit_turns_n99`). The rule does not catch
      every form: a turn cut to fewer than 40 characters of each prompt and answer, with the omission
-     line, passes, as does the open case itself (`omit_turns`, tested as passing). A correct engine
+     line, passes, as does the open case itself (`omit_turns`, tested as passing); so does a short turn
+     kept only inside a longer text block (`"yes\n\nDone."` merged into one block), and a turn whose
+     every text is exactly another turn's (it cannot be told apart). A correct engine
      whose turns share text (every prompt "continue", "yes" or "ok", a common template or answer
      opener, a final answer "Done.", a later prompt quoting an earlier one) is not failed: a turn's
      runs found in another turn's text are not counted, and a short text counts only whole. What remains open: an engine that
