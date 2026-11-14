@@ -21,6 +21,8 @@ install it and how to start it.
   paged out.
 - [mcp-tools.md](mcp-tools.md): the five MCP tools the model gets, how search ranks, and the recall
   budget.
+- [search.md](search.md): what a search query matches, the approximate matches search falls back to
+  when no turn holds every word, and its limits.
 - [faq.md](faq.md): subscription logins, API keys, cost, what is sent where, and continuing a
   session later.
 - [doctor.md](doctor.md): `contexto doctor`, a check of what `contexto run` needs: the CLIs, the
