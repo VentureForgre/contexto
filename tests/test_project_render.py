@@ -20,9 +20,10 @@ from contexto.store.memory import MemoryStore
 from contexto.store.pinned import CARRIED_BODY_CHARS, CARRIED_HEADING, READABLE_CARRIED_HEADING
 from contexto.store.recall import DEFAULT_LINES
 from contexto.tokens import estimate_tokens
-from test_project import V0_5_24_PIN_LINE, confirm, main_pin, new_session, repo, v0_5_24_guidance
+from test_project import V0_5_24_EXAMPLE_LINE, V0_5_24_PIN_LINE, confirm, main_pin, new_session, repo, v0_5_24_guidance
 
-OPENING = "\n".join((*DEFAULT_LINES[:2], V0_5_24_PIN_LINE, DEFAULT_LINES[3])) + "\n"  # v0.5.24's
+BASE = estimate_tokens("\n".join(DEFAULT_LINES))  # the preamble's fixed lines: 420 tokens since D63, 380 before
+OPENING = "\n".join((*DEFAULT_LINES[:2], V0_5_24_PIN_LINE, V0_5_24_EXAMPLE_LINE)) + "\n"  # v0.5.24's
 FIRST = "3f2a9c1e" + "0" * 24  # an earlier session, labelled 3f2a9c1e
 
 V0_5_24_PINNED = (
@@ -189,7 +190,7 @@ def test_own_and_carried_records_share_the_one_budget_own_first(tmp_path, home):
     assert [line.split()[1] for line in shown[5:]] == carried[::-1][:len(shown) - 5]  # then carried, newest first
     assert capped[-1] == f"({45 - len(shown)} more pinned items omitted; call contexto_state for the full list)"
     # a budget the own records do not fit in: the carried ones are counted with the rest, and no heading is left over
-    tight = second.pinned_text(480).split("\n")
+    tight = second.pinned_text(BASE + 100).split("\n")  # the fixed lines and room for a few records
     kept = [line for line in tight if line.startswith("- ")]
     assert 0 < len(kept) < 5 and CARRIED_HEADING not in tight
     assert tight[-1] == f"({45 - len(kept)} more pinned items omitted; call contexto_state for the full list)"
@@ -561,6 +562,40 @@ def test_a_space_between_zero_width_characters_does_not_hide_them(space):
 ])
 def test_real_text_with_joiners_blanks_and_spaces_prints_as_it_is(text):
     assert safe_text(text) == text
+
+
+@pytest.mark.parametrize("pair", [("\U0001bca0", "\U0001bca1"), ("\U0001bca2", "\U0001bca3"),
+                                  ("\U0001d173", "\U0001d174"), ("\U0001d175", "\U0001d17a"),
+                                  ("\U00013430", "\U00013431"), ("\U00013439", "\U0001343f"),
+                                  ("\U00016fe4", "\U00016fe4"), ("\U00016fe4", "​")])
+def test_a_run_of_default_ignorable_format_characters_is_shown_as_escapes(pair):
+    """Review B round 8, N22 (pocP): the shorthand format controls U+1BCA0 to U+1BCA3, the musical
+    formatting controls U+1D173 to U+1D17A and the hieroglyph format controls U+13430 to U+1343F, which a
+    terminal draws as nothing, and the Khitan filler U+16FE4 are zero-width characters for the run rule,
+    so a run of them between two letters, which spells text in its pattern, is escapes."""
+    hidden = "".join(pair[int(bit)] for bit in "1011001110001011")
+    shown = safe_text("a" + hidden + "b")
+    assert shown.isascii() and shown.startswith("a\\") and shown.endswith("b")
+    assert safe_text(f"a{pair[0]}b") == f"a{pair[0]}b"  # one alone prints, as any zero-width character
+
+
+MONGOLIAN_SELECTORS = ["᠋", "᠌", "᠍", "᠏"]
+
+
+@pytest.mark.parametrize("fvs", MONGOLIAN_SELECTORS)
+def test_a_word_final_mongolian_variation_selector_before_a_space_prints(fvs):
+    """Review A round 8, nit 2: a Mongolian free variation selector follows a letter and can end a word, so
+    one after a letter and before a space prints; a run of them, one after a space, and one between two
+    spaces are still escapes (N19)."""
+    text = f"ᠪᠠᠷ{fvs} ᠲᠠ"
+    assert safe_text(text) == text
+    for hidden in (f"ᠠ{fvs}{fvs} ᠲ", f"ᠠ {fvs}ᠲ", f"ᠠ {fvs} ᠲ", f"{fvs} ᠲ"):
+        assert fvs not in safe_text(hidden), hidden
+    gaps = " ".join(MONGOLIAN_SELECTORS[int(bit)] for bit in "01101000") + " "
+    assert safe_text("Use ISO dates. " + gaps).isascii()
+    assert safe_text("᠎ ").isascii()  # the vowel separator is not a selector: next to a space, an escape
+    # Review B on #288, N25: only after a Mongolian letter; after a Latin one each word could carry a bit.
+    assert fvs not in safe_text(f"Use{fvs} ISO{fvs} dates.")
 
 
 def test_a_blank_cell_prints_on_its_own_and_is_an_escape_next_to_a_zero_width_character():

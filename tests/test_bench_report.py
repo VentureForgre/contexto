@@ -852,6 +852,21 @@ def test_merged_directories_with_different_cache_lifetimes_are_each_named(tmp_pa
             "does not carry its own: directory 1 at the 5-minute rate; directory 2 at the 1-hour rate.") in text
     same = report.render(report.build([first, make_run(tmp_path / "third", repeats=1, seeds=(13,))]))
     assert "- Cache writes are priced at the 5-minute rate for every arm" in same
+    # #264 Reviewer B nit 3: the rate comes from the manifest; the record's missing field is not the reason.
+    assert ("- Cache writes are priced at the 5-minute rate for every arm, the cache lifetime the manifest records; "
+            "a request record does not carry its own.") in same
+
+
+def test_the_compaction_table_lists_the_sessions_by_seed_and_repeat(tmp_path):
+    """#264 Reviewer B nit 3: after a resume the manifest's order is not the seeds' order."""
+    out = make_run(tmp_path / "run", repeats=2, seeds=(11, 12))
+    edit_manifest(out, lambda m: m["units"].reverse())
+    results = report.build([out])
+    order = [(u["seed"], u["repeat"]) for u in results["plain_compaction"]["units"]]
+    assert order == sorted(order) and len(order) == 3
+    section = report.render(results).split("Compaction in the plain Claude Code arm")[1]
+    rows = [line.split(" | ")[:2] for line in section.splitlines() if line.startswith("| 1")]
+    assert [(int(seed.strip("| ")), int(repeat)) for seed, repeat in rows] == order
 
 
 def test_a_session_may_record_its_own_cache_lifetime(tmp_path):

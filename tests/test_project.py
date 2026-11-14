@@ -49,11 +49,22 @@ V0_5_24_PIN_LINE = (
     "turn is paged.")
 
 
+# The example line as v0.5.24 sent it, before D63 (PR #274) said that search covers tool results paged out
+# of the running turn too. Put back with the pin line for the same reason.
+V0_5_24_EXAMPLE_LINE = (
+    'Example: to find the value of cache.ttl_seconds, call contexto_search with {"query": '
+    '"cache.ttl_seconds"}. Each hit names a page, such as "pg_0123456789abcdef (turn 3)", then '
+    'shows its matching lines with their character offsets, such as "> 18240: cache.ttl_seconds=...". '
+    'Answer from that line, or call contexto_recall with {"page_id": "pg_0123456789abcdef", "offset": '
+    '18240} to read on from it. Search covers only paged-out turns, so when the conversation in view states '
+    'the same thing, the conversation in view is newer.')
+
+
 def v0_5_24_guidance(monkeypatch) -> tuple[str, ...]:
     """Put the preamble's opening lines back to v0.5.24's; returns them."""
     from contexto.store import recall
 
-    lines = (*recall.RULE_LINES[:2], V0_5_24_PIN_LINE, recall.EXAMPLE_LINE)
+    lines = (*recall.RULE_LINES[:2], V0_5_24_PIN_LINE, V0_5_24_EXAMPLE_LINE)
     monkeypatch.setattr(recall, "DEFAULT_LINES", lines)
     return lines
 

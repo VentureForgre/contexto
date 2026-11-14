@@ -46,7 +46,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    from contexto.launcher import LaunchError, open_session, session_affinity_key
+    from contexto.launcher import LaunchError, check_not_service, open_session, session_affinity_key
     from contexto.paths import contexto_home, session_dir
     from contexto.proxy import ContextoProxy
     from contexto.store.prune import discard_new_session
@@ -54,6 +54,11 @@ def run(args: argparse.Namespace) -> int:
 
     session_id = args.session if args.session is not None else uuid.uuid4().hex
     upstream = resolve_upstream(args.upstream, cwd=Path.cwd())
+    try:
+        check_not_service(upstream, contexto_home(), "contexto proxy")
+    except LaunchError as exc:
+        print(f"contexto proxy: {exc}", file=sys.stderr)
+        return exc.code
     if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: no project base URL (D52)
         note = untrusted_note("env.ANTHROPIC_BASE_URL", upstream.ignored, "Pass --upstream", os.environ)
         print(f"contexto proxy: {note}", file=sys.stderr)

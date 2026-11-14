@@ -183,6 +183,12 @@ backend and Codex's own login.
 
 The base URL is not read from organization-managed Claude Code settings, here or by `contexto run`.
 
+`claude-upstream` fails when Claude Code's upstream is this Contexto home's `contexto serve`, the base
+URL [serve.md](serve.md) has a client put in its settings: `contexto run claude` refuses it, because
+requests would pass two engines that open the same store. Pass `--upstream` to `contexto run`, or
+use the client through the service. The check shows only the origin, never the URL's path, which
+holds the service's token.
+
 ### `claude-key` and `codex-key`
 
 Whether a key or key helper is configured, by name and place.

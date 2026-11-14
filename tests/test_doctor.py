@@ -444,6 +444,35 @@ def test_an_upstream_from_settings_is_shown_as_its_origin_without_credentials(bo
                                                    "source": "settings:project"}
 
 
+def test_an_upstream_that_is_this_home_s_service_fails_as_the_launcher_refuses_it(both, capsys, fast_mcp,
+                                                                                   monkeypatch):
+    """D70: ``contexto run claude`` refuses an upstream that is this home's ``contexto serve``
+    (``launcher.check_not_service``), the base URL docs/serve.md puts in Claude Code's settings. Doctor
+    fails the same setup, and neither its text nor its JSON holds the token in the URL."""
+    import os
+    from pathlib import Path
+
+    store = Path(os.environ["CONTEXTO_HOME"])
+    store.mkdir(parents=True, exist_ok=True)
+    token = "Tk" + "x" * 40
+    (store / "serve.token").write_text(token + "\n")
+    os.chmod(store / "serve.token", 0o600)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://127.0.0.1:7837/{token}")
+    code, out, _ = run(capsys)
+    _, json_out, _ = run(capsys, "--json")
+    found = {c["id"]: c for c in json.loads(json_out)["checks"]}
+    upstream = found["claude-upstream"]
+    assert code != 0 and upstream["status"] == "fail"
+    assert "contexto serve" in upstream["summary"] and "--upstream" in upstream["action"]
+    assert upstream["details"] == {"origin": "http://127.0.0.1:7837", "source": "env"}
+    for text in (out, json_out):
+        assert token not in text
+    # Another token, or none on disk, is an ordinary loopback upstream.
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:7837/" + "y" * 42)
+    _, found = checks(capsys)
+    assert found["claude-upstream"]["status"] == "pass"
+
+
 def test_an_upstream_from_the_environment(both, capsys, fast_mcp, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8317")
     _, found = checks(capsys)

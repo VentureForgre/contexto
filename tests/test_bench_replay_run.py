@@ -19,6 +19,7 @@ import dataclasses
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -29,13 +30,13 @@ from pathlib import Path
 
 import pytest
 
-from contexto import __version__, cli, mcp
+from contexto import __version__, cli
 from contexto.bench import script as bench_script
 from contexto.bench.model import NEW_CLASSES, Script
 from contexto.bench.modes import replay as replay_mode
 from contexto.bench.replay import client, lines, output, reach, scripted, session, trace
 from contexto.commands import bench as bench_command
-from contexto.store import SessionStore
+from contexto.store import SessionStore, recall
 
 SHORT = ["--protocol", "d27", "--replay-turns", "8"]  # 14 turns, about 3 seconds
 
@@ -306,10 +307,27 @@ def check_requests_jsonl(run):
     assert all(r["history_tokens"] == history[r["turn"]] and r["main"] and not r["compaction"] for r in replayed)
     assert replayed[-1]["history_tokens"] == bench_script.estimate(script)["tokens"]
     assert sum(r["rotation"] for r in replayed) == expected["rotations"]
-    assert all(r["round"] == 0 for r in replayed if r["rotation"])
-    # The proxy's own estimate is beside the fake upstream's count; once usage is known the two are close.
+    # A rotation runs at a turn start, or inside a tool loop as step 2 of an in-turn batch (D63), which the
+    # proxy logs with reason "in_turn".
+    log = run["out"] / "store" / "sessions" / "bench-replay-20261016" / "log.jsonl"
+    logged = [json.loads(line)["transform_events"] for line in log.read_text(encoding="utf-8").splitlines()
+              if json.loads(line)["event"] == "request"]
+    assert len(logged) == len(replayed)
+    in_turn = sum(1 for events in logged for t in events if t["event"] == "rotation" and t.get("reason") == "in_turn")
+    assert sum(1 for r in replayed if r["rotation"] and r["round"] != 0) == in_turn
+    # The proxy's own estimate is beside the fake upstream's count; once usage is known the two are close. On a
+    # request where an in-turn batch ran (D63) it is the anchored estimate less what the batch freed by the
+    # estimator, which errs high when the paged content was estimated low: never under the count there, and
+    # close again on the next request. Nor far over it: the pinned run's one batch request (113, an in-turn
+    # rotation of 53 turns) is estimated 43,495 against a count of 34,128, 1.274 times; at most 1.35 leaves
+    # that error a margin of 6% and fails an estimate that leaves freed content uncounted (Reviewer A at
+    # 15293e9c, finding 3: 56,473 for a request of 7,301).
+    batch = {n for n, events in enumerate(logged) if any(t["event"] == "in_turn_batch" for t in events)}
     assert all(type(r["proxy_estimate"]) is int for r in replayed)
-    assert all(abs(r["proxy_estimate"] - r["uncached"]) < 0.15 * r["uncached"] for r in replayed[1:])
+    assert all(abs(r["proxy_estimate"] - r["uncached"]) < 0.15 * r["uncached"]
+               for n, r in enumerate(replayed) if n and n not in batch)
+    assert all(replayed[n]["uncached"] <= replayed[n]["proxy_estimate"] <= 1.35 * replayed[n]["uncached"]
+               for n in batch)
     # The modelled arms: the same rows the model gives for the measured head.
     assert by_arm["full"] == lines.full_rows(script, expected["head_tokens"])
     assert by_arm["plain"] == lines.plain_rows(script, expected["head_tokens"], 150_000)
@@ -384,6 +402,20 @@ def check_results_json(run):
     assert all(len(sizes) == 1 for sizes in by_turn.values())  # what the note says: one x per turn
     assert max(sum(r["turn"] == turn for r in contexto) for turn in by_turn) > 1  # and some turns have several
     assert all(isinstance(note, str) for note in data["notes"])
+    # #269 Reviewer B lows 1 and 2 at 9a04985c: under the chart, why each line drops, and the three peaks
+    # (the full-context line sets the y axis at about 1M, so the other two are hard to tell apart by eye).
+    modelled = data["replay"]["modelled"]
+    assert data["notes"][1] == (
+        f"The Contexto line drops at each of its {run['expected']['rotations']} rotations: the proxy moves the oldest "
+        "turns out of the request to its store, where they stay searchable, and summarises nothing. The plain Claude "
+        f"Code line drops at each of its {modelled['plain_compactions']} modelled compactions, where Claude Code "
+        "replaces the old turns with a summary. Largest request: Contexto "
+        f"{run['expected']['max_input_estimated']:,} tokens (estimated), plain Claude Code {modelled['plain_max']:,} "
+        f"and full context {modelled['full_max']:,} (modelled).")
+    assert data["notes"][1] == output.drops_note(
+        data["replay"]["rotations"], data["replay"]["modelled"]["plain_compactions"],
+        {arm: max(y for _, y in series[arm]["points"]) for arm in series})
+    assert max(y for _, y in series["contexto"]["points"]) == run["expected"]["max_input_estimated"]
     full = [r for r in rows if r["arm"] == "full"]
     plain = [r for r in rows if r["arm"] == "plain"]
     assert data["replay"]["modelled"] == {"full_max": full[-1]["uncached"],
@@ -402,8 +434,12 @@ def check_the_store_is_kept_without_its_private_files(run):
     store = SessionStore.open_existing(out / "store", "bench-replay-20261016")
     assert len(store.page_ids()) >= run["expected"]["pages"]  # the pages at the first probe turn, and any after
     probe = next(p for p in script.probes if p.cls == "paged_only")
-    (page_id,) = store.search(probe.subjects[0])  # still readable and searchable without its key
-    assert probe.statements[0] in json.dumps(store.get_page(page_id)["messages"])
+    # Still readable and searchable without its key. Since D63 a probe turn's tool loop pages the probe turns
+    # before it, which quote the fact, so the plant's own page (the earliest) need not be the only hit.
+    hits = store.search(probe.subjects[0])
+    plant = min(hits, key=lambda page: store.get_page(page)["turn"])
+    assert probe.statements[0] in json.dumps(store.get_page(plant)["messages"])
+    assert all(store.get_page(page)["turn"] >= script.n_content for page in hits if page != plant)
     assert "store/ (session bench-replay-20261016)" in run["stdout"]
     assert _private_files(out / "store") == []  # reading it with open_existing wrote no key
     # Reviewer B's nit, said in results.md: opening the kept store as a session writes a new page.key.
@@ -451,8 +487,16 @@ def check_the_pinned_fallback_sentence_holds_in_the_run(run):
     said = "update output.pinned_fallback, the sentence that states this"
     assert len(empty) == output.FALLBACK_EMPTY, said
     assert len(approximate) == output.FALLBACK_ANSWERED, said
-    probe, call = approximate[0]
-    assert (probe.id, probe.cls) == (output.FALLBACK_PROBE, output.FALLBACK_CLASS), said
+    (probe, call), = [(p, c) for p, c in approximate if p.id == output.FALLBACK_PROBE]
+    assert probe.cls == output.FALLBACK_CLASS, said
+    for other, other_call in approximate:  # D63: the others show only a page of an earlier probe turn
+        if other is probe:
+            continue
+        shown = list(dict.fromkeys(hit["page_id"] for hit in other_call["returned"]))
+        pages_of = [SessionStore.open_existing(out / "store", "bench-replay-20261016").get_page(p) for p in shown]
+        assert other.cls == output.FALLBACK_OTHER_CLASS and other.id in {r["id"] for r in empty}, said
+        assert all(p["turn"] >= script.n_content and other.statements[0] not in json.dumps(p["messages"])
+                   for p in pages_of), said
     assert probe.id in {r["id"] for r in empty}, said
     pages = list(dict.fromkeys(hit["page_id"] for hit in call["returned"]))
     store = SessionStore.open_existing(out / "store", "bench-replay-20261016")
@@ -462,9 +506,10 @@ def check_the_pinned_fallback_sentence_holds_in_the_run(run):
     assert [hit["page_id"] for hit in call["returned"]].count(pages[1]) == 3, said  # its line and two others
     assert sum(old in texts[1] for old in probe.older) == 2, said  # the two decoys beside it
     assert output.pinned_fallback() == (
-        "On the pinned session the tool's fallback answers 1 of the 18 queries the strict search finds nothing for: "
+        "On the pinned session the tool's fallback answers 3 of the 18 queries the strict search finds nothing for: "
         "for q_r_02 (paraphrase) its reply shows the plant's line on the second of the three pages it shows in "
-        "detail, beside two of the service's decoy lines.")
+        "detail, beside two of the service's decoy lines; for the other 2 (toolloop probes) it shows only a page "
+        "of an earlier probe turn, which holds no plant.")
 
 
 def check_the_chart_of_a_replay_names_each_basis_once(run):
@@ -488,16 +533,19 @@ def check_the_chart_of_a_replay_names_each_basis_once(run):
         assert "estimated" not in words or "modelled" not in words, words
     notes = " ".join("".join(t.itertext()) for t in root.iter(f"{svg}text") if t.get("font-size") == "11")
     assert "vertical run of points" in notes
+    assert f"{run['expected']['rotations']} rotations" in notes and "replaces the old turns with a summary" in notes
+    assert f"full context {run['results']['replay']['modelled']['full_max']:,}" in notes
     # Reviewer B nit 2: the full-context line crosses the bound at the left, so the label is at the right end.
     (label,) = [t for t in root.iter(f"{svg}text") if t.get("data-bound-label")]
     assert (label.text, label.get("text-anchor")) == ("bound: 150,000 tokens", "end")
 
 
-PINNED_CHECKS =[check_equals_the_trace, check_the_bound_held, check_the_engine_ran_as_in_a_launch,
-                 check_the_terminal_text, check_results_md, check_manifest, check_requests_jsonl, check_reach_jsonl,
-                 check_results_json, check_the_store_is_kept_without_its_private_files,
-                 check_no_path_of_this_machine_is_in_any_output_file, check_output_helpers_agree_with_what_was_written,
-                 check_the_pinned_fallback_sentence_holds_in_the_run, check_the_chart_of_a_replay_names_each_basis_once]
+PINNED_CHECKS = [check_equals_the_trace, check_the_bound_held, check_the_engine_ran_as_in_a_launch,
+                  check_the_terminal_text, check_results_md, check_manifest, check_requests_jsonl, check_reach_jsonl,
+                  check_results_json, check_the_store_is_kept_without_its_private_files,
+                  check_no_path_of_this_machine_is_in_any_output_file,
+                  check_output_helpers_agree_with_what_was_written, check_the_pinned_fallback_sentence_holds_in_the_run,
+                  check_the_chart_of_a_replay_names_each_basis_once]
 
 
 # The pinned replay
@@ -530,20 +578,25 @@ def test_the_replay_connects_to_loopback_only(pinned_run, short_run):
 
 
 def test_a_proxy_change_needs_only_the_trace_recorded_again(monkeypatch, tmp_path):
-    """Reviewer A's repro of finding 2: one word of an MCP tool description made longer grows every
-    request. Against the shipped trace the replay fails, saying what differed, the command that records
-    the trace again and what to check in its diff; recorded again into a file the tests are pointed at,
-    every check of a pinned run passes."""
-    tools = copy.deepcopy(mcp.TOOLS)
-    tool = next(t for t in tools if "a short note on" in t["description"])
-    tool["description"] = tool["description"].replace("a short note on", "a short note saying")
-    monkeypatch.setattr(mcp, "TOOLS", tools)
+    """Reviewer A's repro of finding 2, on what the proxy injects: one word of the preamble's pin rule
+    made longer grows every request from the first rotation, the first to carry the preamble. (A tool's
+    wording no longer reaches the replay's head: test_the_head_does_not_move_with_tool_wording.) Against
+    the shipped trace the replay fails, saying what differed, the command that records the trace again
+    and what to check in its diff; recorded again into a file the tests are pointed at, every check of a
+    pinned run passes."""
+    rule = next(line for line in recall.DEFAULT_LINES if "in their own messages" in line)
+    longer = rule.replace("in their own messages", "in their very own messages")
+    opening = tuple(longer if line == rule else line for line in recall.DEFAULT_LINES)
+    monkeypatch.setattr(recall, "DEFAULT_LINES", opening)
     shipped = trace.load_packaged()
     code, text, err = _run(["--replay"])
     assert code == 1 and "Pinned expectations: " in text and "Result: FAIL" in text
     requests = shipped["expected"]["requests"]
-    assert f"request_tokens: {requests} of {requests} differ; the first is number 1" in err
-    assert f"All {requests} differ, by +" in err and "(the head, the tool definitions)" in err
+    # The requests before the first rotation carry no preamble, so they are equal.
+    first = int(re.search(r"Requests 1 to (\d+) are equal", err).group(1))
+    assert 0 < first < requests
+    assert f"request_tokens: {requests - first} of {requests} differ; the first is number {first + 1}" in err
+    assert f"Requests 1 to {first} are equal and the difference starts at number {first + 1}" in err
     assert err.startswith("The measurements differ from the pinned trace in ")
     for said in ("record the trace again, from the repository's root:",
                  "contexto bench --replay --record-trace src/contexto/bench/data/trace-20261016.json --force",
@@ -566,7 +619,8 @@ def test_a_proxy_change_needs_only_the_trace_recorded_again(monkeypatch, tmp_pat
     # re-record that this test could not see. It reads the trace now; run it against the recorded one.
     parts = _test_module("test_bench_replay")
     parts.test_the_head_is_synthetic_text_of_a_realistic_size()
-    assert recorded["expected"]["head_tokens"] != shipped["expected"]["head_tokens"]  # the head did grow
+    assert recorded["expected"]["head_tokens"] == shipped["expected"]["head_tokens"]  # the head did not move
+    assert recorded["expected"]["request_tokens"][:first] == shipped["expected"]["request_tokens"][:first]
 
 
 # A session that is not the pinned one
@@ -933,8 +987,6 @@ def test_options_a_replay_cannot_use_are_usage_errors(monkeypatch, capsys, tmp_p
     assert list(tmp_path.iterdir()) == []  # nothing dumped, nothing recorded
 
 
-
-
 @pytest.mark.parametrize("argv", [["--dump-trace", "DIR"], ["--record-trace", "trace.json"], ["--replay-turns", "8"],
                                   ["--force"]])
 def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path, argv):
@@ -947,7 +999,8 @@ def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path
     assert argv[0] in replay_mode.OWN_OPTIONS
     # The live run is installed (contexto.bench.modes.live, the default mode), so with no mode flag this
     # would be a live run: the replay's option is refused before any mode runs.
-    assert any(getattr(m, "FLAG", 0) is None for m in bench_command.discover()), modes.__path__
+    default = [m.__name__ for m in bench_command.discover() if getattr(m, "FLAG", 0) is None]
+    assert default == ["contexto.bench.modes.live"], (default, modes.__path__)
     assert cli.main(["bench", *argv]) == 2
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err.strip() == said
@@ -991,7 +1044,7 @@ def test_the_help_names_the_mode_and_its_options(capsys):
 # Every name a replay or a live run writes into --out, written out from the shared output schema
 # (schemas.md): not read from the package, so a name dropped from replay_mode.OUTPUT_NAMES fails here.
 RESULT_NAMES = ("manifest.json", "requests.jsonl", "probes.jsonl", "reach.jsonl", "results.json", "results.md",
-                "scripts", "charts", "store")
+                "scripts", "charts", "store", "reservations.jsonl")
 
 
 def test_the_refused_names_are_the_output_schemas():

@@ -339,6 +339,20 @@ def test_notice_log_shows_the_fault_even_when_the_log_itself_cannot_be_written()
     assert "log_unwritable" in notices.shown
 
 
+def test_a_failed_log_write_keeps_the_carried_records_tokens_for_a_later_bound_notice():
+    """Review B round 9, N23: the start text's tokens are read before the log write, so a full disk at the
+    one line that holds ``start_text`` does not drop the project-memory hint from a later bound notice."""
+    store, err = Store(OSError(errno.ENOSPC, "No space left on device")), io.StringIO()
+    notices = NoticeLog(store, err)
+    with pytest.raises(OSError):
+        notices.log({"event": "request", "transform_events": [{"event": "start_text", "epoch": 0, "tokens": 1234}]})
+    assert notices.start_text_tokens == 1234
+    store.error = None
+    notices.log({"event": "request", "transform_events": [{"event": "bound_too_small", "epoch": 0}]})
+    assert err.getvalue().rstrip().endswith("Records carried by project memory take about 1,234 tokens of the "
+                                            "bound; --no-project-memory turns them off.")
+
+
 def test_fault_notices_reads_any_event_without_raising():
     assert fault_notices(None) == [] and fault_notices({"event": "request", "transform_events": "x"}) == []
     assert fault_notices({"event": ["store_error"]}) == [] and fault_notices({"event": "rotation"}) == []

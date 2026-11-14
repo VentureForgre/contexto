@@ -18,7 +18,9 @@ Steps (M2 contract, Architecture):
    claude's exit code.
 
 The user's own settings, hooks, and MCP servers still load: a flag-level ``--settings`` only adds
-the base URL and the allow rules. Its base URL outranks the user, project, and local settings files.
+the base URL and the allow rules, and a ``statusLine`` when no settings file Claude Code would read has
+one (D64, ``contexto.statusline``: Claude Code replaces that key, so one the user has is never
+overridden). Its base URL outranks the user, project, and local settings files.
 Its allow rules join the user's permission rules rather than replacing them, and the user's ``deny``
 and ``ask`` rules still win over them (measured with zero spend on Claude Code 2.1.302: a deny takes
 the tool out of the request, an ask refuses it in ``-p`` mode). Without the rules, 2.1.302 refuses
@@ -144,6 +146,7 @@ from contexto.paths import PROJECT_MEMORY_ENV, contexto_home, mcp_env, project_m
 from contexto.private import affinity_salt, open_private, private_dir
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.stats import fault_notices, log_unwritable_message, print_exit_summary, quiet_from_env
+from contexto.statusline import launch_status_line
 from contexto.store import LIVE_LOCK, SessionStore
 from contexto.store.pinned import render_carried
 from contexto.store.project import project_root, read_meta, recorded_root
@@ -181,8 +184,10 @@ WATCHDOG_EXITED = b"exited\n"  # the child was reaped: its pid may be reused
 # after the CLI's name). The codex options are not listed: they only apply before 'codex'.
 RUN_OPTIONS = {"--bound": True, "--allow-large-bound": False, "--window-fraction": True, "--headroom-floor": True,
                "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False,
-               "--quiet": False, "--no-project-memory": False}
+               "--quiet": False, "--no-statusline": False, "--no-project-memory": False, "--no-in-turn-paging": False}
 ENV_VALUE_SHOWN = 40  # characters of an unrecognised variable's value quoted on stderr
+# D63: set to 0, false, off or no to turn in-turn paging off, like --no-in-turn-paging.
+IN_TURN_PAGING_ENV = "CONTEXTO_IN_TURN_PAGING"
 # Claude Code's long options whose value is the next argument even when it starts with "-": every main-command
 # option declared with a required ``<value>`` in the 2.1.314 and 2.1.318 binaries, shown in ``--help`` or
 # hidden (variadic ones take at least that one). ``claude_options`` skips that value.
@@ -252,7 +257,9 @@ class LaunchOptions:
     claude_bin: str = "claude"
     version_check: bool = True
     quiet: bool = False  # D64: no summary at exit; warnings are still printed
+    statusline: bool = True  # D64: add Contexto's status line when the user has none (contexto.statusline)
     project_memory: bool = True  # False: --no-project-memory (D69)
+    in_turn_paging: bool = True  # D63: page inside a running turn (rule 5)
 
 
 def check_user_args(claude_args: list[str]) -> None:
@@ -306,6 +313,21 @@ def check_upstream(upstream: Upstream) -> None:
         ok, problem = False, str(exc)
     if not ok:
         raise LaunchError(f"invalid upstream {upstream.url!r} (from {upstream.source}): {problem}", EXIT_USAGE)
+
+
+def check_not_service(upstream: Upstream, home: Path, command: str) -> None:
+    """Refuse an upstream that is the address of this home's ``contexto serve`` (a loopback host whose
+    first path segment is the service's token; ``contexto.servecontract.names_service``). That is the
+    base URL a client of the service is given, so it is what the default upstream resolves to once it
+    is in the user's Claude Code settings, and requests would then pass two engines that open the
+    same store. The URL is never printed: it holds the token."""
+    from contexto.servecontract import names_service
+
+    if names_service(upstream.url, home):
+        raise LaunchError(
+            f"the upstream (from {upstream.source}) is this Contexto home's `contexto serve`, which bounds the "
+            f"requests it is sent itself. Pass --upstream URL (for example --upstream https://api.anthropic.com), "
+            f"or use the client through `contexto serve` instead of `{command}`.", EXIT_USAGE)
 
 
 def check_cloud_provider(cwd: Path, env: Mapping[str, str] | None = None, *, home: Path | None = None,
@@ -426,7 +448,16 @@ def engine_config(options: LaunchOptions) -> dict[str, int | float]:
         config["window_fraction"] = options.window_fraction
     if options.headroom_floor is not None:
         config["headroom_floor"] = options.headroom_floor
+    if not options.in_turn_paging:
+        config["in_turn_paging"] = False
     return config
+
+
+def in_turn_paging(flag_off: bool, env: dict[str, str] | None = None) -> bool:
+    """D63: in-turn paging is on unless ``--no-in-turn-paging`` is given or ``CONTEXTO_IN_TURN_PAGING``
+    is 0, false, off or no."""
+    env = os.environ if env is None else env
+    return not flag_off and env.get(IN_TURN_PAGING_ENV, "").strip().lower() not in ("0", "false", "off", "no")
 
 
 def assumed_overhead(env: dict[str, str] | None = None) -> int:
@@ -495,15 +526,17 @@ class NoticeLog:
         # D64: store failures first, because on a full disk the write below fails as well.
         for key, message in fault_notices(event, getattr(self.store, "session_id", None)):
             self._once(key, "warning: " + message)
+        # D69: read before the write below, so a failed write keeps the hint a later bound notice gives
+        # (review B round 9, N23).
+        inners = [event, *(event.get("transform_events") or [])]
+        for inner in inners:
+            if isinstance(inner, dict) and inner.get("event") == "start_text" and isinstance(inner.get("tokens"), int):
+                self.start_text_tokens = inner["tokens"]
         try:
             self.store.log(event)
         except OSError as exc:
             self._once("log_unwritable", "warning: " + log_unwritable_message(exc))
             raise
-        inners = [event, *(event.get("transform_events") or [])]
-        for inner in inners:
-            if isinstance(inner, dict) and inner.get("event") == "start_text" and isinstance(inner.get("tokens"), int):
-                self.start_text_tokens = inner["tokens"]
         for inner in inners:
             if not isinstance(inner, dict):
                 continue
@@ -873,6 +906,8 @@ def resume_command(options: LaunchOptions, session_id: str, cli_session: str) ->
         args.append("--no-version-check")
     if not options.project_memory:
         args.append("--no-project-memory")
+    if not options.in_turn_paging:
+        args.append("--no-in-turn-paging")
     return shlex.join([*args, "claude", "--resume", cli_session])
 
 
@@ -1234,7 +1269,9 @@ def options_from_args(args: Any) -> LaunchOptions:
         window_fraction=args.window_fraction, headroom_floor=args.headroom_floor,
         version_check=not getattr(args, "no_version_check", False),
         quiet=bool(getattr(args, "quiet", False)) or quiet_from_env(),
-        project_memory=not getattr(args, "no_project_memory", False))
+        statusline=not getattr(args, "no_statusline", False),
+        project_memory=not getattr(args, "no_project_memory", False),
+        in_turn_paging=in_turn_paging(getattr(args, "no_in_turn_paging", False)))
 
 
 def check_options(options: LaunchOptions) -> None:
@@ -1410,6 +1447,7 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         return run_child([claude, *options.claude_args], stderr=stderr)
     # D70: the provider check, the upstream and the hint header state, from one read of each settings file.
     upstream, hint_headers = claude_launch_settings(options.upstream, Path.cwd())
+    check_not_service(upstream, contexto_home(), "contexto run claude")
     check_upstream(upstream)
     if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: as Claude Code -p, no project base URL (D52)
         print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', upstream.ignored, 'Pass --upstream', os.environ)}",
@@ -1438,13 +1476,16 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     try:
         tmp = Path(tempfile.mkdtemp(prefix="contexto-run-"))  # mode 0700, removed on exit
         watchdog = Watchdog.start(tmp, store)
-        settings = write_private_json(tmp, "settings.json", settings_payload(proxy.url, hint_headers))
+        # D64: a statusLine only when it cannot replace one of the user's; the note says which it was.
+        status_line, status_note = launch_status_line(session_id, home, Path.cwd(), enabled=options.statusline)
+        settings = write_private_json(tmp, "settings.json",
+                                      {**settings_payload(proxy.url, hint_headers), **status_line})
         mcp = write_private_json(tmp, "mcp.json", mcp_payload(session_id, home))
         store.log({"event": "launch", "cli": "claude", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": upstream.source,
                    "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args),
                    "affinity_header": proxy.affinity_header is not None,
-                   "hint_headers": hint_headers})
+                   "hint_headers": hint_headers, "statusline": status_note})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
         project_memory_notice(store, stderr, engine_pin_budget(config))  # D69: what it carries, or nothing

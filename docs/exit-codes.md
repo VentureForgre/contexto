@@ -15,6 +15,9 @@ The exit codes of the `contexto` commands. The Command column names the subcomma
 | `run` | 130 | Ctrl+C during the version check or while waiting for another launch to choose its session, before the CLI started |
 | `proxy` | 1 | Could not start: a port in use or not allowed (for example `--port 1`), an invalid upstream, or a `CONTEXTO_HOME` that cannot be written |
 | `proxy` | 2 | `--port` outside 0 to 65535, an invalid `--session` id (`''` included), an id that only starts existing session ids, or a `CONTEXTO_HOME` that is a file |
+| `serve` | 0 | A clean shutdown on SIGINT, SIGTERM or SIGHUP; also a `--print-settings`, `--print-mcp-config` or `--rotate-token` that succeeded, and a `--status` that found the service running |
+| `serve` | 1 | Could not start: the port is in use (or `contexto serve` already runs there), the token file is refused (a symlink, not a regular file, or readable by group or others), or `CONTEXTO_HOME` cannot be written; also a `--status` that found no service |
+| `serve` | 2 | Usage error: an engine option `contexto run` would refuse, `--max-sessions` below 1, `--idle-minutes` not above 0, `--port` outside 0 to 65535, an invalid upstream, an upstream that is the service itself (pass `--upstream URL`), or a `CONTEXTO_HOME` that is a file |
 | `mcp` | 0 | The CLI closed the server's input (the normal end) |
 | `mcp` | 1 | An invalid or unknown session id (it serves existing sessions only) |
 | `mcp` | 2 | Invalid `--search-cache-mb` |

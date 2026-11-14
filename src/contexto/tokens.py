@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import functools
+import hashlib
 import itertools
 import math
 import re
@@ -40,7 +42,7 @@ from contextlib import contextmanager
 from typing import Any, NamedTuple
 
 from contexto.canonical import canonical_bytes, utf8
-from contexto.pdfpages import UNCERTAIN, PdfCount, count_pages
+from contexto.pdfpages import PDF_MAX_PAGES, UNCERTAIN, PdfCount, count_pages
 
 TEXT_BYTES_PER_TOKEN = 3.5
 TOOL_RESULT_BYTES_PER_TOKEN = 1.5
@@ -69,6 +71,8 @@ IMAGE_FLOOR_SHARE = 0.95  # measured costs ran up to 3% under the formula (2,694
 # fits too.
 PDF_PAGE_TOKENS = 3_000 + IMAGE_FLOOR_MAX_TOKENS
 PDF_TYPICAL_PAGE_TOKENS = 1_583  # the measured page, for telling the allowance from the bound (D60)
+# What D60 counts a PDF at when its pages are not certain: the API's maximum, so it is never estimated low.
+UNCERTAIN_DOCUMENT_TOKENS = PDF_MAX_PAGES * PDF_PAGE_TOKENS
 PDF_MAX_BASE64 = 32 << 20  # base64 characters a PDF is decoded from: the API's request limit
 # PDFs whose counts are kept, least recently used dropped first; an entry is a key and a 2-tuple (under
 # 300 bytes), so this costs at most about 19 MB, and no request holds enough PDFs to cycle it.
@@ -376,6 +380,42 @@ def uncertain_documents(value: Any) -> int:
     pages are not certain (a PDF the reader could not read fully, or one by URL or file id)."""
     return sum(1 for block in split_media(value)[1]
                if _media_kind(block) == "document" and not _document_count(block).counted)
+
+
+def uncertain_document_keys(value: Any) -> tuple:
+    """The content key (``document_key``) of every document in ``value`` that counts as ``PDF_MAX_PAGES``,
+    in order, a PDF sent twice keyed twice."""
+    return tuple(document_key(block) for block in split_media(value)[1]
+                 if _media_kind(block) == "document" and not _document_count(block).counted)
+
+
+def document_key(block: dict) -> tuple[int, str]:
+    """D63: (size, digest) of a document as sent, the same in every process, so a measured cost can be
+    kept in the epoch record. The size is the length of its base64 data, or for a document by URL or
+    file id the length of its block's canonical JSON; the digest is the first 32 hex digits of the
+    SHA-256 of the same bytes."""
+    data = _base64_payload(block)
+    return _sized_digest(data) if data is not None else _sized_digest(canonical_bytes(block))
+
+
+@functools.lru_cache(maxsize=256)
+def _sized_digest(data: str | bytes) -> tuple[int, str]:
+    raw = data.encode("utf-8", "surrogatepass") if isinstance(data, str) else data
+    return len(data), hashlib.sha256(raw).hexdigest()[:32]
+
+
+def measured_documents(value: Any, costs: Any) -> tuple[int, int]:
+    """For the uncertain PDFs in ``value``, given ``costs`` (content key to the tokens usage measured for
+    that PDF, D63): how many tokens the estimate counts over their measured costs, and how many have no
+    measured cost yet. The estimate less the first is the estimate with each measured PDF at its cost."""
+    over = unmeasured = 0
+    for key in uncertain_document_keys(value):
+        cost = costs.get(key) if costs else None
+        if cost is None:
+            unmeasured += 1
+        else:
+            over += UNCERTAIN_DOCUMENT_TOKENS - cost
+    return over, unmeasured
 
 
 def pdf_allowance(value: Any) -> tuple[int, int]:

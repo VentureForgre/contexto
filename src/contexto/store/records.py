@@ -19,7 +19,8 @@
   earlier or later, is closed or replaced in this session's texts too, its own records included, and a
   conflict with a carried decision is marked. ``pinned_state(root)`` is the state and the carried
   records those texts render. A failure anywhere in the project part (never the session's own ledger)
-  reads as nothing carried and logs the content-free ``project_unavailable``: another session can never
+  reads as nothing carried and logs the content-free ``project_unavailable`` (a strict read, the engine's
+  refresh at a turn start, raises instead and is logged by the engine): another session can never
   break this one's texts, pins or closes. With nothing carried every method returns what it did before
   D69.
 
@@ -62,8 +63,9 @@ class LedgerOps:
         """``compute(project)``, or ``fallback`` when this session has no project. Other sessions can
         never break this one: any failure in the project part (the session's own ledger is read before
         it) reads as nothing carried and logs the content-free ``project_unavailable`` event. With
-        ``strict`` the failure is logged the same way and then raised, and a sessions directory that
-        exists but could not be listed is such a failure."""
+        ``strict`` the failure is raised and not logged here, since the caller logs it (the engine's
+        ``start_text_unavailable`` at a turn start; review A round 9, finding 1), and a sessions directory
+        that exists but could not be listed is such a failure."""
         try:
             project = self.project()
             if project is None:
@@ -79,13 +81,13 @@ class LedgerOps:
                     raise OSError("a session's metadata could not be read")
             return result
         except Exception as error:
+            if strict:
+                raise
             try:
                 if not getattr(self, "_read_only", False):  # a store opened read-only writes nothing
                     self.log({"event": "project_unavailable", "error": type(error).__name__})
             except Exception:  # a log write must never fail a render or a pin
                 pass
-            if strict:
-                raise
             return fallback
 
     def pinned_state(self, root: Path | None = None) -> tuple[State, tuple[Carried, ...]]:
