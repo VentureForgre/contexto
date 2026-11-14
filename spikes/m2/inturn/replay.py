@@ -3,7 +3,8 @@
     uv run python spikes/m2/inturn/replay.py --scenario all --json out.json
     uv run python spikes/m2/inturn/replay.py --scenario small --full      # 1,500 rounds, minutes of CPU
 
-No model calls: the upstream is ``upstream.FakeUpstream``, in this process. The tables are Markdown.
+No model calls: the upstream is ``upstream.FakeUpstream``, in this process. The tables are Markdown:
+the bound, the recall room, the cost of rewrites, and what search and recall returned late in each loop.
 """
 
 from __future__ import annotations
@@ -42,28 +43,41 @@ def _table(header: list[str], rows: list[list[str]]) -> str:
 
 
 def tables(runs: list[dict[str, Any]]) -> str:
-    """The three tables for a list of ``Run.metrics()`` dicts."""
-    bound, cost, rooms = [], [], []
+    """The four tables for a list of ``Run.metrics()`` dicts."""
+    bound, cost, rooms, recall = [], [], [], []
     for m in runs:
         name = [m["scenario"], m["dialect"]]
         bound.append([*name, _n(m["requests"]), _n(m["over_bound"]["estimate"]), _n(m["over_bound"]["real"]),
                       _n(m["largest"]["estimate"]), _n(m["largest"]["tokens"]), _n(m["largest"]["bytes"]),
                       _n(m["pages"]), _n(m["rotations"]), _kinds(m["violations"])])
-        lost = {k: v for k, v in m["info"].items() if k in ("inflight_thinking_missing", "inflight_reasoning_dropped")}
-        cost.append([*name, _n(m["input_tokens"]), _share(m["cache_read_share"]), _n(m["rewrites"]["count"]),
-                     _n(m["rewrites"]["tokens"]), _n(m["rewrites"]["mean"]), _share(m["rewrites"]["share"]),
-                     _n(sum(lost.values()))])
+        info, rewrites = m["info"], m["rewrites"]
+        around = info.get("thinking_kept_around_strip", 0) + info.get("reasoning_kept_around_drop", 0)
+        cost.append([*name, _n(m["input_tokens"]), _share(m["cache_read_share"]), _n(rewrites["count"]),
+                     _n(rewrites["in_loop"]), _n(rewrites["invalidated"]), _n(rewrites["resent"]),
+                     _n(rewrites["mean_resent"]), _share(rewrites["resent_share"]),
+                     _n(m["thinking"]["newest_missing"]), _n(around)])
         for conversation, room in m["room"].items():
             rooms.append([*name, conversation, _n(m["requests_by_conversation"][conversation]),
-                          _n(room["published"]), _n(room["min"]), _n(room["median"]), _n(room["zero"]),
-                          _n(room["zero_past_50k"])])
+                          _n(room["published_at_request"]), _n(room["published"]), _n(room["min"]),
+                          _n(room["median"]), _n(room["zero"]), _n(room["past_50k"]),
+                          _n(room["request_under_min_past_50k"]), _n(room["response_zero_past_50k"]),
+                          _n(room["response_under_half_min_past_50k"])])
+        for conversation, probes in m["probes"].items():
+            counted = m["count_tokens"]
+            recall.append([*name, conversation, _kinds(probes["search"]), _kinds(probes["recall"]),
+                           _n(m["arrival"]["results_stubbed_on_arrival"]), _n(m["originals"]["lost"]),
+                           f"{counted['sent']} sent, {counted['different']} different"])
     return "\n\n".join([
         _table(["scenario", "dialect", "requests", "over_bound (estimate)", "over_bound (real)", "largest estimate",
                 "largest tokens", "largest bytes", "pages", "rotations", "violations"], bound),
-        _table(["scenario", "dialect", "conversation", "requests", "rooms published", "room min", "room median",
-                "requests at 0", "at 0 past 50,000"], rooms),
-        _table(["scenario", "dialect", "input tokens sent", "cache read", "rewrites", "re-sent tokens",
-                "mean per rewrite", "re-sent share", "in-flight thinking missing"], cost),
+        _table(["scenario", "dialect", "conversation", "requests", "rooms at request", "rooms at response",
+                "room min", "room median", "at 0", "past 50,000", "request room under 12,000", "response room 0",
+                "response room under 6,000"], rooms),
+        _table(["scenario", "dialect", "input tokens sent", "cache read", "rewrites", "in a loop",
+                "cache invalidated", "re-sent tokens", "mean re-sent", "re-sent share", "newest thinking missing",
+                "thinking kept around a strip"], cost),
+        _table(["scenario", "dialect", "conversation", "searches", "recalls", "stubbed on arrival", "results lost",
+                "count_tokens"], recall),
     ])
 
 

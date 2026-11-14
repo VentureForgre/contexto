@@ -9,52 +9,67 @@ Results at v0.5.24: `docs/research/M2-in-turn-paging-baseline.md`.
 
 ```sh
 uv run python spikes/m2/inturn/replay.py --scenario all --json out.json   # about 30 s of CPU
-uv run python spikes/m2/inturn/replay.py --scenario small --full          # 1,500 rounds, about 3 minutes
-uv run --with pytest pytest -q spikes/m2/inturn
+uv run python spikes/m2/inturn/replay.py --scenario small --full          # 1,500 rounds, about 3 minutes of CPU
+uv run --with pytest pytest -q spikes/m2/inturn                           # about 45 s of CPU
 ```
 
 ## Files
 
-- `scripts.py`: the six scenarios (`loop120`, `large`, `small`, `subagent`, `images`, `multiturn`).
-  A script is what the model says and what each tool returns, with no API shape in it. Every text
-  comes from SHA-256 of its position, so a script is the same bytes on every run and platform.
+- `scripts.py`: the seven scenarios (`loop120`, `large`, `small`, `subagent`, `images`, `multiturn`,
+  `mixed`). A script is what the model says and what each tool returns, with no API shape in it.
+  Every text comes from SHA-256 of its position, so a script is the same bytes on every run and
+  platform. Late in each long loop two steps are a probe: a search for a line of an early result, then
+  a recall of the page the search named.
 - `cli.py`: the two CLIs. `ClaudeCode` sends Messages requests (`/v1/messages`) in Claude Code
   2.1.318's shapes, `Codex` sends Responses requests (`/v1/responses`) in codex-cli 0.166.0's. Each
   keeps its own history and resends all of it; what the engine forwards is never fed back.
 - `upstream.py`: `FakeUpstream`. It checks each forwarded request against the API's rules and counts
   violations by kind, prices it with `tokenizer.py`, models the prompt cache, and answers with the
-  script's next step. A thinking block's signature is a keyed hash of the request it answered, so a
-  later request that changed anything before that block is caught (`thinking_binding`).
+  script's next step. A thinking block's signature is a keyed hash of the request it answered and of
+  the blocks ahead of it in its message, so a later request that changed anything before that block is
+  caught (`thinking_binding`).
 - `tokenizer.py`: the upstream's tokenizer: tool output at 2.2 bytes a token, other text at 3.1,
-  images by the contract's rule 3 pixel price, 4 tokens a message. It is not the engine's estimator.
-- `harness.py`: `run(scenario, dialect)` plays a scenario and returns a `Run`; `Run.metrics()` is the
-  numbers. It calls the engine in `contexto.proxy`'s order: `prime`, the transform, the upstream, then
-  `observe_usage` with the CLI's own request.
-- `targets.py`: `unmet(run)` lists the D63 targets a run misses.
+  4 tokens a message, images by the contract's rule 3 pixel price. For text it is not the engine's
+  estimator; for images it is the engine's own rule.
+- `harness.py`: `run(scenario, dialect)` plays a scenario and returns a `Run`; `Run.sent` is one
+  record per request and `Run.metrics()` the numbers. It calls the engine in `contexto.proxy`'s order
+  (`prime`, the transform, the upstream, then `observe_usage` with the CLI's own request), runs the
+  probes through the real MCP handlers (`contexto.mcp.Server`) on a second handle of the store, and
+  sends a `count_tokens` request after some loop requests.
+- `targets.py`: the D63 rules, one function each, and `unmet(run)`.
 - `stubs.py`: `find_stubs(dialect, request)`, the hook the engine pull request fills in.
-- `replay.py`: the command. It prints three Markdown tables and can write the numbers as JSON.
+- `toy.py`: a small in-turn pager for the harness's own tests. It is not the D63 design.
+- `replay.py`: the command. It prints four Markdown tables and can write the numbers as JSON.
 
 ## The tests
 
 - `tests/test_inturn_upstream.py`: each violation kind on a hand-made request, a clean append-only
-  conversation, the cache model, the re-sent count, the tokenizer and the PNG builder.
-- `tests/test_inturn_scenarios.py`: the scripts' sizes, the CLI history staying append-only, no tool
-  result lost, two runs giving the same numbers, and the command.
-- `tests/test_inturn_targets.py`: one test per scenario and dialect, marked
-  `xfail(strict=True, reason="D63: in-turn paging not built")`. They fail at v0.5.24.
+  conversation, the cache model, the rewrite numbers, the tokenizer and the PNG builder.
+- `tests/test_inturn_scenarios.py`: the scripts' sizes and shapes, the CLI history staying
+  append-only, no tool result lost, two runs giving the same numbers, and the command.
+- `tests/test_inturn_engines.py`: `toy.ToyPager` meets every target on every scenario; each of six
+  wrong engines fails the rule written for it; each rule's line, on a run edited by hand.
+- `tests/test_inturn_targets.py`: one test per scenario and dialect (13), marked
+  `xfail(strict=True, raises=AssertionError, reason="D63: in-turn paging not built")`. They fail at
+  v0.5.24.
 
 ## For the engine pull request (D63)
 
-1. Replace the body of `stubs.find_stubs(dialect, request)`. It gets one forwarded request (`claude`:
-   a Messages request, `codex`: a Responses request) and returns a `StubRef(page_id, call_ids)` for each
-   stub in it: the store page the stub names, and the tool calls (Messages `tool_use` ids, Responses
-   `call_id`s) whose results it stands for. The harness calls it on every forwarded request and checks
-   that `SessionStore.get_page(page_id)` exists and holds each named call's original result.
-2. Remove the `xfail` marks in `tests/test_inturn_targets.py`. They are strict: a scenario that meets
-   its targets while still marked fails as XPASS.
+1. Replace the body of `stubs.find_stubs(dialect, request)`. It returns a `StubRef(page_id, call_ids)`
+   for each stub in `request`:
+   - `call_ids`: the tool calls whose results the stub stands for (Messages `tool_use` ids, Responses
+     `call_id`s). Never empty.
+   - `page_id`: the store page that holds them. `None` only when every call is one of Contexto's own
+     search, recall or state calls (`contexto.store.render.own_call_ids`), which may be stubbed
+     without a stored copy.
+   - `request` is a forwarded request, or `{"messages": page["messages"]}` (`codex`:
+     `{"input": page["messages"]}`) for a store page, when the harness follows a stub it found inside
+     a page. Read only that one field.
+2. Remove the `xfail` marks in `tests/test_inturn_targets.py` (the `NOT_BUILT` mark). They are strict:
+   a scenario that meets its targets while still marked fails as XPASS.
 
 No passing test depends on the hook being empty, so nothing else needs to change.
 
-Independent of the hook, `Run.originals` counts every scripted tool result as in the last forwarded
-request (`in_view`), in a store page (`stored`), or in neither (`lost`). Each result starts and ends
-with a line of its own, and both lines must be present. `lost` must stay 0.
+What a run is held to is in `targets.py`, one docstring per rule, and in the research note under
+"What D63 has to change". `targets.unmet_by_rule(run)` says which rules a run misses and why.
+`uv run python spikes/m2/inturn/replay.py --scenario loop120` prints one scenario's numbers.

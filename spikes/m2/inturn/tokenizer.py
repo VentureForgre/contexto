@@ -1,4 +1,5 @@
-"""The fake upstream's tokenizer. It is deliberately not the engine's estimator.
+"""The fake upstream's tokenizer. For text it is deliberately not the engine's estimator; for images
+it is the same rule, taken from ``contexto.tokens``, so image estimates agree by construction.
 
 The engine counts text at 3.5 bytes a token and tool output at 1.5 until it has real usage, then
 everything at one measured ratio (``contexto.tokens``). This tokenizer keeps two ratios for the whole
@@ -34,6 +35,11 @@ IMAGE_TYPES = ("image", "input_image")  # Messages, Responses
 def dumps(value: Any) -> str:
     """JSON as the proxy writes a request: insertion key order, no spaces, non-ASCII kept."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def canonical(value: Any) -> str:
+    """Canonical JSON (sorted keys), for comparing a stored value with the original byte for byte."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def text_tokens(byte_count: int) -> int:
