@@ -376,6 +376,10 @@ def test_a_version_is_not_a_prefix_of_another():
     assert message is not None and "no section for 0.1.0" in message
     assert "is not in the form" not in message
     assert guard.problem("# Changelog\n\n## 0.1.0 (2026-11-13)\n\n- Something.\n", "0.10.0") is not None
+    # Nor is the heading of a longer version a near miss of a shorter one.
+    for heading in ("## 0.1.01 (2026-11-13)", "## 0.1.0.1 (2026-11-13)", "## v0.1.05"):
+        message = guard.problem(f"# Changelog\n\n{heading}\n\n- Something.\n", "0.1.0")
+        assert message is not None and "is not in the form" not in message, heading
 
 
 # --- why the heading must change ----------------------------------------------------------------------

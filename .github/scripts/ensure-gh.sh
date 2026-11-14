@@ -34,5 +34,5 @@ tar -xzf "$archive" -C "$RUNNER_TEMP"
 rm -f "$archive"
 
 bin="$RUNNER_TEMP/$name/bin"
-"$bin/gh" --version | head -1
+"$bin/gh" --version
 echo "$bin" >> "$GITHUB_PATH"
