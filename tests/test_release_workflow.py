@@ -4,10 +4,14 @@ The suite has no YAML dependency, so the workflow is read as text: jobs are spli
 two-space keys. A last test parses it for real when PyYAML happens to be installed.
 """
 
+import io
 import os
 import re
 import shutil
 import subprocess
+import sys
+import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -207,8 +211,8 @@ def test_no_step_may_fail_and_let_the_job_go_on():
     for job in ("request", "release", "reattach", "pypi"):
         for function in ("always()", "failure()", "cancelled()"):
             assert function not in _steps(job), (job, function)
-    assert not re.search(r"^\s*set \+", CODE, flags=re.MULTILINE)
-    assert "set +" not in CODE
+    # Any way of turning errexit off: `set +e`, `set  +o errexit`, `shopt -u -o errexit`.
+    assert not re.search(r"\bset\s+\+|errexit", CODE)
 
 
 def _step_list(job):
@@ -342,6 +346,16 @@ def test_the_scripts_run_with_an_isolated_python_and_the_guard_gets_the_last_rel
     assert guard[-1] == 'run: python3 -I .github/scripts/changelog-check.py "$TAG" --last-released "$LAST"'
     assert "LAST: ${{ steps.plan.outputs.last }}" in guard
     assert 'echo "last=$last" >> "$GITHUB_OUTPUT"' in JOBS["release"]
+
+
+def test_nothing_else_chooses_the_python_of_the_build():
+    # In the release job the build runs under semantic-release's uvx environment, whose Python uv
+    # chooses from UV_PYTHON (set by setup-uv's python-version) or a --python option.
+    assert "UV_PYTHON" not in CODE
+    assert not re.search(r"(?<![\w-])--python\b", CODE)
+    for job in ("release", "reattach"):
+        assert re.findall(r"python-version: (.*)", JOBS[job]) == ['"3.12"'], job
+    assert "python-version" not in JOBS["pypi"]
 
 
 def test_the_release_and_reattach_jobs_build_with_the_same_pinned_python():
@@ -795,6 +809,66 @@ def test_the_tag_check_runs_under_strict_bash():
     assert "origin/main" not in code.replace("refs/remotes/origin/main", "")
     assert 'git rev-list --first-parent "$MAIN" | grep -cx -- "$commit" || true' in code
     assert 'if [ "$on_chain" != 1 ]; then' in code
+
+
+# --- the build script and the gh check -----------------------------------------------------------------
+
+BUILD = ROOT / ".github" / "scripts" / "release-build.sh"
+ENSURE_GH = ROOT / ".github" / "scripts" / "ensure-gh.sh"
+# Python 3.15's GzipFile default, forced onto any Python, so that the test means the same on all.
+LEVEL_6_DEFAULT = """
+import gzip
+_init = gzip.GzipFile.__init__
+def _level_6(self, filename=None, mode=None, compresslevel=6, fileobj=None, mtime=None):
+    _init(self, filename, mode, compresslevel, fileobj, mtime)
+gzip.GzipFile.__init__ = _level_6
+"""
+
+
+def test_the_sdist_repack_writes_gzip_level_9(tmp_path):
+    script = BUILD.read_text(encoding="utf-8")
+    repack = script[script.index("<<'PY'\n") + len("<<'PY'\n") : script.index("\nPY\n")]
+    wheel, sdist = tmp_path / "x-1.0-py3-none-any.whl", tmp_path / "x-1.0.tar.gz"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("x-1.0.dist-info/METADATA", "Metadata-Version: 2.4\nName: x\nVersion: 1.0\n")
+    with tarfile.open(sdist, "w:gz") as archive:
+        for name, data in (("x-1.0/PKG-INFO", b"Metadata-Version: 2.4\nName: x\nVersion: 1.0\n"),
+                           ("x-1.0/pyproject.toml.orig", b"[project]\n"), ("x-1.0/README", b"x" * 5000)):
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    run_stdin = "\nimport sys\nsys.argv = sys.argv[1:]\nexec(compile(sys.stdin.read(), 'repack', 'exec'))\n"
+    program = LEVEL_6_DEFAULT + run_stdin
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", program, "repack", "1.0", str(wheel), str(sdist)],
+        input=repack, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Removed pyproject.toml.orig" in result.stdout
+    data = sdist.read_bytes()
+    # The gzip header's XFL byte: 2 means the slowest, best compression (level 9).
+    assert data[:2] == b"\x1f\x8b" and data[8] == 0x02
+    with tarfile.open(sdist) as archive:
+        assert archive.getnames() == ["x-1.0/PKG-INFO", "x-1.0/README"]
+
+
+def test_the_gh_check_fails_when_gh_fails(tmp_path):
+    if shutil.which("bash") is None:
+        pytest.skip("bash is not on PATH")
+    lines = ENSURE_GH.read_text(encoding="utf-8").splitlines()
+    code = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
+    assert not re.search(r"--version\s*\|", code)
+    fake = tmp_path / "gh"
+    env = {"PATH": f"{tmp_path}{os.pathsep}/usr/bin{os.pathsep}/bin"}
+    fake.write_text("#!/bin/sh\necho 'gh version 9.9.9 (2026-01-01)'\necho 'https://example.invalid'\n")
+    fake.chmod(0o755)
+    result = subprocess.run(["bash", str(ENSURE_GH)], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "gh found: gh version 9.9.9 (2026-01-01)\n"
+    fake.write_text("#!/bin/sh\nexit 1\n")
+    result = subprocess.run(["bash", str(ENSURE_GH)], env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "gh found" not in result.stdout
 
 
 # --- with a YAML parser, when there is one -----------------------------------------------------------

@@ -12,7 +12,9 @@ GH_VERSION="2.102.0"
 GH_SHA256_LINUX_AMD64="bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386"
 
 if command -v gh >/dev/null 2>&1; then
-  echo "gh found: $(gh --version | head -1)"
+  # On its own line, so that set -e stops the script if gh fails; the first line is the version.
+  version=$(gh --version)
+  echo "gh found: ${version%%$'\n'*}"
   exit 0
 fi
 
