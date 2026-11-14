@@ -1199,3 +1199,64 @@ def test_state_shows_a_store_that_stopped_paging_and_how_to_fix_it(tmp_path):
     assert contexto(tmp_path, "state", "--session", "st1", "--raw").stdout == store.state_text() + "\n"
     write_log(tmp_path, "st1", [*launch(0), request(1)])
     assert "Warning:" not in contexto(tmp_path, "state", "--session", "st1").stdout
+
+
+# Re-review of the fixes (PR #263, Reviewer B) ------------------------------------------------------
+
+
+@pytest.mark.parametrize("stamp", ["2026-11-13T10:00:05", "2026-11-13"])
+def test_a_time_without_a_utc_offset_is_ignored_not_a_traceback(tmp_path, stamp):
+    """A `ts` with no offset could not be subtracted from one with `Z`: `contexto stats` and `contexto
+    state` exited 1 with a TypeError. Contexto always writes `Z`, so such a line was edited or damaged:
+    its time is not used, and it is counted as an ignored value."""
+    naive = request(5)
+    naive["ts"] = stamp
+    write_log(tmp_path, "t1", [*launch(0, pages=0), request(1), naive, request(9), *stop(10, pages=0)])
+    for last_run in (False, True):
+        out = session_stats(tmp_path, "t1", last_run=last_run)
+        assert out["log"]["ignored_values"] >= 1 and out["requests"]["model"] == 3
+    assert render(session_stats(tmp_path, "t1"))  # the text is built too
+
+
+def test_messages_requests_no_engine_judged_make_compaction_undetectable(tmp_path):
+    """A bare `contexto proxy` and a curl with no engine `request` event printed "none seen: Claude Code did
+    not compact" with `detectable: true`. A Messages request the engine did not read (no engine, a skipped
+    or failed transform) gives the reason `not_read`, and the text makes no claim."""
+    unread = {"event": "request", "method": "POST", "path": "/v1/messages", "api": "messages", "status": 200,
+              "original_request_bytes": 10, "request_bytes": 10, "transform_skipped": "request body is not JSON",
+              "usage": None, "ts": ts(2)}
+    write_log(tmp_path, "c1", [*launch(0), request(1, events=(version(),)), unread])
+    out = session_stats(tmp_path, "c1")
+    assert out["compaction"]["detectable"] is False and "not_read" in out["compaction"]["reasons"]
+    text = "\n".join(render(out))
+    assert "did not compact" not in text and "not every Messages request was read by Contexto" in text
+    write_log(tmp_path, "c2", [{"event": "proxy_start", "port": 1, "ts": ts(0)}, unread])  # a bare proxy, no engine
+    assert session_stats(tmp_path, "c2")["compaction"]["detectable"] is False
+
+
+def test_a_stop_line_from_another_run_does_not_end_the_next_one(tmp_path):
+    """Interleaved launches: a `proxy_stop` that arrives when no run is open, or before the next run's start,
+    was kept and closed the next run at its count. Each run's gain is now from its own lines."""
+    lines = [*launch(0, pages=0), *launch(1, pages=0), {"event": "proxy_stop", "pages": 4, "ts": ts(2)},
+             {"event": "exit", "code": 0, "ts": ts(2)}, {"event": "proxy_stop", "pages": 4, "ts": ts(3)},
+             *launch(4, pages=4)]
+    write_log(tmp_path, "r1", lines)
+    fill_pages(tmp_path, "r1", 10)  # the third run, killed, added 6
+    assert session_stats(tmp_path, "r1", last_run=True)["paging"]["pages_added"] == 6
+    whole = session_stats(tmp_path, "r1")["paging"]["pages_added"]
+    assert whole is None or whole <= 10
+
+
+@pytest.mark.parametrize("read,total,text", [(4, 100_000, "under 1%"), (99_996, 100_000, "over 99%")])
+def test_a_share_that_rounds_to_none_or_all_is_not_printed_as_0_or_100_percent(tmp_path, read, total, text):
+    write_log(tmp_path, "s1", [*launch(0), request(1, tokens=total, cache_read=read)])
+    out = session_stats(tmp_path, "s1")
+    assert 0 < out["cache"]["read_share"] < 1
+    assert f"{text} of input" in "\n".join(render(out))
+
+
+def test_one_request_refused_with_415_is_said_in_the_singular(tmp_path):
+    refused = {"event": "encoded_body_rejected", "endpoint": "/v1/messages", "encoding": "br", "ts": ts(2)}
+    write_log(tmp_path, "e1", [*launch(0), request(1), refused])
+    text = "\n".join(render(session_stats(tmp_path, "e1")))
+    assert "1 more refused with 415 before it was read" in text

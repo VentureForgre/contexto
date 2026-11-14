@@ -1,6 +1,6 @@
 """``contexto stats [SESSION]``: what a session did, as numbers (D64).
 
-The peak prompt against the bound, the turns paged out, how often the model read them back, the share
+The peak prompt against the bound, the pages kept on disk, how often the model read them back, the share
 of input read from cache, the bytes the CLI sent against the bytes forwarded, whether Claude Code
 compacted, and anything that went wrong. ``--json`` prints the same numbers in the stable shape
 docs/stats.md defines. Nothing is written, and only this machine's files are read.
@@ -21,9 +21,9 @@ from contexto.store.sessions import select_session
 
 def register(subparsers) -> None:
     parser = subparsers.add_parser(
-        "stats", help="show what a session did: peak prompt, turns paged, recalls, cache, faults",
+        "stats", help="show what a session did: peak prompt, pages on disk, recalls, cache, faults",
         description="Show one session's numbers, read from its log and its store: the largest prompt against "
-                    "the bound, requests over the bound, turns paged out and tokens kept on disk, recall and "
+                    "the bound, requests over the bound, pages kept on disk and their tokens, recall and "
                     "search calls, the share of input read from cache, bytes sent against bytes forwarded, "
                     "whether Claude Code compacted, and faults with what to do about them. A line is shown "
                     "only when the log holds its data. docs/stats.md defines each number.")

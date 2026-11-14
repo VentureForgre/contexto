@@ -1,7 +1,7 @@
 """What a session did, as numbers: read from its ``log.jsonl`` and its store, never written (D64).
 
-Contexto's value is in each session's log (how large the prompt got against the bound, how many turns
-were paged, how often the model read them back, how much of the input came from cache), and until D64
+Contexto's value is in each session's log (how large the prompt got against the bound, how many pages
+were kept on disk, how often the model read them back, how much of the input came from cache), and until D64
 nothing showed it: ``contexto sessions show`` prints event counts. ``session_stats`` turns one session
 into a plain dict, which ``contexto stats`` prints, ``contexto run`` summarises at exit, and a status
 line can call after every assistant message. docs/stats.md defines every number.
@@ -57,7 +57,7 @@ TOOL_NAMES = ("recall", "search", "state", "pin", "close")  # Contexto's MCP too
 # ``rewrite.CLAUDE_CODE_COMPACTION_SUMMARY``; tests/test_stats.py checks the two agree). "Claude Code did
 # not compact" is claimed only for requests from one of these, with a Claude Code session id on each.
 COMPACTION_MEASURED_ON = ("2.1.314", "2.1.318")
-COMPACTION_REASONS = ("no_session_id", "cli_version_unknown", "cli_version_not_measured")
+COMPACTION_REASONS = ("no_session_id", "cli_version_unknown", "cli_version_not_measured", "not_read")
 
 # The log is read in blocks of this size, each parsed on its own, so the memory a call takes does not
 # grow with the log. 4 MiB holds a whole 6-hour session's log (2.9 MB at 4,000 requests), which is then
@@ -137,11 +137,14 @@ def _nat(value: Any) -> int | None:
 
 
 def _when(value: Any) -> datetime | None:
-    """A log line's ``ts`` as a time, or None when it is not one."""
+    """A log line's ``ts`` as a time, or None when it is not one. Contexto writes every ``ts`` in UTC with
+    ``Z``; one without an offset was edited or damaged, and cannot be compared with the others (the
+    subtraction raised TypeError, PR #263's re-review), so it is not used."""
     try:
-        return datetime.fromisoformat(value) if isinstance(value, str) else None
+        when = datetime.fromisoformat(value) if isinstance(value, str) else None
     except ValueError:
         return None
+    return when if when is not None and when.tzinfo is not None else None
 
 
 def _events(value: Any) -> Iterator[dict[str, Any]]:
@@ -446,6 +449,7 @@ class _Tally:
         self._pages_start: int | None = None
         self._pages_stop: int | None = None
         self._stopped = False  # this run's proxy_stop line was seen
+        self._started_at: datetime | None = None  # this run's proxy_start time
         # Compaction (Claude Code only). ``undetectable`` holds why the log could not have shown one.
         self.messages_api = False  # a Messages request was seen: the compaction check applies
         self.compactions = 0
@@ -481,6 +485,8 @@ class _Tally:
         self.since = None
         self.run_open = True
         self._pages_start = self._number(event.get("pages"))
+        self._stopped, self._pages_stop = False, None  # a stop line belongs to the run it follows, not this one
+        self._started_at = _when(event.get("ts"))
 
     def _close_run(self, pages_after: int | None) -> None:
         """End the open run: its time, and the pages the store gained in it. The gain is the proxy's own
@@ -519,6 +525,7 @@ class _Tally:
     def line(self, event: dict[str, Any]) -> None:
         stamp = event.get("ts")
         when: str | None = None
+        at: datetime | None = None
         if stamp is not None:
             at = _when(stamp)
             if at is None:
@@ -545,7 +552,11 @@ class _Tally:
             elif config is not None:
                 self.ignored += 1
         elif name == "proxy_stop":
-            self._stopped, self._pages_stop = True, self._number(event.get("pages"))
+            # Interleaved launches: another run's stop, logged while no run is open or (among the launch lines
+            # held and replayed after this run's start) before this run started, is not this run's.
+            started = self._started_at
+            if self.run_open and not (started is not None and at is not None and at < started):
+                self._stopped, self._pages_stop = True, self._number(event.get("pages"))
         elif name == "exit":
             self._close_run(None)
         elif name == "proxy_stop_incomplete":  # requests with no line of their own: said, not a fault
@@ -622,6 +633,8 @@ class _Tally:
                 self._engine_messages = True
                 if engine.get("cli_session") is not True:  # absent in a log from before the engine wrote it
                     self.undetectable.add("no_session_id")
+            else:  # no engine read it (none running, or the transform was skipped or failed): no check ran
+                self.undetectable.add("not_read")
         usage_events = list(_events(event.get("usage_events")))
         moved = False  # this line holds a degraded_enter or degraded_leave
         for inner in [*nested, *usage_events]:
@@ -726,6 +739,16 @@ class _Tally:
         """Whether paging is stopped at the end of the scope: the main conversation's state, or any
         conversation's when the scope holds no request of the main one."""
         return self.degraded[True] if self.seen_main else any(self.degraded.values())
+
+
+def _share(part: int, whole: int) -> float | None:
+    """``part / whole`` to 4 places, None when ``whole`` is 0. A share that is neither none nor all is never
+    rounded to exactly 0 or 1, so the text can say ``under 1%`` or ``over 99%`` (PR #263's re-review: 4 of
+    100,000 printed 0%)."""
+    if not whole:
+        return None
+    share = round(part / whole, 4)
+    return part / whole if (share == 0 and part) or (share == 1 and part != whole) else share
 
 
 def _seconds(first: datetime | None, last: datetime | None) -> int | None:
@@ -949,10 +972,8 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
         "pages": pages,
         "tools": {**tally.tools, "out_of_room": tally.out_of_room},
         "pins": pins,
-        "cache": {**cache, "read_share": (round(cache["cache_read_tokens"] / cache["input_tokens"], 4)
-                                          if cache["input_tokens"] else None)},
-        "bytes": {**sizes, "forwarded_share": (round(sizes["forwarded"] / sizes["cli_sent"], 4)
-                                               if sizes["cli_sent"] else None)},
+        "cache": {**cache, "read_share": _share(cache["cache_read_tokens"], cache["input_tokens"])},
+        "bytes": {**sizes, "forwarded_share": _share(sizes["forwarded"], sizes["cli_sent"])},
         "compaction": ({"seen": tally.compactions, "detectable": not reasons, "reasons": reasons,
                         "cli_versions": tally.cli_versions} if tally.messages_api else None),
         "faults": _fault_report(tally, session_id, earlier_run=tally.ended_degraded and not last_run),
@@ -1025,7 +1046,8 @@ def _request_text(requests: dict[str, Any]) -> str:
     if requests["not_transformed"]:
         text += f"; {requests['not_transformed']:,} forwarded as the CLI sent it, unread"
     if requests["rejected_encoding"]:
-        text += f"; {requests['rejected_encoding']:,} more refused with 415 before they were read"
+        refused = requests["rejected_encoding"]
+        text += f"; {refused:,} more refused with 415 before {'it was' if refused == 1 else 'they were'} read"
     if requests["in_flight_at_stop"]:
         text += f"; {requests['in_flight_at_stop']:,} still in flight when the proxy stopped, so not in these numbers"
     return text
@@ -1088,6 +1110,7 @@ COMPACTION_WHY = {
     "no_session_id": "the log does not show a Claude Code session id on every request",
     "cli_version_unknown": "the log does not name Claude Code's version",
     "cli_version_not_measured": "Contexto's check was not measured on Claude Code {versions}",
+    "not_read": "not every Messages request was read by Contexto",
 }
 
 
