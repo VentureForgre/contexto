@@ -404,6 +404,21 @@ def test_context_compacted_hands_over_inside_a_tool_loop_when_the_key_was_seen_b
         assert later["changes"] == [] and later["main"] is bool(expected)
 
 
+def test_a_side_class_request_carrying_context_compacted_never_takes_main():
+    """Reviewer A, round 2: a side class never takes main, by any rule. A request classed
+    ``auxiliary`` that carries x-claude-code-context-compacted, under a key a ``main`` request already
+    judged, must not hand main over (Claude Code sends the header only on main requests)."""
+    summary = user(DRIFTED + "\nSummary:\nx")
+    compacted = [summary, tool_use(4), tool_result(4)]
+    for side in ("auxiliary", "subagent", "workflow"):
+        engine = new_engine()
+        send(engine, main_request(history(2)), sent(request_class="main"), tool_calls=False)
+        first = send(engine, main_request(compacted), sent(request_class="main"))  # judged, no header
+        assert first["changes"] == [] and first["main"] is False
+        event = send(engine, main_request(compacted), sent(request_class=side, context_compacted="auto"))
+        assert event["changes"] == [] and event["main"] is False, side
+
+
 def test_fallback_a_seen_key_waits_for_its_next_turn_start_without_the_header():
     """Without the header nothing changes: the text signature hands over a pending-call compaction only
     at its key's first request (D59), and otherwise at the conversation's next turn start."""

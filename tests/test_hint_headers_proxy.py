@@ -226,6 +226,14 @@ def test_an_off_value_in_the_environment_or_the_user_file_is_an_explicit_off(tmp
     assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"}) == "off"  # the file outranks the environment
 
 
+@pytest.mark.parametrize("value", ["0", "false", "no", "off"])
+def test_an_explicit_off_counts_inside_a_session_an_outer_launch_stripped(tmp_path, value):
+    """Reviewer A, round 2: ``CLAUDE_CODE_GATEWAY_HINT_HEADERS=0 contexto run claude`` run inside a
+    session whose launch stripped the hints was ``stripped``, so its --settings asked for them again.
+    Only the inherited on value is the outer launch's; an off value is the user's."""
+    assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": value, "CONTEXTO_HINT_HEADERS": "stripped"}) == "off"
+
+
 @pytest.mark.parametrize("value", ["", "2", "enabled", "maybe"])
 def test_a_value_that_is_neither_on_nor_off_leaves_contexto_s_default(tmp_path, value):
     assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": value}) == "stripped"

@@ -2663,11 +2663,12 @@ class RewriteEngine:
         """D50: ``key`` is Claude Code's compaction of ``main``: seen with a request the dialect judges,
         its first message the compaction summary or a request of it carrying
         ``x-claude-code-context-compacted`` (D70, ``_classify``), in main's own session id and
-        entrypoint, and neither a child session nor a subagent. A request whose class is
-        ``subagent``, ``workflow`` or ``auxiliary`` never gets here as judged: ``_takes_over`` returns
-        before it asks, and ``_classify`` judges a classed request by its class alone."""
+        entrypoint, and neither a child session nor a subagent, by its ids or by its class: a request
+        classed ``subagent``, ``workflow`` or ``auxiliary`` never hands main over, also when its key was
+        judged by an earlier ``main`` request and it carries ``x-claude-code-context-compacted``."""
         session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
         return bool(key in self._judged and key in self._compacted and session and current
+                    and self._classes.get(key) not in SIDE_CLASSES
                     and not session.parent and not session.agent and session.entrypoint
                     and session.entrypoint == current.entrypoint and session.id == current.id)
 

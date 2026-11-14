@@ -189,6 +189,25 @@ def test_the_suite_never_reads_this_machine_s_managed_settings():
     assert not str(path).startswith(("/Library", "/etc"))
 
 
+@pytest.mark.parametrize("text", ['{"env": {}} // a comment', '{"env": {"OTHER": "1",}}', '{"permissions": ',
+                                  '/* note */ {"model": "x"}'])
+def test_a_file_claude_code_cannot_load_and_that_names_no_switch_does_not_refuse(tree, text):
+    """Reviewer A, round 2: Claude Code does not load a settings file with a comment, a trailing comma
+    or a syntax error (measured on 2.1.322), so such a file cannot turn a provider on, and refusing on
+    it stopped launches that ran before."""
+    write(tree["cwd"] / PROJECT, text)
+    assert guard(tree) is None
+
+
+@pytest.mark.parametrize("text", ['{"env": {"CLAUDE_CODE_USE_BEDROCK": "1",}}',
+                                  '{"env": {"CLAUDE_CODE\\u005fUSE_BEDROCK": "1"}} // x',
+                                  b'\xff{"env": {"CLAUDE_CODE_USE_VERTEX": "1"}}'])
+def test_a_file_that_does_not_parse_and_could_name_a_switch_still_refuses(tree, text):
+    write(tree["cwd"] / PROJECT, text)
+    found = guard(tree)
+    assert found is not None and found.unread
+
+
 def test_a_number_past_the_largest_double_reads_as_infinity_and_is_off(tree):
     """Reviewer B, round 2: a JSON integer of 309 or more digits raised OverflowError and the launch
     ended with a traceback. Claude Code reads such a number as Infinity, which is off."""
@@ -240,11 +259,14 @@ def test_a_file_over_the_cap_is_not_read_and_refuses(tree):
     assert resolve_upstream(env={}, cwd=tree["cwd"], home=tree["home"]).url == "http://fits.invalid"
 
 
-@pytest.mark.parametrize("content", [b'{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"},}', b"{not json",
-                                     b'\xff\xfe{"env": {}}', b"[" * 100_000])
+@pytest.mark.parametrize("content", [b'{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"},}',
+                                     b'{not json "CLAUDE_CODE_USE_MANTLE"',
+                                     b'\xff\xfe{"env": {"CLAUDE_CODE_USE_FOUNDRY": "1"}}',
+                                     b"[" * 100_000 + b'"CLAUDE_CODE_USE_BEDROCK"'])
 def test_a_file_contexto_cannot_parse_refuses(tree, content):
-    """Not JSON for Python, not UTF-8, or nested deeper than the bounded loader allows: Claude Code's
-    reading of such a file is not known, so the guard does not take it for "off"."""
+    """Not JSON for Python, not UTF-8, or nested deeper than the bounded loader allows, and its text
+    could name a switch: Claude Code's reading of such a file is not known, so the guard does not take
+    it for "off"."""
     write(tree["home"] / USER, content)
     found = guard(tree)
     assert found is not None and found.unread == (("settings:user", "is not valid JSON"),)
@@ -326,7 +348,7 @@ def test_check_cloud_provider_takes_the_home_and_names_every_place_and_what_to_d
 
 
 def test_check_cloud_provider_with_only_an_unreadable_file_says_how_to_get_past_it(tree):
-    write(tree["cwd"] / LOCAL, "{broken")
+    write(tree["cwd"] / LOCAL, '{broken "CLAUDE_CODE_USE_BEDROCK"')
     with pytest.raises(LaunchError) as raised:
         check_cloud_provider(tree["cwd"], {}, home=tree["home"], managed=tree["managed"])
     message = str(raised.value)

@@ -147,10 +147,12 @@ def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None
     only after its trust dialog, so a project file that turns the hints on lets them reach the
     upstream from the first request, before the folder is trusted.
 
-    The process environment's value does not count while ``CONTEXTO_HINT_HEADERS`` there is
+    The process environment's on value does not count while ``CONTEXTO_HINT_HEADERS`` there is
     ``stripped``: the process then runs inside an outer ``contexto run claude`` session, which put the
-    ``1`` there for itself and removes the hints (module docstring). With ``forwarded`` the outer
-    launch found the user had them on, so the value is the user's; with ``off`` it set nothing.
+    ``1`` there for itself and removes the hints (module docstring). An off value there does count: it
+    is not the outer launch's, so a user who writes ``CLAUDE_CODE_GATEWAY_HINT_HEADERS=0 contexto run
+    claude`` inside such a session gets ``off``. With ``forwarded`` the outer launch found the user had
+    them on, so the value is the user's; with ``off`` it set nothing.
 
     "Off" is, when the hints are not on, one of ``0``, ``false``, ``no``, ``off`` in the process
     environment (unless it is an outer launch's, as above), in the user settings file, or in the
@@ -161,7 +163,9 @@ def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None
     home = home or Path.home()
     files = files or SettingsFiles()
     managed = managed or managed_settings_path()
-    own = env.get(HINT_MARKER_KEY) != STRIPPED  # whether the environment's value is the user's own
+    # Whether the environment's value is the user's own: an on value under an outer stripped launch is
+    # that launch's; an off value never is.
+    own = env.get(HINT_MARKER_KEY) != STRIPPED or not env_truthy(env.get(HINT_HEADERS_KEY))
     found = claude_env_value(HINT_HEADERS_KEY, env=env, cwd=cwd, home=home, files=files, managed=managed,
                              process_env=own)
     if env_truthy(found.value):

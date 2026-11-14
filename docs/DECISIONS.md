@@ -2861,7 +2861,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
     because such a file is not evidence that a switch is off. The hint decision reads the same
     files the same way, so a project file Claude Code ignores (one holding `NaN`, say) that turns
     the hints on makes a launch `forwarded`; a repository gains nothing by it that a valid file
-    would not give it. A file that does not exist, or that
+    would not give it. A settings file that does not parse (a comment, a trailing comma) refuses
+    only when its text could name a switch (it contains `CLAUDE_CODE_USE_` or a `\u` escape):
+    Claude Code does not load such a file (measured on 2.1.322), so otherwise it turns nothing on.
+    One more change to the base URL's resolution than the byte order mark and the size bound: a
+    settings file nested deeper than 512 levels is unreadable for the bounded loader, so a base URL
+    in it is not used and the next file's is; Claude Code would read it. No real settings file nests
+    that deep. A file that does not exist, or that
     this user cannot open, passes: Claude Code cannot read it either. The message names what to
     unset or fix.
   - **Settings files are read once, with a bound.** One reader for every Claude Code settings

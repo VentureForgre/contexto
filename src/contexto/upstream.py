@@ -68,6 +68,7 @@ MANAGED_KIND = "managed"
 # and hide the real file from a nested launch. The test suite patches this table in its own process.
 MANAGED_SETTINGS_FILES = {"darwin": "/Library/Application Support/ClaudeCode/managed-settings.json",
                           "linux": "/etc/claude-code/managed-settings.json"}
+PROVIDER_PREFIX = "CLAUDE_CODE_USE_"  # every cloud-provider switch (CLOUD_PROVIDER_KEYS) starts with it
 SETTINGS_FILE_LIMIT = 4 * 1024 * 1024  # bytes read from one settings file; real ones are a few kilobytes
 
 
@@ -309,6 +310,10 @@ class SettingsFile(NamedTuple):
 
     data: dict | None  # its JSON object; None when the file is missing or could not be read
     problem: str | None  # why a file that is there could not be read, as "is ..."; else None
+    # For a file with a ``problem``: whether it might set a cloud-provider switch. False only for a file
+    # that was read whole but is not valid JSON, and whose text neither names ``CLAUDE_CODE_USE_`` nor
+    # holds a ``\u`` escape that could spell it.
+    may_name_provider: bool = True
 
 
 def read_settings_file(path: Path) -> SettingsFile:
@@ -326,7 +331,10 @@ def read_settings_file(path: Path) -> SettingsFile:
     ``problem``: it is not a regular file, it is larger than the limit, it cannot be read, or it is
     not valid JSON for Python (not UTF-8, a syntax error, nested too deep). Such a file is not
     evidence that a setting is off, since Claude Code may read it differently; the cloud-provider
-    guard refuses on it (``cloud_provider``)."""
+    guard refuses on it (``cloud_provider``) unless it was read whole, is not valid JSON, and its text
+    could not name a switch (``may_name_provider``): Claude Code does not load a file with a comment,
+    a trailing comma or another syntax error (measured on 2.1.322, D70), so such a file turns no
+    switch on."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except (OSError, ValueError):  # missing, not permitted, a symlink loop, a name the system rejects
@@ -355,7 +363,8 @@ def read_settings_file(path: Path) -> SettingsFile:
         text = raw.decode("utf-8-sig")
         data = loads_bounded(text) if text.strip() else {}
     except (ValueError, RecursionError):  # UnicodeDecodeError and JSONTooDeepError are ValueErrors
-        return SettingsFile(None, "is not valid JSON")
+        return SettingsFile(None, "is not valid JSON",
+                            PROVIDER_PREFIX.encode() in raw or b"\\u" in raw)
     return SettingsFile(data if isinstance(data, dict) else {}, None)
 
 
@@ -592,7 +601,7 @@ def cloud_provider(*, env: Mapping[str, str] | None = None, cwd: Path | None = N
                    if found.data is not None and env_truthy(_settings_env(found.data, name))]
         if places:
             on.append((name, tuple(places)))
-    unread = tuple((place, found.problem) for place, found in read if found.problem)
+    unread = tuple((place, found.problem) for place, found in read if found.problem and found.may_name_provider)
     return CloudProvider(tuple(on), unread) if on or unread else None
 
 
