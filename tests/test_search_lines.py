@@ -394,9 +394,11 @@ def test_every_search_reply_ends_with_its_uncharged_coverage_note(store):
 
 def test_the_tool_description_and_worked_example_state_the_coverage():
     [tool] = [t for t in mcp.TOOLS if t["name"] == "contexto_search"]
-    # D63: pages of the running turn can be newer than what is in view, so neither says "newer than any".
-    assert "Search covers paged-out turns and tool results paged out of the running turn" in tool["description"]
-    assert 'a hit marked "this turn"' in EXAMPLE_LINE and "newer than a hit from an earlier turn" in EXAMPLE_LINE
+    # D63: pages written inside a turn can be newer than what is in view, so neither says "newer than any";
+    # they name the turn they were written in, never "this turn" (Reviewer A at 7575c76f, finding 4).
+    assert "Search covers paged-out turns and tool results paged out inside a turn" in tool["description"]
+    assert 'a hit marked "paged inside turn N"' in EXAMPLE_LINE and "newer than an unmarked hit" in EXAMPLE_LINE
+    assert "this turn" not in tool["description"] + EXAMPLE_LINE
     assert "newer than any" not in tool["description"] + EXAMPLE_LINE
 
 

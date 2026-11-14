@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import json
 
 import pytest
 
@@ -1265,7 +1266,7 @@ def test_search_does_not_steer_the_model_to_an_older_copy_in_view():
         cli.results([output(f"m-{r}", RESULT)])
     assert (6, 0) in {(i, j) for i, j, _ in cli.state.inturn.stubs}  # the newer read is paged
     reply = tool(cli.store, "contexto_search", {"query": "retry_timeout_seconds"})
-    assert "[this turn, paged result]" in reply and "retry_timeout_seconds = 30" in reply
+    assert "[paged inside turn 0, tool result]" in reply and "retry_timeout_seconds = 30" in reply
     assert "newer than any" not in reply and "can be newer than an earlier copy in view" in reply
 
 
@@ -1391,3 +1392,22 @@ def test_a_pdf_whose_pages_are_not_certain_is_read_once_and_stubbed_only_once_se
     assert not [e for e in batches(cli) if e["unseen_results_stubbed"] or e["documents_over_bound"]]
     assert max(s.real for s in cli.sent) <= BOUND and not cli.events("in_turn_exhausted")
     assert not [e for e in cli.usage_events if e["event"] == "over_bound"]
+
+
+def test_a_page_written_inside_a_turn_names_that_turn_in_every_later_turn():
+    # Reviewer A at 7575c76f, finding 4: the label came from the page's kind alone, so a result paged in
+    # turn 0 and searched in turn 6 said "this turn", and the coverage line leaned on it.
+    cli = Cli(memory())
+    cli.prompt("Turn one: read the config.")
+    cli.send([("Read", {"file_path": "app.ini"})])
+    cli.results(["cache_ttl_seconds = 30\n" + "# filler line of the config file\n" * 600])
+    cli.loop(25, lambda r: output(f"other-{r}", RESULT))
+    paged = next(p for _, _, p in cli.state.inturn.stubs if p and "cache_ttl_seconds = 30"
+                 in json.dumps(cli.store.get_page(p)["messages"]))
+    assert cli.store.get_page(paged)["turn"] == 0
+    for t in range(1, 7):
+        cli.prompt(f"Turn {t + 1}: keep going.")
+        cli.loop(3, lambda r, t=t: output(f"t{t}-{r}", RESULT))
+    reply = tool(cli.store, "contexto_search", {"query": "cache_ttl_seconds"})
+    assert f"{paged} (turn 0)\n  [paged inside turn 0, tool result]" in reply
+    assert "this turn" not in reply and "a hit paged inside a turn can be newer" in reply

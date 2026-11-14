@@ -316,15 +316,15 @@ request. Its 5 rotation requests are left out of the gaps above. With PR #48 the
 **The approval figure.** `run.py live` refuses an approval below `budget.simulate`'s worst-case H1,
 so that simulation is the budget to approve. `run.py approval-table` prints it, and the table
 between the markers below is that output; a test fails if they differ. Defaults: 18 turns of 40
-KB, head 47,983, bound 150,000, 2 recalls sized by B9 (below).
+KB, head 47,982, bound 150,000, 2 recalls sized by B9 (below).
 
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,902,768 | 6,588,006 |
-| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,686,847 | 2,874,851 |
-| Full-context baseline through a plain CLI session (alternative) | 5,061,619 | - |
-| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,589,615** | **9,462,857** |
+| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,902,598 | 6,587,796 |
+| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,686,841 | 2,874,845 |
+| Full-context baseline through a plain CLI session (alternative) | 5,061,600 | - |
+| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,589,439** | **9,462,641** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
@@ -368,12 +368,12 @@ B21 grew those definitions, in Claude Code's request form, from 2,743 to 2,827 b
 dry run #5): 47,600 + ceil(84 / 3.0) = 47,628. D51 grew them to 2,985 bytes and the MCP server
 instructions, which Claude Code puts in its system prompt, from 426 to 741: 47,600 + ceil(242 / 3.0)
 + ceil(315 / 3.0) = 47,786, and the preamble's fixed lines (`Params.preamble_base`)
-follow the engine's opening lines by its estimator (300 before, 380 with D51, 409 with D69, 449 with D63). D65 (search falls back
+follow the engine's opening lines by its estimator (300 before, 380 with D51, 409 with D69, 446 with D63). D65 (search falls back
 to approximate matches) grew the definitions to 3,070 bytes and the instructions to 747, and D69
 (only the user's own words are pinned; a pin in the main conversation can be carried) to 3,285 and
 878: 47,600 + ceil(542 / 3.0) + ceil(452 / 3.0) = 47,932. D63 (search and recall cover tool results
-paged out of the running turn) grew the definitions to 3,439: 47,600 + ceil(696 / 3.0) + ceil(452 / 3.0)
-= 47,983 (`budget.HEAD`). A test fails when the
+paged out inside a turn) grew the definitions to 3,435: 47,600 + ceil(692 / 3.0) + ceil(452 / 3.0)
+= 47,982 (`budget.HEAD`). A test fails when the
 definitions or the instructions change without updating it. The engine's own estimate of `F` rose about 85 at the dry runs'
 rotations, because it counts tool JSON more conservatively; the gate follows the measured bytes.
 

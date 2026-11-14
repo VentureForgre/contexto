@@ -89,28 +89,32 @@ CONTROL_REPLIES = frozenset({BUDGET_SPENT, SEARCH_TOO_LONG, NO_HIT})
 # B19 (a): every search reply ends with this, as its own text block. Like the control replies it is fixed
 # protocol text and not charged. The live run showed answers taken from the newest search hit while a newer
 # statement sat in the conversation in view, which search cannot see.
-# D63 (Reviewer B on PR #274): pages written inside the running turn hold its own tool results, which can
-# be newer than what stays in view before them, so "newer than any hit" holds only for earlier turns.
-SEARCH_COVERAGE = ("[Paged hits come from paged-out turns and from tool results paged out of the running turn "
-                   "(marked \"this turn\"). A hit from an earlier turn is older than the conversation in view; a "
-                   "hit marked this turn can be newer than an earlier copy in view. Prefer the newest by turn, then "
-                   "by position.]")  # contract PR #125, D63
+# D63 (Reviewer B on PR #274): pages written inside a turn hold tool results, which can be newer than what
+# stays in view before them, so "newer than any hit" holds only for turns paged out whole. A page names the
+# turn it was written in, never "this turn": the server cannot tell the running turn for certain (Reviewer A
+# at 7575c76f, finding 4).
+SEARCH_COVERAGE = ("[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked "
+                   "\"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged "
+                   "inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by "
+                   "position.]")  # contract PR #125, D63
 # B19 (b): when the retained-window snapshot is missing or not from the current room publish.
 SEARCH_COVERAGE_UNCHECKED = SEARCH_COVERAGE[:-1] + " In view not checked.]"
 IN_VIEW_LIMIT = 3  # matching lines from the conversation in view per search reply, newest first
-# D63: how a search hit names an in-turn page, by its kind (contexto.store.pages).
-IN_TURN_LABELS = {"result": "this turn, paged result", "rounds": "this turn, folded rounds",
-                  "folds": "this turn, list of folds"}
+# D63: what an in-turn page holds, by its kind (contexto.store.pages).
+IN_TURN_LABELS = {"result": "tool result", "rounds": "folded rounds", "folds": "list of folds"}
 
 
 def _in_turn_label(page: dict) -> str | None:
-    return IN_TURN_LABELS.get(page.get("kind")) if isinstance(page.get("kind"), str) else None
+    """``paged inside turn N, <what it holds>`` for a page written inside a turn, from the page alone, so
+    the label is the same in every later turn (D63)."""
+    held = IN_TURN_LABELS.get(page.get("kind")) if isinstance(page.get("kind"), str) else None
+    return f"paged inside turn {page.get('turn')}, {held}" if held else None
 
 
 def _turn_label(page: dict) -> str:
-    """``turn N``, and for a page written inside a running turn what it holds, after the parenthesis so
-    that ``<page id> (turn N)`` reads as before (D63)."""
-    label = IN_TURN_LABELS.get(page.get("kind")) if isinstance(page.get("kind"), str) else None
+    """``turn N``, and for a page written inside a turn its label, after the parenthesis so that
+    ``<page id> (turn N)`` reads as before (D63)."""
+    label = _in_turn_label(page)
     return f"turn {page.get('turn')}) [{label}]" if label else f"turn {page.get('turn')})"
 UNMEASURED_CHARS_PER_TOKEN = 1.0  # before the engine records bytes per token: charges more, never less
 # Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
@@ -271,9 +275,9 @@ TOOLS: list[dict[str, Any]] = [
             f"(marked >) with {_lines(MATCH_CONTEXT)} of context either side, each with its page offset; up to "
             f"{SEARCH_MORE_LIMIT} more are listed as page id, turn, @offsets. Answer from a "
             "matching line, or call contexto_recall with its page id and offset to read on. Search covers "
-            "paged-out turns and tool results paged out of the running turn (marked \"this turn\"): the "
-            "conversation in view is newer than a hit from an earlier turn, but a hit marked this turn can be "
-            "newer than an earlier copy in view. If no page holds every word, the reply gives approximate "
+            "paged-out turns and tool results paged out inside a turn (marked \"paged inside turn N\"): the "
+            "conversation in view is newer than an unmarked hit, but a hit paged inside a turn can be newer "
+            "than an earlier copy in view. If no page holds every word, the reply gives approximate "
             "matches, marked as such, with the words each page matched."
         ),
         "inputSchema": {
