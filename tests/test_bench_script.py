@@ -587,12 +587,21 @@ RIGHT_REPLIES = (
     "DECISION {label}: {value} (it has the lowest number, 110)", "DECISION {label}: {value} = 110",
     "DECISION {label}: <{value}>", "decision {label}: {value}", "DECISION {label_lower}: {value}",
     "1. DECISION {label}: {value}", "DECISION {label_nbh}: {value}",
+    # Reviewer B's forms rejected at 74bdf083: the losers named in brackets, and other separators.
+    "DECISION {label}: {value} (beats {other} and {other2})", "DECISION: {label}: {value}",
+    "DECISION {label} - {value}", "DECISION {label} = {value}", "DECISION {label} \u2013 {value}",
+    "DECISION {label}: {value} [{other} and {other2} lost]", "DECISION {label}: {value} ({other} (high) lost)",
 )
 WRONG_REPLIES = (
     "DECISION {label}: {other}", "DECISION {label}: {value} or {other}", "DECISION {label}: {other2}",
     "DECISION DX-0000: {value}", "DECISION {label}0: {value}", "OK", "", "{value}",
     "DECISION {label}: {value}\nDECISION {label}: {other}", "DECISION {label}: none of them",
     "DECISION {label}: {value_prefix}", "DECISION {label}: {value}9", "DECISION {label}:",
+    # Reviewer B's forms accepted at 74bdf083: a negated candidate is not a decision for it.
+    "DECISION {label}: not {value}", "DECISION {label}: anything except {value}",
+    "DECISION {label}: {other} (not {value})", "DECISION {label}: ({value}) {other}",
+    "DECISION {label}: no, {value} is wrong", "DECISION {label}: {other} = 110 [{value}]",
+    "DECISION {label}-0: {value}",
 )
 
 
