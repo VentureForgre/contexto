@@ -410,7 +410,7 @@ class PageCatalog:
 def _view(page: dict[str, Any]) -> dict[str, Any]:
     """The fields the index and page ids read, of a page ``check_page`` passed."""
     view = {"id": page["id"], "turn": page["turn"], "stub": page["stub"]}
-    for name in ("kind", "seq", "locator"):  # D63: an in-turn page; the index leaves result pages out
+    for name in ("kind", "seq", "block", "locator"):  # D63: an in-turn page; the index leaves result pages out
         if name in page:
             view[name] = page[name]
     return view
@@ -453,6 +453,9 @@ def check_page(page: Any, page_id: str | None = None) -> dict[str, Any]:
         raise TypeError("page kind is not a string")
     if "seq" in page and (not isinstance(page["seq"], int) or isinstance(page["seq"], bool) or page["seq"] < 0):
         raise TypeError("page seq is not a natural number")  # D63: optional, an in-turn page's position
+    if "block" in page and (not isinstance(page["block"], int) or isinstance(page["block"], bool)
+                            or page["block"] < 0):
+        raise TypeError("page block is not a natural number")  # D63: optional, a result page's block
     if "locator" in page and not isinstance(page["locator"], str):
         raise TypeError("page locator is not a string")
     stub = page["stub"]

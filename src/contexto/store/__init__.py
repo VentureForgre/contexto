@@ -1013,12 +1013,14 @@ class SessionStore(LedgerOps):
         return self._write_pages(build_page(self._key, turn, first_turn + offset) for offset, turn in enumerate(turns))
 
     def page_parts(self, parts: list[list[dict]], turn: int, kind: str,
-                   seqs: list[int] | None = None) -> list[str]:
+                   seqs: list[int] | None = None, blocks: list[int] | None = None) -> list[str]:
         """Write one in-turn page per part (D63): each holds its messages exactly, the turn number
         ``turn`` (the same for all: the turn they are part of) and ``kind`` (``result``: a tool call and
-        its result; ``rounds``: tool rounds folded out of a running turn). Ids, immutability and
-        conflicts are ``page_out``'s; ``kind`` is not part of the id."""
-        return self._write_pages(build_page(self._key, part, turn, kind, None if seqs is None else seqs[n])
+        its result; ``rounds``: tool rounds folded out of a running turn). ``seqs`` and ``blocks``: each
+        page's message index and block index in the turn, for ordering. Ids, immutability and conflicts
+        are ``page_out``'s; ``kind``, ``seqs`` and ``blocks`` are not part of the id."""
+        return self._write_pages(build_page(self._key, part, turn, kind, None if seqs is None else seqs[n],
+                                            None if blocks is None else blocks[n])
                                  for n, part in enumerate(parts))
 
     def _write_pages(self, pages: Iterable[dict[str, Any]]) -> list[str]:

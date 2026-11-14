@@ -562,9 +562,11 @@ def note_size(text: str) -> int:
     return len(utf8(text))
 
 
+# The note names at most NOTE_CALLS calls of its newest fold and none of the earlier folds' (Reviewer A at
+# 7575c76f, finding 6), so without Contexto's tools only the listed calls can be run again.
 _NOTE_TAIL = ('If you have the contexto_recall tool, call it with a page_id named here to read them (pass the '
-              "next offset to continue; a page is long); contexto_search finds lines in them. Without it, run the "
-              "calls again.]")
+              "next offset to continue; a page is long); contexto_search finds lines in them. Without it, you can "
+              "run again the calls listed here; the other calls of these rounds are named only in those pages.]")
 _NOTES: OrderedDict[tuple[str, int], str] = OrderedDict()
 _TURN_NOTES: OrderedDict[tuple, str] = OrderedDict()
 _NOTES_LOCK = threading.Lock()  # engines of several sessions can share a process
@@ -1179,7 +1181,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         ids: dict[tuple[int, int], str] = {}
         for turn, group in by_turn.items():
             written = store.page_parts([hooks.result_page(c.call, c.result) for c in group], turn, RESULT_PAGE,
-                                       [c.i for c in group])
+                                       [c.i for c in group], [c.j for c in group])
             ids.update({(c.i, c.j): page_id for c, page_id in zip(group, written)})
         new = [(c.i, c.j, ids.get((c.i, c.j), "")) for c in chosen]
         edits = current.inturn

@@ -174,9 +174,10 @@ class MemoryStore(LedgerOps):
         return self._write_pages(build_page(self._key, turn, first_turn + offset) for offset, turn in enumerate(turns))
 
     def page_parts(self, parts: list[list[dict]], turn: int, kind: str,
-                   seqs: list[int] | None = None) -> list[str]:
+                   seqs: list[int] | None = None, blocks: list[int] | None = None) -> list[str]:
         """As ``SessionStore.page_parts`` (D63)."""
-        return self._write_pages(build_page(self._key, part, turn, kind, None if seqs is None else seqs[n])
+        return self._write_pages(build_page(self._key, part, turn, kind, None if seqs is None else seqs[n],
+                                            None if blocks is None else blocks[n])
                                  for n, part in enumerate(parts))
 
     def _write_pages(self, pages: Iterable[dict[str, Any]]) -> list[str]:

@@ -708,10 +708,10 @@ def test_memory_store_writes_the_same_in_turn_pages(tmp_path):
 class BrokenParts(MemoryStore):
     broken = True
 
-    def page_parts(self, parts, turn, kind, seqs=None):
+    def page_parts(self, parts, turn, kind, seqs=None, blocks=None):
         if self.broken:
             raise OSError("synthetic: disk full")
-        return super().page_parts(parts, turn, kind, seqs)
+        return super().page_parts(parts, turn, kind, seqs, blocks)
 
 
 def test_a_store_failure_in_a_batch_degrades_and_sends_the_request_unpaged():
@@ -997,11 +997,11 @@ def test_only_as_many_unread_results_are_stubbed_as_needed():
 class FailsOnce(MemoryStore):
     failures = 1
 
-    def page_parts(self, parts, turn, kind, seqs=None):
+    def page_parts(self, parts, turn, kind, seqs=None, blocks=None):
         if self.failures:
             self.failures -= 1
             raise OSError("synthetic: a transient write error")
-        return super().page_parts(parts, turn, kind, seqs)
+        return super().page_parts(parts, turn, kind, seqs, blocks)
 
 
 def test_one_transient_store_error_does_not_leave_a_subagent_unbounded():
@@ -1062,7 +1062,11 @@ def test_stub_and_note_wording_is_true_without_contextos_tools():
     assert "Nothing was lost" not in note and "They are stored in page pg_fedcba9876543210." in note
     assert "tools: Grep x15, Bash x15\n" in note
     assert "calls: Grep pattern: marker (in src/0); Bash command: make check-1; " in note and "check-29" in note
-    assert "If you have the contexto_recall tool" in note and "Without it, run the calls again." in note
+    assert "If you have the contexto_recall tool" in note
+    # The note lists at most NOTE_CALLS calls of its newest fold; it says so rather than "run the calls
+    # again" for calls it does not name (Reviewer A at 7575c76f, finding 6).
+    assert ("Without it, you can run again the calls listed here; the other calls of these rounds are "
+            "named only in those pages.]") in note
     assert inturn.note_page(note) == "pg_fedcba9876543210"
     # It names the calls it folded, as many as its share of the cap holds, and the page that holds them all.
     assert inturn.note_calls(note) == tuple(f"t{i}" for i in range(30))
@@ -1457,3 +1461,22 @@ def test_folds_pages_store_each_fold_once_and_every_fold_stays_reachable_at_2000
     seen: dict = {}
     reached = set().union(*(_reach(store, ref, 8, seen) for ref, _ in inturn.note_refs(note)))
     assert {f"toolu_{r:05d}" for r in range(2_001)} <= reached
+
+
+def test_sessions_show_lists_parallel_results_of_one_message_in_their_calls_order():
+    # Reviewer A at 7575c76f, nit: seq is the message index, so the parallel results of one message listed
+    # by page id (a hash), not in the order of their calls.
+    cli = Cli(memory(), SMALL, head_bytes=8_000)
+    cli.prompt("Run the checks, eight at a time.")
+    cli.loop(6, lambda r: tuple(output(f"check-{r}-{c}", RESULT // 2) for c in range(8)),
+             call=lambda r: ("Bash", {"command": f"make check-{r}-0"}))
+    pages = [cli.store.get_page(p) for p in cli.store.page_ids()]
+    results = [p for p in pages if p.get("kind") == RESULT_PAGE]
+    by_message: dict[int, list[int]] = {}
+    for p in results:
+        by_message.setdefault(p["seq"], []).append(p["block"])
+    assert any(len(blocks_) > 2 for blocks_ in by_message.values())
+    assert all(blocks_ == sorted(blocks_, reverse=True) for blocks_ in by_message.values())  # newest first
+    check_page({**results[0], "block": 3})
+    with pytest.raises(TypeError):
+        check_page({**results[0], "block": -1})

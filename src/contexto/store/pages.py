@@ -228,12 +228,14 @@ def current_stub(page: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int, kind: str | None = None,
-               seq: int | None = None) -> dict[str, Any]:
+               seq: int | None = None, block: int | None = None) -> dict[str, Any]:
     """A page record for one turn, messages kept exactly as received (thinking included). ``kind`` marks
     an in-turn page (D63); a whole turn has none, and the id never depends on it. ``seq`` (D63, Reviewer B):
     an in-turn page's position in its turn (the index of its first message in the CLI's history), so the
-    pages of one turn list in order; a result page also gets ``locator``, what its call ran or read. Neither
-    is part of the id, and both are optional: a page without them sorts as before."""
+    pages of one turn list in order; a result page also gets ``locator``, what its call ran or read, and
+    ``block``, its result's block index in that message, so parallel results list in their calls' order
+    (Reviewer A at 7575c76f). None is part of the id, and all are optional: a page without them sorts as
+    before."""
     text, tool = message_bytes(turn)
     page = {
         "turn": turn_number,
@@ -246,6 +248,8 @@ def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int, kind: s
         page["kind"] = kind
     if seq is not None:
         page["seq"] = seq
+    if block is not None:
+        page["block"] = block
     if kind == RESULT_PAGE:
         page["locator"] = _result_locator(turn)
     page["id"] = page_id(key, page)
@@ -265,9 +269,11 @@ def _result_locator(turn: list[dict[str, Any]]) -> str:
 
 def page_order(page: dict[str, Any]) -> tuple:
     """The sort key of a page, oldest first: its turn, then an in-turn page by its position in the turn
-    (``seq``), and a page without one (a whole turn, or an in-turn page written before ``seq``) after them."""
-    seq = page.get("seq")
-    return (page["turn"], 0 if isinstance(seq, int) else 1, seq if isinstance(seq, int) else 0, page["id"])
+    (``seq``) and among the results of one message by ``block``, and a page without ``seq`` (a whole turn,
+    or an in-turn page written before it) after them."""
+    seq, block = page.get("seq"), page.get("block")
+    return (page["turn"], 0 if isinstance(seq, int) else 1, seq if isinstance(seq, int) else 0,
+            block if isinstance(block, int) else 0, page["id"])
 
 
 def _search_fields(page: dict[str, Any]) -> list[str]:
