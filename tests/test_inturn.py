@@ -1631,3 +1631,71 @@ def test_with_usage_never_arriving_no_batch_rewrites_right_after_another():
     assert max(s.real for s in cli.sent) <= BOUND
     assert not cli.events("over_bound") and not cli.events("in_turn_exhausted")
     assert not [e for e in batches(cli) if e["unseen_results_stubbed"]]
+
+
+def test_after_a_resync_the_note_is_rebuilt_within_its_cap():
+    # Reviewer A at 15293e9c, finding 2: clipped kept the folds pages that still held and dropped the
+    # rest, and each fold they stood for was then named in the note until the next fold: 31,309 bytes at
+    # 2,000 folds cut at fold 1,800. relisted, which the resync calls, rebuilds the folds pages first.
+    from contexto.rewrite import _dialect
+    dialect = _dialect()
+    store = memory()
+    messages = [{"role": "user", "content": [{"type": "text", "text": "Read every module."}]}]
+    state = EpochState()
+    for r in range(2_000):
+        call = {"type": "tool_use", "id": f"toolu_{r:05d}", "name": "Read",
+                "input": {"file_path": f"src/deep/module_{r:05d}.py"}}
+        messages += [{"role": "assistant", "content": [call]},
+                     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"],
+                                                   "content": output(f"m-{r}", 300)}]}]
+        page_id = store.page_parts([messages[-2:]], 0, ROUNDS_PAGE, [len(messages) - 2])[0]
+        edits = state.inturn
+        state = replace(state, inturn=edits._replace(folds=(*edits.folds, (0, ((len(messages) - 2, len(messages)),),
+                                                                            page_id))))
+        state = inturn._listed(messages, state, store, 0, dialect.in_turn, dialect)
+    matched = 1 + 2 * 1_800  # the call message of fold 1,800
+    new = messages[:matched] + [{"role": "assistant", "content": [{"type": "text", "text": "changed"}]}]
+    clipped = replace(state, inturn=inturn.clipped(state.inturn, matched, new, dialect))
+    assert len(clipped.inturn.folds) == 1_800
+
+    def note(at):
+        return inturn._note_text(inturn.view(new, at, dialect)[0])
+
+    assert inturn.note_size(note(clipped)) > inturn.NOTE_BYTES  # the gap
+    rebuilt = inturn.relisted(new, clipped, store)
+    assert inturn.note_size(note(rebuilt)) <= inturn.NOTE_BYTES
+    seen: dict = {}
+    reached = set().union(*(_reach(store, ref, 8, seen) for ref, _ in inturn.note_refs(note(rebuilt))))
+    assert {f"toolu_{r:05d}" for r in range(1_800)} <= reached
+
+
+def test_a_resync_in_the_engine_rebuilds_the_folds_pages(monkeypatch):
+    # The same through the engine: a cap so small that every fold writes a folds page, until an index page
+    # stands for FOLDS_FANOUT of them; then the CLI changes a message inside a fold that index covers. The
+    # index no longer holds and is dropped; the resync's request lists every fold left but the newest in
+    # folds pages again, instead of naming each in the note.
+    monkeypatch.setattr(inturn, "NOTE_BYTES", 900)
+    cli = Cli(memory(), SMALL, head_bytes=8_000)
+    cli.prompt("Check the small files.")
+    r = 0
+    while not any(level for *_, level in (cli.state.inturn.lists if cli.state else ())):
+        cli.send([("Read", {"file_path": f"src/small_{r}.py"})])
+        cli.results([output(f"small-{r}", 1_500)])
+        r += 1
+        assert r < 2_000
+    folds = cli.state.inturn.folds
+    a, b = folds[5][1][0]
+    index = a + 2 * ((b - a) // 4)  # a call message inside fold 5, which the index page covers
+    assert cli.history[index]["role"] == "assistant"
+    changed = dict(cli.history[index])
+    changed["content"] = [x for x in changed["content"] if x["type"] == "tool_use"]
+    cli.history[index] = changed
+    cli.upstream.strict = False
+    sent = cli.send([("Read", {"file_path": "after.py"})])
+    assert "resync" in sent.names
+    # Kept: folds 0 to 4 whole and fold 5 cut. The resync relists folds 0 to 4 in a folds page (an entry
+    # covering 5) before this request's own batch folds again; without it only that batch's fold would
+    # list them, as one entry covering every fold but its own.
+    edits = cli.state.inturn
+    assert (5, 0) in [(covered, level) for _, covered, _, level in edits.lists]
+    assert edits.lists[-1][1] == len(edits.folds) - 1

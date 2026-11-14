@@ -1934,6 +1934,11 @@ def _rewrite(request: dict, state: EpochState | None, store: Store, config: Conf
             # D63: the in-turn edits before the change stand; a fold keeps only its whole rounds before it.
             edits = inturn.clipped(state.inturn, match, messages, _dialect())
             state = replace(state, last_input_tokens=None, inturn=edits)
+            calls = StoreCalls(store)
+            try:  # the note back within its cap (D63, Reviewer A at 15293e9c, finding 2)
+                state = inturn.relisted(messages, state, calls)
+            except STORE_FAILURES as error:
+                state = enter_degraded(state, store_failure(error, calls, state), events)
         previous_n = match
 
     try:

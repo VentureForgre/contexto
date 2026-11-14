@@ -1356,6 +1356,20 @@ def _listed(messages: list[dict], state: Any, store: Any, start: int, hooks: Any
     return replace(state, inturn=edits._replace(lists=tuple(sorted(lists))))
 
 
+def relisted(messages: list[dict], state: Any, store: Any) -> Any:
+    """After a resync (``clipped``): the folds a dropped folds page stood for are named one by one in the
+    note until the next fold, past NOTE_BYTES (Reviewer A at 15293e9c, finding 2: 31,309 bytes at 2,000
+    folds cut at 1,800). Rebuild each turn's folds pages from what still holds, so the note is within its
+    cap on the request the resync sends. A store failure raises, as in a batch."""
+    dialect = _rw()._dialect()
+    hooks = dialect.in_turn
+    if hooks is None or state.degraded or not callable(getattr(store, "page_parts", None)):
+        return state
+    for start in sorted({s for s, _, _ in state.inturn.folds}):
+        state = _listed(messages, state, store, start, hooks, dialect)
+    return state
+
+
 def _note_text(item: dict) -> str:
     """The fold note a view put on a turn-start message: its last text block."""
     blocks = _blocks(item)
