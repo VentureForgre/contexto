@@ -466,7 +466,9 @@ def test_version_and_help_alone_run_without_the_check(launch_env, tmp_path, info
     launch_env.update(CLAUDE_CODE_USE_BEDROCK="1", FAKE_VERSION="2.1.322 (Claude Code)")
     proc = launch(launch_env, "claude", info, cwd=tmp_path)
     out, err = proc.communicate(timeout=30)
-    assert "contexto run:" not in err and "CLAUDE_CODE_USE_BEDROCK" not in err
+    # Launch errors are printed as lines starting "contexto: " (D64): none here, so nothing refused.
+    assert not [line for line in err.splitlines() if line.startswith("contexto:")], err
+    assert "CLAUDE_CODE_USE_BEDROCK" not in err
     if info == "--version":
         assert proc.returncode == 0 and out.strip() == "2.1.322 (Claude Code)"
     else:
