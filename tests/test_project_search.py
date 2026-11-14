@@ -712,7 +712,8 @@ def test_the_mcp_call_event_names_no_other_session_no_path_and_no_text(three, ho
     assert project["scope"] == "project" and session["scope"] == "session"
     assert {k for k in project if k.startswith("earlier_")} == {"earlier_searched", "earlier_skipped",
                                                                "earlier_matched", "earlier_not_searched",
-                                                               "earlier_hits"}
+                                                               "earlier_hits", "earlier_in_view_hits",
+                                                               "earlier_in_view_skipped"}
     assert not any(k.startswith("earlier_") for k in session)
     line = (cur.dir / "log.jsonl").read_text()
     for secret in ("e1aaaaaa", "e2bbbbbb", str(home), "amber", "birch", "cedar", "deploy"):
