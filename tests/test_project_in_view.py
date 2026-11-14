@@ -281,6 +281,30 @@ def test_a_snapshot_that_cannot_be_used_is_skipped_whole_and_its_pages_still_sea
     assert snapshot(store.dir) == before
 
 
+def test_the_reply_and_the_command_say_how_many_last_windows_could_not_be_read(home, root, monkeypatch, capsys):
+    """Review A finding 7: a skipped snapshot was in the log and --json only; the text says it, as it says
+    how many sessions could not be read or were not searched."""
+    for n, sid in enumerate(("e1aaaaaa", "e2bbbbbb", "e3cccccc")):
+        store, _ = ended(home, sid, root, 1 + n, [f"the deploy key was amber-{n}"])
+        (store.dir / "retained.json").write_text("{not json")
+    cur = new_session(home, "cur", root, 5)
+    server = serve(cur)
+    text = search(server)
+    assert text.splitlines()[-2:] == ["[3 earlier sessions' last windows could not be read]", mcp.EARLIER_READ_ON]
+    (home / "sessions" / "e2bbbbbb" / "retained.json").unlink()
+    (home / "sessions" / "e3cccccc" / "retained.json").unlink()
+    assert "[1 earlier session's last window could not be read]" in search(server).splitlines()
+    assert "[1 earlier session's last window could not be read]" in search(server, "no-such-word").splitlines()
+    (home / "sessions" / "e1aaaaaa" / "retained.json").unlink()
+    assert "last window" not in search(server)
+    (home / "sessions" / "e1aaaaaa" / "retained.json").write_text("{not json")
+    monkeypatch.setenv("CONTEXTO_HOME", str(home))
+    monkeypatch.delenv("CONTEXTO_SESSION", raising=False)
+    cur.release()
+    assert cli.main(["search", "--project", "deploy", "key", "--session", "cur"]) == 0
+    assert "[1 earlier session's last window could not be read]" in capsys.readouterr().err.splitlines()
+
+
 def test_a_snapshot_over_the_limit_is_skipped_from_its_size_without_being_read(home, root, monkeypatch):
     store, _ = ended(home, E1, root, 1, ["the deploy key was amber-17"],
                      [entry(1, 0, "the deploy key is walnut-9 " + "y" * 500)])
