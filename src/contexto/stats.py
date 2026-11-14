@@ -103,6 +103,7 @@ FAULT_EVENTS = {
     "search_cache_invalid": "CONTEXTO_SEARCH_CACHE_MB was not a valid value, so the default was used",
     "watchdog_unavailable": "the watchdog that cleans up after a killed launch could not start",
     "affinity_salt_unavailable": "the cache-affinity key could not be read, so requests carried no affinity header",
+    "tool_calls_hook_error": "a response's tool calls could not be registered for contexto serve's MCP server",
 }
 # Deliberately not faults. The first group are the log's ordinary records, most with a number of their
 # own; the second happen in normal use; docs/stats.md gives the reason for each.
@@ -115,6 +116,10 @@ NOT_FAULT_EVENTS = frozenset({
     "stale_temp_removed", "estimate_error", "pdf_allowance", "pdf_pages_uncertain", "cli_version_untested",
     "proxy_stop_incomplete", "carried_text_growing", "sizing_not_restored", "window_budget_warning",
     "hint_mismatch",
+    # contexto serve: its session records, then the events it writes to serve.log, which stats never reads.
+    "serve_open", "serve_close",
+    "serve_start", "serve_stop", "serve_error", "session_open", "session_open_failed", "session_close",
+    "session_discarded", "reap_error", "stopping_refused", "token_header_dropped", "tool_use_ambiguous", "unrouted",
 })
 
 DISK_FULL = frozenset({"ENOSPC", "EDQUOT"})
