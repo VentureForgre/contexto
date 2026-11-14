@@ -5,9 +5,10 @@
 What Contexto does not do, and where its measurements stop. The [README](../README.md#known-limitations)
 has the short list; this is the full one.
 
-- **Tool loops.** Contexto never rotates inside a tool loop. A turn that grows past the bound inside
-  one very long tool loop is sent as is and logged `over_bound` with `in_tool_loop: true`. The next
-  turn start rotates. A turn start can also go over: when the bound is too small for the fixed
+- **Tool loops.** On `main` (not v0.5.24), Contexto pages inside a Claude Code tool loop, and its
+  limits are in [In-turn paging](in-turn-paging.md#limits): among them, the thinking it strips has
+  not been checked against the live API. On Codex, with in-turn paging off, or on v0.5.24, a tool
+  loop that grows past the bound is sent as is and logged `over_bound` with `in_tool_loop: true`. The next turn start rotates. A turn start can also go over: when the bound is too small for the fixed
   overhead and the new prompt together (logged `bound_too_small`, or `pdf_allowance` when a PDF
   counted high is the reason), while the store cannot be read or written (no rotation until it
   recovers), or when the estimate runs low before the first token count (below)

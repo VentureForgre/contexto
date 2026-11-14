@@ -7,8 +7,9 @@ moving the oldest turns to disk, word for word, and giving the model tools to se
 
 - **A fixed bound.** Each turn starts with the request under the bound, 150,000 tokens by default,
   however long the session runs. The turns removed to make room stay on disk word for word, not as
-  a summary. A request can still pass it, for example inside one very long tool loop (the
-  requests the CLI sends while the model calls tools, before it answers you) or with an oversized
+  a summary. On `main` this holds inside a long tool loop too (the requests the CLI sends while
+  the model calls tools, before it answers you; [in-turn paging](docs/in-turn-paging.md)). A
+  request can still pass it in a Codex tool loop, on v0.5.24 in any tool loop, or with an oversized
   prompt ([limitations](#known-limitations)).
 - **Recall no worse than full context on a scripted recall test.** In a scripted synthetic
   session (acceptance run 4) on claude-haiku-5-5, Contexto answered 52 of 54 recall questions. The
@@ -131,7 +132,9 @@ definitions, the turns Contexto carries forward, the page index and the pinned s
 
 The model reads paged-out turns back with MCP tools: `contexto_search` finds turns by the words they
 contain, and `contexto_recall` returns one word for word, in parts if it is long. The proxy rotates
-only at the start of a turn, never inside a tool loop. It makes no model calls of its own.
+only at the start of a turn. Inside a Claude Code tool loop, the code on `main` replaces older tool
+results with short stubs and stores the originals ([in-turn paging](docs/in-turn-paging.md)). It
+makes no model calls of its own.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/request-size-dark.svg">
@@ -226,8 +229,11 @@ without.
 
 The full list, with sources, is in [docs/limitations.md](docs/limitations.md).
 
-- **Tool loops.** Contexto never rotates inside a tool loop, so a very long one can pass the bound
-  (logged `over_bound`); the next turn start rotates. A turn start can also pass it: a prompt too
+- **Tool loops.** On `main`, Contexto pages inside a Claude Code tool loop
+  ([in-turn paging](docs/in-turn-paging.md)); whether an account that enforces preserved thinking
+  accepts that has not been checked live. Codex tool loops, and every tool loop on v0.5.24, are sent
+  whole, so a very long one can pass the bound (logged `over_bound`); the next turn start rotates.
+  A turn start can also pass it: a prompt too
   large for the bound (`bound_too_small`), a failing store, or a low estimate before the first count.
 - **Tested scope.** Recall was measured with one synthetic session script, on two models, at one
   bound, on Claude Code 2.1.301, 2.1.302 and 2.1.318. Codex passed the long-session checks on one
