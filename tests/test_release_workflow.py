@@ -258,7 +258,9 @@ def test_each_jobs_step_conditions_are_exactly_the_expected_ones():
     assert _conditions("reattach") == [
         ("- name: Attest the build provenance of the rebuilt sdist and wheel", "hashFiles('dist/SHA256SUMS') != ''"),
     ]
-    assert _conditions("pypi") == [("- name: Upload to PyPI by trusted publishing", "steps.plan.outputs.upload_count != '0'")]
+    assert _conditions("pypi") == [
+        ("- name: Upload to PyPI by trusted publishing", "steps.plan.outputs.upload_count != '0'"),
+    ]
     for job in ("disabled", "request", "pypi-disabled"):
         assert _conditions(job) == [], job
 
