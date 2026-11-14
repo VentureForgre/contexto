@@ -57,10 +57,14 @@ first 401 or 403 on a model path sets ``Ledger.stop`` to ``"auth"``; after that 
 forwarded, ``count_tokens`` included.
 
 Runaway caps, per unit. A model that keeps calling tools can spend a unit's share of the budget in
-one turn. Each meter can be given ``turn_request_cap`` (the most billed requests in one script turn)
-and ``token_cap`` (the most tokens the unit may count, with requests in flight reserved as above).
-The request that would pass either is refused locally, ``Meter.unit_stop`` becomes ``"runaway"`` and the
-arm stops that unit; the run goes on with the next.
+one turn. Each meter can be given ``turn_request_cap`` (the most billed requests in one script turn
+that the upstream answered with a 2xx, counting those still in flight) and ``token_cap`` (the most
+tokens the unit may count, with requests in flight reserved as above). The request that would pass
+either is refused locally, ``Meter.unit_stop`` becomes ``"runaway"`` and the arm stops that unit; the
+run goes on with the next. A response that failed (a 429, 529 or other status that is not 2xx, or no
+response) is not counted toward the per-turn cap, because Claude Code retries it and it is the
+upstream's doing, not the model's; such responses count toward ``turn_failure_cap`` instead, and the
+request after that many in one turn stops the unit as ``"api_error"``: the upstream kept failing.
 """
 
 from __future__ import annotations
@@ -374,7 +378,7 @@ class Meter:
 
     def __init__(self, upstream: str, ledger: Ledger, *, arm: str, seed: int, repeat: int, model: str,
                  history: list[int], bound: int, attempt: int = 0, turn_request_cap: int | None = None,
-                 token_cap: int | None = None) -> None:
+                 token_cap: int | None = None, turn_failure_cap: int | None = None) -> None:
         from contexto.proxy import HOP_BY_HOP, is_vendor_host  # here, so importing this module stays light
 
         parts = urlsplit(upstream)
@@ -397,12 +401,14 @@ class Meter:
         self.unreachable = 0  # requests that got no response from the upstream
         self.classes_seen = False  # a request carried Claude Code's request-class header
         self.auth_status: int | None = None
-        self.turn_request_cap, self.token_cap = turn_request_cap, token_cap
-        self.unit_stop: str | None = None  # "runaway": this unit must end (the run goes on)
+        self.turn_request_cap, self.token_cap, self.turn_failure_cap = turn_request_cap, token_cap, turn_failure_cap
+        self.unit_stop: str | None = None  # "runaway" or "api_error": this unit must end (the run goes on)
         self.unit_stop_reason: str | None = None
         self.stopped = threading.Event()
         self.usage_unreadable = 0  # records whose usage could not be read, counted at their reservation
         self._arrived: dict[int | None, int] = {}  # billed requests that reached the meter, per turn
+        self._counted: dict[int | None, int] = {}  # per turn: admitted, less those that failed (the per-turn cap)
+        self._failed: dict[int | None, int] = {}  # per turn: admitted requests whose response failed
         self._unit_spent = 0
         self._unit_reserved = 0
         self._count = 0
@@ -467,29 +473,42 @@ class Meter:
         """Count a billed request and check the unit's caps; reserve ``reserved`` against the token cap.
         False, with the unit stopped, when the request would pass a cap."""
         with self._lock:
-            self._arrived[turn] = count = self._arrived.get(turn, 0) + 1
+            self._arrived[turn] = self._arrived.get(turn, 0) + 1
             if self.unit_stop is not None:
                 return False
-            reason = None
-            if self.turn_request_cap is not None and count > self.turn_request_cap:
-                where = f"turn {turn + 1}" if turn is not None else "one turn"
-                reason = (f"{where} asked for more than {self.turn_request_cap:,} requests (the per-turn cap); "
-                          "the model kept calling tools")
+            count, failed = self._counted.get(turn, 0) + 1, self._failed.get(turn, 0)
+            where = f"turn {turn + 1}" if turn is not None else "one turn"
+            stop, reason = "runaway", None
+            if self.turn_failure_cap is not None and failed >= self.turn_failure_cap:
+                stop, reason = "api_error", (
+                    f"{where} had {failed:,} failed responses (a 429, 529 or other error status, or none; the per-turn "
+                    f"cap on failed responses is {self.turn_failure_cap:,}): the upstream kept failing")
+            elif self.turn_request_cap is not None and count > self.turn_request_cap:
+                reason = (f"{where} asked for more than {self.turn_request_cap:,} billed requests that the upstream "
+                          f"answered (the per-turn cap; {failed:,} more failed and are not counted toward it): the "
+                          "model kept calling tools")
             elif self.token_cap is not None and self._unit_spent + self._unit_reserved + reserved > self.token_cap:
                 reason = (f"the unit would have passed its cap of {self.token_cap:,} tokens "
                           f"({self._unit_spent:,} counted when the next request was refused)")
             if reason is None:
                 self._unit_reserved += reserved
+                self._counted[turn] = count
                 return True
-            self.unit_stop, self.unit_stop_reason = "runaway", reason
+            self.unit_stop, self.unit_stop_reason = stop, reason
         self.stopped.set()
         return False
 
-    def settle(self, reserved: int, record: dict[str, Any] | None) -> None:
+    def settle(self, reserved: int, record: dict[str, Any] | None, turn: int | None = None,
+               answered: bool = True) -> None:
+        """Release an admitted request's reservation and count its record; one that was not
+        ``answered`` (no 2xx) leaves the per-turn count and counts as a failed response instead."""
         with self._lock:
             self._unit_reserved -= reserved
             if record is not None:
                 self._unit_spent += record_tokens(record)
+            if not answered:
+                self._counted[turn] = self._counted.get(turn, 0) - 1
+                self._failed[turn] = self._failed.get(turn, 0) + 1
 
     def summary(self) -> dict[str, Any]:
         """Counts over this unit's records, for the manifest. A compaction request carries the whole
@@ -587,16 +606,17 @@ class _Handler(BaseHTTPRequestHandler):
         if model_path:
             headers.append(("Accept-Encoding", "identity"))
         reserved, record = 0, None
+        turn = owner.turn
         if billed:
             shape = _shape(body, received.get("content-encoding"))
             reserved = math.ceil(shape["bytes"] / RESERVE_BYTES_PER_TOKEN) + shape["max_tokens"]
-            if not owner.admit(owner.turn, reserved):
+            if not owner.admit(turn, reserved):
                 with owner._lock:
                     owner.refused += 1
                 self._local_error(400, "contexto bench: this unit was stopped (a runaway cap)")
                 return
             if not owner.ledger.reserve(reserved):
-                owner.settle(reserved, None)
+                owner.settle(reserved, None, turn, answered=False)
                 with owner._lock:
                     owner.refused += 1
                 self._local_error(400, "contexto bench: the run was stopped (token budget or credential)")
@@ -607,7 +627,6 @@ class _Handler(BaseHTTPRequestHandler):
                 main = request_class == "main"
             else:  # no class header: a main request has a tool list and no subagent id
                 main = owner.arm == "full" or (shape["tools"] and AGENT_HEADER not in received)
-            turn = owner.turn
             record = {"arm": owner.arm, "seed": owner.seed, "repeat": owner.repeat, "model": owner.model,
                       "n": owner.next_index(), "turn": turn, "main": bool(main),
                       "history_tokens": owner.history[turn] if turn is not None and turn < len(owner.history) else 0,
@@ -628,7 +647,8 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     with owner._lock:
                         owner.unreachable += 1
-                owner.settle(reserved, record if reached else None)
+                answered = reached and record is not None and 200 <= int(record.get("status") or 0) < 300
+                owner.settle(reserved, record if reached else None, turn, answered)
                 owner.ledger.settle(reserved, record if reached else None)
         # The client sees the response complete only now, after its record is counted and written:
         # Claude Code sends its next request at once, and the guard must already know this one's cost.

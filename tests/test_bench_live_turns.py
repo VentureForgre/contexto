@@ -149,11 +149,14 @@ def test_a_turn_that_calls_tools_without_end_is_stopped_and_the_run_goes_on(env,
                                 turn_request_cap=12)
     plain = run.unit("plain")
     assert (plain["status"], plain["stop"], plain["turns_completed"]) == ("stopped", "runaway", 0)
-    assert "more than 12 requests" in plain["reason"]
+    assert "more than 12 billed requests" in plain["reason"]
     assert len(stub.messages_requests("plain")) == 12 and plain["requests"] == 12
     assert run.unit("full")["status"] == "complete" and run.code == 1
     caps = run.manifest["runaway_caps"]
     assert caps["turn_requests"] == 12 and "at most 6 requests in a probe turn" in caps["note"]
+    assert caps["turn_failures"] == runner.TURN_FAILURE_CAP and "Failed responses" in caps["note"]
+    line = next(x for x in run.manifest["arm_differences"] if "runaway caps" in x)
+    assert line.startswith("Every arm alike") and "runaway_caps" in line
 
 
 def test_a_unit_past_its_token_cap_is_stopped_and_the_run_goes_on(env, tmp_path, script):

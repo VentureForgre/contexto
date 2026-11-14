@@ -88,7 +88,7 @@ def test_every_unit_completes_and_the_manifest_has_the_shared_fields(run, script
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",  # no background task, so one result per turn
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",  # the caller's own opt-out, kept for both arms and recorded
         "settings": {"permissions": {"allow": ["Read"]}}}
-    assert len(manifest["arm_differences"]) == 6 and len(manifest["metering"]) == 4
+    assert len(manifest["arm_differences"]) == 7 and len(manifest["metering"]) == 4
     background = next(line for line in manifest["arm_differences"] if "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" in line)
     assert background.startswith("Both Claude Code arms alike")
     # A bound under 67,000 cannot be matched: the smallest window is set, and the manifest says so.

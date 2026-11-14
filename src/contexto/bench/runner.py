@@ -31,8 +31,10 @@ all of them stay in ``requests.jsonl``, because all of them were billed. A diffe
 protocol, turn size or first seed for an existing ``--out`` is refused.
 
 Runaway caps. Each unit's meter refuses a request past ``turn_request_cap`` billed requests in one
-script turn, or past the unit's token cap (``unit_token_cap``, by default twice the unit's planned
-worst case from ``contexto.bench.plan``); the unit stops as ``runaway`` and the run goes on.
+script turn that the upstream answered, or past the unit's token cap (``unit_token_cap``, by default
+twice the unit's planned worst case from ``contexto.bench.plan``); the unit stops as ``runaway`` and
+the run goes on. Failed responses (429, 529, other errors) are counted apart, against
+``turn_failure_cap`` per turn; past it the unit stops as ``api_error``.
 
 The budget (``--budget-tokens``) covers the whole output directory: what earlier attempts recorded in
 ``requests.jsonl`` counts as spent. A unit that stops writes no ``probes.jsonl`` lines; the run goes
@@ -80,6 +82,9 @@ EXIT_NOT_FOUND = 127
 EXIT_INTERRUPTED = 130
 MAX_ANSWER_CHARS = 200
 TURN_REQUEST_CAP = 60  # see runaway_caps in the manifest
+# Failed responses in one turn. Claude Code retries a failed request up to 10 times by default
+# (CLAUDE_CODE_MAX_RETRIES), so this is the default retries of 20 requests.
+TURN_FAILURE_CAP = 200
 UNIT_TOKEN_CAP_FACTOR = 2
 LOCK_NAME = ".lock"
 STUB_LABEL = ("Stub run: the upstream was a server on this machine (127.0.0.1), not a model API, so the answers, "
@@ -108,6 +113,10 @@ ARM_DIFFERENCES = (
     "shell command in the background, so a subagent the model starts runs in the foreground within its turn. "
     "Without it a background task's report starts a run of its own with its own result, and the replies of every "
     "later turn would be matched to the wrong turn; a unit where that still happens stops as desync.",
+    "Every arm alike runs under the same runaway caps (see runaway_caps): a unit stops when one script turn asks "
+    "for more billed requests than the per-turn cap, when a turn gets more failed responses than their own cap, "
+    "or when the unit would pass its token cap, twice its own arm's planned worst case unless --max-unit-tokens "
+    "sets one figure for all. A unit stopped that way writes no probe lines.",
     "full is not Claude Code: its requests carry a one-line system prompt, the script's turns with scripted "
     "replies, one declared tool with tool_choice none when the script has a tool-loop turn, no thinking parameter, "
     "no beta header, and max_tokens 8,192. It answers each probe turn in one request with no tools, where the "
@@ -166,6 +175,7 @@ class Config:
     upstream_source: str = "flag"  # "flag", "environment" ($ANTHROPIC_BASE_URL) or "default"
     turn_request_cap: int = TURN_REQUEST_CAP
     unit_token_cap: int | None = None  # None: UNIT_TOKEN_CAP_FACTOR times the unit's planned worst case
+    turn_failure_cap: int = TURN_FAILURE_CAP
 
 
 class Refused(Exception):
@@ -293,14 +303,19 @@ def upstream_note(source: str) -> str:
 
 def runaway_caps(config: Config) -> dict[str, Any]:
     return {"turn_requests": config.turn_request_cap, "unit_tokens": config.unit_token_cap,
+            "turn_failures": config.turn_failure_cap,
             "note": f"A unit stops as runaway when one script turn asks for more than {config.turn_request_cap:,} "
-                    "billed requests, or when the unit would pass its token cap (token_cap in each unit: "
+                    "billed requests that the upstream answered, or when the unit would pass its token cap "
+                    "(token_cap in each unit: "
                     + (f"{config.unit_token_cap:,} tokens, set by --max-unit-tokens" if config.unit_token_cap else
                        f"{UNIT_TOKEN_CAP_FACTOR} times the unit's planned worst case from the token plan")
                     + "). The recorded live runs needed at most 6 requests in a probe turn and 4 in a content turn "
                       "(docs/research/M2-acceptance-run4.md and M2-acceptance-opus.md), and the tool-loop turn needs "
-                      "one request per file plus one (11 for the v2 script's 10 files). The run goes on with the "
-                      "next unit."}
+                      "one request per file plus one (11 for the v2 script's 10 files). Failed responses (a 429, 529 "
+                      "or other error status, or none) are not counted toward the per-turn cap: Claude Code retries "
+                      f"them. A turn with more than {config.turn_failure_cap:,} of them stops the unit as api_error "
+                      "(Claude Code retries a request up to 10 times by default). The run goes on with the next "
+                      "unit."}
 
 
 def new_manifest(config: Config, claude_version: str | None) -> dict[str, Any]:
@@ -595,7 +610,7 @@ def _run_units(config: Config, ready: dict[str, Any], out_stream: TextIO, err_st
                 meter = bench_meter.Meter(config.upstream, ledger, arm=arm, seed=seed, repeat=repeat,
                                           model=config.model, history=histories[seed], bound=config.bound,
                                           attempt=attempt, turn_request_cap=config.turn_request_cap,
-                                          token_cap=token_cap)
+                                          token_cap=token_cap, turn_failure_cap=config.turn_failure_cap)
                 result = bench_arms.UnitResult()
                 try:
                     found = []

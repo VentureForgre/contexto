@@ -11,6 +11,7 @@ from contexto.bench.modes import add_option, seeds
 
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 TURN_REQUEST_CAP = 60  # contexto.bench.runner.TURN_REQUEST_CAP, repeated so that module is not imported at start
+TURN_FAILURE_CAP = 200  # contexto.bench.runner.TURN_FAILURE_CAP, likewise
 ARMS = ("contexto", "full", "plain")  # contexto.bench.arms.ARMS, repeated so that module is not imported at start
 
 
@@ -77,9 +78,14 @@ def add_live(parser: Any) -> None:
     parser.add_argument("--turn-timeout", type=_seconds, default=1_800.0, metavar="SECONDS",
                help="stop a unit when a turn has no result for this long (default 1800)")
     parser.add_argument("--max-turn-requests", type=_tokens, default=TURN_REQUEST_CAP, metavar="N",
-               help="stop a unit as runaway when one script turn asks for more than N billed requests (default "
+               help="stop a unit as runaway when one script turn asks for more than N billed requests that the "
+                             "upstream answered (default "
                     f"{TURN_REQUEST_CAP}; the recorded runs needed at most 6, the tool-loop turn needs 11); the run "
                     "goes on with the next unit")
+    parser.add_argument("--max-turn-failures", type=_tokens, default=TURN_FAILURE_CAP, metavar="N",
+                        help="stop a unit when one script turn gets more than N failed responses (429, 529 and other "
+                             f"errors; default {TURN_FAILURE_CAP}, the default retries of 20 requests); they do not "
+                             "count toward --max-turn-requests")
     parser.add_argument("--max-unit-tokens", type=_tokens, default=None, metavar="T",
                help="stop a unit as runaway when it would pass T tokens (default: twice the unit's planned worst "
                     "case); the run goes on with the next unit")
@@ -108,4 +114,4 @@ def config(args: argparse.Namespace, credentials: Any) -> Any:
                   work=args.work, keep_work=args.keep_work, cache_ttl=args.cache_ttl,
                   turn_timeout=args.turn_timeout, context_window=args.context_window,
                   upstream_source=upstream_source(args), turn_request_cap=args.max_turn_requests,
-                  unit_token_cap=args.max_unit_tokens)
+                  unit_token_cap=args.max_unit_tokens, turn_failure_cap=args.max_turn_failures)

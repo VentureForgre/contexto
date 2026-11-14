@@ -25,6 +25,8 @@ ARMS = ("contexto", "full", "plain")
 CLI_ARMS = ("contexto", "plain")
 # Why a unit stopped. "budget", "auth" and "managed_settings" end the whole run; after any other the next
 # unit runs. "runaway": the unit passed a per-turn request cap or its token cap (contexto.bench.meter).
+# "api_error": the full arm's request kept failing, or a Claude Code turn passed the meter's cap on failed
+# responses.
 # "unmetered": a Claude Code turn ended with no request through the meter, so something sent Claude Code
 # around it. "desync": Claude Code printed a result that answered no turn, so its replies could not be matched
 # to the turns. "interrupted": Ctrl+C, SIGTERM, or (found on resume) a run killed while the unit ran.
@@ -95,8 +97,8 @@ def ledger_stop(unit: Unit) -> Stop | None:
     if ledger.stop == "auth":
         return Stop("auth", f"the upstream answered {unit.meter.auth_status or 401}: the credential was refused, and "
                             "the run stops at the first such answer")
-    if getattr(unit.meter, "unit_stop", None) == "runaway":
-        return Stop("runaway", unit.meter.unit_stop_reason or "the unit passed a runaway cap")
+    if (code := getattr(unit.meter, "unit_stop", None)) in ("runaway", "api_error"):
+        return Stop(code, unit.meter.unit_stop_reason or "the unit passed a runaway cap")
     return None
 
 

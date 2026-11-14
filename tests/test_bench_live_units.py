@@ -442,11 +442,43 @@ def test_a_unit_that_asks_for_too_many_requests_in_one_turn_is_stopped(upstream,
     meter, ledger = metered(upstream, tmp_path, turn_request_cap=3)
     meter.turn = 0
     assert [post(meter, "/v1/messages", b"{}")[0] for _ in range(4)] == [200, 200, 200, 400]
-    assert meter.unit_stop == "runaway" and "more than 3 requests" in meter.unit_stop_reason and ledger.stop is None
+    assert meter.unit_stop == "runaway" and "more than 3 billed requests" in meter.unit_stop_reason
+    assert "the model kept calling tools" in meter.unit_stop_reason and ledger.stop is None
     meter.turn = 1
     assert post(meter, "/v1/messages", b"{}")[0] == 400  # the unit stays stopped
     meter.stop()
     assert len(Upstream.received) == 3 and meter.turn_requests(0) == 4 and meter.turn_requests(1) == 1
+
+
+def test_failed_responses_do_not_count_toward_the_per_turn_cap(upstream, tmp_path):
+    """A 529 or another failed response cost nothing and is the upstream's doing, not the model's: it
+    counts toward its own cap, and the per-turn cap counts the requests the upstream answered."""
+    meter, ledger = metered(upstream, tmp_path, turn_request_cap=3, turn_failure_cap=50)
+    meter.turn = 0
+    statuses = []
+    failed = {"chunks": [b'{"type":"error"}'], "length": True, "headers": {"content-type": "application/json"}}
+    for status in (200, 529, 529, 500, 200, 200):
+        Upstream.answer = {"chunks": USAGE_EVENTS} if status == 200 else {**failed, "status": status}
+        statuses.append(post(meter, "/v1/messages", b"{}")[0])
+    assert statuses == [200, 529, 529, 500, 200, 200] and meter.unit_stop is None
+    Upstream.answer = {"chunks": USAGE_EVENTS}
+    assert post(meter, "/v1/messages", b"{}")[0] == 400  # the fourth answered request of the turn
+    meter.stop()
+    reason = meter.unit_stop_reason
+    assert meter.unit_stop == "runaway" and "more than 3 billed requests" in reason
+    assert "3 more failed" in reason and "the model kept calling tools" in reason and ledger.stop is None
+
+
+def test_a_turn_whose_requests_keep_failing_stops_on_its_own_cap(upstream, tmp_path):
+    meter, ledger = metered(upstream, tmp_path, turn_request_cap=3, turn_failure_cap=4)
+    meter.turn = 0
+    Upstream.answer = {"status": 529, "chunks": [b'{"type":"error"}'], "length": True,
+                       "headers": {"content-type": "application/json"}}
+    assert [post(meter, "/v1/messages", b"{}")[0] for _ in range(5)] == [529, 529, 529, 529, 400]
+    meter.stop()
+    reason = meter.unit_stop_reason
+    assert meter.unit_stop == "api_error" and "4 failed responses" in reason and "the upstream kept failing" in reason
+    assert "model" not in reason and ledger.stop is None and len(Upstream.received) == 4
 
 
 def test_a_unit_that_would_pass_its_token_cap_is_stopped_and_the_run_is_not(upstream, tmp_path):
@@ -648,7 +680,8 @@ def test_the_live_runs_own_options_are_refused_beside_a_mode_and_the_plan_option
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
     for option, value in (("--key-helper", "cat key"), ("--upstream", "http://127.0.0.1:9"), ("--work", "w"),
-                          ("--max-turn-requests", "5"), ("--max-unit-tokens", "5"), ("--keep-work", None)):
+                          ("--max-turn-requests", "5"), ("--max-turn-failures", "5"), ("--max-unit-tokens", "5"),
+                          ("--keep-work", None)):
         assert option in live.OWN_OPTIONS
         assert main(["bench", "--dry-run", "--model", "claude-haiku-5-5", option, *([value] if value else [])]) == 2
         err = capsys.readouterr().err
@@ -739,3 +772,11 @@ def test_this_builds_modes_pass_the_mode_bug_check():
     own = {option for module, option, _dest, _default in args._bench_own if module is live}
     assert own == set(live.OWN_OPTIONS)
     assert not getattr(dry_run, "OWN_OPTIONS", ())
+
+
+def test_the_option_defaults_repeat_the_runners_caps():
+    from contexto.bench.modes import _live_options
+
+    assert (_live_options.TURN_REQUEST_CAP, _live_options.TURN_FAILURE_CAP) == (
+        runner.TURN_REQUEST_CAP, runner.TURN_FAILURE_CAP)
+    assert _live_options.ARMS == ARMS

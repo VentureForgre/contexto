@@ -25,7 +25,8 @@ FLAG = None
 # not listed: the dry run plans with them, so both add them with add_option, and the plan of a live
 # command is that command with --dry-run and without these.
 OWN_OPTIONS = ("--upstream", "--key-helper", "--settings", "--allow-git-out", "--work", "--keep-work", "--cache-ttl",
-               "--turn-timeout", "--max-turn-requests", "--max-unit-tokens", "--context-window")
+               "--turn-timeout", "--max-turn-requests", "--max-turn-failures", "--max-unit-tokens",
+               "--context-window")
 
 
 def add_arguments(parser) -> None:
