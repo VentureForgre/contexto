@@ -105,8 +105,10 @@ FAULT_EVENTS = {
     "affinity_salt_unavailable": "the cache-affinity key could not be read, so requests carried no affinity header",
     "tool_calls_hook_error": "a response's tool calls could not be registered for contexto serve's MCP server",
     # D69, project memory: each means a record may not be carried, or a carried one may be lost.
-    "project_unavailable": "the project's earlier sessions could not be read, so nothing was carried",
-    "project_session_skipped": "an earlier session of the project could not be read, so its records were not carried",
+    "project_unavailable": ("the project's other sessions could not be read, so a session start, a pin, a close "
+                            "or the text of the pins went without their records"),
+    "project_session_skipped": ("another session of the project could not be read, so its records, closures and "
+                                "replacements were not counted"),
     "start_text_unavailable": "the records carried from earlier sessions could not be read for a request",
     "main_records_unavailable": "a pin of the main conversation could not be recorded, so it may not be carried",
     "trusted_conversations_unavailable": "the list of trusted main conversations could not be written",

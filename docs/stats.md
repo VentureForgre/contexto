@@ -448,8 +448,8 @@ that is in neither.
 | `watchdog_unavailable` | The helper that removes a launch's temporary files if the launcher is killed could not start. |
 | `affinity_salt_unavailable` | The key for the cache-affinity header could not be read, so requests went out without the header and a gateway may route them to different caches. |
 | `tool_calls_hook_error` | Under `contexto serve`, the tool calls in a response could not be registered, so a Contexto tool call from that response may not find its session. |
-| `project_unavailable` | Project memory could not read the project's earlier sessions, so nothing was carried ([project memory](project-memory.md)). |
-| `project_session_skipped` | An earlier session of the project could not be read (damaged, too large or unreadable), so its records were not carried. |
+| `project_unavailable` | Project memory could not read the project's other sessions when a session started, or for a pin, a close or the text of the pins (at a rotation or for `contexto_state`), so that step went without their records: nothing was carried, and their closures and replacements were not applied ([project memory](project-memory.md)). A failed read at a turn start is `start_text_unavailable` alone. |
+| `project_session_skipped` | Another session of the project could not be read (damaged, too large or unreadable), so its records, closures and replacements were not counted. |
 | `start_text_unavailable` | The records carried from earlier sessions could not be read for a request; the text already sent was kept. |
 | `main_records_unavailable` | A pin the main conversation made could not be recorded as the main conversation's, so a later session may not carry it. |
 | `trusted_conversations_unavailable` | The list of main conversations the proxy trusted could not be written, so a later launch may not trust this one. |
@@ -497,7 +497,9 @@ Events that are **not** counted, because they happen in normal use:
   the first request of this run was on another model. The ratio is measured again.
 - `start_text`, `start_text_changed`, `project_memory`: project memory's ordinary records: how many
   tokens a new session carried, a turn start that sent fewer carried records after one was closed or
-  forgotten, and the counts at launch ([project memory](project-memory.md)).
+  forgotten, and the counts at launch ([project memory](project-memory.md)). When the counts could not
+  be read at launch, `project_memory` holds `error` with the error's class in their place; a project
+  that still cannot be read at the first request is also `project_unavailable`.
 - `main_record_unmatched`: a signal for whoever updates Contexto for a new CLI: Contexto's own pin
   or close call had a reply of a shape it does not read, so that record is not carried. It is not a
   fault of the session.
