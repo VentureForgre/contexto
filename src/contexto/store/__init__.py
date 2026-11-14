@@ -305,8 +305,14 @@ def _ranges(v: Any) -> bool:
 
 def _in_turn(v: Any) -> bool:
     """D63: the epoch's in-turn edits (``contexto.inturn.to_record``): positions and page ids only."""
-    if (not isinstance(v, dict) or set(v) != {"stubs", "folds", "strips", "batches", "rewrote"}
-            or not _nat(v["batches"]) or not _nat(v["rewrote"])):
+    base = {"stubs", "folds", "strips", "batches", "rewrote"}
+    if (not isinstance(v, dict) or not base <= set(v) <= base | {"lists", "room_low"}
+            or not _nat(v["batches"]) or not _nat(v["rewrote"]) or not _nat(v.get("room_low", 0))):
+        return False
+    lists = v.get("lists", [])
+    if not (isinstance(lists, list) and all(
+            isinstance(x, list) and len(x) == 3 and _nat(x[0]) and _nat(x[1]) and x[1] > 0
+            and isinstance(x[2], str) and bool(_PAGE_ID.fullmatch(x[2])) for x in lists)):
         return False
     stubs, folds = v["stubs"], v["folds"]
     return (isinstance(stubs, list) and all(

@@ -9,6 +9,7 @@ room, byte-exact storage, the turn start after a paged turn, resume, old stores,
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 
 import pytest
@@ -24,6 +25,8 @@ from contexto.store.memory import MemoryStore
 from contexto.store.pages import RESULT_PAGE, ROUNDS_PAGE, build_page, page_id, render_index
 from contexto.store.render import recall_chunk
 from inturn_harness import AGENT, MODEL, Cli, Refused, Upstream, blocks, check_pairing, output, png, tool
+from inturn_harness import BYTES_PER_TOKEN as BYTES
+from test_pdf_pages import simple_pdf
 
 BOUND = Config().bound
 ROOM = Config().min_turn_room
@@ -186,13 +189,15 @@ def test_many_small_rounds_fold_into_pages(small_rounds):
         removed = [cli.history[i] for a, b in ranges for i in range(a, b)]
         stored = cli.store.get_page(page)
         assert stored["kind"] == ROUNDS_PAGE and canonical_bytes(stored["messages"]) == canonical_bytes(removed)
-    # The turn start keeps its prompt and gains one note per fold; the newest round is never folded.
+    # The turn start keeps its prompt and gains one note, whatever the number of folds (Reviewer B,
+    # finding 1): the newest fold in detail, each earlier one by its page and rounds. The newest round
+    # is never folded.
     first = cli.sent[-1].messages[0]["content"]
     assert first[0]["text"].startswith("Check each of the 600 files")
-    notes = [b["text"] for b in first[1:]]
-    assert len(notes) == len(state.inturn.folds) and all(page in note for (_, _, page), note in
-                                                         zip(state.inturn.folds, notes))
-    assert "Grep x" in notes[0] and "tool rounds of this turn into page" in notes[0]
+    (note,) = [b["text"] for b in first[1:]]
+    assert all(page in note for _, _, page in state.inturn.folds)
+    assert inturn.note_page(note) == state.inturn.folds[-1][2] and "earlier folds of this turn: rounds 1 to " in note
+    assert "Grep x" in note and "tool rounds of this turn into page" in note
     assert cli.sent[-1].messages[-1] == _drop_cache_control(cli.request()["messages"][-2])
 
 
@@ -504,7 +509,8 @@ def test_the_event_is_content_free_and_complete():
     cli.loop(12, lambda r: output(f"m-{r}", RESULT))
     event = batches(cli)[0]
     assert set(event) == {"event", "epoch", "trigger", "results_stubbed", "own_results_stubbed",
-                          "unseen_results_stubbed", "rounds_folded", "turns_paged", "pages", "estimate_before",
+                          "unseen_results_stubbed", "documents_over_bound", "rounds_folded", "turns_paged", "pages",
+                          "estimate_before",
                           "estimate_after", "margin", "first_changed", "resent_tokens", "messages"}
     assert all(isinstance(v, (int, str)) for v in event.values())
     # The line is T less the output allowance, and the result that just arrived counts at 1.8 bytes a
@@ -633,7 +639,12 @@ def test_the_record_field_is_checked_by_the_store_and_the_engine():
         with pytest.raises(ValueError):
             check_epoch({**base, "in_turn": bad})
     edits = inturn.from_record(good, 11)
-    assert inturn.to_record(edits) == good
+    assert inturn.to_record(edits) == {**good, "lists": [], "room_low": 0}  # a record without them reads
+    full = {**good, "lists": [[0, 1, "pg_0123456789abcdef"]], "room_low": 1}
+    assert check_epoch({**base, "in_turn": full})["in_turn"] == full and inturn.to_record(
+        inturn.from_record(full, 11)) == full
+    with pytest.raises(ValueError):
+        check_epoch({**base, "in_turn": {**full, "lists": [[0, 0, "pg_0123456789abcdef"]]}})
     with pytest.raises(ValueError):
         inturn.from_record(good, 10)  # the record names a message the request does not have
     assert inturn.from_record(None, 0) == inturn.EMPTY
@@ -1056,7 +1067,9 @@ def test_stub_and_note_wording_is_true_without_contextos_tools():
     long_note = inturn.fold_note(inturn.MESSAGES, many, "pg_0000000000000001")
     calls_part = long_note[:long_note.index("\ncall ids: ")] + long_note[long_note.index("\nwas: "):]
     assert len(calls_part) < 2_600 and " more calls" in long_note
-    assert len(inturn.note_calls(long_note)) == 600  # every call id, uncapped
+    # The ids are capped too: the note stays bounded, and the page holds every call.
+    assert len(inturn.note_calls(long_note)) == inturn.NOTE_IDS
+    assert f"; {600 - inturn.NOTE_IDS} more in the page" in long_note
 
 
 def test_codex_has_no_in_turn_paging_yet():
@@ -1076,3 +1089,84 @@ def test_model_and_upstream_helpers_agree_with_the_engine():
     assert cli.request()["model"] == MODEL and isinstance(cli.upstream, Upstream)
     assert all(abs(s.estimate - s.real) <= 0.05 * s.real for s in cli.sent[2:])
     assert cli.engine.observe_usage(MESSAGES, {"input_tokens": 5}, {"messages": []}) == []
+
+
+# Reviewer B on PR #274 ----------------------------------------------------------------------------
+
+def test_one_fold_note_per_turn_stays_bounded_and_is_not_rebuilt_per_fold(monkeypatch):
+    # Reviewer B, finding 1: one note per fold piled up in the turn-start message (82 notes, 31,478 bytes
+    # after 400 rounds with a 92,000-token head), and past 256 folds every note was rebuilt on every
+    # request. Here a head that leaves little room makes the loop fold every few rounds.
+    builds = []
+    real = inturn._fold_note_uncached
+    monkeypatch.setattr(inturn, "_fold_note_uncached", lambda *a: builds.append(1) or real(*a))
+    cli = Cli(memory(), SMALL, head_bytes=int(38_000 * BYTES))
+    cli.prompt("Read every module.")
+    for r in range(420):
+        cli.send([("Read", {"file_path": f"src/deep/module_{r:04d}.py"})])
+        cli.results([output(f"m-{r}", 6_000)])
+    assert_bound_held(cli, SMALL.bound)
+    edits = cli.state.inturn
+    assert len(edits.folds) > 40 and edits.lists  # past the cap, a folds page lists the earlier folds
+    (start, covered, listing), = edits.lists
+    notes = [b["text"] for b in cli.sent[-1].messages[0]["content"][1:]]
+    assert len(notes) == 1 and len(notes[0].encode()) <= inturn.NOTE_BYTES
+    assert f"pages listed in page {listing}" in notes[0] and inturn.note_page(notes[0]) == edits.folds[-1][2]
+    # The folds page holds each earlier fold's own note, byte for byte, each naming its rounds page.
+    page = cli.store.get_page(listing)
+    assert page["kind"] == inturn.FOLDS_PAGE
+    listed = [inturn.note_page(b["text"]) for b in page["messages"][0]["content"]]
+    assert listed[:covered] == [pid for _, _, pid in edits.folds[:covered]]
+    # Requests with no new fold build no note: the cost does not grow with the number of folds.
+    builds.clear()
+    for r in range(3):
+        sent = cli.send([("Read", {"file_path": f"tail_{r}.py"})])
+        cli.results([output(f"tail-{r}", 300)])
+        assert "in_turn_batch" not in sent.names
+    assert builds == []
+    assert not [e for e in batches(cli) if e["unseen_results_stubbed"]]
+
+
+def test_a_document_result_is_stubbed_once_seen_and_unread_only_when_over_the_bound_alone():
+    # Reviewer B: documents were never stubbed, so a PDF in every result folded every round and reached
+    # over_bound; and one document over the bound on its own made every request fold (finding 8).
+    pdf = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                          "data": base64.b64encode(simple_pdf(10)).decode()}}
+    cli = Cli(memory(), head_bytes=64_000)
+    cli.prompt("Read the reports.")
+    cli.loop(30, lambda r: [pdf])
+    assert_bound_held(cli)
+    assert not cli.state.inturn.folds and cli.state.inturn.stubs
+    assert not [e for e in batches(cli) if e["unseen_results_stubbed"]]
+    i, j, page_id = cli.state.inturn.stubs[0]
+    stub = cli.sent[-1].messages[i]["content"][j]["content"]
+    assert "1 document, 10 pages" in stub and "run the call again to see the document" in stub
+    assert cli.store.get_page(page_id)["messages"][-1]["content"][0]["content"] == [pdf]
+    # One document over the bound on its own is stubbed on arrival, once, with that reason.
+    # A damaged PDF: its pages cannot be counted, so it is estimated at PDF_MAX_PAGES, over the bound.
+    huge = {**pdf, "source": {**pdf["source"], "data": base64.b64encode(b"%PDF-1.7\n" + b"x" * 4_000).decode()}}
+    cli = Cli(memory(), head_bytes=64_000)
+    cli.prompt("Read the scan.")
+    cli.send([("Read", {"file_path": "scan.pdf"})])
+    cli.results([[huge]])
+    sent = cli.send([("Read", {"file_path": "next.md"})])
+    (batch,) = [e for e in sent.events if e["event"] == "in_turn_batch"]
+    assert batch["documents_over_bound"] == 1 and batch["unseen_results_stubbed"] == 1
+    cli.results([output("next", 2_000)])
+    cli.loop(5, lambda r: output(f"after-{r}", 2_000))
+    assert len(batches(cli)) == 1 and not cli.events("over_bound")
+
+
+def test_at_a_small_bound_each_result_is_still_read_once():
+    # Reviewer B, finding 3: bound 60,000 with a 20,000-token head: 60 of 60 results were stubbed unread,
+    # though every request would have been 33,400 to 45,091 tokens.
+    config = Config(bound=60_000)  # floor 25,000, min_turn_room 12,000: T = 23,000, under the head and prompt
+    cli = Cli(memory(), config, head_bytes=int(20_000 * BYTES))
+    cli.prompt("Read every module.")
+    cli.loop(60, lambda r: output(f"m-{r}", RESULT))
+    assert_bound_held(cli, config.bound)
+    assert not [e for e in batches(cli) if e["unseen_results_stubbed"]]
+    (low,) = cli.events("turn_room_low")  # once per turn, with its reason
+    assert low["reason"] == "in_turn_small_bound"
+    # The headroom floor stays whole: the room for the reply is what such a bound gives up last.
+    assert max(s.estimate for s in cli.sent) <= config.bound - config.headroom_floor

@@ -24,6 +24,7 @@ STUB_TEXT_CHARS = 200
 # a rounds page holds tool rounds folded out of a running turn. ``kind`` is not part of the page id.
 RESULT_PAGE = "result"
 ROUNDS_PAGE = "rounds"
+FOLDS_PAGE = "folds"  # the detailed fold notes of a turn's earlier folds, once its note reached its cap
 ROUNDS_STUB = "[earlier tool rounds]"
 STUB_MAX_PATHS = 20
 EMPTY_SYSTEM_STUB = "(empty system message)"
@@ -348,7 +349,8 @@ def render_index(pages: list[dict[str, Any]], budget_tokens: int, salient: bool 
     Result pages (D63) are not listed: one per stubbed tool result would flood the budget, and each is
     named by its stub in the request; search and recall reach them.
     """
-    ordered = sorted((p for p in pages if p.get("kind") != RESULT_PAGE), key=lambda p: (p["turn"], p["id"]),
+    ordered = sorted((p for p in pages if p.get("kind") not in (RESULT_PAGE, FOLDS_PAGE)),
+                     key=lambda p: (p["turn"], p["id"]),
                      reverse=True)
     lines: list[str] = []
     used = 0
