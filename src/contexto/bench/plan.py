@@ -56,6 +56,14 @@ on every request would cost more than this plan. The run still cannot pass its b
 meter's guard reserves each request's real ``max_tokens`` while it is in flight and refuses the
 request that could pass the budget (``contexto.bench.meter``); such a run stops early instead.
 
+Models. The tool rounds are calibrated on claude-haiku-5-5. Where a recorded run of the same session
+exists for another model, the expected tokens of the two Claude Code arms are scaled by the ratio of
+that run's Contexto tokens to run #4's (``RECORDED``): claude-opus-5-5 spent 4,726,388 tokens on the
+Contexto arm (docs/research/M2-acceptance-opus.md, 62 requests: it called tools on content turns)
+against 3,422,988 on claude-haiku-5-5 in run #4, a factor of 1.381. The full arm's figures come from
+the script alone and are not scaled; neither is the worst case. For any other model the plan is the
+claude-haiku-5-5 plan, and ``calibration`` says so.
+
 Heads. Claude Code 2.1.322 with a fresh configuration sent a first request of 51,270 bytes in the
 plain arm and 52,325 under ``contexto run`` (stub upstream, 2026-11-12; Contexto's tools are deferred
 behind tool search, so they add about 1,000 bytes until the model loads them). Real token counts of
@@ -97,6 +105,11 @@ TOOL_CALL_TOKENS = 100  # [assumed] a tool call and the frame of its result
 UNCACHED_PER_REQUEST = 2  # run #4: 90 over 45 requests
 UNCACHED_PER_FULL_REQUEST = 27  # run #4's baseline
 CLASSES = ("uncached", "cache_write", "cache_read", "output")
+CALIBRATED_ON = "claude-haiku-5-5"
+CALIBRATION_TOKENS = 3_422_988  # run #4's Contexto arm on claude-haiku-5-5 (docs/research/M2-acceptance-run4.md)
+# model -> (the Contexto arm's tokens on the same 54-probe session, where it is recorded)
+RECORDED = {"claude-opus-5-5": (4_726_388, "docs/research/M2-acceptance-opus.md")}
+SCALED_ARMS = ("contexto", "plain")
 # What --dry-run prints under its tables. The module docstring has the whole model.
 NOTES = (
     "The model behind these figures (contexto.bench.plan states it in full):",
@@ -338,9 +351,39 @@ def _price(expected: list[Request], worst: list[Request], reserve: int, uncached
     return out
 
 
-def unit_estimate(arm: str, script: Script, bound: int, params: Params | None = None) -> Estimate:
-    """The plan of one arm on one script: expected and worst-case requests and tokens by class."""
-    params = params or engine_params()
+def model_factor(model: str | None) -> float:
+    """The factor on the Claude Code arms' expected tokens for ``model`` (1.0 without a recorded run)."""
+    recorded = RECORDED.get(model or "")
+    return recorded[0] / CALIBRATION_TOKENS if recorded else 1.0
+
+
+def calibration(model: str | None) -> str:
+    """One sentence on what the expected figures for ``model`` are calibrated on."""
+    recorded = RECORDED.get(model or "")
+    if recorded:
+        return (f"Calibration: the tool rounds are fitted on {CALIBRATED_ON}; {model} has a recorded run of the same "
+                f"session ({recorded[1]}: {recorded[0]:,} tokens on the Contexto arm against {CALIBRATION_TOKENS:,} "
+                f"for {CALIBRATED_ON} in run #4), so the expected tokens of the contexto and plain arms are scaled by "
+                f"{model_factor(model):.3f}. The full arm and the worst case are not scaled.")
+    name = model or "the model"
+    if model == CALIBRATED_ON:
+        return f"Calibration: the tool rounds are fitted on recorded runs of {CALIBRATED_ON}, the model given."
+    return (f"Calibration: the plan is calibrated on {CALIBRATED_ON}; no run of {name} has been recorded, and a model "
+            "that calls more tools (claude-opus-5-5 spent 38% more on the Contexto arm) costs more than this.")
+
+
+def unit_estimate(arm: str, script: Script, bound: int, params: Params | None = None,
+                  model: str | None = None) -> Estimate:
+    """The plan of one arm on one script: expected and worst-case requests and tokens by class. With a
+    ``model`` that has a recorded run, the Claude Code arms' expected tokens are scaled (``model_factor``)."""
+    out = _unit_estimate(arm, script, bound, params or engine_params())
+    factor = model_factor(model) if arm in SCALED_ARMS else 1.0
+    if factor != 1.0:
+        out.expected = {name: round(value * factor) for name, value in out.expected.items()}
+    return out
+
+
+def _unit_estimate(arm: str, script: Script, bound: int, params: Params) -> Estimate:
     if arm == "contexto":
         expected = simulate_contexto(script, bound, params, worst=False)
         worst = simulate_contexto(script, bound, params, worst=True)
@@ -374,7 +417,7 @@ def units(seeds: list[int], repeats: int, arms: tuple[str, ...]) -> list[tuple[s
 
 
 def estimate(scripts: dict[int, Script], todo: list[tuple[str, int, int]], bound: int,
-             params: Params | None = None) -> dict[str, Any]:
+             params: Params | None = None, model: str | None = None) -> dict[str, Any]:
     """The plan for the units in ``todo``: per arm (``units``, ``turns``, an ``Estimate``) and in total."""
     params = params or engine_params()
     cache: dict[tuple[str, int], Estimate] = {}
@@ -382,7 +425,7 @@ def estimate(scripts: dict[int, Script], todo: list[tuple[str, int, int]], bound
     total = Estimate()
     for arm, seed, _repeat in todo:
         if (arm, seed) not in cache:
-            cache[(arm, seed)] = unit_estimate(arm, scripts[seed], bound, params)
+            cache[(arm, seed)] = unit_estimate(arm, scripts[seed], bound, params, model)
         row = arms.setdefault(arm, {"units": 0, "turns": 0, "estimate": Estimate()})
         row["units"] += 1
         row["turns"] += len(scripts[seed].turns)

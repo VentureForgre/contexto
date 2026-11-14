@@ -612,6 +612,36 @@ def test_dry_run_prints_the_plan_and_the_budget_without_a_key_or_a_call(capsys, 
     assert "--budget-tokens 5 is below the worst case" in out and "| plain |" not in out and "(none given)" in out
 
 
+def test_dry_run_says_what_its_figures_are_and_calibrates_on_a_recorded_model(capsys, monkeypatch):
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    assert main(["bench", "--dry-run", "--model", "claude-haiku-5-5", "--seeds", "2"]) == 0
+    haiku = capsys.readouterr().out
+    assert "a planning figure and not a ceiling" in haiku and "the ceiling is --budget-tokens" in haiku
+    assert "32,000 tokens on every Claude Code request and 8,192 on every full-arm request" in haiku
+    assert "up to 128,000 output tokens" in haiku and "full output reservation" not in haiku
+    assert "fitted on recorded runs of claude-haiku-5-5, the model given" in haiku
+
+    assert main(["bench", "--dry-run", "--model", "claude-opus-5-5", "--seeds", "2"]) == 0
+    opus = capsys.readouterr().out
+    assert "4,726,388 tokens on the Contexto arm against 3,422,988" in opus and "scaled by 1.381" in opus
+    assert main(["bench", "--dry-run", "--model", "claude-sonnet-5-5", "--seeds", "2"]) == 0
+    assert "the plan is calibrated on claude-haiku-5-5; no run of claude-sonnet-5-5" in capsys.readouterr().out
+
+    script = bench_script.build(20261016, "v2")
+    factor = 4_726_388 / 3_422_988
+    for arm in ARMS:
+        base = bench_plan.unit_estimate(arm, script, 150_000)
+        scaled = bench_plan.unit_estimate(arm, script, 150_000, model="claude-opus-5-5")
+        assert scaled.worst == base.worst  # the worst case is not scaled
+        if arm == "full":  # built from the script alone
+            assert scaled.expected == base.expected
+        else:
+            assert abs(scaled.expected_total - factor * base.expected_total) <= 4
+            assert scaled.expected_total < scaled.worst_total
+    assert bench_plan.model_factor("claude-haiku-5-5") == bench_plan.model_factor(None) == 1.0
+
+
 def test_the_live_run_refuses_to_start_without_what_it_needs(capsys, monkeypatch, tmp_path):
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
         monkeypatch.delenv(name, raising=False)

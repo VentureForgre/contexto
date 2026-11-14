@@ -45,7 +45,7 @@ def run(args: argparse.Namespace) -> int:
     except (runner.Refused, ValueError) as exc:
         print(f"contexto bench: error: {exc}", file=sys.stderr)
         return runner.EXIT_USAGE
-    plan = bench_plan.estimate(scripts, todo, config.bound)
+    plan = bench_plan.estimate(scripts, todo, config.bound, model=config.model or None)
     total = plan["total"]
     first = config.seeds[0]
     seed_text = f"seed {first}"
@@ -60,12 +60,15 @@ def run(args: argparse.Namespace) -> int:
     if skipped or spent:
         lines.append(f"The output directory already holds {skipped} complete units and {spent:,} recorded tokens; "
                      "the plan below covers the rest.")
-    lines += ["", "Expected case (tokens):", *bench_plan.table(plan, "expected"), "",
-              "Worst case (every input token counted as a cache write with a 10% margin, the full output "
-              "reservation on every request):", *bench_plan.table(plan, "worst"), ""]
+    lines += ["", "Expected case (tokens), a rough size:", *bench_plan.table(plan, "expected"), "",
+              "Worst case (tokens), a planning figure and not a ceiling: every input token counted as a cache write "
+              f"with a 10% margin, and an output reservation of {bench_plan.OUTPUT_RESERVE:,} tokens on every Claude "
+              f"Code request and {bench_plan.FULL_MAX_TOKENS:,} on every full-arm request. Claude Code itself asks for "
+              "up to 128,000 output tokens a request on claude-haiku-5-5, so a run could pass this figure; the "
+              "ceiling is --budget-tokens.", *bench_plan.table(plan, "worst"), ""]
     script = scripts[first]
     for arm in config.arms:
-        est = bench_plan.unit_estimate(arm, script, config.bound)
+        est = bench_plan.unit_estimate(arm, script, config.bound, model=config.model or None)
         extra = ""
         if arm == "contexto":
             extra = f"; {est.over_bound_expected} planned requests above the bound"
@@ -77,11 +80,13 @@ def run(args: argparse.Namespace) -> int:
     if "plain" in config.arms:
         setting = plain.compaction_setting(config.bound)
         lines.append(f"Plain arm: {setting['variable']}={setting['value']}. {setting['note']}")
-    lines += ["", *bench_plan.NOTES, ""]
+    lines += ["", bench_plan.calibration(config.model or None), *bench_plan.NOTES, ""]
     need = bench_plan.budget_to_pass(spent + total.worst_total)
     lines.append(f"Budget: pass --budget-tokens {need} (the worst case of {total.worst_total:,} tokens"
-                 + (f" plus the {spent:,} already recorded" if spent else "") + ", rounded up to 10,000). The live run "
-                 "refuses a smaller figure and stops before passing the one it is given. The expected case is "
+                 + (f" plus the {spent:,} already recorded" if spent else "") + ", rounded up to 10,000). That figure "
+                 "is the ceiling: the live run refuses a smaller one, and its guard reserves each request's own "
+                 "max_tokens while the request is in flight and refuses the request that could pass the budget, so a "
+                 "run that would pass it stops early instead. The expected case is "
                  f"{total.expected_total:,} tokens.")
     if config.budget is not None:
         verdict = "covers" if config.budget >= spent + total.worst_total else "is below"
