@@ -90,13 +90,17 @@ def test_turn_kbytes_below_the_floor_is_refused(tmp_path, capsys):
 
 
 def test_contexto_does_not_import_the_generator_or_statistics_at_start():
-    # Every mode module is imported at start by contract (the command line is built from them all),
-    # so the modules under contexto.bench.modes are allowed; nothing they import inside run() is.
+    # Every mode module is imported at start (the command line is built from all of them); the
+    # generator (d27, script) and the statistics are not.
     code = ("import sys\nfrom contexto import cli\ncli.build_parser()\n"
-            "print(sorted(m for m in sys.modules if m.startswith('contexto.bench.') and m != 'contexto.bench.model' "
-            "and m != 'contexto.bench.modes' and not m.startswith('contexto.bench.modes.')))")
+            "print(sorted(m for m in sys.modules if m.startswith('contexto.bench.') and m not in "
+            "('contexto.bench.model', 'contexto.bench.modes') and not m.startswith('contexto.bench.modes.')))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]"
+    code = ("import sys\nfrom contexto import cli\ncli.build_parser()\n"
+            "print(sorted(m for m in sys.modules if m.startswith('contexto.bench.modes.')))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert "'contexto.bench.modes.script_only'" in out.stdout
 
 
 def test_protocol_help_says_the_service_is_named(capsys):
@@ -304,6 +308,43 @@ def test_a_mode_that_lists_an_option_it_does_not_add_is_refused(tmp_path, monkey
                                                                "OWN_OPTIONS = ('--t-dump', '--t-nope')"))
     assert cli.main(["bench", "--t-replay"]) == 2
     assert "mode t-odd lists --t-nope in OWN_OPTIONS but adds no such option" in capsys.readouterr().err
+
+
+THIEF_MODE = (
+    "from contexto.bench.modes import add_option\n"
+    "FLAG = '--t-thief'\n"
+    "OWN_OPTIONS = (LISTED,)\n"
+    "def add_arguments(parser):\n"
+    "    parser.add_argument(FLAG, action='store_true')\n"
+    "    add_option(parser, '--t-model', default='m-9')\n"
+    "def run(args):\n"
+    "    print('thief')\n"
+    "    return 0\n"
+)
+
+
+@pytest.mark.parametrize(("name", "listed", "says"), [
+    ("t_thief", "--t-dump", "the t-replay mode adds it"),  # another mode's own option
+    ("t_thief", "--seed", "it is a common option of contexto bench"),
+    ("t_thief", "--t-thief", "it is the mode's own FLAG"),
+    ("t_thief", "--t-model", "it is shared through add_option"),  # t-live added it first
+    ("t_athief", "--t-model", "it is shared through add_option"),  # this mode added it first
+])
+def test_a_mode_that_lists_an_option_it_did_not_add_is_a_mode_bug(tmp_path, monkeypatch, capsys, name, listed,
+                                                                    says):
+    _mode(tmp_path, monkeypatch, "t_live", OWN_DEFAULT_MODE)
+    (tmp_path / "t_replay.py").write_text(OWN_FLAG_MODE, encoding="utf-8")
+    (tmp_path / f"{name}.py").write_text(THIEF_MODE.replace("LISTED", repr(listed)), encoding="utf-8")
+    monkeypatch.delitem(sys.modules, f"contexto.bench.modes.{name}", raising=False)
+    mode = name.replace("_", "-")
+    bug = (f"contexto bench: error: mode {mode} lists {listed} in OWN_OPTIONS, but {says}; a mode lists only "
+           "options its add_arguments adds, other than its FLAG")
+    # The option's real owner is never refused for it: the mode bug is reported instead, whatever runs.
+    for argv in (["--t-replay", "--t-dump", "d"], ["--seed", "5"], ["--t-model", "m-2"], ["--t-replay"],
+                 ["--t-thief"]):
+        assert cli.main(["bench", *argv]) == 2, argv
+        captured = capsys.readouterr()
+        assert captured.out == "" and captured.err.strip() == bug, argv
 
 
 def test_two_default_modes_are_refused(tmp_path, monkeypatch, capsys):

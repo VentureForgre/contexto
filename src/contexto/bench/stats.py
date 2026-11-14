@@ -18,6 +18,12 @@ Z95 = 1.959963984540054  # the 0.975 quantile of the standard normal distributio
 SIGN_FLIP_EXACT_MAX = 20  # seeds up to which the sign-flip test enumerates every pattern
 SIGNIFICANCE = 0.05
 SEED_INTERVAL_METHOD = "Student t on the per-seed differences, n - 1 degrees of freedom"
+SEED_INTERVAL_MIN_SEEDS = 3
+# seed_level's interval_note when it gives no interval, and why.
+SEED_INTERVAL_FEWER = ("fewer than 3 seeds: a t interval from 2 seeds held the true difference in 80% to 92% of "
+                       "simulated benchmarks")
+SEED_INTERVAL_SAME = ("every seed has the same difference, so the spread between seeds is unknown and a t interval "
+                      "would have zero width")
 
 
 def wilson(k: int, n: int, z: float = Z95) -> tuple[float, float]:
@@ -219,7 +225,11 @@ def seed_level(differences: Sequence[float], resamples: int = 10_000, seed: int 
     """Treat each seed as one observation: ``differences`` holds one paired difference per seed.
 
     Returns the mean difference, a two-sided sign-flip permutation p value, and a 95% interval for
-    the mean over seeds (``interval``, named in ``interval_method``).
+    the mean over seeds (``interval``, named in ``interval_method``). ``interval`` is None, and
+    ``interval_note`` says why, with fewer than ``SEED_INTERVAL_MIN_SEEDS`` seeds or when every seed
+    has the same difference; ``interval_note`` is None when the interval is given. The direction of a
+    difference is decided by the pooled test (``paired["significant"]``) and the sign-flip test, not
+    by this interval.
 
     Sign-flip test (Fisher's randomization test for paired data; Good, P. (2005), Permutation,
     Parametric and Bootstrap Tests of Hypotheses, 3rd edition, section 3.1): under the null
@@ -236,7 +246,16 @@ def seed_level(differences: Sequence[float], resamples: int = 10_000, seed: int 
     (``tests/test_bench_stats.py`` checks it is at least 93% at 3, 5, 10 and 20 seeds): with
     discordance rates 0.10 and 0.04, 0.13 and 0.04, or 0.06 and 0.06, 94.7% to 95.7% at 3 to 20
     seeds and 91% at 2; where one arm almost never wins alone (0.03 and 0), 92.1% at 3 seeds and 80%
-    at 2. Fewer than three seeds give an interval that covers less than it says.
+    at 2. Fewer than three seeds give an interval that covers less than it says, so none is given.
+    At 2 seeds the zero-width intervals (every seed the same) explained nearly all of that shortfall;
+    they also occur at 3 seeds (0.5% to 4.4% of simulated benchmarks), so none is given then either.
+
+    Those rates were fixed across seeds. When the rates themselves vary between seeds (Reviewer A's
+    measurement: the first arm's per-seed rate drawn from a Beta distribution with concentration 15)
+    and one arm rarely wins alone, the per-seed differences are skewed, bounded at zero on one side,
+    and the interval covers less: at (0.03, 0), 75.6%, 82.9%, 86.6% and 89.7% at 3, 5, 10 and 20
+    seeds; at (0.05, 0), 84.5%, 86.8%, 89.0% and 91.8%. With larger rates, or less spread, it was
+    92.8% to 95.8%. The interval assumes roughly symmetric per-seed differences.
 
     Raises ``ValueError`` for no seeds, fewer than one resample, or a difference that is not finite.
     """
@@ -263,8 +282,15 @@ def seed_level(differences: Sequence[float], resamples: int = 10_000, seed: int 
                    if abs(sum(v if flips.random() < 0.5 else -v for v in values)) >= threshold)
         p_value = (hits + 1) / (resamples + 1)
         method = "monte-carlo"
+    if n < SEED_INTERVAL_MIN_SEEDS:
+        interval, note = None, SEED_INTERVAL_FEWER
+    elif len(set(values)) == 1:
+        interval, note = None, SEED_INTERVAL_SAME
+    else:
+        interval, note = t_interval(values), None
     return {"seeds": n, "differences": values, "mean": total / n, "sign_flip_p": p_value, "sign_flip_method": method,
-            "interval": t_interval(values), "interval_method": SEED_INTERVAL_METHOD, "resamples": resamples}
+            "interval": interval, "interval_method": SEED_INTERVAL_METHOD, "interval_note": note,
+            "resamples": resamples}
 
 
 def repeat_noise(runs: Sequence[Sequence[bool]]) -> dict[str, Any]:

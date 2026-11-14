@@ -10,9 +10,10 @@ provides ``FLAG`` (its option, or None for the one default mode), ``add_argument
 ``run(args) -> int``, and may list the options that belong to it alone in ``OWN_OPTIONS``; the
 rules are in ``contexto.bench.modes``. The options every mode shares are defined here, once.
 
-Before a mode runs, this command refuses (exit 2) an option that belongs to a mode that is not the
-one running, and a ``--turn-kbytes`` so small for the bound that the script would need more than
-``MAX_CONTENT_TURNS`` content turns.
+Before a mode runs, this command refuses (exit 2) a mode whose ``OWN_OPTIONS`` lists an option its
+``add_arguments`` did not add, an option that belongs to a mode that is not the one running, and a
+``--turn-kbytes`` so small for the bound that the script would need more than ``MAX_CONTENT_TURNS``
+content turns.
 """
 
 from __future__ import annotations
@@ -95,16 +96,44 @@ def register(subparsers) -> None:
                              "reach 2.5 times the bound: below 2 at the default bound")
     parser.add_argument("--out", type=Path, default=None, metavar="DIR",
                         help="the output directory: scripts, per-probe results and the report")
-    found = discover()
-    for module in found:
-        module.add_arguments(parser.add_argument_group(f"{mode_name(module)} mode"))
-    # Each mode's own options, as (module, option, dest, default); dest None for an option the mode
-    # lists but did not add. argparse has no public way to look an option up, hence the private table.
+    # argparse has no public way to look an option up, hence its private table of option strings,
+    # which argument groups share with their parser.
     actions = parser._option_string_actions
-    own = [(module, option, actions[option].dest if option in actions else None,
-            actions[option].default if option in actions else None)
-           for module in found for option in getattr(module, "OWN_OPTIONS", ())]
-    parser.set_defaults(func=run, _bench_modes=found, _bench_own=own)
+    common = set(actions)
+    found = discover()
+    added_by: dict[str, ModuleType] = {}
+    for module in found:
+        before = set(actions)
+        module.add_arguments(parser.add_argument_group(f"{mode_name(module)} mode"))
+        added_by.update((option, module) for option in set(actions) - before)
+    # Each mode's own options, as (module, option, dest, default), and the mode bugs in OWN_OPTIONS.
+    own, bugs = [], []
+    for module in found:
+        for option in getattr(module, "OWN_OPTIONS", ()):
+            problem = _own_problem(module, option, actions, common, added_by)
+            if problem:
+                bugs.append(f"mode {mode_name(module)} lists {option} in OWN_OPTIONS{problem}")
+            else:
+                own.append((module, option, actions[option].dest, actions[option].default))
+    parser.set_defaults(func=run, _bench_modes=found, _bench_own=own, _bench_bugs=bugs)
+
+
+def _own_problem(module: ModuleType, option: str, actions: dict, common: set[str],
+                 added_by: dict[str, ModuleType]) -> str | None:
+    """Why ``module`` may not list ``option`` as its own (the end of the error message), or None."""
+    if option not in actions:
+        return " but adds no such option"
+    if option in common:
+        reason = "it is a common option of contexto bench"
+    elif option == module.FLAG:
+        reason = "it is the mode's own FLAG"
+    elif getattr(actions[option], modes.SHARED, False):
+        reason = "it is shared through add_option"
+    elif added_by.get(option) is not module:
+        reason = f"the {mode_name(added_by[option])} mode adds it"
+    else:
+        return None
+    return f", but {reason}; a mode lists only options its add_arguments adds, other than its FLAG"
 
 
 def _turn_problem(args: argparse.Namespace) -> str | None:
@@ -124,9 +153,9 @@ def _turn_problem(args: argparse.Namespace) -> str | None:
 
 def _foreign_option(args: argparse.Namespace, running: ModuleType) -> str | None:
     """The error for an option that belongs to a mode other than ``running`` and was given, or None."""
+    if args._bench_bugs:
+        return args._bench_bugs[0]
     for module, option, dest, default in args._bench_own:
-        if dest is None:
-            return f"mode {mode_name(module)} lists {option} in OWN_OPTIONS but adds no such option"
         if module is running or getattr(args, dest, default) == default:
             continue
         if module.FLAG is None:

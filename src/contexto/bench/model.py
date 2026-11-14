@@ -34,14 +34,15 @@ _WORD = re.compile(r"[a-z0-9]+")
 MIN_WORD = 3
 # The words of the generator's filler lines and of its fixed turn texts (the log head and tail, the
 # opening instructions, the probe-turn header, the tool-loop turn's head and the decision turn's
-# fixed lines), 3 or more letters long. They are on every page or every turn of a kind, so a word
-# search learns nothing from them. Words that are also part of a subject's name are left out of this
-# set ("search" is a service root and a word of the tool-loop head). tests/test_bench_script.py
-# derives this set from the generator's texts and checks it is equal.
+# fixed lines, with its label filled in), 3 or more letters long. They are on every page or every
+# turn of a kind, so a word search learns nothing from them. Words that are also part of a service
+# name are left out of this set ("search" is a service root and a word of the tool-loop head); other
+# subject words stay ("shard", "log" and "name" are also words of attribute keys).
+# tests/test_bench_script.py derives this set from the generator's texts and checks it is equal.
 GENERATOR_WORDS = frozenset((
     "about", "all", "and", "answer", "any", "are", "below", "commas", "contain", "conversation", "current",
     "debug", "decision", "directory", "does", "each", "else", "end", "exactly", "file", "files", "for", "form",
-    "give", "has", "have", "highest", "ids", "info", "instead", "its", "keep", "label", "latency", "level",
+    "give", "has", "have", "highest", "ids", "info", "instead", "its", "keep", "latency", "level",
     "line", "list", "listed", "log", "long", "lowest", "matters", "message", "name", "next", "not", "nothing",
     "number", "one", "only", "order", "part", "pasted", "pastes", "paths", "per", "point", "question",
     "questions", "read", "relative", "reply", "rule", "say", "separated", "session", "shard", "skip", "take",
@@ -222,8 +223,8 @@ class Script:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Script:
-        if not isinstance(data, dict) or data.get("format") != FORMAT:
-            found = data.get("format") if isinstance(data, dict) else type(data).__name__
+        found = data.get("format") if isinstance(data, dict) else type(data).__name__
+        if not isinstance(data, dict) or type(found) is not int or found != FORMAT:  # True is not 1
             raise ValueError(f"not a benchmark script of format {FORMAT} (found {found!r})")
         try:
             files = data["files"]
@@ -252,6 +253,8 @@ class Script:
         """Refuse a script whose parts do not fit together, so a damaged file fails here and not
         later with an index error or a file written outside the session. Each problem names its
         field; turn numbers in the messages count from 1."""
+        from contexto.bench.d27 import normalize  # d27 imports this module
+
         n = len(self.turns)
         if len(self.kinds) != n:
             raise ValueError(f"not a benchmark script: kinds: {n} turns but {len(self.kinds)} kinds")
@@ -274,6 +277,9 @@ class Script:
                 problems.append(f"probes: {p.id!r} has kind {p.kind!r}")
             if p.cls not in D27_CLASSES + NEW_CLASSES:
                 problems.append(f"probes: {p.id!r} has class {p.cls!r}")
+            if not normalize(p.answer):
+                problems.append(f"probes: {p.id!r} has an answer that is empty after normalisation, so no reply "
+                                "can score correct")
         problems += [f"paged_only: unknown probe {i!r}" for i in self.paged_only if i not in by_id]
 
         k = len(self.probe_turn_ids)
@@ -310,11 +316,16 @@ class Script:
                 problems.append(f"decisions: the value of {where} is not the answer of {d.probe!r}")
             if d.reply != f"DECISION {d.label}: {d.value}":
                 problems.append(f"decisions: the reply of {where} is not 'DECISION <label>: <value>'")
+            if 0 <= d.turn < n and (not d.label.strip() or f"DECISION {d.label}:" not in self.turns[d.turn]):
+                problems.append(f"decisions: the label of {where} is not asked for in that turn, so no reply "
+                                "can be judged right")
         problems += [f"decisions: decision turn {i + 1} has no decision" for i, kind in enumerate(self.kinds)
                      if kind == "decision" and i not in seen]
 
         for path in self.files:
-            problem = _path_problem(path)
+            parts = path.split("/")
+            above = next((a for a in ("/".join(parts[:i]) for i in range(1, len(parts))) if a in self.files), None)
+            problem = _path_problem(path) or (f"is below the file {above!r}" if above else None)
             if problem:
                 problems.append(f"files: {path!r} {problem}")
         for path in self.reads:
@@ -372,10 +383,13 @@ def _list(value: Any, field: str) -> list[Any]:
 
 def _path_problem(path: str) -> str | None:
     """What is wrong with a file path a script carries, or None. A path must be relative, use ``/``,
-    have no empty, ``.`` or ``..`` part, and lie under ``FILE_DIR``: the runner writes these files
-    into the session's working directory."""
+    hold no control character (U+0000 to U+001F), have no empty, ``.`` or ``..`` part, and lie under
+    ``FILE_DIR``: the runner writes these files into the session's working directory. A path below
+    another of the script's files is refused in ``Script._check_shape``."""
     if not path:
         return "is empty"
+    if any(ord(c) < 0x20 for c in path):  # NUL fails the write; a newline breaks the tool-loop turn's list
+        return "holds a control character"
     if "\\" in path:
         return "holds a backslash"
     if path.startswith("/") or re.match(r"^[A-Za-z]:", path):
@@ -401,3 +415,5 @@ def _loads(text: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"not JSON: {exc}") from exc
+    except RecursionError as exc:
+        raise ValueError("not JSON: nested too deeply to read") from exc

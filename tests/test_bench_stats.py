@@ -206,11 +206,12 @@ def test_seed_level_t_interval_by_hand():
     assert result["interval_method"] == "Student t on the per-seed differences, n - 1 degrees of freedom"
     assert "bootstrap_interval" not in result
     assert list(result) == ["seeds", "differences", "mean", "sign_flip_p", "sign_flip_method", "interval",
-                            "interval_method", "resamples"]
-    # Equal differences: a zero-width interval.
-    assert stats.seed_level([0.05] * 6)["interval"] == pytest.approx((0.05, 0.05))
-    # 0 and 1: mean 0.5, sd sqrt(0.5), se 0.5; half width 12.7062047 * 0.5.
-    assert stats.seed_level([0.0, 1.0])["interval"] == pytest.approx((0.5 - 6.35310235, 0.5 + 6.35310235), rel=1e-7)
+                            "interval_method", "interval_note", "resamples"]
+    assert result["interval_note"] is None  # given whenever the interval is
+    # t_interval alone gives a zero-width interval for equal values, and one from 2 values: 0 and 1
+    # have mean 0.5, sd sqrt(0.5), se 0.5; half width 12.7062047 * 0.5.
+    assert stats.t_interval([0.05] * 6) == pytest.approx((0.05, 0.05))
+    assert stats.t_interval([0.0, 1.0]) == pytest.approx((0.5 - 6.35310235, 0.5 + 6.35310235), rel=1e-7)
     # seed_level's interval is t_interval's (the coverage test below calls t_interval directly, because
     # the exact sign-flip test at 20 seeds enumerates 2 ** 20 patterns per call).
     values = [0.02, -0.01, 0.05, 0.03, 0.00, 0.04, 0.01]
@@ -219,6 +220,27 @@ def test_seed_level_t_interval_by_hand():
     # One seed: no interval, and the sign-flip test cannot reject.
     single = stats.seed_level([0.3])
     assert single["interval"] is None and single["sign_flip_p"] == 1.0 and single["mean"] == 0.3
+
+
+FEWER = ("fewer than 3 seeds: a t interval from 2 seeds held the true difference in 80% to 92% of simulated "
+         "benchmarks")
+SAME = ("every seed has the same difference, so the spread between seeds is unknown and a t interval would have "
+        "zero width")
+
+
+@pytest.mark.parametrize(("differences", "note"), [
+    ([0.3], FEWER), ([0.0, 1.0], FEWER), ([2 / 72, 2 / 72], FEWER),
+    ([0.05] * 6, SAME), ([2 / 72] * 3, SAME), ([0.0] * 4, SAME),
+])
+def test_seed_level_gives_no_interval_where_it_would_mislead(differences, note):
+    # Reviewer A: seed_level([2/72, 2/72]) gave (0.0278, 0.0278). Below 3 seeds, or with no spread
+    # between seeds, there is no interval and the note says why; the mean and sign-flip p remain.
+    result = stats.seed_level(differences)
+    assert result["interval"] is None
+    assert result["interval_note"] == note
+    assert result["mean"] == pytest.approx(sum(differences) / len(differences))
+    assert result["interval_method"] == stats.SEED_INTERVAL_METHOD
+    assert stats.seed_level([2 / 72, 2 / 72, 3 / 72])["interval_note"] is None
 
 
 def _benchmark_seed(rnd, only_a: float, only_b: float, probes: int = 72) -> float:
