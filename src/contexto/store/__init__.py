@@ -1096,7 +1096,7 @@ class SessionStore(LedgerOps):
 
     def search_earlier(self, query: str) -> EarlierSearch | None:
         """Search the earlier sessions of this session's project (``EarlierPages.search``: the newest
-        50, the best 3 matches of each with one, its lines in view when it ended first, then its pages,
+        50, the best 3 matches of each with one, its lines in view at its last request first, then its pages,
         newest session first); None when this session has no
         project view. Strictly read-only in those sessions, and nothing about them is logged here."""
         project = self.project()
