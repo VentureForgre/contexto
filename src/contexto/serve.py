@@ -110,7 +110,6 @@ import hmac
 import http.client
 import json
 import os
-import secrets
 import signal
 import socket
 import sys
@@ -261,7 +260,7 @@ def ensure_token(home: Path) -> str:
     if not os.path.lexists(path):
         try:
             private_dir(Path(home), narrow=False)
-            write_new(path, (secrets.token_urlsafe(32) + "\n").encode("ascii"))
+            write_new(path, (servecontract.new_token() + "\n").encode("ascii"))
         except OSError as exc:
             raise ServeError(f"cannot create {path}: {exc.strerror or type(exc).__name__}") from None
     return read_token(home)
@@ -273,7 +272,7 @@ def rotate_token(home: Path) -> str:
     path = token_path(home)
     try:
         private_dir(Path(home), narrow=False)
-        write_atomic(path, (secrets.token_urlsafe(32) + "\n").encode("ascii"))
+        write_atomic(path, (servecontract.new_token() + "\n").encode("ascii"))
     except OSError as exc:
         raise ServeError(f"cannot replace {path}: {exc.strerror or type(exc).__name__}") from None
     return read_token(home)
@@ -592,6 +591,7 @@ class ServeService:
         self._shown: OrderedDict[str, set[str]] = OrderedDict()  # Contexto session id -> warnings printed for it
         self._tool_calls: OrderedDict[str, str | None] = OrderedDict()  # tool-use id -> session; None: ambiguous
         self._tool_lock = threading.Lock()
+        self._resolved = {"found": 0, "unknown": 0}  # resolve answers given, for health
         self._in_flight = 0  # requests being handled, local endpoints included
         self._idle = threading.Condition()
         self._refusal_lock = threading.Lock()
@@ -726,8 +726,13 @@ class ServeService:
             pass
 
     def health(self) -> dict[str, Any]:
+        """``ok``, the version, the port, the open sessions, and how many resolve requests named a
+        session (``found``) and how many were answered unknown (``unknown``): counts only."""
+        with self._tool_lock:
+            resolved = dict(self._resolved)
         with self._lock:
-            return {"ok": True, "version": __version__, "port": self.port, "sessions": len(self._sessions)}
+            return {"ok": True, "version": __version__, "port": self.port, "sessions": len(self._sessions),
+                    "resolve": resolved}
 
     def say(self, message: str) -> None:
         print(f"contexto serve: {message}", file=self.stderr, flush=True)
@@ -855,7 +860,9 @@ class ServeService:
     def resolve(self, tool_use_id: str) -> str | None:
         """The Contexto session a tool-use id was issued in; None when unknown or ambiguous."""
         with self._tool_lock:
-            return self._tool_calls.get(tool_use_id)
+            session_id = self._tool_calls.get(tool_use_id)
+            self._resolved["found" if session_id is not None else "unknown"] += 1
+            return session_id
 
     # The registry
 

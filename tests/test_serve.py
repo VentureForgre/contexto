@@ -646,7 +646,8 @@ def test_health_reports_version_port_and_open_sessions(make_service):
     service = make_service()
     response, data = call(service, "GET", "/contexto/health")
     assert response.status == 200 and response.getheader("Content-Type") == "application/json"
-    assert json.loads(data) == {"ok": True, "version": __version__, "port": service.port, "sessions": 0}
+    assert json.loads(data) == {"ok": True, "version": __version__, "port": service.port, "sessions": 0,
+                                "resolve": {"found": 0, "unknown": 0}}
     post(service, A)
     assert json.loads(call(service, "GET", "/contexto/health")[1])["sessions"] == 1
 

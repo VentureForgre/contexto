@@ -110,7 +110,8 @@ def claude_print(tmp_path: Path, settings: Path, session_id: str, prompt: str) -
     for directory in (user_home, config, work):
         directory.mkdir(exist_ok=True)
     env = {"HOME": str(user_home), "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TERM": "xterm-256color",
-           "CLAUDE_CONFIG_DIR": str(config), "ANTHROPIC_API_KEY": "stub-key", "DISABLE_AUTOUPDATER": "1"}
+           "CLAUDE_CONFIG_DIR": str(config), "ANTHROPIC_API_KEY": "stub-key", "DISABLE_AUTOUPDATER": "1",
+           "DISABLE_TELEMETRY": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
     argv = [CLAUDE, "-p", f"--settings={settings}", "--session-id", session_id, "--model", "claude-haiku-5-5",
             "--output-format", "json", prompt]
     if sys.platform == "darwin" and os.path.exists(SANDBOX):
@@ -154,7 +155,8 @@ def test_claude_reaches_upstream_through_serve_and_each_session_id_gets_a_store(
 
     # Every request reached the stub with the prefix removed: no token in any path or header.
     paths = sorted({(method, path) for method, path, _, _ in Stub.received})
-    assert ("POST", "/v1/messages?beta=true") in paths and ("HEAD", "/api/hello") in paths, paths
+    # With CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, 2.1.322 sends no HEAD /api/hello: Messages requests only.
+    assert ("POST", "/v1/messages?beta=true") in paths, paths
     for _, path, head, _ in Stub.received:
         assert service.token not in path and not any(service.token in value for value in head.values())
     posts = [(head, request) for method, path, head, request in Stub.received
@@ -169,10 +171,10 @@ def test_claude_reaches_upstream_through_serve_and_each_session_id_gets_a_store(
         sent = [request for head, request in posts if head.get("X-Claude-Code-Session-Id") == session_id]
         assert len(logged) == len(sent) >= 1
         assert all(e["path"] == "/v1/messages" and e["status"] == 200 for e in logged)
-    # Requests with no session id (the HEAD) are in the service log, not in a store.
+    # A request with no session id (none here but a HEAD or a GET) is in the service log, never in a store.
     service_requests = [e for e in (json.loads(line) for line in (home / serve.LOG_FILE).read_text().splitlines())
                         if e["event"] == "request"]
-    assert {e["path"] for e in service_requests} == {"/api/hello"}
+    assert all(e["method"] in ("HEAD", "GET") for e in service_requests), service_requests
     assert not [e for e in (json.loads(line) for line in (home / serve.LOG_FILE).read_text().splitlines())
                 if e["event"] in ("unrouted", "request_refused", "serve_error")]
     assert service.token not in stderr.getvalue()

@@ -31,6 +31,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import stat
 import time
@@ -102,6 +103,12 @@ def _read_private(home: Path, name: str) -> bytes:
     if len(data) > MAX_FILE_BYTES:
         raise ServeFileError(name, "content", "is not the file the service writes (too long)")
     return data
+
+
+def new_token() -> str:
+    """A fresh token: 32 random bytes as ``secrets.token_urlsafe`` writes them, 43 characters of
+    ``TOKEN_PATTERN``."""
+    return secrets.token_urlsafe(32)
 
 
 def read_token(home: Path) -> str:
