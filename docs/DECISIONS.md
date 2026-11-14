@@ -4387,16 +4387,19 @@ the owner's delegation. Open decisions are listed at the end with the options an
     with an empty `git show --remerge-diff` as well. (c) A conflict, or an overlap in the same code,
     gets a pushed merge and a confirmation from both reviewers. The tests for (a) and (b): the pull
     request's own tests and the tests of every file both sides changed; the tests that hold numbers
-    recorded from a whole run (`tests/test_bench_replay*.py` and the others like them);
+    recorded from a whole run (`tests/test_bench_replay*.py`, and the in-turn baseline under
+    `spikes/m2/inturn/tests/` from #268);
     `tests/test_docs_links.py`; and `tests/test_events_doc.py`. Reason for the second group: #269 and
     #279 shared no files and still turned `main` red through the pinned replay trace (Incidents).
-    Immediately before the merge command, check again that `main` is still the commit the merge was
-    tested with, and pass `gh pr merge --match-head-commit <approved head>`, which guards the pull
-    request's head, not `main`. Used: (a) for #263 with #273, #283 with #269 and #261 with #290; (b)
+    Merge one pull request at a time. Immediately before the merge command, check again that `main`
+    is still the commit the merge was tested with; if it has moved, start again at (a). Pass
+    `gh pr merge --match-head-commit <approved head>`, which guards the pull request's head, not
+    `main`. This narrows the window in which another thread's merge can land first; it does not
+    close it while the ruleset does not require branches to be up to date (`strict=false`), which
+    D66 (4) names along with a merge queue as what would. Used: (a) for #263 with #273, #283 with #269 and #261 with #290; (b)
     for #263 with #281 (`CHANGELOG.md`), #276 with #288 (`CHANGELOG.md`, and `launcher.py`, where
-    #288 changed `NoticeLog`, which #276 does not touch; 836 tests passed on the merge) and #261
-    with #293 (`docs/README.md` and `docs/serve.md`; `tests/test_events_doc.py` and
-    `tests/test_docs_links.py`, 43 passed). #290 with #293 was not checked; see Incidents. Reason:
+    #288 changed `NoticeLog`, which #276 does not touch) and #261 with #293 (`docs/README.md` and
+    `docs/serve.md`), each after a scratch merge on which the tests above passed. #290 with #293 was not checked; see Incidents. Reason:
     a new review round for each move of `main` would never have caught up, and (a) and (b) leave
     the reviewed code unchanged while (c) is where a merge can change it.
   - **Incidents.**
@@ -4410,12 +4413,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
     - #290 was squash-merged at 15:00:33 UTC after a check that `main` was an ancestor of its
       approved head. #293 (D70) had landed about 3 seconds earlier, so #290 went onto a `main` it
       had not been tested with (they share `CHANGELOG.md` and other functions of `upstream.py`).
-      `main`'s CI at 2401cf56 then passed. The re-check and `--match-head-commit` in the merge
-      policy above are what close this.
-    - A reviewer's report on #276, in the round that checked the merge of `main` (with #279) into
-      that branch, said its sandbox launch had escaped its stub `HOME` (an unquoted variable in zsh)
-      and created one session directory in the real `~/.contexto`, with a fake `claude` and a stub
-      upstream, so nothing was spent. It is in no pull request's record. The reviewer deleted the
+      `main`'s CI at 2401cf56 then passed. The re-check in the merge policy above narrows this
+      window; it does not close it.
+    - During the review of #276 (the round that checked the merge of `main` with #279), a
+      reviewer's sandbox launch escaped its stub `HOME` (an unquoted variable in zsh) and created
+      one session directory in the real `~/.contexto`, with a fake `claude` and a stub upstream, so
+      nothing was spent. The reviewer reported it to the orchestrator, not on the pull request. The reviewer deleted the
       directory, the orchestrator checked that it was gone, and the briefs since pass each variable
       to `env -i` as a separate argument.
   - **Not built:** a status line for Codex, which has no such setting. No release was cut; that is
