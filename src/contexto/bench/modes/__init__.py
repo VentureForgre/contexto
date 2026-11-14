@@ -19,7 +19,10 @@ A mode is one module here whose name does not start with an underscore. It provi
     --dump-trace DIR`` without ``--replay`` does not quietly start the live run with the user's key.
     The live run lists its own options too (a key helper, say), so they are refused beside a mode
     flag. List every option the mode adds except its ``FLAG`` and the ones it shares through
-    ``add_option``; an option listed here but not added is reported as a mode bug, also with exit 2.
+    ``add_option``. Listing anything else is a mode bug, reported with exit 2 for every ``contexto
+    bench`` run and naming the mode and the option: an option the mode's ``add_arguments`` did not
+    add (one no mode adds, another mode's, or a common option), the mode's own ``FLAG``, or an
+    option shared through ``add_option``, whichever mode added it first.
 
 The common options (``--seed``, ``--seeds``, ``--repeats``, ``--bound``, ``--protocol``,
 ``--turn-kbytes``, ``--out``) are defined once in ``contexto.commands.bench``; a mode reads them from
@@ -38,13 +41,16 @@ from __future__ import annotations
 
 import argparse
 
+SHARED = "_contexto_bench_shared"  # set on an action add_option made, so no mode can claim it as its own
+
 
 def add_option(parser, *names: str, **kwargs) -> None:
     """``parser.add_argument(*names, **kwargs)``, unless another mode already added the option."""
     try:
-        parser.add_argument(*names, **kwargs)
+        action = parser.add_argument(*names, **kwargs)
     except argparse.ArgumentError:  # a conflicting option string: the first definition stands
-        pass
+        return
+    setattr(action, SHARED, True)
 
 
 def seeds(args: argparse.Namespace) -> list[int]:
