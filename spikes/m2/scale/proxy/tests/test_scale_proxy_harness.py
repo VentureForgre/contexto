@@ -5,17 +5,23 @@ No network beyond 127.0.0.1 and no model calls; the scale run itself is not part
 
 from __future__ import annotations
 
+import errno
 import http.client
 import json
+import socket
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[5]
 for p in (ROOT / "spikes" / "m2", ROOT / "src"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from scale.proxy import summarize, synth  # noqa: E402
+from scale.proxy import run, summarize, synth  # noqa: E402
 from scale.proxy.upstream import FakeUpstream, reply_events  # noqa: E402
 
 from contexto import rewrite  # noqa: E402
@@ -104,6 +110,190 @@ def test_fake_upstream_counts_the_forwarded_body():
     assert response.status == 200 and b"message_stop" in data
     record = upstream.take("a1")
     assert record["bytes"] == len(body) and record["tokens"] == synth.tokens_of(len(body)) and record["messages"] == 1
+
+
+class _KeepAliveServer:
+    """A stdlib HTTP/1.1 server on 127.0.0.1 that keeps connections open and counts them."""
+
+    def __init__(self) -> None:
+        owner = self
+        self.connections = 0
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def setup(self) -> None:
+                owner.connections += 1
+                super().setup()
+
+            def log_message(self, *args) -> None:
+                pass
+
+            def do_POST(self) -> None:  # noqa: N802
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                payload = b"event: message_stop\ndata: {}\n\n"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_the_driver_sends_every_request_over_one_kept_open_connection():
+    """Claude Code keeps its connection to the proxy open. A connection per request left about 850
+    sockets in TIME_WAIT per short run, and a few runs at once ran out of local ports (EADDRNOTAVAIL)."""
+    server = _KeepAliveServer()
+    client = run.Client(server.port)
+    try:
+        results = [client.send(b"{}", f"k{i}", "end_turn") for i in range(3)]
+    finally:
+        client.close()
+        server.stop()
+    assert [r["status"] for r in results] == [200, 200, 200]
+    assert client.connections == 1 and server.connections == 1
+
+
+def test_the_driver_reconnects_before_the_clock_when_the_server_closed():
+    """The fake upstream closes each connection after its reply; the next send opens a new one before
+    its clock starts, so the connect is not in ``e2e_s`` (``added_ms`` sends straight to it)."""
+    upstream = FakeUpstream()
+    port = upstream.start()
+    client = run.Client(port)
+    try:
+        results = [client.send(b'{"messages": []}', f"r{i}", "end_turn") for i in range(2)]
+    finally:
+        client.close()
+        upstream.stop()
+    assert [r["status"] for r in results] == [200, 200]
+    assert client.connections == 2 and upstream.connections == 2
+
+
+def test_a_connect_is_retried_only_while_no_local_port_is_free(monkeypatch):
+    failures = [OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")] * 3
+    calls = []
+
+    def connect(self):
+        calls.append(1)
+        if failures:
+            raise failures.pop()
+        self.sock = socket.socket()  # unconnected: enough for the driver's TCP_NODELAY
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", connect)
+    monkeypatch.setattr(run.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(run, "PATIENCE", run.ConnectPatience())
+    client = run.Client(9)
+    client.connect()
+    assert len(calls) == 4 and client.connections == 1
+    client.close()
+
+    def refused(self):
+        calls.append(1)
+        raise ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", refused)
+    calls.clear()
+    with pytest.raises(ConnectionRefusedError):
+        run.Client(9).connect()
+    assert len(calls) == 1, "only EADDRNOTAVAIL is worth waiting out"
+
+
+def test_the_wait_for_a_free_port_is_a_total_for_the_run(monkeypatch):
+    """Every connect of a run spends one ``CONNECT_PATIENCE_S``. With a wait per connect, a machine whose
+    ports stayed used up took about 22 minutes to fail a short run (42 sequential connects of 31 s each)."""
+    slept: list[float] = []
+    calls = []
+
+    def no_port(self):
+        calls.append(1)
+        raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", no_port)
+    monkeypatch.setattr(run.time, "sleep", slept.append)
+    monkeypatch.setattr(run, "PATIENCE", run.ConnectPatience())
+    with pytest.raises(OSError):
+        run.Client(9).connect()
+    assert sum(slept) == pytest.approx(run.CONNECT_PATIENCE_S) and max(slept) <= 2.0
+    first = len(calls)
+    for _ in range(3):  # later connects of the same run find the patience spent and raise at once
+        with pytest.raises(OSError):
+            run.Client(9).connect()
+    assert len(calls) == first + 3 and sum(slept) == pytest.approx(run.CONNECT_PATIENCE_S)
+    run.PATIENCE.reset()  # a new run (``short.measure`` calls this) has the whole wait again
+    with pytest.raises(OSError):
+        run.Client(9).connect()
+    assert sum(slept) == pytest.approx(2 * run.CONNECT_PATIENCE_S)
+
+
+def test_the_driver_sends_without_waiting_for_acks():
+    """Python's http.client writes a request's headers and its body in two sends. With Nagle's algorithm on,
+    the body waits for the headers' ACK, which Linux delays by 40 ms on a connection kept open: every
+    request on GitHub's Ubuntu runners took about 41 ms more once the driver kept its connections open."""
+    server = _KeepAliveServer()
+    client = run.Client(server.port)
+    try:
+        client.send(b"{}", "n0", "end_turn")
+        assert client.conn.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+        client.close()  # and on a connection opened again
+        client.send(b"{}", "n1", "end_turn")
+        assert client.conn.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+    finally:
+        client.close()
+        server.stop()
+
+
+def test_the_fake_upstream_closes_each_connection_first():
+    """The side that closes first keeps the TIME_WAIT. When the fake upstream closes, it is held on the
+    upstream's listening port and not on one of the proxy's local ports, which the proxy (a new upstream
+    connection per request, by design) would otherwise use up in a few runs at once."""
+    upstream = FakeUpstream()
+    port = upstream.start()
+    try:
+        body = json.dumps({"messages": []}).encode()
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\nx-scale-id: c1\r\n"
+                         b"x-scale-reply: end_turn\r\n\r\n%s" % (len(body), body))
+            data = b""
+            while chunk := sock.recv(65536):  # returns b"" only once the upstream has closed
+                data += chunk
+    finally:
+        upstream.stop()
+    head = data.split(b"\r\n\r\n", 1)[0].lower()
+    assert b"connection: close" in head and data.endswith(b"0\r\n\r\n") and b"message_stop" in data
+    assert upstream.connections == 1
+
+
+def test_a_short_run_that_fails_reports_what_it_measured(monkeypatch, tmp_path):
+    """conftest.py prints this when the fixture errors, so a CI log holds the numbers measured up to the
+    failure, and the step it failed in."""
+    from scale.proxy import short
+
+    def broken_burst(*args, **kwargs):
+        raise RuntimeError("burst broke")
+
+    monkeypatch.setattr(short, "burst", broken_burst)
+    progress: dict = {}
+    with pytest.raises(RuntimeError, match="burst broke"):
+        short.measure(2, startups=1, clients=1, per_client=1, home=tmp_path, progress=progress)
+    assert progress["stage"] == "burst" and len(progress["startup_all_ms"]) == 1
+    assert progress["first_request_added_ms"] > 0 and progress["first_request_direct_ms"] > 0
+    text = short.failure_report(RuntimeError("burst broke"), progress)
+    assert "burst broke" in text and "stage burst" in text and "first_request_added_ms" in text
+
+
+def test_the_short_run_takes_a_turn_size():
+    from scale.proxy import short
+
+    assert short.short_args().turn_tokens == short.TURN_TOKENS == 3_000
+    assert short.short_args(turn_tokens=26_000).turn_tokens == 26_000
+    assert short.main(["--turn-tokens", "26000", "--spread", "/dev/null"]) == 0
 
 
 def test_summary_statistics():

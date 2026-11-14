@@ -38,7 +38,7 @@ writes a `config.toml` there (mode 0600) that:
 - adds a model provider `contexto` whose `base_url` is the proxy, with `wire_api = "responses"`,
   `supports_websockets = false`, and the key helper as its auth command;
 - turns request compression off (`features.enable_request_compression = false`);
-- adds the MCP server `contexto` (`python -P -m contexto mcp --session <id>` with the same Python)
+- adds the MCP server `contexto` (`python -P -m contexto mcp --session=<id>` with the same Python)
   with `default_tools_approval_mode = "approve"`, so recall works in `codex exec` too, and
   `CONTEXTO_HOME` (plus `CONTEXTO_SEARCH_CACHE_MB` when set) in its `env` table, because Codex starts
   MCP servers with a restricted environment.

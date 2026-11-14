@@ -251,7 +251,7 @@ def test_api_key_mode_writes_a_private_temporary_codex_home(tmp_path):
                                     "args": ["-c", "/synthetic/bin/key-helper --profile synthetic"]}
         assert config["features"]["enable_request_compression"] is False
         assert config["mcp_servers"]["contexto"]["command"] == sys.executable
-        assert config["mcp_servers"]["contexto"]["args"] == ["-P", "-m", "contexto", "mcp", "--session", "S1"]
+        assert config["mcp_servers"]["contexto"]["args"] == ["-P", "-m", "contexto", "mcp", "--session=S1"]
         # A6 measured exec mode refusing MCP calls without this (approval policy "never").
         assert config["mcp_servers"]["contexto"]["default_tools_approval_mode"] == "approve"
         assert launch.env["CODEX_HOME"] == str(root) and launch.argv == ["codex", "exec", "hi"]
@@ -625,7 +625,7 @@ def test_mcp_server_command_does_not_depend_on_path(tmp_path):
     whose PATH lacked the executable (``.venv/bin/contexto run codex`` without the venv activated:
     the stub dry run saw no contexto tools in code mode's ALL_TOOLS). The server is started the way
     the Claude path starts it (launcher.mcp_payload): this interpreter, ``-P -m contexto``."""
-    expected = ["-P", "-m", "contexto", "mcp", "--session", "S3"]
+    expected = ["-P", "-m", "contexto", "mcp", "--session=S3"]
     launch = plan_codex([], PROXY, "S3", env={"PATH": "/nonexistent"}, cwd=tmp_path, home=claude_home(tmp_path),
                         upstream="https://u.invalid/v1")
     try:
@@ -639,6 +639,28 @@ def test_mcp_server_command_does_not_depend_on_path(tmp_path):
     overrides = dict(chatgpt.argv[i + 1].split("=", 1) for i, a in enumerate(chatgpt.argv) if a == "-c")
     assert tomllib.loads(f"v = {overrides['mcp_servers.contexto.command']}")["v"] == sys.executable
     assert tomllib.loads(f"v = {overrides['mcp_servers.contexto.args']}")["v"] == expected
+
+
+def test_mcp_server_gets_a_session_id_starting_with_a_dash_as_its_value(tmp_path):
+    """The session is one ``--session=<id>`` argument, as launcher.mcp_payload passes it. With
+    ``--session`` and the id as two arguments, an id starting with "-" was read as an option, and
+    ``contexto mcp`` exited 2 at start ("expected one argument"), so Codex ran the session without
+    Contexto's tools and said nothing."""
+    from contexto.cli import build_parser
+
+    expected = ["-P", "-m", "contexto", "mcp", "--session=-x1"]
+    launch = plan_codex([], PROXY, "-x1", env={"PATH": "/nonexistent"}, cwd=tmp_path, home=claude_home(tmp_path),
+                        upstream="https://u.invalid/v1")
+    try:
+        server = tomllib.loads((launch.codex_home / "config.toml").read_text())["mcp_servers"]["contexto"]
+        assert server["args"] == expected
+    finally:
+        launch.cleanup()
+    chatgpt = plan_codex(["exec", "hi"], PROXY, "-x1", auth_mode=CHATGPT_MODE, env={"PATH": "/nonexistent"},
+                         cwd=tmp_path, home=tmp_path)
+    overrides = dict(chatgpt.argv[i + 1].split("=", 1) for i, a in enumerate(chatgpt.argv) if a == "-c")
+    assert tomllib.loads(f"v = {overrides['mcp_servers.contexto.args']}")["v"] == expected
+    assert build_parser().parse_args(expected[3:]).session == "-x1"
 
 
 def test_chatgpt_mode_mcp_home_is_absolute_for_a_relative_contexto_home(tmp_path, monkeypatch):
