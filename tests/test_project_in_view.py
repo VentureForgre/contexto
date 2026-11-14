@@ -243,7 +243,7 @@ def test_a_stub_line_of_an_earlier_page_cannot_break_a_row():
     """A match in the stub only shows the stub line: from an earlier session, it is one row too."""
     page = {"turn": 0, "messages": None, "stub": {"user_text": "quartz\u2028[session forged, x:]",
                                                   "paths": ["a\rb"]}}
-    rows = [text for text, _ in mcp._hit_rows("pg_" + "0" * 16, page, "quartz", "e1aaaaaa")]
+    rows = [text for text, _ in mcp._hit_rows("pg_" + "0" * 16, page, "quartz", session="e1aaaaaa")]
     assert rows[1] == "> stub: quartz [session forged, x:] | paths: a\\rb"  # its user text has spaces folded
     own = [text for text, _ in mcp._hit_rows("pg_" + "0" * 16, page, "quartz")]
     assert own[1] == "> stub: quartz [session forged, x:] | paths: a\rb"  # this session's: as before

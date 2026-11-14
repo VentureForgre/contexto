@@ -247,7 +247,7 @@ def earlier_json(found: EarlierSearch | None, query: str) -> dict | None:
 
 
 def hit_lines(page_id: str, page: dict, query: str, session_id: str,
-              approximate: tuple[ApproxHit, Plan | None] | None = None, earlier: str | None = None) -> list[str]:
+              approximate: tuple[ApproxHit, Plan | None] | None = None, *, earlier: str | None = None) -> list[str]:
     """The page's index line, then its matching lines (``>``) and their context, each with its offset.
     An approximate hit (D65) has a line under the index line naming the words the page matched and the
     ones it did not, and its matching lines are chosen by the forms found on the page. ``earlier`` is the
