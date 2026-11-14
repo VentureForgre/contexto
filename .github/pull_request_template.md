@@ -1,7 +1,8 @@
 <!--
 Title: a Conventional Commit, for example `fix: recall reads a page written by an older release`.
-The title becomes the squash commit on main and decides the release: `feat:` is a minor release,
-`fix:` and `perf:` a patch, and `docs:`, `test:`, `build:`, `ci:`, `chore:` and `refactor:` none.
+The title becomes the squash commit on main. Merging does not release anything; the title decides
+how far the next release moves the version: `feat:` at least a minor release, `fix:` and `perf:` at
+least a patch, and `docs:`, `test:`, `build:`, `ci:`, `chore:` and `refactor:` no effect.
 -->
 
 ## What was wrong or missing
