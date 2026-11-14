@@ -370,7 +370,7 @@ def codex_support() -> bool:
     those words rather than failing its Codex checks as a bug to report (PR #283's review)."""
     try:
         import contexto.codex  # noqa: F401
-    except ImportError:
+    except Exception:  # missing, or broken on import (PR #290 review A): doctor must not die of it either way
         return False
     return True
 

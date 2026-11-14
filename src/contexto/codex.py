@@ -558,7 +558,7 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
                codex_bin: str = "codex", env: dict[str, str] | None = None, cwd: Path | None = None,
                home: Path | None = None, claude_upstream: str | None = None,
                codex_home_dir: Path | None = None, contexto_home: Path | None = None,
-               no_daemon: bool = False) -> CodexLaunch:
+               no_daemon: bool = False, named_upstream: str | None = None) -> CodexLaunch:
     """Plan a ``codex`` launch behind the proxy at ``proxy_url`` (no ``/v1``: the upstream carries the
     version path). The caller starts the proxy with ``launch.upstream``, runs ``launch.argv`` with
     ``launch.env``, and calls ``launch.cleanup()`` on exit. ``no_daemon`` (``takes_no_daemon``) puts
@@ -587,7 +587,9 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
                                         f"Pass --codex-key-helper (or set {KEY_HELPER_ENV})", base_env))
     if not helper:
         example = f"With an OpenAI key in $OPENAI_API_KEY, run `{KEY_HELPER_COMMAND}`"
-        named = upstream or base_env.get(UPSTREAM_ENV)
+        # ``upstream`` is the resolved one, given even when the user named none (PR #290 review A): only
+        # --codex-upstream (``named_upstream``) or CONTEXTO_CODEX_UPSTREAM is one the user named.
+        named = named_upstream or base_env.get(UPSTREAM_ENV)
         if named and named.rstrip("/") != OPENAI_UPSTREAM:
             # The example's flag replaces an upstream the user named (PR #257 review B): say so.
             example += f" (it sends Codex's requests to {OPENAI_UPSTREAM}, not to the upstream you named)"
@@ -752,7 +754,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         plan = plan_codex(codex_args, proxy.url, session_id, auth_mode=args.codex_auth,
                           key_helper=args.codex_key_helper, upstream=target, codex_bin=codex,
                           codex_home_dir=paths.session_dir(home, session_id) / "codex-home",
-                          contexto_home=home, no_daemon=no_daemon)
+                          contexto_home=home, no_daemon=no_daemon, named_upstream=args.codex_upstream)
         for note in plan.notes:
             print(f"contexto: {note}", file=stderr)
         store.log({"event": "launch", "cli": "codex", "session": session_id, "config": config,

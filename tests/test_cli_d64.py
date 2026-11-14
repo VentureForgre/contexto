@@ -823,6 +823,12 @@ def test_the_key_helper_variable_clause_says_to_keep_the_upstream(tmp_path):
     message = str(exc.value)
     assert f"or set {codex.KEY_HELPER_ENV} to such a command and still pass --codex-upstream, " in message
     assert "not to the upstream you named" not in message  # nothing was named
+    # `contexto run codex` always passes the resolved upstream; one derived from Claude Code's is not named
+    # (PR #290 review A: ANTHROPIC_BASE_URL alone gave "not to the upstream you named").
+    with pytest.raises(codex.CodexLaunchError) as exc:
+        codex.plan_codex([], "http://127.0.0.1:43210", "S", env={}, cwd=tmp_path, home=empty,
+                         upstream="https://gateway.invalid/v1")
+    assert "not to the upstream you named" not in str(exc.value)
 
 
 @pytest.mark.parametrize("how", ["flag", "env"])
@@ -832,7 +838,8 @@ def test_the_example_says_it_replaces_an_upstream_the_user_named(tmp_path, how):
     empty = tmp_path / "empty-home"
     empty.mkdir()
     named = "http://127.0.0.1:18432/v1"
-    kwargs = {"upstream": named, "env": {}} if how == "flag" else {"env": {codex.UPSTREAM_ENV: named}}
+    kwargs = ({"upstream": named, "named_upstream": named, "env": {}} if how == "flag"
+              else {"upstream": named, "env": {codex.UPSTREAM_ENV: named}})
     with pytest.raises(codex.CodexLaunchError) as exc:
         codex.plan_codex([], "http://127.0.0.1:43210", "S", cwd=tmp_path, home=empty, **kwargs)
     message = str(exc.value)
