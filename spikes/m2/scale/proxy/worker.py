@@ -9,8 +9,9 @@ JSON-lines control channel on stdin/stdout returns per-request timings, ``ru_max
 and on ``exit`` stops the proxy as the launcher does and pickles the engine for the next phase.
 
 ``ff`` (fast-forward): the same engine, called directly at each turn start only, with the request headers
-the driver sends (``synth.CLI_HEADERS``; none before 2026-11-13), the usage the fake upstream would report for the bytes the proxy would send (``ceil(len(serialize_request(upstream)) /
-1.83)``), and a proxy-shaped entry in the session log. See README.md "How each checkpoint is reached".
+the driver sends (``synth.CLI_HEADERS``; none before 2026-11-13), the usage the fake upstream would report
+for the bytes the proxy would send (``ceil(len(serialize_request(upstream)) / 1.83)``), and a proxy-shaped
+entry in the session log. See README.md "How each checkpoint is reached".
 
 Run by run.py; not meant to be started by hand.
 """

@@ -15,7 +15,8 @@ What it measures, and what ``tests/test_scale_proxy_short.py`` holds to ``BUDGET
   proxy's read, parse, transform and serialization, its connection to the upstream, and the relay back.
   Reported over every request of the session (median and p95), and for the session's first request alone,
   sent ``SMALL_SENDS`` times to a new proxy and as often straight to the fake upstream: the difference of
-  those two medians is what the proxy adds to a request with no history.
+  those two medians is what the proxy adds to a request with no history. The same for ``TINY_BODY``, a
+  104-byte request with no tools.
 - **Growth with history**: the slope of added time against the size of the history the CLI sent, in
   milliseconds per million tokens, over the tool-loop requests (Theil-Sen: the median of the slopes between
   every pair of requests, so a few slow requests do not move it).
@@ -187,7 +188,9 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int 
             small: list[float] = []
             direct: list[float] = []
             concurrent: dict[str, Any] = {}
-            connections = {"small": 0, "direct": 0, "burst": 0, "session": 0}
+            connections = {"small": 0, "direct": 0, "tiny": 0, "tiny_direct": 0, "burst": 0, "session": 0}
+            tiny: list[float] = []
+            tiny_direct: list[float] = []
             try:
                 for i in range(startups):
                     if probe is not None:
@@ -200,6 +203,9 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int 
                     small, connections["small"] = added_ms(probe.port, upstream, first_body, "small", SMALL_SENDS)
                     direct, connections["direct"] = added_ms(upstream.upstream_port, upstream, first_body, "direct",
                                                              SMALL_SENDS)
+                    tiny, connections["tiny"] = added_ms(probe.port, upstream, TINY_BODY, "tiny", SMALL_SENDS)
+                    tiny_direct, connections["tiny_direct"] = added_ms(upstream.upstream_port, upstream, TINY_BODY,
+                                                                       "tinydirect", SMALL_SENDS)
                     progress.update(first_request_added_ms=round(statistics.median(small), 3) if small else None,
                                     first_request_direct_ms=round(statistics.median(direct), 3) if direct else None)
                     if clients:
@@ -276,6 +282,10 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int 
         "first_request_direct_ms": round(statistics.median(direct), 3) if direct else None,
         "first_request_over_direct_ms": round(statistics.median(small) - statistics.median(direct), 3)
         if small and direct else None,
+        "tiny_request_bytes": len(TINY_BODY),
+        "tiny_request_added_ms": round(statistics.median(tiny), 3) if tiny else None,
+        "tiny_request_over_direct_ms": round(statistics.median(tiny) - statistics.median(tiny_direct), 3)
+        if tiny and tiny_direct else None,
         "startup_ms": round(min(startup_s) * 1e3, 1) if startup_s else None,
         "startup_all_ms": [round(s * 1e3, 1) for s in startup_s],
         "peak_rss_mb": round(peak, 1),
@@ -284,7 +294,8 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, turn_tokens: int 
         "objects_per_turn": round((last_sample["objects"] - first_sample["objects"]) / turn_span, 2)
         if turn_span > 0 else None,
         "connections": connections,
-        "driver_connections": connections["session"] + connections["small"] + connections["burst"],
+        "driver_connections": connections["session"] + connections["small"] + connections["tiny"]
+        + connections["burst"],
         "upstream_connections": connections["upstream_accepted"],
         "samples": samples, "throughput": concurrent, "throughput_rps": concurrent.get("rps"),
         "rows": rows,
@@ -335,7 +346,8 @@ def report(result: dict[str, Any]) -> str:
     lines.append(f"  added time at no history: the fit's intercept {result['added_intercept_ms']} ms; the first "
                  f"request ({result['first_request_bytes']:,} bytes) {result['first_request_added_ms']} ms through "
                  f"the proxy, {result['first_request_direct_ms']} ms straight to the fake upstream, "
-                 f"{result['first_request_over_direct_ms']} ms more")
+                 f"{result['first_request_over_direct_ms']} ms more; a {result['tiny_request_bytes']}-byte request "
+                 f"{result['tiny_request_over_direct_ms']} ms more")
     lines.append(f"  largest added time {result['added_max_ms']} ms; startups {result['startup_all_ms']} ms; "
                  f"burst {json.dumps(result['throughput'])}")
     lines.append(f"  connections opened: {json.dumps(result['connections'])}")
@@ -344,7 +356,7 @@ def report(result: dict[str, Any]) -> str:
 
 
 SPREAD_KEYS = ("added_median_ms", "added_p95_ms", "added_intercept_ms", "first_request_added_ms",
-               "first_request_over_direct_ms", "added_ms_per_mtok", "cpu_median_ms", "cpu_p95_ms", "cpu_intercept_ms",
+               "first_request_over_direct_ms", "tiny_request_over_direct_ms", "added_ms_per_mtok", "cpu_median_ms", "cpu_p95_ms", "cpu_intercept_ms",
                "cpu_ms_per_mtok", "startup_ms", "peak_rss_mb", "rss_mb_per_body_mb",
                "objects_per_turn", "throughput_rps", "max_upstream_tokens", "seconds")
 

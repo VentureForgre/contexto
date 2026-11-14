@@ -21,12 +21,25 @@ which other test suites were running, over 39 runs at 1-minute loads of 25 to 84
     100 concurrent requests, floor          5 req/s    49.8    10      225.8       15.4 to 124.6
 
 The latency budgets are loose because one macOS runner and the loaded laptop were several times slower than
-the rest; a budget that fails on a slow runner would be worse than a loose one. What they still catch: the
-session ends at 1,269 messages, so a pass over every pair of messages is 1.6 million steps per request by
-then. At 1 microsecond a step that is 1.6 s per request, eight times the median budget; at 20 nanoseconds
-a step (a membership test in C) it is 32 ms and passes. The memory budgets depend little on the machine:
-a proxy that kept each request's parsed messages would gain thousands of objects per turn, and one that
-kept each request's bytes would add about 0.9 MB of RSS per request, more than 500 MB by the end.
+the rest; a budget that fails on a slow runner would be worse than a loose one. What they catch was
+measured by Reviewer B on 2026-11-12, by injecting slowdowns into the package of a scratch copy on the
+laptop (load 7 to 10), and from the CI runs' values:
+
+- A linear slowdown is caught only when it is large. On the laptop, 2, 4, 8, 12 and 16 times the proxy's
+  CPU work per request all passed (16 times: median 170 ms against 200). From the Ubuntu runners' values
+  the threshold there is about 8.5 to 12 times on the median and 9 to 13 times on growth; only the slow
+  macOS runner (median 50.9 ms) is near 4 times.
+- A quadratic pass over the 1,269 messages of the last request is caught when a step costs about 200 ns
+  (growth 402 ms per million tokens against 300). A cheap one passes: a pair loop at 5 ns a step, a dict
+  ``.get`` comparison at 26 ns (growth 65) and a list membership test all passed. The full run at 30M
+  tokens, 28 times as many messages, is the check for those.
+- A leak: a proxy that kept each request's parsed messages gained 5,203 objects per turn (budget 40); one
+  that kept each request's bytes peaked at 622 MB (budget 300). A leak under about 350 KB per request that
+  is not made of Python objects passes.
+- A start of 3 seconds or more fails (3,119 ms); a 2.5-second sleep in ``start_proxy`` passed.
+
+Not caught: a slowdown of less than about 10 times on a typical runner, a cheap quadratic pass, a small
+leak outside Python objects, and anything the 200-turn session (0.9M tokens) is too short to show.
 Throughput is only a floor: it spread from 15 to 226 requests a second across these runs, and the 100
 clients share one Python process with the fake upstream, so it says little about the proxy alone.
 """
@@ -58,14 +71,22 @@ def test_every_request_of_200_turns_stays_under_the_bound(short_run):
 
 
 def test_the_driver_keeps_its_connections_open(short_run):
-    """One connection to the proxy for the session, one for the first-request sends, and one per client
-    of the burst. A connection per request left about 850 of this machine's local ports in TIME_WAIT
+    """One connection to the proxy for the session, one each for the first-request and the 104-byte sends,
+    and one per client of the burst. A connection per request left about 850 of this machine's local ports in TIME_WAIT
     per run, and several runs at once failed with EADDRNOTAVAIL (README.md, "Connections")."""
-    assert short_run["driver_connections"] == short.CLIENTS + 2, short_run["connections"]
+    assert short_run["driver_connections"] == short.CLIENTS + 3, short_run["connections"]
     # The proxy opens a new upstream connection per request (contexto.proxy, by design): every request
     # it forwarded, and the direct sends.
     assert short_run["upstream_connections"] == short_run["requests"] + short.CLIENTS * short.PER_CLIENT \
-        + 2 * short.SMALL_SENDS, short_run["connections"]
+        + 4 * short.SMALL_SENDS, short_run["connections"]
+
+
+def test_what_the_proxy_adds_to_a_request_with_no_history_is_measured(short_run):
+    """The session's first request and a 104-byte one, each through the proxy and straight to the fake
+    upstream: the audit of 2026-11-12 compared its "about +2 ms" with these (README.md)."""
+    for key in ("first_request_over_direct_ms", "tiny_request_over_direct_ms"):
+        assert short_run[key] is not None, short.report(short_run)
+    assert short_run["tiny_request_bytes"] == len(short.TINY_BODY) < 200
 
 
 def test_added_time_per_request_and_its_growth_with_history(short_run):
