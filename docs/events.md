@@ -1760,8 +1760,9 @@ room was open for the call, that is when `turn_budget` is not `unbudgeted`:
 - `limiting_age_s`: with `limited_by: "side"`: seconds since that room was last published. A large
   value is a stale room, not a live subagent.
 - `returned`: recall and search: the spans of text the reply showed, as positions, not text. Each
-  item has `source` (`paged` or `in_view`), `start` and `end`, and either `page_id` or, for text in
-  view, `turn` and `message_index`.
+  item has `source` (`paged` or `in_view`; for an earlier session of the project, D69, `earlier` or
+  `earlier_in_view`), `start` and `end`, and either `page_id` or, for text in view, `turn` and
+  `message_index`. An earlier session's span never names that session.
 - `chars`: recall and state: how many characters of content the reply returned.
 
 `contexto_recall`:
@@ -1769,6 +1770,8 @@ room was open for the call, that is when `turn_budget` is not `unbudgeted`:
 - `page_id`: the page read.
 - `offset`: the character offset the read started at.
 - `total_chars`: the page's full length in characters.
+- `earlier`: from a server with a project view only (D69): whether the page read is an earlier
+  session's (`contexto_recall` with `session`). Never which session.
 
 `contexto_search`:
 
@@ -1782,6 +1785,19 @@ room was open for the call, that is when `turn_budget` is not `unbudgeted`:
 - `approximate_steps`: with `approximate`: which steps of the fallback the pages shown in detail
   needed, in this order: `stop_words`, `long_query`, `fold`, `typo`, `any_word`; `punctuation` alone
   when only the punctuation at the words' ends was dropped. Never the words.
+- `scope`: from a server with a project view only (D69): `session` or `project`, the search's scope.
+
+With `scope: "project"`, counts of the project's earlier sessions, never which ones
+([project memory](project-memory.md)):
+
+- `earlier_searched`: how many earlier sessions were searched (at most the newest 50).
+- `earlier_skipped`: how many could not be read and were skipped.
+- `earlier_not_searched`: how many older ones were not searched (past the newest 50, or the 20,000
+  page files or 30 seconds a search allows).
+- `earlier_matched`: how many earlier sessions had a match.
+- `earlier_hits`: how many pages of earlier sessions the reply showed.
+- `earlier_in_view_hits`: how many lines of earlier sessions' last windows the reply showed.
+- `earlier_in_view_skipped`: how many earlier sessions' last windows could not be read.
 
 `contexto_pin` and `contexto_close` (`chars` is then the length of the pinned text or the note):
 
