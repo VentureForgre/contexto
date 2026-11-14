@@ -204,10 +204,10 @@ def test_managed_settings_that_reroute_claude_code_refuse_the_run(env, tmp_path,
     plist = tmp_path / "managed.plist"
     plist.write_bytes(plistlib.dumps({"forceLoginMethod": "claudeai"}))
     harmless = tmp_path / "harmless.json"
-    harmless.write_text(json.dumps({"env": {"DISABLE_TELEMETRY": "1"}, "permissions": {"deny": ["Bash"]}}))
+    harmless.write_text(json.dumps({"env": {"DISABLE_TELEMETRY": "1"}, "cleanupPeriodDays": 30, "permissions": {}}))
     env.setattr(managed, "sources", lambda platform=None: [
         ("the managed settings file", settings), ("the device-level managed preferences", plist),
-        ("the managed settings drop-in 10-team.json", harmless), ("a source that is not there", tmp_path / "none")])
+        ("a managed settings drop-in", harmless), ("a source that is not there", tmp_path / "none")])
     found = managed.problems()
     assert found == ["the managed settings file sets apiKeyHelper; env ANTHROPIC_BASE_URL",
                      "the device-level managed preferences sets forceLoginMethod"]
@@ -217,6 +217,44 @@ def test_managed_settings_that_reroute_claude_code_refuse_the_run(env, tmp_path,
     assert "elsewhere" not in run.printed and not run.out.exists()
     full = bench_stubs.run_bench(env, tmp_path / "f", [script], arms=("full",), bound=BOUND)
     assert full.code == 0  # the full arm does not run Claude Code
+
+
+REFUSED_CASES = [(key, False if key == "autoCompactEnabled" else "planted-value")
+                 for _what, keys in managed.REFUSED for key in keys]
+
+
+@pytest.mark.parametrize(("key", "value"), REFUSED_CASES + [
+    ("modelSettings", {"claude-haiku-5-5": {"autoCompactWindow": 500_000}}),
+    ("permissions", {"deny": ["Read"]}), ("hooks", {"Stop": []}), ("autoCompactWindow", 400_000)])
+def test_every_managed_setting_that_changes_an_arm_is_refused(tmp_path, key, value):
+    """Each key of the table, set to a value that is not empty: compaction, permissions, the model, MCP
+    servers, hooks, the system prompt, and where requests go."""
+    path = tmp_path / "managed-settings.json"
+    path.write_text(json.dumps({key: value, "cleanupPeriodDays": 30}))
+    found = managed.problems([("the managed settings file", path)])
+    assert found == [f"the managed settings file sets {key}"]
+    assert "planted" not in found[0] and "500" not in found[0]  # the value is never named
+
+
+def test_the_table_of_refused_managed_settings_covers_what_the_arms_depend_on():
+    refused = {key for _what, keys in managed.REFUSED for key in keys}
+    assert {"autoCompactEnabled", "autoCompactWindow", "modelSettings", "permissions", "model", "availableModels",
+            "allowManagedMcpServersOnly", "deniedMcpServers", "managedMcpServers", "hooks", "disableAllHooks",
+            "apiKeyHelper", "forceLoginMethod"} <= refused
+    assert [what for what, _keys in managed.REFUSED][:6] == [
+        "where requests go and with what credential", "compaction", "permissions", "the model", "MCP servers", "hooks"]
+
+
+def test_a_managed_drop_in_or_mcp_file_is_named_by_kind_never_by_its_file_name(tmp_path, monkeypatch):
+    drop_ins = tmp_path / managed.DROP_IN_DIR
+    drop_ins.mkdir()
+    (drop_ins / "10-acme-corp-route.json").write_text(json.dumps({"autoCompactEnabled": False}))
+    (tmp_path / managed.MCP_FILE_NAME).write_text(json.dumps({"mcpServers": {"corp": {"command": "x"}}}))
+    monkeypatch.setattr(managed, "managed_directory", lambda platform=None: tmp_path)
+    found = managed.problems(managed.sources("linux"))
+    assert found == ["a managed settings drop-in sets autoCompactEnabled",
+                     "the managed MCP configuration sets mcpServers"]
+    assert "acme" not in managed.refusal(found) and str(tmp_path) not in managed.refusal(found)
 
 
 def test_managed_settings_are_read_where_claude_code_reads_them(tmp_path):
