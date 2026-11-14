@@ -147,8 +147,10 @@ order:
 The status line covers `contexto run` launches only. When the JSON on stdin names a Claude Code
 session, a session that [`contexto serve`](serve.md) has opened since its last `contexto run` launch
 prints nothing in steps 2 and 3. Named by `--session`, or by `$CONTEXTO_SESSION` with no session on
-stdin (run by hand), it prints that session's numbers with the last launch's bound, not the
-service's `--bound`, or with no bound when no launch made the session.
+stdin (run by hand), it prints that session's numbers with the bound `contexto stats` gives: for a
+session a launch made, that launch's bound, not the service's `--bound`; for a session only the
+service made, none until a request goes over the service's bound or the bound proves too small, and
+the service's after that.
 
 There is no fourth step. If none of the three names a session, nothing is printed. In a plain
 `claude` session that Contexto is not serving, that is the right answer: a line with another
