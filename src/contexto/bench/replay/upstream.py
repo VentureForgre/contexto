@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -421,14 +422,29 @@ class FakeUpstream:
 
             def do_POST(self) -> None:  # noqa: N802 - stdlib name
                 raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
-                self._send(*owner.answer(self.path.split("?", 1)[0], raw))
+                reply = owner.answer(self.path.split("?", 1)[0], raw)
+                try:
+                    self._send(*reply)
+                except (BrokenPipeError, ConnectionResetError):
+                    # The proxy closed the connection: it was stopped (Ctrl+C, a signal) or gave up on
+                    # this request, and the proxy's own log says which. Nothing is left to send to.
+                    self.close_connection = True
 
             def do_GET(self) -> None:  # noqa: N802 - stdlib name
                 self._send(*owner.error(404, "not_found_error", NO_SUCH_PATH))
 
             do_HEAD = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = do_GET  # noqa: N815 - stdlib names
 
-        self._server = ThreadingHTTPServer((self.host, 0), Handler)
+        class Server(ThreadingHTTPServer):
+            def handle_error(self, request: Any, client_address: Any) -> None:
+                """Record a handler's failure instead of printing a traceback on stderr (which would name
+                the Python install's paths); the replay then fails with it named."""
+                kind = sys.exc_info()[0]
+                with owner.lock:
+                    owner.unexpected.append(f"the fake upstream failed while answering a request: "
+                                            f"{kind.__name__ if kind else 'an error'}")
+
+        self._server = Server((self.host, 0), Handler)
         self._server.daemon_threads = True
         threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05},
                          name="bench-replay-upstream", daemon=True).start()
