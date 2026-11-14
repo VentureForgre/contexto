@@ -130,5 +130,6 @@ def test_the_engines_rule_17_reproduces_the_recommended_row():
     assert (s["rotations"], s["window_minimal"], s["bound_too_small"]) == (15, 1, 0)
     # 18,907 and $7.3125 before D51: its pin sentence in the preamble is 69 tokens of the window. 18,594
     # since D49's amendment: rule 4 counts the first prompt at its measured 4 bytes per token, not the 3.5
-    # seed, so the head is no longer 244 tokens low (18,838 before)
-    assert s["window_budget"][0] == 18_594 and s["usd"] == 7.3187
+    # seed, so the head is no longer 244 tokens low (18,838 before). 18,569 and $7.3209 since D69: the pin
+    # line says only the user's own words are pinned (18,594 and $7.3187 before)
+    assert s["window_budget"][0] == 18_569 and s["usd"] == 7.3209

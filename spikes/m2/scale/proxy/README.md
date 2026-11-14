@@ -10,6 +10,10 @@ agents benchmarking on the same machine. 1-minute load averages were 3.1 to 7.4 
 runs (`load1` in `results/requests_*.csv`; the `uptime` line for each checkpoint is in
 `results/checkpoints_*.csv`). Every number below is measured unless it is marked as an inference.
 
+The harness was repaired on 2026-11-12 and a 200-turn version of it now runs in the test suite: see
+"2026-11-12: repaired at v0.5.24" at the end. Everything between here and that section is the
+2026-10-17 record and is left as it was written, apart from two notes that say so.
+
 ## Short answer
 
 - **With a context block on the first message only and one session-start system message (the `first`
@@ -52,6 +56,10 @@ python3 -m venv .venv && .venv/bin/pip install -q -e . pytest
 .venv/bin/python spikes/m2/scale/proxy/run.py --label first-1        # about 7 min; 0.5M..30M
 .venv/bin/python spikes/m2/scale/proxy/summarize.py first-1 first-2 first-3   # the table below
 ```
+
+[Note added 2026-11-12] A label names the output files, and the labels used in this document
+(`first-1`, `mixed-1`, `perf-1` and so on) name the committed 2026-10-17 files, so running these
+commands as written overwrites that record. Use a new label, as in the 2026-11-12 section.
 
 Other entry points:
 
@@ -396,4 +404,594 @@ of the first; `carried_content` could be cached per epoch.
 - `results/profile_first-{1,2,3}_10M.txt`, `results/fidelity_*_120.json`, `results/leak_*.csv`.
 - `results/*_base-{1,2,3}.*` and `results/*_perf-{1,2,3}.*`: the before and after runs of the CPU fixes.
 - `tests/test_scale_proxy_harness.py`: fast checks of the helpers (7 tests, under a second, collected
-  by the default `pytest`). The scale run itself is not in the suite.
+  by the default `pytest`). The scale run itself is not in the suite. [Note added 2026-11-12] A
+  200-turn run is in the suite now, with two more test files; see the next section. [Note added
+  2026-11-13] This file has 13 tests now: the driver's kept-open connections, the fake upstream
+  closing first, and a failing short run's report were added.
+
+## 2026-11-12: repaired at v0.5.24, and a 200-turn run in the test suite
+
+Main at b0e2dbc (v0.5.24), Python 3.13.14, the same Apple M5 Pro (18 cores, 48 GB). Nothing here
+talked to a model API. Other agents ran test suites on the machine the whole time, so every timing
+below is given with the 1-minute load average it was taken at. A load above 18 means more runnable
+processes than cores.
+
+### What was broken
+
+`run.py` stopped at its first proxy start with `AttributeError: 'SessionStore' object has no
+attribute '_pages'`. No test ran the harness, so nothing reported it. With that fixed, more had
+drifted from the package since 2026-10-18. Each item says what the harness does now.
+
+1. **`SessionStore._pages` is gone.** The store was split into `src/contexto/store/*.py`, and
+   `index_text` now reads pages through a per-process `PageCatalog` (D34): `entries()` lists
+   `pages/` and reads only the files this process has not seen. The timer moved to
+   `PageCatalog.entries` and kept its key, so `pages_read_s` (`requests_*.csv`) and `store_pages_s`
+   (`ff_*.csv`) still mean the time `index_text` spent finding and reading pages. Two new columns,
+   `page_file_reads` and `store_page_reads_n`, count the page files read (`PageCatalog._read`).
+2. **The engine could not be pickled between phases.** The catalog holds a lock
+   (`TypeError: cannot pickle '_thread.lock' object`). The harness drops the catalog before it
+   pickles the engine. Each phase's process then reads every page once, at its first rotation, as a
+   restarted proxy does; that read is inside the first rotating turn start measured at a checkpoint.
+3. **The proxy was built by hand**, as a copy of `launcher.start_proxy` from October. That function
+   has since gained the `SessionRecorder` around the engine (D55), the `X-Session-Affinity` key for
+   an upstream that is not a vendor host (D36), and the clearing of the MCP-listed record. The
+   harness now calls `launcher.start_proxy` itself. It replaces `launcher.build_engine` for the
+   length of that call, so the timed engine goes in, and it stops the proxy the way `launcher._run`
+   does (`report_missing_tools`, then `SessionRecorder.flush`).
+4. **The timer around the engine hid arguments from the proxy.** The proxy passes `tool_calls` and
+   `tool_call_ids` only to a usage callback whose signature takes them (D40), and calls the
+   transform's `prime` when it has one (D60). The October wrapper had neither, so the engine was
+   never told whether a response held a tool call. `worker.TimedEngine` passes both through.
+5. **Two break events were never counted.** `page_conflict` and `observe_usage_error` were in
+   `BREAK_EVENTS` but not in `COUNTED_EVENTS`, so a run could not stop for them. They are counted
+   now, and eleven events the package has gained since stop a run too: `request_refused`,
+   `request_too_deep`, `hold_skipped`, `page_unreadable`, `proxy_stop_incomplete`,
+   `session_start_unrecognised`, `unclassified_system_message`, `cli_version_untested`,
+   `mcp_tools_missing`, `toolcheck_error` and `cli_version_error`. `cli_version`, `epoch_not_resumed`
+   and `epoch_resumed` are counted and do not stop a run. New `n_<event>` columns are appended to
+   `checkpoints_*.csv`; the columns of the 2026-10-17 files keep their places.
+6. **The engine no longer took the synthetic session for Claude Code's.** The first run after the
+   fix logged `session_start_unrecognised`. Its tool list also held none of Contexto's tools
+   (`toolcheck.anthropic_tools_offered` returns False for it), which the engine reports as
+   `mcp_tools_missing` once a session is 30 seconds old. `synth.py` and the driver now send what
+   the engine reads:
+   - the session-start message begins with `# Environment` (the D33 signature) and is still 8,470
+     characters;
+   - `User-Agent: claude-cli/2.1.318 (external, cli)`, the newest version in
+     `cliversions.TESTED_VERSIONS` (it was `contexto-scale-harness`);
+   - one Claude Code session id, in `X-Claude-Code-Session-Id` and in `metadata.user_id` as a JSON
+     string, which is how 2.1.314 and later send it;
+   - five of the 40 tools are Contexto's MCP tools by name (`mcp__contexto__contexto_recall` and
+     the other four).
+
+   The head's `system` and `tools` are 49,909 tokens with these names (49,885 before), and
+   `metadata.user_id` grew from 31 to 104 characters, so every request is about 70 tokens larger:
+   the whole head (a request with no messages) is 50,056 tokens by `synth.tokens_of`, 49,985
+   before. Turn 0 is 17 bytes longer; every later turn's messages are byte for byte the same, but
+   each request carries the head, so F and the engine's rotation decisions move (see "The full run
+   at v0.5.24").
+7. **Fast-forward** passes `tool_calls` to `observe_usage`, as the proxy does, and reports the
+   output tokens of the reply the fake upstream would send (420 for a turn with no tool call; it
+   was 180 for every turn). [Added 2026-11-13] It also passes the driver's `User-Agent` and
+   `X-Claude-Code-Session-Id` to the engine (`synth.CLI_HEADERS`); it passed none, so its session
+   logged no `cli_version` event where the HTTP path logs one. The rotations are the same either
+   way (Reviewer A checked).
+
+Harness-only changes came with the short run: the fake upstream records when it wrote a request's
+last event (`t_done`) and listens with a backlog of 256, and `requests_*.csv` has more columns,
+`upstream_s`, `added_s`, `page_file_reads` and `proxy_cpu_s` (defined under "The short run").
+[Added 2026-11-13] The driver keeps its connections open and the fake upstream closes each one
+after its reply (see "Connections").
+
+Left as it was: the `mixed` profile's reminder texts ("The TodoWrite tool hasn't been used
+recently", "... was modified, either by the user or by a linter") are not among the kinds the engine
+recognises since D32 (`rewrite.CONTEXT_BLOCK_KINDS` has "The task tools haven't been used recently"
+and "Note: ... changed on disk"). The fallback may therefore page every one of them, where a real
+4.x session keeps the latest block of each kind. The `mixed` runs of the record used these texts,
+so the profile still means what the record measured.
+
+### So it fails loudly next time
+
+`tests/test_scale_proxy_drift.py` (10 tests, about two seconds) fails when:
+
+- a name in `worker.INSTRUMENTED` is not an attribute of the class it is listed under (the store
+  methods, `SessionStore._catalog`, the catalog's `entries` and `_read`, the handler's `_read_body`
+  and `_transform`, and the engine attributes the timer forwards);
+- a timer key the driver reads into a CSV column is not one the worker writes, or a page written
+  and indexed through an instrumented store does not reach the timers behind those columns;
+- an event name in the harness's lists is no longer written by `src/contexto/`, or a break event is
+  not counted. "Written" means the name is the value of an `"event"` key or `event=` keyword, as a
+  literal, a conditional of literals, or a variable the same function assigns one to (parsed with
+  `ast`); a name that is only compared or mentioned does not count;
+- `launcher.start_proxy`, `build_engine`, `open_session`, `NoticeLog` or
+  `RewriteEngine.observe_usage` no longer take what the harness passes, or a field `fidelity.py`
+  compares is not in the epoch record;
+- the proxy started by the harness is not the launcher's (no `SessionRecorder`, no affinity key),
+  or the timed engine hides `preserves_input`, `prime`, `tool_calls` or `tool_call_ids`;
+- the engine does not take the synthetic first request for Claude Code's: the session-start
+  signature, the tested CLI version, the session id, and Contexto's tool names, each checked with
+  the package's own function;
+- `cputime.py` can no longer drive the handler's `_transform` and the engine without a server, or
+  stops passing `observe_usage` the reply's output tokens and `tool_calls`;
+- fast-forward does not pass the driver's headers to the engine (its session must log `cli_version`,
+  as the HTTP path's does).
+
+[Changed 2026-11-13.] The event check looked for the quoted name anywhere in the package, so
+Reviewer B's mutation, `store_failure` always returning `store_error`, passed it while
+`"page_conflict"` stayed in a comparison. With the parsed check that mutation fails the test (run
+in a scratch copy: the old test passed 8 of 8, the new one failed), and a test applies the same
+mutation to a small package of its own. Every assertion now says which part of the harness to
+update.
+
+The short run below also fails on any `BREAK_EVENTS` event, so a signature the drift test does not
+name still stops the suite when the engine reports it.
+
+### The short run
+
+```
+uv run --with pytest pytest spikes/m2/scale/proxy/tests      # the tests; numbers at the end of the output
+.venv/bin/python spikes/m2/scale/proxy/short.py --repeat 5   # the numbers alone, five times, with the spread
+```
+
+`short.py` sends 200 turns of the `mixed` session (20,000-token head, 3,000-token turns, bound
+150,000) through one proxy process and the fake upstream, every request over HTTP: 634 requests
+and 1,269 messages, ending at 913,084 tokens of history in a 1.67 MB body, six times the bound.
+Before that it starts three proxies on empty homes, sends the session's first request (50,838
+bytes) 20 times to the last of them and 20 times straight to the fake upstream, and then 200 times
+from 100 threads at once. It needs neither `claude` nor `codex`. `tests/test_scale_proxy_short.py`
+runs it once per test session and `tests/conftest.py` prints its numbers at the end of the pytest
+output whether the tests pass or fail, so every CI log has them.
+
+What the run found, the same in every measured run on this machine and in CI (Ubuntu and macOS):
+all 634 responses were 200; the largest upstream request was 117,423 tokens; no event of `run.BREAK_EVENTS` (which include
+`over_bound`, `bound_too_small` and `transform_error`); 20 rotations, 267 pages, 19 `carried_paged`,
+3 `carried_over_budget` and the first request's one `estimate_error`.
+
+The quantities with a budget, as `short.py` defines them:
+
+- **Added time per request** is the driver's time from sending a request to its last byte, less
+  the time the fake upstream spent on it (`added_s`). It covers the body's way to the proxy, the
+  proxy's read, parse, transform and store writes, its connection to the upstream, and the relay.
+  The clock starts after the TCP connection is open. That change came after the first CI run and
+  the two loops of the flake check, whose times include the connect, as `e2e_s` does in the
+  2026-10-17 files. Since 2026-11-13 the driver also keeps its connection open between requests
+  (see "Connections"). On Linux that adds a wait of about 41 ms to every request, which is the
+  proxy's, not the harness's (see "The 40 ms wait on Linux"); on macOS there is none.
+- **Growth with history** is the slope of added time against the history the CLI sent, over the
+  434 tool-loop requests, as the median of the slopes between every pair of them (Theil-Sen).
+- **Startup** is from starting the proxy process to its `ready` line: the interpreter, the imports,
+  opening the session, building the engine and binding the port. The smallest of three starts.
+- **Peak RSS** is read by the proxy process itself: `ru_maxrss` on macOS, `VmHWM` on Linux. On
+  Linux `ru_maxrss` is carried across exec, and the first CI run reported the pytest process's
+  1,600 MB for a proxy whose RSS was 36 MB.
+- **RSS growth per MB of body growth** and **live objects gained per turn** compare the proxy after
+  turn 20 and after turn 200 (`ps` RSS, and `len(gc.get_objects())` after `gc.collect()`).
+- **Throughput** is 200 copies of the first request from 100 threads, in requests a second.
+
+Measured on 2026-11-12. "CI" is this branch's first CI run: four Ubuntu runners (4 CPUs, Python
+3.12 to 3.15, loads 0.6 to 1.0) and two macOS runners (3 CPUs, Python 3.12 and 3.15, loads 1.7 to
+2.3). "This machine" is the 39 measured runs of the flake check below: 18 of a first loop of 20
+(two errored before measuring), the 20 of a second loop, and one run with `yes > /dev/null` on each
+of the 18 cores, at loads of 25 to 84.
+
+| Quantity | CI, Ubuntu (4 runs) | CI, macOS (2 runs) | This machine (39 runs) | Budget | Budget over the slowest CI run |
+|---|---|---|---|---|---|
+| Added time per request, median | 17.1 to 26.2 ms | 19.6 and 50.9 ms | 31.7 to 79.2 ms | 200 ms | 3.9 |
+| Added time per request, p95 | 28.2 to 41.9 ms | 41.5 and 109.8 ms | 50.3 to 388.2 ms | 800 ms | 7.3 |
+| Growth of added time per million tokens | 25.8 to 36.5 ms | 28.1 and 14.7 ms | 20.4 to 164.6 ms | 300 ms | 8.2 |
+| Startup, best of 3 | 77 to 101 ms | 113 and 423 ms | 133 to 1,049 ms | 3,000 ms | 7.1 |
+| Peak RSS | 52.0 to 86.8 MB (second CI run; the first read it wrongly, see above) | 66.0 and 55.3 MB | 51.6 to 62.8 MB | 300 MB | 3.5 |
+| RSS growth per MB of body growth | 3.5 to 9.8 MB | 17.9 and 9.6 MB | 6.4 to 13.9 MB | 150 MB | 8.4 |
+| Live objects gained per turn | 7.43 to 8.91 | 7.27 and 8.91 | 7.11 to 7.59 | 40 | 4.5 |
+| Throughput, 100 concurrent | 148 to 226 req/s | 150 and 50 req/s | 15 to 125 req/s | floor of 5 req/s | 10 (below) |
+| Duration of the run | 14.5 to 21.0 s | 18.8 and 45.0 s | 25.7 to 102.8 s | none | |
+
+The second CI run's four Ubuntu jobs: median 15.4 to 25.0 ms, p95 26.5 to 79.4 ms, growth 21.2 to
+36.7 ms per million tokens, startup 64 to 101 ms, 151 to 207 req/s, 12.9 to 24.0 s.
+
+The second macOS runner of the first run was slow in every fixed cost and fast per byte: its
+growth per million tokens was the lowest of the six (14.7 ms) and its added time for the first request the highest
+(18.1 ms over a direct send, against 3.8 to 5.7 ms on the other five). The proxy writes and
+fsyncs three or four small files per request (`set_retained`, `set_turn_room` twice, and
+`set_epoch` at a turn start), so [inference] that runner's disk was slow. The run took 45 s there
+and 14.5 to 21 s on the other five. [Inference] With `short.TURNS = 150` it would take about 34 s
+on such a runner.
+
+What the budgets catch, and what they do not:
+
+[Rewritten 2026-11-13: the first version of this list said a 4 to 8 times slowdown and a quadratic
+pass "at Python speed" were caught. Reviewer B measured otherwise.] What follows was measured by
+Reviewer B at e14f6630 by injecting each change into the package of a scratch copy and running the
+test on this machine (loads 7 to 10), and from the CI runs' values. The budgets were not tightened
+to catch more: a required check that fails on a slow runner would be worse.
+
+- **A linear slowdown** is caught only when it is large. Here, the handler spinning until its CPU
+  time for a request was 2, 4, 8, 12 and 16 times what it was passed every budget (16 times:
+  median 170 ms against 200, growth 265 against 300). From the CI values of 2026-11-12 the
+  threshold was about 8.5 to 12 times on the median and 9 to 13 times on growth on an Ubuntu
+  runner, about 15 times on this machine, and near 4 times only on the slow macOS runner. Since
+  the driver keeps its connections open, every request on an Ubuntu runner also carries the
+  proxy's 41 ms wait (see "The 40 ms wait on Linux"). In CI run 43552340153 (2026-11-14) the
+  median there was 61.8 to 65.7 ms, 3.0 to 3.2 times under the budget, of which about 20 to 24
+  ms is the rest of the proxy's work. [Inference] A slowdown of that part is now caught on the
+  median from about 6.5 to 8 times, since the wait does not grow with it. Growth, a slope, does
+  not include the wait: 28.2 to 37.4 ms per million tokens there, 8.0 to 10.7 times under the
+  budget. So the test catches a slowdown from about 7 to 10 times on a typical CI runner.
+- **A quadratic pass over history** is caught when a step costs about 200 ns: the session ends at
+  1,269 messages, 1.6 million pairs per request, and a dict `.get` comparison done 8 times per pair
+  gave growth 402 ms per million tokens (budget 300). A cheap pass is not caught: a pair loop with
+  `a is b` (5 ns a step), one `.get` comparison per pair (26 ns; growth 65) and a list membership
+  test per message all passed. The full run at 30M tokens, 28 times as many messages, is the check
+  for those.
+- **A leak** of Python objects or of request bytes is caught: keeping each request's parsed
+  messages gave 5,203 objects per turn (budget 40), keeping its bytes a 622 MB peak (budget 300).
+  A leak under about 350 KB per request that is not made of Python objects passes.
+- **A slow start** is caught from 3 seconds: a 3-second sleep in `start_proxy` failed (3,119 ms),
+  a 2.5-second one passed.
+
+Not caught, then: a slowdown of less than about 7 times on a typical runner (a doubling, or a
+regression of 50 percent, passes with room to spare), a cheap quadratic pass, a small leak outside
+Python objects, and anything that only shows after more than 200 turns (0.9M tokens of history).
+
+**Throughput is asserted only as a floor of 5 requests a second**, with all 200 responses 200. It
+spread from 15 to 226 requests a second over these runs, a factor of 15, and the 100 client
+threads, the fake upstream and the timer share one Python process, so the number is not the
+proxy's alone. A budget near the measured values would fail on a busy runner without the proxy
+having changed.
+
+#### Flake check
+
+The test ran 60 times on this machine with `uv run --with pytest==9.1.1 pytest
+spikes/m2/scale/proxy/tests/test_scale_proxy_short.py`, in three loops of 20, while other agents'
+test suites kept the 1-minute load between 20 and 84 on 18 cores.
+
+- First loop, with tighter latency budgets (median 100 ms, p95 300 ms, growth 120 ms per million
+  tokens): 16 passed. 2 failed on latency while the load passed 80 (p95 388 and 356 ms, growth 165
+  ms). 2 errored in the fixture before measuring, after 18 s and 3 s; their output was not kept,
+  so the cause is not known. This session ran nothing else at the time.
+- The latency budgets were then loosened to the values in the table. All 18 measured runs of the
+  first loop meet them.
+- Second loop, with the budgets in the table and failing runs' output kept: 20 of 20 passed, at
+  loads of 43 to 84. The two errors did not recur.
+- One run with `yes > /dev/null` on each of the 18 cores, on top of a load of 48: passed in 50 s
+  (median 43.5 ms, p95 187 ms, growth 65.5 ms per million tokens, startup 583 ms, 78 req/s).
+
+- Third loop, on the final code, with this branch's whole test suite running beside it: 20 of 20
+  passed, at loads of 20 to 68 (median 36.1 to 57.4 ms, p95 92.7 to 196.8 ms, growth 53.7 to 90.5
+  ms per million tokens, startup 94 to 553 ms, peak RSS 50.9 to 59.9 MB, 54 to 179 req/s, 31 to
+  53 s).
+
+Between the second loop and the third, the driver was changed to open its connection before
+starting the clock and to retry a failed connect up to three times. The cause of the two errors
+was found later by Reviewer B: local ports ran out (see "Connections" below). A proxy process that
+exits now puts the end of its log in the error, and a run that raises prints the step it was in
+and what it had measured.
+
+On the final code of fix round 1 (2026-11-13) the three test files ran 20 times in a row: 20 of
+20 passed, each in 12.4 to 14.1 s, at loads of 5.7 to 8.0 (median 11.0 to 15.0 ms, p95 17.3 to
+22.5 ms, growth 15.1 to 19.5 ms per million tokens, startup 49.6 to 70.3 ms, peak RSS 51.0 to 56.9
+MB, 273 to 444 req/s).
+
+The spread of the first 39 measured runs (smallest, median, largest), from `short.py --spread`:
+added time median 31.7, 43.3, 79.2 ms; p95 50.3, 127.3, 388.2 ms; growth 20.4, 55.5, 164.6 ms per
+million tokens; startup 133, 336, 1,049 ms; peak RSS 51.6, 55.5, 62.8 MB; RSS growth 6.4, 9.9,
+13.9 MB per MB; objects per turn 7.11, 7.43, 7.59; throughput 15, 82, 125 req/s; duration 25.7,
+42.4, 102.8 s.
+
+#### Connections (2026-11-13)
+
+Reviewer B found that the short test failed with `OSError: [Errno 49] Can't assign requested
+address` (EADDRNOTAVAIL) when several copies overlapped. Six copies started within 30 seconds of six
+others: in the second round 4 errored in the fixture and 2 failed with non-200 responses (the
+proxy's own connect to the fake upstream failing). Twelve at once: 11 errored and 1 failed. That is
+the likely cause of the two fixture errors in the first loop of the flake check.
+
+The cause: the side of a TCP connection that closes first holds it in TIME_WAIT, on macOS for 30
+seconds (`net.inet.tcp.msl` is 15,000 ms), and a TIME_WAIT on a local port keeps that port from new
+connections. This machine has 16,384 of them (49152 to 65535). The driver opened a connection per
+request and closed it, and the proxy opens a new upstream connection per request and closes it
+after the reply. Counted with `netstat -an -p tcp` right after one run, on the run's own ports (the
+machine as a whole had 2,900 to 6,300 TIME_WAIT sockets from other sessions throughout):
+
+| | Driver to proxy | Proxy (and direct sends) to fake upstream | Local ports held |
+|---|---|---|---|
+| Before (e14f6630) | 854 | 874 | 1,728 |
+| After, two runs | 102 | 874 on the upstream's listening port; 1 and 4 of them also on a local port (both sides closed at once) | 103 and 106 |
+
+The "after" runs came before the 104-byte sends were added, which add one driver connection and 40
+upstream connections to a run.
+
+What changed, in the harness only:
+
+- The driver keeps one HTTP/1.1 connection per client open between requests (`run.Client`), as
+  Claude Code does: one for the session, one each for the first-request and 104-byte sends (two
+  for the 104-byte sends since 2026-11-14; see "The 40 ms wait on Linux" below), one per client of
+  the burst. A connection is opened before the request's clock starts, and a connect that fails
+  with EADDRNOTAVAIL is retried with a growing pause. The wait is 30 seconds in all for the run
+  (`run.PATIENCE`); until 2026-11-14 each connect had 30 seconds of its own, so a run on a machine
+  whose ports stayed used up took about 22 minutes to fail.
+- The fake upstream answers with `Connection: close` and closes first, so the TIME_WAIT of each of
+  the proxy's upstream connections is on the upstream's listening port and holds no local port. The
+  proxy reads each reply to its last chunk before either side closes, so what it does is unchanged.
+- The proxy itself was not changed. **Finding:** it opens a new upstream connection per request by
+  design (`contexto/proxy.py`: "a new connection per request: nothing is pooled or reused"). A
+  short run makes 934 of them (634 for the session, 200 for the burst, 100 for the first-request
+  and 104-byte sends; 914 before the second set of 104-byte sends), and the full run one per
+  request it forwards. At the rate of a real session, a few requests a minute, the ports this holds
+  are negligible. The cost that matters is elsewhere: `ContextoProxy.connection()` builds a new
+  `_UpstreamHTTPS` with `ssl.create_default_context()` for every request, so each request to a
+  real HTTPS upstream also pays a TCP connect, a TLS handshake (at least two round trips to the
+  host) and the building of a context with the CA store loaded (2 to 3 ms on this machine: over
+  20 calls, Reviewer A measured 2.4 ms minimum and 2.7 ms median, and I measured 2.1 and 2.2 ms on
+  2026-11-14 at a load of about 5). Claude Code without Contexto keeps its
+  upstream connection open. The fake upstream is plain HTTP on 127.0.0.1, so the harness cannot
+  measure these costs, and none of its added-time figures include them. What they cost a session
+  was not measured.
+- `test_the_driver_keeps_its_connections_open` checks the counts on every run (104 driver
+  connections, and one upstream connection per forwarded request and direct send).
+
+After the change, twelve copies at once and then twelve more as soon as they ended, done twice
+(the second time on the final code, with the 104-byte sends): 24 of 24 passed each time, none with
+EADDRNOTAVAIL, at loads of 9 to 24. The machine's TIME_WAIT count peaked at 26,046 and 26,365,
+more than the 16,384 local ports, which shows that the sockets on the fake upstream's listening
+port do not use them up. The copies' added time was 17.4 to 24.3 ms (median), p95 31.6 to 78.4 ms,
+growth 22.7 to 34.9 ms per million tokens.
+
+Other test files on this machine have failed with the same error under load
+(`tests/test_launcher.py`). [Inference] The old harness plausibly contributed: each whole-suite run
+held about 1,700 local ports for 30 seconds while its short test ran, so four to six suites
+reaching it within half a minute of each other, on top of the 1,400 to 6,000 sockets other loopback
+tests hold, could take all 16,384, and any process connecting in that window fails. It was not the
+only load on the ports, and no `test_launcher.py` failure was reproduced here.
+
+#### The 40 ms wait on Linux (2026-11-14)
+
+Reviewer B found that, once the driver kept its connections open, every request on GitHub's Ubuntu
+runners took about 41 ms more, whatever its size. macOS showed no such wait. **Finding: the wait is
+the proxy's.** It comes from how the proxy writes its responses, and a client that keeps its
+connection open to the proxy on Linux, as Claude Code does, meets it on every request.
+
+[Inference, from the code and the measurements below] The proxy's handler (`contexto.proxy._Handler`,
+a `BaseHTTPRequestHandler`) leaves Nagle's algorithm on, as `socketserver` does by default
+(`disable_nagle_algorithm = False`). It writes a response's headers and then each chunk in separate
+`send` calls. Nagle holds the first chunk until the client has acknowledged the headers. On a
+connection that has carried a request and a response before, Linux delays that acknowledgement by
+its minimum of 40 ms, hoping to send it with data. A new connection acknowledges at once, which is
+why the driver's connection per request until 2026-11-13, and the direct sends to the fake
+upstream (which closes each connection), did not show the wait.
+
+Reviewer B suggested that the driver's request writes were the cause (`http.client` sends a
+request's headers and body in two calls). They are not: `http.client.HTTPConnection.connect` has
+set `TCP_NODELAY` on every Python CI runs (3.12 to 3.15). The driver now sets it as well
+(`run.Client.connect`), so its timings do not depend on that. As expected, this changed nothing.
+
+To measure it, the short run sends the 104-byte request 20 more times after `worker.py`'s `nagle`
+command has set `_Handler.disable_nagle_algorithm` in the proxy process: the package with
+`TCP_NODELAY` on its accepted sockets, as an experiment in the harness only. It also reports how
+much of the request's added time comes before the response's headers. Neither is budgeted. In CI
+run 43552340153 at 8e0dc259, on the four Ubuntu legs (Python 3.12 to 3.15, 4 CPUs, loads 0.5 to
+0.9), in milliseconds over a direct send:
+
+| | Ubuntu, the package as shipped | Ubuntu, `TCP_NODELAY` on the proxy's sockets | This machine (macOS), 10 runs |
+|---|---|---|---|
+| 104-byte request | 41.3 to 41.5 | 0.79 to 1.47 | 0.47 to 0.59 as shipped, 0.46 to 0.58 with it |
+| of which before the response's headers | 0.90 to 0.98 | | 0.27 to 0.33 |
+| First request (50,838 bytes) | 44.8 to 45.2 | not measured | 2.39 to 2.85 |
+
+So about 40.5 ms of each request's added time on Ubuntu comes after the proxy has sent the
+response's headers, and it goes when the proxy's sockets have `TCP_NODELAY`. The fix belongs in the
+package (for example `disable_nagle_algorithm = True` on `_Handler`, or one write for the headers
+and the first chunk), which this PR does not change; it is recorded here for a separate issue.
+What it costs a real session was not measured: a real upstream's replies stream over seconds, and
+the wait is per response, not per chunk, in these measurements.
+
+What the Ubuntu legs measure, before and after (Reviewer B's figures for the first two columns):
+
+| | e14f6630 (run 43365787007), a connection per request | bd7b8dd8 (43548374232), kept open | 8e0dc259 (43552340153), kept open, driver `TCP_NODELAY` |
+|---|---|---|---|
+| Added time per request, median | 16.5 to 23.6 ms | 54.3 to 65.6 ms | 61.8 to 65.7 ms |
+| p95 | | 64.0 to 81.3 ms | 78.3 to 99.0 ms |
+| Growth per million tokens | | 19.3 to 37.3 ms | 28.2 to 37.4 ms |
+| First request over a direct send | 4.4 to 5.4 ms | 43.4 to 45.1 ms | 44.8 to 45.2 ms |
+| 104-byte request over a direct send | not measured | 40.6 to 41.6 ms | 41.3 to 41.5 ms |
+| Duration of the short run | 14.6 to 23.7 s | 38.8 to 47.2 s | 45.9 to 48.4 s |
+
+The budgets were not changed. The median's margin on Ubuntu is 3.0 to 3.2 times, against 8.5 to
+12 times before the driver kept its connections open; growth's is 8.0 to 10.7 times. The harness
+could turn Nagle off in the proxy for the whole run to measure the proxy's work alone, but then the
+required check would no longer measure the package as it ships, so it does not.
+
+### Against the audit's four numbers
+
+An audit on 2026-11-12 measured four numbers on a fast Apple laptop; it did not record the turn
+size of the session it timed. [Rewritten 2026-11-13] The first version of this section compared
+them with four sizing runs whose outputs were not kept, made with a driver whose clock still
+included the TCP connect. Those numbers are replaced by fifteen runs of the final `short.py`, all
+in `results/short_2026-11-13.jsonl` (one JSON object per run, as `short.py --json` writes it; `short.py
+--spread FILE` prints the spread): three runs at each of five turn sizes, 200 turns each, except 60
+at 26,000 tokens, as Reviewer A ran it. Measured on the M5 Pro on 2026-11-13 at 1-minute loads of
+10.1 to 13.0, all at the head of this PR (b0e2dbc's package with main merged in).
+
+```
+for t in 3000 4000 5000 8000; do .venv/bin/python spikes/m2/scale/proxy/short.py --turn-tokens $t --repeat 3 --json out.jsonl; done
+.venv/bin/python spikes/m2/scale/proxy/short.py --turn-tokens 26000 --turns 60 --repeat 3 --json out.jsonl
+```
+
+| Quantity | Audit | Measured here (median of the runs, smallest to largest) | How |
+|---|---|---|---|
+| Added time per request | about +2 ms | 3.2 ms (2.5 to 4.7) for the session's first request (50,838 bytes); 0.73 ms (0.50 to 1.13) for a 104-byte request with no tools; 3.8 ms (2.9 to 5.0) as the intercept of the growth fit | through the proxy less straight to the fake upstream, median of 20 sends each, 15 runs |
+| Growth with history | about 13 ms per million tokens, turn size not recorded | 16.7 ms with 3,000-token turns, 18.6 with 4,000, 15.3 with 5,000, 12.5 with 8,000, 9.2 with 26,000 (each the median of 3 runs) | the growth fit over tool loops |
+| Throughput at 100 concurrent | 768 requests a second | 318 requests a second (248 to 417) | 200 copies of the 50,838-byte first request from 100 threads, 15 bursts |
+| Startup | 60 ms | 57.2 ms (49.6 to 73.1) | process start to `ready`, best of 3, 15 runs |
+
+**Growth per million tokens depends on the turn size.** Part of the proxy's cost per request is per
+message (hashing and classifying each one), so the same number of tokens in smaller turns, which
+means more messages, costs more. Each figure below is the median of three runs, the range in
+brackets:
+
+| Turn size | Growth of added time, ms per million tokens | Growth of the proxy's CPU time | Reviewer A, 2026-11-12, loads 10 to 12 |
+|---|---|---|---|
+| 3,000 tokens | 16.7 (16.7 to 19.9) | 16.6 | 18.9 |
+| 4,000 tokens | 18.6 (16.8 to 19.6) | 18.4 | 18.2 |
+| 5,000 tokens | 15.3 (14.9 to 16.6) | 15.0 | |
+| 8,000 tokens | 12.5 (12.2 to 13.1) | 12.2 | 16.2 |
+| 26,000 tokens (60 turns) | 9.2 (8.9 to 9.4) | 9.1 | 9.9 |
+
+The audit's "about 13 ms per million tokens" therefore matches 8,000-token turns here and not the
+short run's 3,000-token turns (about 17 to 19). The record's 8.5 ms per million tokens was measured
+with 26,000-token turns (`synth.Shape`'s default), where this package measures 9.2 at a load of 10.
+
+Added time depends on the request: the audit's 2 ms lies between the 0.73 ms of a 104-byte request
+and the 3.2 ms of a Claude Code-sized first request, of which about 1.4 ms is four store writes
+(`set_retained`, `set_turn_room` twice, `set_epoch`; measured on 2026-11-12, not in these files).
+Throughput here is about 40 percent of the audit's. What the audit sent is not recorded, and the
+100 clients here share one Python process with the fake upstream, so the two may not measure the
+same thing.
+
+Against the 2026-10-18 record ("Before and after", after the CPU fixes): a tool loop cost 8.5 ms
+more per million tokens of history then, with 26,000-token turns. [Rewritten 2026-11-13: this
+paragraph put the difference from the 13 to 17 ms of the sizing runs down to "this machine on this
+day". Reviewer A showed the cause is the turn size: those runs used turns of 4,000 to 8,000
+tokens.] At 26,000-token turns this package measures 9.2 ms per million tokens through HTTP (table
+above), and `cputime.py` gives the record's package and this one nearly the same slope.
+
+`cputime.py` runs the same requests through two source trees in turn, with no HTTP, and keeps each
+request's smallest CPU time over several repetitions. It gives each tree's `observe_usage` what that
+tree's proxy would: the reply's output tokens, and `tool_calls` and `tool_call_ids` where the tree
+takes them (62b02a1 takes neither). Its 26,000-token turns are `synth.Shape`'s default.
+
+```
+mkdir /tmp/r1018 && git archive 62b02a16 src | tar -x -C /tmp/r1018   # 62b02a1, the merge of #205 (the record's "after")
+.venv/bin/python spikes/m2/scale/proxy/cputime.py --src /tmp/r1018/src --src src --turns 17,76 --reps 3
+```
+
+The first version of this section called 62b02a1 "v0.2.9". That cannot be checked: its
+`pyproject.toml` says 0.1.0 and the v0.1.0 to v0.4.0 tags were deleted (D62). It is named by its
+commit now.
+
+CPU time depends on the load on this machine, so a comparison holds only between two trees run
+side by side in one invocation. The same 62b02a1 tool loop at 0.55M tokens cost 6.7 CPU-ms at a
+load of 8 to 13 (`results/cputime_2026-11-13.md`), 7.4 at a load of 10 (Reviewer A), and 16.3 to
+19.7 at loads of 32 to 51 (the two comparisons below). [Inference] At high load the scheduler puts
+work on efficiency cores and lowers clock speeds, which the smallest of a few repetitions does not
+remove; the 49.8 against 32.1 row below is the kind of outlier that follows.
+
+| History | Load | Tool loop, 62b02a1 | Tool loop, head | Rotating turn start, 62b02a1 | Rotating turn start, head |
+|---|---|---|---|---|---|
+| 0.55M | 8 to 13 (2026-11-13, committed) | 6.7 | 6.9 | 81 | 17 |
+| 2.07M | 8 to 13 (2026-11-13, committed) | 18.4 | 19.3 | 118 | 32 |
+| 0.55M | 10 (Reviewer A) | 7.4 | 7.5 | 88 | 18 |
+| 2.07M | 10 (Reviewer A) | 18.7 | 20.5 | 120 | 34 |
+| 0.55M, first comparison | 32 to 51 (2026-11-12) | 16.3 | 17.5 | 175 | 40 |
+| 0.55M, second | 34 | 19.7 | 21.5 | 222 | 51 |
+| 2.1M, first | 32 to 51 | 41.8 | 43.9 | 261 and 251 | 82 and 69 |
+| 2.1M, second | 34 | 49.8 | 32.1 | 299 and 310 | 47 and 55 |
+| 5.0M, first | 32 to 51 | 90.9 | 95.7 | 356 | 139 |
+| 5.0M, second | 34 | 89.7 | 100.4 | 353 | 149 |
+
+The 2026-11-12 rows used 5, 4 and 3 repetitions at the three sizes in the first comparison and 3 in
+the second; their output was not kept. In them `observe_usage` was given 180 output tokens and no
+`tool_calls`, which the CPU time hardly depends on.
+
+- Slope of a tool loop, 0.55M to 2.07M: 62b02a1 7.7 and the head 8.1 ms per million tokens at a
+  load of 8 to 13; 7.4 and 8.5 in Reviewer A's run at a load of 10. The record's 8.5 is in the same
+  range. At loads of 32 to 51 the same code measured 15.6 to 17.5, about twice as much: the load,
+  not the package, doubles CPU time there.
+- Per tool loop the head was slower in 9 of the 10 rows, by 1 to 12 percent (3 and 5 percent in the
+  committed run), and 36 percent faster in the one outlier. That leans towards the head costing a
+  few percent more per tool loop. With one to three runs per row and a spread between runs as
+  large as the difference, it is not established.
+- A rotating turn start cost 2.4 to 6.4 times less CPU on the head in every row. That is D34's page
+  catalog (next section).
+
+### The full run at v0.5.24
+
+```
+.venv/bin/python spikes/m2/scale/proxy/run.py --label v0524-1          # 0.5M to 30M
+.venv/bin/python spikes/m2/scale/proxy/summarize.py v0524-1
+.venv/bin/python spikes/m2/scale/proxy/fidelity.py --turns 30          # writes results/fidelity_first_30.json
+.venv/bin/python spikes/m2/scale/proxy/leak.py --at 0.5 --turns 3 --label check
+```
+
+All four ran to the end at b0e2dbc, as did `run.py --reminders mixed` to 2M and `fidelity.py --turns
+30 --reminders mixed` (both fidelity runs: rotations, pages and next-turn requests equal). The
+small runs' outputs were not kept.
+
+The kept run, `results/*_v0524-1.*`, was rerun on 2026-11-13 with the final harness (commit
+d37d347a; nothing `run.py`, `worker.py`, `synth.py` or `upstream.py` does changed after it), so
+`requests_v0524-1.csv` has every column the harness writes, `proxy_cpu_s` included. The first
+`v0524-1`, taken on 2026-11-12 at loads of 26 to 42 by an earlier revision of the harness (34
+columns, no `proxy_cpu_s`), is replaced; its sizes, counts and rotations were the same as the
+rerun's. The package is b0e2dbc's with main merged in, which changed only `contexto/__init__.py`
+and `contexto/cli.py` (the version and packaging); the proxy and the engine are v0.5.24's. The
+rerun took 241 s at loads of 9 to 18, against the record's 420 s or so at 2 to 7, so its timings
+are still not comparable with the record's and are not in the table.
+
+To tell the two causes of the differences apart, the same run was made once more at the same
+package with the October `synth.py` (only the names the repaired harness imports were added to it),
+`results/*_v0524-synth1017-1.csv`, with `--keep-going` because that session logs
+`session_start_unrecognised` and `mcp_tools_missing`. Against `perf-1` of 2026-10-18:
+
+| | 2026-10-18 (`perf-1`): October package and synth | 2026-11-13, head package, October synth | 2026-11-13 (`v0524-1`): head package and synth |
+|---|---|---|---|
+| Turns at 0.5M, 2M, 5M, 10M, 30M | 17, 76, 188, 376, 1,140 | the same | the same |
+| Largest upstream request measured | 135,954 tokens | 136,105 | 136,176 |
+| Largest last request of a fast-forwarded turn | 144,176 tokens | 143,940 | 144,011 |
+| `over_bound`, `bound_too_small`, `transform_error`, non-200 | 0 | 0 | 0 |
+| Rotations through 30M (session log) | 557 | 559 | 559 |
+| Fast-forward rotations by reason: `bound`, `min_turn_room`, `window_minimal` | 370, 160, 4 | 370, 163, 4 | 371, 161, 4 |
+| F | 69,565 to 70,031 | 69,716 to 70,182 | 69,786 to 70,252 |
+| W | 42,469 to 55,435 | 42,319 to 55,284 | 42,249 to 55,214 |
+| Pages and store size at 30M | 1,145 and 56.78 MB | 1,145 and 56.83 MB | 1,145 and 56.84 MB |
+| Peak RSS of the checkpoint's proxy at 0.5M, 2M, 5M, 10M, 30M | 41, 124, 322, 756, 1,573 MB | 60, 135, 332, 544, 1,676 MB | 51, 119, 338, 761, 1,663 MB |
+
+What each change accounts for:
+
+- **The synth change** (third column against the second: same package, the request content of
+  this PR against October's) moves F up and W down by 70 tokens, the 70 tokens the head grew by,
+  and the largest requests by 71. It changes 12 of the 1,097 fast-forward rotation decisions the
+  two runs share: two rotations change reason (turns 90 and 426, `min_turn_room` to `bound`), one
+  is added (a `min_turn_room` at turn 338), and a run of five `bound` rotations at turns 296 to 304
+  becomes four, each one turn later. The counts by reason (`bound` 371 against 370,
+  `min_turn_room` 161 against 163) are also not over the same turns: turns 382 and 383 were
+  fast-forwarded in the October-synth run (with a `min_turn_room` rotation at 383) and measured
+  over HTTP in the other (1,099 against 1,097 fast-forward rows, 140 against 150 request rows).
+  The session log counts 559 rotations in both at 30M, but 186 against 187 at the 10M checkpoint.
+- **The package and the repaired harness** (second column against the first: the same October
+  request content) move F up and W down by 151 tokens, add 2 rotations (557 to 559), change 44 of
+  the 1,097 fast-forward rotation decisions the two runs share (3 more `min_turn_room` rotations
+  net), and lower the largest fast-forwarded last request by
+  236 tokens. These include what the harness now does as the proxy does (D40's `tool_calls`, the
+  Claude Code headers, 420 output tokens for a reply with no tool call) as well as three weeks of
+  package changes; this run does not separate those. In the second column the engine also did not
+  recognise the session start (`session_start_unrecognised`), which the third column's synth fixes.
+- Nothing in either change comes near the bound: every request is at least 5,800 tokens under it.
+
+Peak RSS at 30M is from one process that handled 17 requests, once per run: 1,663 MB in the rerun,
+822 MB in the replaced first run and 1,573 MB in the record, so it varies by about two times
+between runs and one run says little. `leak.py --at 30` was not run.
+
+One timing survives the load, because it fell so far. `index_text` per rotation at 30M (two
+calls, fast-forward, median of the rotating turns among the last 60) was 0.272 s in the record, of
+which 0.167 s was reading pages. In the rerun it was 0.022 s at loads of 9 to 13, with 0.015 s in
+the catalog's `entries` (0.045 s and 0.027 s in the first run, at loads of 27 to 40): D34's
+catalog reads one to three page files per rotation where `_pages` read all 1,145 twice. A proxy
+process started on an existing store reads every page once, at its first rotation (1,160 page
+reads in one request at 30M, in both runs).
+
+### Not measured
+
+- Wall-clock timings of the full run at a load comparable with the record's. The rerun was at
+  loads of 9 to 18. `cputime.py` compared CPU time with 62b02a1 up to 5M tokens; nothing was
+  compared at 10M or 30M.
+- The short run on a quiet machine in its final form. Every one of its runs here was at a load
+  of 9 or more; the CI runs (loads under 2.4) are the quiet ones.
+- Throughput with the clients in other processes than the fake upstream.
+- `leak.py` at 5M or 30M, and `fidelity.py` at 120 turns, at this commit. Both were run only at
+  small sizes to check that they work.
+- Which package change since October moves F by 151 tokens and adds the two rotations (see "The
+  full run at v0.5.24"); the comparison separates the synth change from everything else, not the
+  package from the harness's own fixes.
+- Whether the old harness's port use caused the `tests/test_launcher.py` failures seen on this
+  machine (see "Connections").
+- Windows, which the package does not support.

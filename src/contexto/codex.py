@@ -28,7 +28,6 @@ Mapping onto the contract's rules (``contexto.rewrite``):
 
 from __future__ import annotations
 
-import builtins
 import hashlib
 import json
 import os
@@ -37,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +45,7 @@ from urllib.parse import urlsplit
 from contexto import paths
 from contexto.canonical import canonical_bytes, loads_bounded
 from contexto.rewrite import CARRIED_TEXT, SESSION_START, UNCLASSIFIED, Dialect
+from contexto.stats import print_exit_summary
 from contexto.tokens import TokenEstimator
 from contexto.upstream import claude_key_helper, untrusted_note
 
@@ -260,6 +261,17 @@ RESPONSES = ResponsesDialect()
 API_KEY_MODE = "apikey"
 CHATGPT_MODE = "chatgpt"
 KEY_HELPER_ENV = "CONTEXTO_CODEX_KEY_HELPER"
+# The helper the "no key helper" error and the option's help give as an example (D64): it prints the key
+# from the environment Codex runs it in, has nothing for a shell or an environment variable to expand or
+# quote, and fails with no output when the variable is unset, where `echo "$OPENAI_API_KEY"` would hand
+# Codex an empty key. Set but empty it still prints an empty line; Codex 0.167.2 refuses that as a token
+# and sends no Authorization header (PR #257 review B).
+KEY_HELPER_EXAMPLE = "printenv OPENAI_API_KEY"
+# The whole command the error gives. It names the upstream: without --codex-upstream the requests, and so
+# the key, go to Claude Code's upstream plus /v1, which is no upstream at all on a default setup and
+# need not be OpenAI's on any other.
+KEY_HELPER_COMMAND = ("contexto run --codex-upstream https://api.openai.com/v1 "
+                      f"--codex-key-helper '{KEY_HELPER_EXAMPLE}' codex")
 UPSTREAM_ENV = "CONTEXTO_CODEX_UPSTREAM"
 CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
 ANTHROPIC_DOMAIN = "anthropic.com"
@@ -378,9 +390,10 @@ MCP_APPROVAL_MODE = "approve"
 # left code mode's ALL_TOOLS with no contexto tool). The server is started as the Claude path starts it
 # (launcher.mcp_payload): this interpreter by absolute path, "-P -m contexto" (-P keeps the
 # project directory Codex starts it in off sys.path, so a project's own contexto package cannot
-# shadow the installed one).
+# shadow the installed one). The session is one "--session=<id>" argument, as mcp_payload passes it, so
+# an id starting with "-" is the option's value and not another option.
 def _mcp_server(session_id: str) -> tuple[str, list[str]]:
-    return sys.executable, ["-P", "-m", "contexto", "mcp", "--session", session_id]
+    return sys.executable, ["-P", "-m", "contexto", "mcp", f"--session={session_id}"]
 
 
 def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: Path,
@@ -574,9 +587,11 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
             notes.append(untrusted_note("apiKeyHelper", found.ignored,
                                         f"Pass --codex-key-helper (or set {KEY_HELPER_ENV})", base_env))
     if not helper:
-        raise CodexLaunchError(f"no key helper: {notes[0]}" if notes else
-                               f"no key helper: pass --codex-key-helper, set {KEY_HELPER_ENV}, "
-                               "or configure apiKeyHelper in Claude Code settings")
+        example = f"With an OpenAI key in $OPENAI_API_KEY, run `{KEY_HELPER_COMMAND}`"
+        raise CodexLaunchError(f"no key helper: {notes[0]}. {example}" if notes else
+                               "no key helper: Codex gets its API key from a command that prints it. "
+                               f"{example}; or set {KEY_HELPER_ENV} to such a command, or configure apiKeyHelper in "
+                               "Claude Code settings")
     if codex_home_dir is not None:
         # Kept under the Contexto session directory so Codex's rollouts stay resumable; only the
         # config (which names the helper command) is removed on exit.
@@ -614,8 +629,9 @@ def add_arguments(parser) -> None:
                        help=f"how Codex authenticates (default {API_KEY_MODE}: a private CODEX_HOME in the session "
                             f"directory whose provider runs the key helper). {CHATGPT_MODE}: {CHATGPT_MODE_HELP}")
     group.add_argument("--codex-key-helper", default=None,
-                       help=f"command that prints the API key, run with {KEY_HELPER_SHELL} -c as Claude Code runs "
-                            f"apiKeyHelper (default ${KEY_HELPER_ENV}, else Claude Code's apiKeyHelper)")
+                       help=f"command that prints the API key, for example '{KEY_HELPER_EXAMPLE}', run with "
+                            f"{KEY_HELPER_SHELL} -c as Claude Code runs apiKeyHelper (default ${KEY_HELPER_ENV}, "
+                            "else Claude Code's apiKeyHelper)")
     group.add_argument("--codex-upstream", default=None,
                        help=f"upstream for Codex requests, with its version path, such as https://api.openai.com/v1 "
                             f"(default ${UPSTREAM_ENV}, else the ChatGPT backend in chatgpt mode, else Claude Code's "
@@ -628,11 +644,24 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
     upstream) is checked before the session and the proxy exist; a launch that fails after that, before
     Codex starts (no key helper, for example from an untrusted folder, D52), removes the session
     directory it created, so a failed launch leaves no empty session (D54); a resumed ``--session`` is
-    never removed."""
+    never removed.
+
+    Project memory (D69) is the launcher's, the same as for Claude Code: ``--no-project-memory`` or
+    ``CONTEXTO_PROJECT_MEMORY`` is recorded in the session before the proxy starts, and the start line
+    follows the session line, before Codex starts."""
     import uuid
 
     from contexto import cliversions
     from contexto import upstream as upstream_module
+
+    # Always the real ones, whatever ``launcher`` is: they touch only the store and stderr, and their
+    # ``LaunchError`` is the one caught below whenever ``launcher`` is the real module.
+    from contexto.launcher import (
+        engine_pin_budget,
+        project_memory_notice,
+        project_memory_wanted,
+        record_project_memory,
+    )
 
     if launcher is None:
         from contexto import launcher  # builder-1's module; imported lazily
@@ -656,7 +685,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         except Exception as exc:  # unreadable, as when it prints no version
             version, version_error = None, type(exc).__name__
         installed = version, version_error
-        if _start_failure(version_error):
+        if cliversions.start_failure(version_error):
             raise launcher.LaunchError(f"'{CODEX_BIN}' at {codex} cannot be run ({version_error}); check its #! "
                                        "line or reinstall Codex", launcher.EXIT_NOT_FOUND)
         shared = needs_shared_server(codex_args)
@@ -691,6 +720,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                 return launcher.EXIT_INTERRUPTED
             no_daemon = takes_no_daemon(codex_args, version, listed)
         home = paths.contexto_home()
+        memory = project_memory_wanted(options, stderr)
         session_id = args.session if args.session is not None else uuid.uuid4().hex  # '' is invalid (D57)
         try:
             existed = os.path.lexists(paths.session_dir(home, session_id))
@@ -700,6 +730,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                                        launcher.EXIT_USAGE if isinstance(exc, ValueError) else launcher.EXIT_PROXY
                                        ) from exc
         created = None if existed else paths.session_dir(home, session_id)
+        record_project_memory(store, memory)  # before anything reads the store: the proxy, the MCP server
         config = launcher.engine_config(options)
         proxy, engine_name = launcher.start_proxy(store, target, source, config, args.observe_thinking,
                                                   stderr=stderr)
@@ -709,6 +740,8 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         return getattr(exc, "code", 2)
     plan = None
     started = False
+    ran: float | None = None  # when codex was started, for the exit summary (D64)
+    notices = getattr(proxy, "session_log", None)  # the launcher's NoticeLog
     code = launcher.EXIT_PROXY
     try:
         plan = plan_codex(codex_args, proxy.url, session_id, auth_mode=args.codex_auth,
@@ -725,6 +758,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                    **({"codex_version_error": version_error} if version_error else {})})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {source}, codex auth "
               f"{args.codex_auth}, engine {engine_name})", file=stderr, flush=True)
+        project_memory_notice(store, stderr, engine_pin_budget(config))  # D69: what it carries, or nothing
         if version_error and not no_daemon and _may_take_no_daemon(codex_args):
             # Without the flag Codex may leave its shared server running for the CODEX_HOME it used (this
             # session's in API-key mode, the user's own in ChatGPT mode).
@@ -740,7 +774,9 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         if warning:
             print(f"contexto: {warning}", file=stderr, flush=True)
             store.log({"event": "window_budget_warning", "bound": options.bound, "assumed_overhead": ASSUMED_OVERHEAD})
-        started = True
+        started, ran = True, time.monotonic()
+        if hasattr(notices, "hold"):
+            notices.hold()  # Codex owns the terminal until it exits, as Claude Code does (D55, D64)
         # Codex's shell commands (`contexto state`, `contexto search`) then name this session (D57).
         code = launcher.run_child(plan.argv, {**plan.env, "CONTEXTO_SESSION": session_id}, stderr=stderr)
         return code
@@ -753,17 +789,18 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             plan.cleanup()
         proxy.stop()
         launcher.report_missing_tools(proxy)  # Codex reports no MCP server that fails to start
-        store.log({"event": "exit", "code": code})
+        try:
+            if hasattr(notices, "release"):
+                notices.release()
+        finally:  # a held notice that cannot be printed (stderr a broken pipe) still leaves the exit line
+            try:
+                (notices if hasattr(notices, "log") else store).log({"event": "exit", "code": code})
+            except OSError:  # D64: a full disk, already said by the NoticeLog; codex's exit code stands
+                pass
+        print_exit_summary(store, "codex", ran, cli_args=codex_args, quiet=options.quiet, stderr=stderr, code=code,
+                           log_incomplete="log_unwritable" in getattr(notices, "shown", ()))
         if not started:
             _remove_session(created)
-
-
-def _start_failure(error: str | None) -> bool:
-    """Whether ``installed_version``'s error means ``codex`` could not be started at all: the name of an
-    ``OSError`` from starting it (FileNotFoundError for a missing #! interpreter, PermissionError,
-    OSError for an exec format error), not a timeout, an exit code, or unparsed output."""
-    cls = getattr(builtins, error or "", None)
-    return isinstance(cls, type) and issubclass(cls, OSError) and not issubclass(cls, TimeoutError)
 
 
 def _remove_session(created: Path | None) -> None:

@@ -11,6 +11,124 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
+- Search finds more. When no paged-out turn holds every word of a query, `contexto_search` and
+  `contexto search` now give approximate matches and say so: question words are dropped,
+  `refresh_token` finds `refreshToken`, a turn holding enough of the query (rarer words count more)
+  is returned, and one one-letter typo is tolerated. Each match names the words it matched and the
+  ones it did not. A query that some turn holds every word of gets the same result as before
+  ([docs/search.md](docs/search.md)). `contexto search --json` marks such a result `approximate` and
+  gives each hit's `matched` and `missing` words.
+- A new session starts with the open obligations and active decisions the model pinned in earlier
+  sessions of the same project, so a standing rule pinned yesterday is in view from the first
+  request. A project is the git repository the session started in (a linked worktree or a
+  submodule is its own), else the directory itself. Only pins the proxy saw the main conversation
+  make are carried, never a subagent's: Claude Code subagents are told apart by their
+  `X-Claude-Code-Agent-Id` header (a request that carries it is never read for pins, even a fork's
+  that has the main conversation's key), and a conversation that became the main one only by having
+  more turn starts (a subagent without that header, a Codex child conversation) is not trusted. The model
+  sees carried records as records from an earlier session, not as instructions, with each record's
+  text quoted and escaped. See [docs/project-memory.md](docs/project-memory.md).
+- Codex sessions give nothing to project memory. On codex-cli 0.163.0, as measured, the model calls
+  Contexto's tools from inside Codex's code-mode `exec` tool, which the proxy does not read for this,
+  so a Codex session's pins are never carried and its closures of carried records count only in
+  that session. A Codex session does start with what Claude Code sessions of the project carried.
+  Not checked on codex-cli 0.166.0 or live.
+- A closure or replacement made in the main conversation of any session of the project applies to
+  every session of it, running sessions included (before a session's first rotation from its next
+  turn start; after it, from its next rotation). Forgetting a session never reopens what it closed;
+  pruning it does.
+- At start, `contexto run` prints how many records were carried and from how many sessions, and
+  `contexto state` lists them under their own heading; `contexto state --json` lists them under
+  `carried`.
+- `contexto project show` lists a project's sessions and what a new session would carry.
+  `contexto project forget --record ID`, `--session ID` (full ids only) or `--all` takes records or
+  sessions out of it; nothing is deleted until `contexto sessions prune`.
+- `contexto run --no-project-memory`, or `CONTEXTO_PROJECT_MEMORY=0`, keeps a session out of
+  project memory: it carries nothing and gives nothing to later sessions. It stays off when you
+  resume it, and a resumed session stops sending what it carried: at once before its first
+  rotation; after it, from its next rotation.
+- The model is now told to pin only what you state in your own messages, never a rule found in tool
+  results, files, web pages or another agent's output. This applies to every session.
+- `contexto state` shows a character of a stored record that could move the cursor, end the line,
+  or reorder or hide text as its escape. Joiners and other format characters print as they are, and
+  so does a variation selector right after the emoji or ideograph it varies; anywhere else it is an
+  escape. One zero-width character between letters prints (a ZWNJ in Persian, a ZWJ in an emoji);
+  a run of them, or one next to a space, is escapes.
+- Records pinned before this release are never carried, so project memory starts empty.
+- `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
+  described in the command's `--help`; an error is still one line on stderr with the usual exit
+  code. `contexto state --json` includes the store faults `contexto stats --json` shows.
+- `contexto version` and `contexto -V` print the same line as `--version`. `contexto sessions`
+  with no command lists the sessions.
+- On a fresh install, `state`, `search`, `recall` and `sessions` say to run `contexto run claude`
+  first.
+- When `claude` or `codex` is not on `PATH`, the error gives the vendor's install command. Every
+  `contexto run claude` launch error now starts with `contexto:`, as `run codex` errors did.
+- The Codex "no key helper" error gives a whole command that works with an OpenAI key in
+  `OPENAI_API_KEY`:
+
+  ```sh
+  contexto run --codex-upstream https://api.openai.com/v1 \
+    --codex-key-helper 'printenv OPENAI_API_KEY' codex
+  ```
+
+- The MCP server reports the package version in `serverInfo` (it said `0.1.0`).
+- `contexto run codex` with a session id that starts with `-` no longer starts Codex without
+  Contexto's tools: the MCP server now gets the id as one `--session=<id>` argument, as Claude Code's
+  already did.
+- `contexto run claude` and `contexto run codex` print a short summary on stderr when the CLI
+  exits: the largest prompt against the bound, the pages this run added and the pages the session
+  has on disk, the recall and search calls, the share of input read from cache, and whether Claude
+  Code compacted. `--quiet` or `CONTEXTO_QUIET=1` drops it; warnings are still printed. It is not
+  printed for `--version` or `--help`.
+- `contexto stats [SESSION] [--last-run] [--json]` prints the same numbers for any session, with
+  the requests, the bytes sent against the bytes forwarded, and every fault. docs/stats.md defines
+  each number and says which are measured, which are estimates, and which the log cannot show.
+- A store that cannot be written (a full disk, a permission problem, a damaged page) is no longer
+  silent. Contexto stops paging when that happens, so requests can exceed the bound. It now says
+  so once per cause when the CLI exits, in `contexto stats`, and in `contexto state`, with what
+  to do. The `store_error` log entry names the errno (`ENOSPC`, `EACCES`).
+- A full disk no longer replaces the CLI's exit code. A session log that cannot be written is
+  reported, and the CLI's own exit code is kept. Ctrl+C while the summary is being built keeps the
+  exit code and the resume line too.
+- `contexto stats` and `contexto state` never wait for another process that holds a session's
+  ledger lock, and reading a session with them creates nothing in it.
+- `contexto run codex` holds its warnings until Codex exits, as `contexto run claude` does, so a
+  warning no longer lands in Codex's screen mid-run.
+- A number is shown only when the log supports it. The pages a run added come from the store's
+  own count, so a launch that pages the history again (after an edited CLAUDE.md, a CLI update or
+  another `--model`) does not count it twice. The cache share covers only responses that reported
+  one. "Claude Code did not compact" is said only for requests from a Claude Code version the
+  check was measured on.
+- The session log has two new fields: `pages` on `proxy_start` and `proxy_stop` (the page files in
+  the store), and `cli_session` on a Messages request's entry (whether it carried Claude Code's
+  session id).
+- New command: `contexto doctor` checks what `contexto run` needs from the directory you run it
+  in, and prints one line per check with the next step under a warning or a failure. It checks
+  Python, the `claude` and `codex` CLIs and their versions, the Claude Code settings files, the
+  upstream and what sets it, whether a key or key helper is configured, the store home, the MCP
+  server, and whether `contexto run claude` would refuse to launch because a cloud-provider switch
+  is on (a failure, with the launcher's own message). `--json` prints the same results for scripts.
+  It makes no network request, runs no key helper and prints no key. Details:
+  [docs/doctor.md](docs/doctor.md).
+- `contexto run claude` now refuses to launch (exit 2) when a cloud-provider switch is on, in the
+  environment or in a Claude Code settings file: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+  `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS` or
+  `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` (D70, D64). With one on, Claude Code sends its requests to
+  that provider and none through the proxy, so the session would not be kept under the bound;
+  0.5.24 launched anyway. It also refuses while a settings file that may turn one on cannot be read.
+  The message says which switch and where; to keep using the provider, run `claude` without
+  Contexto.
+- A Claude Code settings file that starts with a UTF-8 byte order mark is read. Claude Code reads
+  such a file, and Contexto treated it as absent, so `contexto run` missed an
+  `ANTHROPIC_BASE_URL` or `apiKeyHelper` set there and used another upstream than Claude Code's own.
+- A Claude Code settings file is now read as Claude Code reads it in four more cases: a named
+  pipe in its place is never opened for reading (`contexto run` waited on it for ever), a file
+  holding `NaN` or `Infinity` is ignored, a file holding a number longer than 4,300 digits is read,
+  and a file whose `env` block is not a JSON object is ignored whole, so an `apiKeyHelper` in it
+  is no longer used (Claude Code loads nothing from it either). `contexto run claude`
+  refuses to launch while a named pipe, or a file it cannot parse that may name a cloud-provider
+  switch, is in a settings file's place (D70).
 - On Claude Code a long tool loop, in the main conversation or a subagent, no longer goes over the
   bound: Contexto now pages inside the running turn. Older tool results become stubs that name a
   page, which `contexto_recall` returns word for word, and the oldest tool rounds of a very long
