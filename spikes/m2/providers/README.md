@@ -113,7 +113,8 @@ loopback stubs that answer 401. Stub A is the environment's `ANTHROPIC_BASE_URL`
 settings file's; "proxy requests" are `request` events in a `contexto run claude -p` session log.
 Nothing was spent. These are the
 measurements behind two of the rules `contexto.upstream.read_settings_file` follows; the third,
-`NaN` and `Infinity`, is also in [D70-serve-probes.md](../../../docs/research/D70-serve-probes.md) §3.
+`NaN` and `Infinity`, is also in [D70-serve-probes.md](../../../docs/research/D70-serve-probes.md),
+"D70 review round", §3.
 
 | Settings file | What Claude Code did |
 |---|---|
