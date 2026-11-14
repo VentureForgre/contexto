@@ -64,7 +64,7 @@ def register(subparsers) -> None:
                     "shows: use more specific words. With --project too, "
                     "earlier: null when the session has no project view, else searched, skipped, "
                     "not_searched, in_view_skipped and sessions, each with session (its id), label (what "
-                    "--from takes), date, total (its matches), in_view (lines in view when it ended: turn "
+                    "--from takes), date, total (its matches), in_view (lines in view at its last request: turn "
                     "and text; on no page, so not recallable) and hits (its best pages, as above).")
     parser.add_argument("words", nargs="+", metavar="WORDS", help="words to find, in any order and case")
     add_session_option(parser)
@@ -75,7 +75,7 @@ def register(subparsers) -> None:
     parser.add_argument("--project", action="store_true",
                         help=f"also search the earlier sessions of the session's project (the newest "
                              f"{EARLIER_SESSIONS}), read-only: the best {EARLIER_HITS} matches of each, under a "
-                             "line with the session's label and date, lines still in view when it ended first; "
+                             "line with the session's label and date, lines in view at its last request first; "
                              "`contexto recall PAGE_ID --from LABEL` prints a page")
     parser.set_defaults(func=run)
 
@@ -184,9 +184,9 @@ def hit_json(page_id: str, page: dict, query: str,
 
 def search_earlier(store: SessionStore, query: str, after_hits: bool) -> None:
     """Print what the earlier sessions of the session's project hold of ``query`` (D69): for each with a
-    match, newest first, a line with its label and date as the MCP tool shows them, then its lines still
-    in view when it ended and its best pages. Those sessions are only read: nothing is locked, logged or
-    created in them."""
+    match, newest first, a line with its label and date as the MCP tool shows them, then its lines in
+    view at its last request and its best pages. Those sessions are only read: nothing is locked, logged
+    or created in them."""
     session_id = store.session_id
     found = store.search_earlier(query)
     if found is None:
@@ -201,7 +201,7 @@ def search_earlier(store: SessionStore, query: str, after_hits: bool) -> None:
                                           else f", the best {count} of {total} matching pages")
         print(f"[session {hits.label}, {hits.date}{best}:]")
         for line in hits.in_view:
-            print(f"> in view when it ended (turn {shown_turn(line)}): {line.line}")
+            print(f"> in view at its last request (turn {shown_turn(line)}): {line.line}")
         if hits.pages:
             if hits.in_view:
                 print()
@@ -211,7 +211,7 @@ def search_earlier(store: SessionStore, query: str, after_hits: bool) -> None:
     if not found.hits:
         print(f"no earlier session of this project contains every word of {query!r}", file=sys.stderr)
     if any(hits.in_view for hits in found.hits):
-        print("[a line in view when its session ended is on no page: contexto recall cannot print it]",
+        print("[a line in view at its session's last request is on no page: contexto recall cannot print it]",
               file=sys.stderr)
     if any(hits.pages for hits in found.hits):
         print(f"[to print a page of an earlier session: contexto recall PAGE_ID --session {session_id} "

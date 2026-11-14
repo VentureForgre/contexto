@@ -278,7 +278,7 @@ def test_two_sessions_one_project_search_reaches_every_paged_fact_and_a_session_
 
 def test_two_sessions_a_fact_said_in_the_last_turns_of_the_first_session_is_reachable(two):
     """The first session's last turns were never paged out; its last retained-window snapshot holds them,
-    and a project-scope search shows the line under the session, as in view when it ended."""
+    and a project-scope search shows the line under the session, as in view at its last request."""
     first, second = two.first, two.second
     assert reached(second, "project", TAIL) == [f.key for f in TAIL]
     assert reached(second, "session", TAIL) == []
@@ -288,14 +288,14 @@ def test_two_sessions_a_fact_said_in_the_last_turns_of_the_first_session_is_reac
         call = by_key[fact.key]
         lines = call.text.splitlines()
         line = next(x for x in lines if fact.value in x)
-        assert line == f"> in view when it ended (turn {turn}): {fact.line}"
+        assert line == f"> in view at its last request (turn {turn}): {fact.line}"
         assert lines[lines.index(line) - 1].startswith(f"[session {first.label}, ")
         assert mcp.EARLIER_IN_VIEW_NOTE in lines and mcp.EARLIER_READ_ON not in lines  # no page to read on
         assert call.event["earlier_in_view_hits"] == 1 and call.event["earlier_hits"] == 0
         spans = call.event["returned"]
         assert [s["source"] for s in spans] == ["earlier_in_view"] and "page_id" not in spans[0]
     for fact in FACTS:  # a paged fact is on a page, not in the last window
-        assert "in view when it ended" not in by_key[fact.key].text
+        assert "in view at its last request" not in by_key[fact.key].text
 
 
 def test_two_sessions_sizes(two):
@@ -727,7 +727,7 @@ def test_fifty_earlier_sessions_time(tmp_path, clean_env, monkeypatch):
 
     # The same searches once each earlier session's last window is large: its retained.json, which the
     # engine wrote from two short turns above, replaced by one of WINDOW_ENTRIES entries, one of which
-    # holds the query, so every earlier session has a line in view when it ended as well as its pages.
+    # holds the query, so every earlier session has a line in view at its last request as well as its pages.
     small_windows = [(home / "sessions" / session_id("fifty", n) / "retained.json").stat().st_size
                      for n in range(EARLIER)]
     for n in range(EARLIER):

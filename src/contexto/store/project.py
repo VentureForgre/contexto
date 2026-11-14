@@ -88,8 +88,9 @@ The API, for the engine, the launcher, the MCP server and the commands:
   ``scope: "project"`` and a recall with ``session`` (``SessionStore.search_earlier``,
   ``SessionStore.earlier_session`` and ``SessionStore.earlier_page``). Pages are read as the ledgers
   are: without a lock, and with nothing created or logged in the session read. A search reads each
-  earlier session's last retained-window snapshot (``retained.json``) the same way, for what was still
-  in view when it ended (``InViewLine``): those lines are on no page, so they cannot be recalled.
+  earlier session's last retained-window snapshot (``retained.json``) the same way, for what was in view
+  at its last request (``InViewLine``; a session created earlier may still be running): those lines are
+  on no page, so they cannot be recalled.
 """
 
 from __future__ import annotations
@@ -842,13 +843,15 @@ EARLIER_PAGES = 20_000
 # A later search finds the text of the sessions already read held, as far as the search budget goes,
 # and gets further.
 EARLIER_SECONDS = 30.0
-EARLIER_HITS = 3  # matches of one earlier session a search returns, its best: lines in view when it ended, then pages
+# Matches of one earlier session a search returns, its best: lines in view at its last request, then pages.
+EARLIER_HITS = 3
 _clock = time.monotonic  # what the deadline reads
 _PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")  # as ``contexto.store.check_page_id``
 # What a page file that is not a page record raises when it is loaded (``contexto.store.catalog.load_page``).
 PAGE_DAMAGE = (ValueError, KeyError, TypeError, AttributeError)
-# An earlier session's last retained-window snapshot (contract PR #125: its engine rewrote it at every main
-# request, ``{stamp, epoch, k, entries}``): the turns still in view when the session ended, which no page holds.
+# An earlier session's last retained-window snapshot (contract PR #125: its engine rewrites it at every main
+# request, ``{stamp, epoch, k, entries}``): the turns in view at its last request (when it ended, or now for
+# one still running), which no page holds.
 RETAINED_FILE = "retained.json"
 RETAINED_LIMIT = 16 << 20  # bytes of an earlier session's retained.json read at most: a larger one is skipped unread
 
@@ -875,7 +878,8 @@ class EarlierSession:
 
 @dataclass(frozen=True)
 class InViewLine:
-    """A matching line of what was in view when an earlier session ended (its last ``retained.json``). It is
+    """A matching line of what was in view at an earlier session's last request (its last ``retained.json``:
+    when it ended, or, for a session created earlier that still runs, its current window). It is
     on no page, so ``contexto_recall`` cannot read on from it: the line is all there is of it."""
 
     turn: int  # the snapshot entry's turn: turn starts counted from 1, as the engine's snapshot counts them
@@ -894,8 +898,8 @@ class SessionHits:
     date: str  # the UTC date it was created, YYYY-MM-DD
     found: int  # its pages that hold the query and can be read
     pages: tuple[tuple[str, dict[str, Any]], ...]  # the best of them, best first
-    in_view: tuple[InViewLine, ...] = ()  # matching lines in view when it ended, newest first; before the pages
-    in_view_found: int = 0  # every matching line in view when it ended; with ``found``, all its matches
+    in_view: tuple[InViewLine, ...] = ()  # matching lines in view at its last request, newest first; before the pages
+    in_view_found: int = 0  # every matching line in view at its last request; with ``found``, all its matches
 
 
 @dataclass(frozen=True)
@@ -1073,7 +1077,7 @@ class EarlierPages:
     def search(self, project: Project, query: str) -> EarlierSearch:
         """Search the newest ``EARLIER_SESSIONS`` earlier sessions of ``project``, newest first, and
         return the best ``EARLIER_HITS`` matches of each that has one: first the newest matching lines of
-        what was in view when it ended (its last ``retained.json``, matched as the current session's
+        what was in view at its last request (its last ``retained.json``, matched as the current session's
         window is, ``render.retained_matches``; at most ``EARLIER_HITS - 1`` when a page matches too, so
         its best page is always shown), then its best readable pages.
 

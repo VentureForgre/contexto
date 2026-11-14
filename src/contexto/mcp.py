@@ -4,8 +4,9 @@ When the session has a project view (D69: ``store.project()`` is not None when t
 ``contexto_search`` takes ``scope: "project"`` and ``contexto_recall`` takes ``session``, which reach
 the pages of the project's earlier sessions, read-only (``store.search_earlier``,
 ``store.earlier_session``, ``store.earlier_page``); a search also shows the lines each earlier session
-still had in view when it ended (its last ``retained.json``), which no page holds and recall cannot
-read. Without one the tool list and every reply are what they were before D69.
+had in view at its last request (its last ``retained.json``; a session created earlier may still be
+running), which no page holds and recall cannot read. Without one the tool list and every reply are
+what they were before D69.
 
 Claude Code spawns ``contexto mcp --session S`` from the launcher's ``--mcp-config``. The server
 speaks JSON-RPC 2.0, one message per line on stdin and stdout, and serves both protocol eras:
@@ -100,8 +101,8 @@ NO_HIT_SESSION = "No paged-out turn of this session contains every word of that 
 EARLIER_HEADER = "[earlier sessions of this project, newest first:]"
 EARLIER_NONE = "[No earlier session of this project matches.]"
 # After the earlier part when it shows a line of an earlier session's last window: no page holds that line.
-EARLIER_IN_VIEW_NOTE = ("[A line in view when its session ended is on no page, so it cannot be recalled: the line is "
-                        "all of it.]")
+EARLIER_IN_VIEW_NOTE = ("[A line in view at its session's last request is on no page, so it cannot be recalled: the "
+                        "line is all of it.]")
 EARLIER_READ_ON = ('[Read on: contexto_recall {"page_id": ..., "offset": ..., "session": "<label on the page\'s '
                    'session line>"}]')
 NOT_EARLIER_SESSION = ('That "session" is not an earlier session of this project. Use the label on a [session ...] '
@@ -1002,8 +1003,9 @@ class _EarlierPart:
 
     For each earlier session with a match, newest session first: a line ``[session <label>, <date>:]``
     (the label ``contexto_recall`` takes as ``session``, and the UTC date the session was created), then
-    its matching lines of what was in view when it ended (``> in view when it ended (turn N): ...``,
-    newest first, numbered as the current session's in-view lines are; on no page, so with no offset),
+    its matching lines of what was in view at its last request (an ended session's last window, or a
+    running one's current window: ``> in view at its last request (turn N): ...``, newest first, numbered
+    as the current session's in-view lines are; on no page, so with no offset),
     then its best pages, each shown as a hit of the current session is. When the room or the per-call
     limit cuts it, matches are left out from the end and one line says how many, and why. Then how many
     older sessions were not searched and how many could not be read, when there are any; when an
@@ -1020,7 +1022,7 @@ class _EarlierPart:
             count, total = len(hits.pages) + len(hits.in_view), hits.found + hits.in_view_found
             best = "" if total <= count else (f", the best {count} of {total} matches" if hits.in_view_found
                                               else f", the best {count} of {total} matching pages")
-            in_view = [[(f"> in view when it ended (turn {max(0, line.turn - 1)}): {line.line}",
+            in_view = [[(f"> in view at its last request (turn {max(0, line.turn - 1)}): {line.line}",
                          ("earlier_in_view", line.turn, line.message_index, line.start, line.end))]
                        for line in hits.in_view]
             pages = _with_context_header([(_hit_rows(page_id, page, query, session=hits.label), page)
@@ -1125,7 +1127,7 @@ def _spans(rows: list[Row]) -> list[dict[str, Any]]:
     earlier session's page (D69) are ``{source: earlier, page_id, start, end}``: the same shape as a
     paged span, under a source of their own, since the page is not this session's (a copied session
     directory can even hold the same page id) and the session it is in is never logged. A line an earlier
-    session had in view when it ended is ``{source: earlier_in_view, turn, message_index, start, end}``
+    session had in view at its last request is ``{source: earlier_in_view, turn, message_index, start, end}``
     into that session's snapshot entry, with no page id and no session, so it never credits recall.
     """
     spans: list[dict[str, Any]] = []

@@ -1,12 +1,14 @@
-"""A project-scope search reads what an earlier session still had in view when it ended (D69).
+"""A project-scope search reads what an earlier session had in view at its last request (D69).
 
 The turns in an ended session's last window were never paged out, so no page holds them; its last
 retained-window snapshot (``retained.json``, contract PR #125) does. ``contexto_search`` with
 ``scope: "project"`` matches each earlier session's snapshot as it matches the current session's window,
-and shows the matching lines under that session's line, labelled as in view when it ended, with no page
+and shows the matching lines under that session's line, labelled as in view at its last request, with no page
 id. They count in the session's limit of ``EARLIER_HITS`` and in the same room. The snapshot is read as
 the other files of an earlier session are: no lock, nothing created, never through a symlink, never a
-FIFO, never one over ``RETAINED_LIMIT``, and skipped whole when it cannot be used.
+FIFO, never one over ``RETAINED_LIMIT``, and skipped whole when it cannot be used. "Earlier" means
+created earlier: a session that still runs rewrites its snapshot at every request, so the label says
+"at its last request", true of an ended session and of a running one alike.
 
 Helpers and fixtures come from ``tests/test_project_search.py``.
 """
@@ -35,7 +37,7 @@ from test_project_search import (
     text_of,
 )
 
-IN_VIEW = "> in view when it ended"
+IN_VIEW = "> in view at its last request"
 
 
 @pytest.fixture
@@ -166,6 +168,25 @@ def test_an_earlier_sessions_stamp_is_not_compared(home, root):
     assert SessionStore.open_existing(home, E1).retained_current() is None
     cur = new_session(home, "cur", root, 2)
     assert in_view(search(serve(cur))) == [f"{IN_VIEW} (turn 0): the deploy key is birch-22"]
+
+
+def test_a_session_still_running_shows_its_window_at_its_last_request(home, root):
+    """Review B finding 3, review A finding 6: an earlier session (created earlier) can still be running,
+    its snapshot rewritten at each of its requests; the label is true of it as of an ended one, and the
+    note under the reply says the same."""
+    running = new_session(home, E1, root, 1)  # never released: its live lock is held
+    running.set_retained(1, 0, [entry(1, 0, "the deploy key is birch-22")])
+    cur = new_session(home, "cur", root, 2)
+    server = serve(cur)
+    text = search(server)
+    assert in_view(text) == [f"{IN_VIEW} (turn 0): the deploy key is birch-22"]
+    assert mcp.EARLIER_IN_VIEW_NOTE in text.splitlines()
+    assert mcp.EARLIER_IN_VIEW_NOTE == ("[A line in view at its session's last request is on no page, so it cannot "
+                                        "be recalled: the line is all of it.]")
+    running.set_retained(1, 0, [entry(2, 2, "the deploy key is now oak-3")])  # its next request
+    assert in_view(search(server)) == [f"{IN_VIEW} (turn 1): the deploy key is now oak-3"]
+    assert "when it ended" not in search(server)
+    running.release()
 
 
 def damaged(path):
@@ -316,7 +337,8 @@ def test_contexto_search_project_prints_the_lines_in_view_and_json_names_them(ho
     start = lines.index(f"[session e1aaaaaa, {date(1)}:]")
     assert lines[start + 1] == f"{IN_VIEW} (turn 2): the deploy key is now walnut-9"
     assert lines[start + 2] == "" and lines[start + 3].startswith(page_id)
-    assert "contexto recall cannot print it" in err and "--from LABEL" in err
+    assert "[a line in view at its session's last request is on no page: contexto recall cannot print it]" in err
+    assert "--from LABEL" in err
     assert cli.main(["search", "--project", "--json", "deploy", "key", "--session", "cur"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert set(data) == {"session", "query", "total", "hits", "earlier"} and data["total"] == 1
