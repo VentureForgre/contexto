@@ -202,12 +202,13 @@ def digest(run: list[tuple]) -> str:
 
 # Nothing carried: byte for byte the requests and the log of the release before D69 ------------------
 
-# Recorded from the engine at 57263d20 (the commit before the start text existed) by running
-# ``recorded`` there: the hash of every upstream request and every event of a 12-turn script that
+# Recorded from the engine before D69 by running ``recorded`` there (first at 57263d20; the Claude Code
+# hash again on main 14586393, where #263, D64, added fields to the engine's events): the hash of
+# every upstream request and every event of a 12-turn script that
 # rotates several times, with its usage fed back and, for Claude Code, a tool-less side request and a
 # count_tokens; and the hash of the epoch record the script leaves in the store. The page key is fixed,
 # so each kind of store gave the same two hashes.
-BEFORE_D69 = {MESSAGES: ("f0b7de585e3910a460fe2a2a64cea1edb3c29a11c77d8480ae61583e9e4c2ad8",
+BEFORE_D69 = {MESSAGES: ("a60be926708cce3e3299873c19fca7959a67ebfe7911bf2b17b06490d9fb3c2b",
                          "5b19ab66b6d9ce783f9e5eef91cac4e8bc0d0505b658a5cbc505358e6b68db1b"),
               RESPONSES: ("4c7ae60ad65681f5c86c390789ca93f6a899d0dc76f2c20c129cae0e650135f7",
                           "a885834683122e1a67bf1f6b9e222d82765995eb6978089d29f19ed60d5cac5c")}
