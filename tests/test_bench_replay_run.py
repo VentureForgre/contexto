@@ -171,13 +171,16 @@ def check_the_terminal_text(run):
                  "estimated tokens against the bound of 150,000",
                  "Compaction: a replay has no CLI, so it cannot show this. What it shows: no request was over the "
                  "bound of 150,000 by the estimate, and none carried a compaction summary or marker.",
-                 f"Search: under one fixed query per fact, the store's search returns {totals['reachable']} of "
-                 f"{totals['probes']} planted facts, {totals['shown']} of them in the top 3, and "
+                 f"Search: under one fixed query per fact, the store's strict search returns {totals['reachable']} "
+                 f"of {totals['probes']} planted facts, {totals['shown']} of them in the top 3, and "
                  f"{totals['covered'] - totals['reachable']} more are still in view. This is a floor under one "
                  "mechanical rule, not what a model can reach. The best query made from each question's own words "
                  f"puts {totals['best_query']} in the top 3. The best-query figure counts a page for a query only "
                  "when every word of the query is on the page as a whole word, not only inside a longer one, as the "
-                 "store's search may match it.",
+                 "store's search may match it. Reach is measured with the store's strict search "
+                 "(SessionStore.search), which counts a page only when it holds every word of the query, not with "
+                 "the reply of the contexto_search tool: since D65 that tool falls back to approximate matches when "
+                 "no page holds every word, and those are not counted.",
                  "What it cannot show:", "Answer accuracy, cache reads, real token counts, what a real CLI or a real "
                  "model does, and what the proxy does with what only Claude Code sends."):
         assert said in joined, said
@@ -203,6 +206,10 @@ def check_the_terminal_text(run):
     unreached = [cls for cls in NEW_CLASSES if totals["by_class"][cls]["reachable"] == 0]
     if unreached:
         assert "The rule's query finds none of " in text and "Which query a model makes is for the live run." in text
+        # Reviewer A's medium at da831a43: the class note allows for the tool's fallback.
+        assert "so the strict search returns nothing for them. " + output.FALLBACK_UNCOUNTED in text
+        assert output.pinned_fallback() in text
+    assert "says nothing about the plants" not in text
     assert "NOT the pinned trace" not in text and "FAIL" not in text and block["seconds"] > 0
 
 
@@ -230,6 +237,13 @@ def check_results_md(run):
     for cls, cell in [*totals["by_class"].items(), ("all", totals)]:
         row = [cls, *(str(cell[k]) for k in ("probes", "paged", "reachable", "shown", "covered", "best_query"))]
         assert "| " + " | ".join(row) + " |" in text, cls
+    # Reviewer A's medium at da831a43: the method paragraph and the class note name the strict search.
+    for said in ("the store's strict search returns", output.STRICT_SEARCH, "\"By search\" counts the probes for which "
+                 "the store's strict search returned", "so the strict search returns nothing for them. "
+                 + output.FALLBACK_UNCOUNTED, output.pinned_fallback(lambda word: f"`{word}`")):
+        assert said in text, said
+    assert text.count(output.STRICT_SEARCH) == 2  # the headline and the method paragraph
+    assert "says nothing about the plants" not in text
 
 
 def check_manifest(run):
@@ -341,8 +355,9 @@ def check_results_json(run):
     series = data["request_series"]
     assert list(series) == ["contexto", "full", "plain"]
     assert [series[arm]["basis"] for arm in series] == ["estimated", "modelled", "modelled"]
-    assert "estimated" in series["contexto"]["label"]
-    assert all("modelled" in series[arm]["label"] for arm in ("full", "plain"))
+    # Reviewer B low 1 at da831a43: the basis is the chart's to add, so no label repeats it.
+    assert [series[arm]["label"] for arm in series] == ["Contexto (replay)", "Full context",
+                                                        "Plain Claude Code compacting at the bound"]
     for arm in series:
         main = [r for r in rows if r["arm"] == arm and r["main"]]
         assert series[arm]["points"] == [[r["history_tokens"], r["uncached"]] for r in main]
@@ -351,10 +366,22 @@ def check_results_json(run):
     notes = " ".join(data["notes"])
     for said in ("Synthetic", "No model was called", "estimates, not token counts", "modelled from the script, not run",
                  "is an assumption, and it errs toward plain Claude Code", "floor under mechanical queries",
-                 output.WHOLE_WORDS,
+                 output.WHOLE_WORDS, output.STRICT_SEARCH, output.pinned_fallback(),
                  "Which query a model makes is for the live run", "cannot show answer accuracy, cache reads, real "
                  "token counts"):
         assert said in notes, said
+    # Reviewer B nit 4 at da831a43: why a tool-loop turn is a vertical run of points, said under the chart.
+    assert output.TOOL_LOOP_NOTE in data["notes"]
+    assert output.TOOL_LOOP_NOTE == (
+        "Every request of a turn, the rounds of a tool loop included, is plotted at that turn's history length, so "
+        "a turn with a tool loop (the file reads of the toolloop turn, the searches of a probe turn) shows as a "
+        "vertical run of points.")
+    contexto = [r for r in rows if r["arm"] == "contexto" and r["main"]]
+    by_turn = {}
+    for row in contexto:
+        by_turn.setdefault(row["turn"], set()).add(row["history_tokens"])
+    assert all(len(sizes) == 1 for sizes in by_turn.values())  # what the note says: one x per turn
+    assert max(sum(r["turn"] == turn for r in contexto) for turn in by_turn) > 1  # and some turns have several
     assert all(isinstance(note, str) for note in data["notes"])
     full = [r for r in rows if r["arm"] == "full"]
     plain = [r for r in rows if r["arm"] == "plain"]
@@ -407,10 +434,65 @@ def check_output_helpers_agree_with_what_was_written(run):
     assert "\n".join(output.summary(script, run["results"])) in run["stdout"]
 
 
-PINNED_CHECKS = [check_equals_the_trace, check_the_bound_held, check_the_engine_ran_as_in_a_launch,
+def check_the_pinned_fallback_sentence_holds_in_the_run(run):
+    """Reviewer A's medium at da831a43: the output gives what the search tool's approximate fallback (D65)
+    does on the pinned session. Each fact of that sentence is checked against this run's own files, so a
+    proxy change that alters the fallback fails here, naming ``output.pinned_fallback``."""
+    script, out = run["script"], run["out"]
+    log = out / "store" / "sessions" / "bench-replay-20261016" / "log.jsonl"
+    events = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    calls = [e for e in events if e["event"] == "mcp_call" and e["tool"] == "contexto_search"]
+    queries = [step.argument for step in scripted.steps(script) if step.tool == scripted.SEARCH_TOOL]
+    assert [c["query_chars"] for c in calls] == [len(q) for q in queries]  # one call per scripted search, in order
+    by_query = {reach.first_query(p): p for p in script.probes}
+    empty = [r for r in run["reach"] if r["returned"] == 0]
+    approximate = [(by_query[q], c) for q, c in zip(queries, calls) if c["approximate"]]
+    said = "update output.pinned_fallback, the sentence that states this"
+    assert len(empty) == output.FALLBACK_EMPTY, said
+    assert len(approximate) == output.FALLBACK_ANSWERED, said
+    probe, call = approximate[0]
+    assert (probe.id, probe.cls) == (output.FALLBACK_PROBE, output.FALLBACK_CLASS), said
+    assert probe.id in {r["id"] for r in empty}, said
+    pages = list(dict.fromkeys(hit["page_id"] for hit in call["returned"]))
+    store = SessionStore.open_existing(out / "store", "bench-replay-20261016")
+    texts = [json.dumps(store.get_page(page)["messages"]) for page in pages]
+    holding = [i for i, text in enumerate(texts) if probe.statements[0] in text]
+    assert len(pages) == 3 and holding == [1], said  # the plant's page is the second of three
+    assert [hit["page_id"] for hit in call["returned"]].count(pages[1]) == 3, said  # its line and two others
+    assert sum(old in texts[1] for old in probe.older) == 2, said  # the two decoys beside it
+    assert output.pinned_fallback() == (
+        "On the pinned session the tool's fallback answers 1 of the 18 queries the strict search finds nothing for: "
+        "for q_r_02 (paraphrase) its reply shows the plant's line on the second of three pages, beside two decoys.")
+
+
+def check_the_chart_of_a_replay_names_each_basis_once(run):
+    """Reviewer B low 1 at da831a43: charting a real replay's results.json, each legend entry and each
+    series tooltip holds its basis once (the replay's labels carry none; the chart adds it)."""
+    import xml.etree.ElementTree as ET
+
+    copy_dir = run["out"].parent / "chart-of-the-pinned-replay"
+    copy_dir.mkdir()
+    shutil.copy(run["out"] / "results.json", copy_dir / "results.json")
+    assert cli.main(["bench", "--chart", str(copy_dir / "results.json")]) == 0
+    svg = "{http://www.w3.org/2000/svg}"
+    root = ET.fromstring((copy_dir / "charts" / "request-size.svg").read_text(encoding="utf-8"))
+    legend = {t.get("data-legend"): "".join(t.itertext()) for t in root.iter(f"{svg}text") if t.get("data-legend")}
+    assert legend == {"contexto": "Contexto (replay) (estimated)", "full": "Full context (modelled)",
+                      "plain": "Plain Claude Code compacting at the bound (modelled)"}
+    tips = [t.text for line in root.iter(f"{svg}polyline") for t in line.iter(f"{svg}title")]
+    assert len(tips) == 3
+    for words in [*legend.values(), *tips]:
+        assert sum(words.count(f"({basis})") for basis in ("estimated", "modelled", "measured")) == 1, words
+        assert "estimated" not in words or "modelled" not in words, words
+    notes = " ".join("".join(t.itertext()) for t in root.iter(f"{svg}text") if t.get("font-size") == "11")
+    assert "vertical run of points" in notes
+
+
+PINNED_CHECKS =[check_equals_the_trace, check_the_bound_held, check_the_engine_ran_as_in_a_launch,
                  check_the_terminal_text, check_results_md, check_manifest, check_requests_jsonl, check_reach_jsonl,
                  check_results_json, check_the_store_is_kept_without_its_private_files,
-                 check_no_path_of_this_machine_is_in_any_output_file, check_output_helpers_agree_with_what_was_written]
+                 check_no_path_of_this_machine_is_in_any_output_file, check_output_helpers_agree_with_what_was_written,
+                 check_the_pinned_fallback_sentence_holds_in_the_run, check_the_chart_of_a_replay_names_each_basis_once]
 
 
 # The pinned replay
@@ -516,7 +598,7 @@ def test_a_store_whose_search_finds_nothing_reaches_no_paged_fact(monkeypatch, s
     monkeypatch.setattr(SessionStore, "search", lambda self, query: [])
     code, text, _ = _run(["--replay", *SHORT])
     assert code == 0  # not the pinned trace: nothing to differ from, and the bound still held
-    assert "the store's search returns 0 of 54 planted facts" in text and "puts 0 in the top 3" in text
+    assert "the store's strict search returns 0 of 54 planted facts" in text and "puts 0 in the top 3" in text
     assert short_run["results"]["replay"]["reach"]["reachable"] > 0
 
 

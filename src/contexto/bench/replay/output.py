@@ -35,8 +35,8 @@ NOT_EXERCISED = (
     "text, countdowns and settings, so the proxy's handling of those (D33) is not exercised",
     "it sends no thinking blocks and no side requests",
 )
-LABELS = {"contexto": "Contexto (replay, estimated)", "full": "Full context (modelled)",
-          "plain": "Plain Claude Code compacting at the bound (modelled)"}
+# A series' label names the series only: the chart adds its basis (estimated, modelled) after it.
+LABELS = {"contexto": "Contexto (replay)", "full": "Full context", "plain": "Plain Claude Code compacting at the bound"}
 RATES_TEXT = (f"{upstream.LOG_BYTES_PER_TOKEN} bytes per token for pasted log text and "
               f"{upstream.OTHER_BYTES_PER_TOKEN} for everything else")
 
@@ -94,8 +94,9 @@ def notes(script: Script, pinned: bool) -> list[str]:
         "nothing else survives is an assumption, and it errs toward plain Claude Code: anything re-attached would "
         "make its requests larger and its compactions more frequent.",
         "Search reach is a floor under mechanical queries, not what a model can reach: one fixed query per fact, "
-        "and beside it the best query made from the question's own words. " + WHOLE_WORDS + " Which query a model "
-        "makes is for the live run.",
+        "and beside it the best query made from the question's own words. " + WHOLE_WORDS + " " + STRICT_SEARCH
+        + (" " + pinned_fallback() if pinned else "") + " Which query a model makes is for the live run.",
+        TOOL_LOOP_NOTE,
         "A replay cannot show " + ", ".join(CANNOT_SHOW) + ".",
     ]
     if not pinned:
@@ -186,6 +187,28 @@ def failures(script: Script, measured: Any, differences: list[str]) -> list[str]
 BEST_QUERY_COLUMN = "best query from the question's words"
 WHOLE_WORDS = ("The best-query figure counts a page for a query only when every word of the query is on the page as "
                "a whole word, not only inside a longer one, as the store's search may match it.")
+STRICT_SEARCH = ("Reach is measured with the store's strict search (SessionStore.search), which counts a page only "
+                 "when it holds every word of the query, not with the reply of the contexto_search tool: since D65 "
+                 "that tool falls back to approximate matches when no page holds every word, and those are not "
+                 "counted.")
+FALLBACK_UNCOUNTED = ("The search tool's approximate fallback, which this replay does not count, can still show a "
+                      "plant.")
+# What the tool's fallback does on the pinned session, stated for the pinned trace only. These are facts of that
+# session, not measurements this command makes or checks; the replay tests check each of them against the run
+# (check_the_pinned_fallback_sentence_holds_in_the_run), so a change to the proxy that alters them fails there.
+FALLBACK_EMPTY = 18  # rule queries the strict search finds nothing for
+FALLBACK_ANSWERED = 1  # of those, the queries whose tool reply holds approximate matches
+FALLBACK_PROBE, FALLBACK_CLASS = "q_r_02", "paraphrase"
+TOOL_LOOP_NOTE = ("Every request of a turn, the rounds of a tool loop included, is plotted at that turn's history "
+                  "length, so a turn with a tool loop (the file reads of the toolloop turn, the searches of a probe "
+                  "turn) shows as a vertical run of points.")
+
+
+def pinned_fallback(code: Any = str) -> str:
+    """What the search tool's approximate fallback (D65) answers on the pinned session."""
+    return (f"On the pinned session the tool's fallback answers {FALLBACK_ANSWERED} of the {FALLBACK_EMPTY} queries "
+            f"the strict search finds nothing for: for {code(FALLBACK_PROBE)} ({code(FALLBACK_CLASS)}) its reply "
+            "shows the plant's line on the second of three pages, beside two decoys.")
 
 
 def _reach_table(totals: dict[str, Any]) -> list[tuple[str, ...]]:
@@ -203,13 +226,14 @@ def _unreached(totals: dict[str, Any]) -> list[str]:
 
 def _search_headline(totals: dict[str, Any]) -> str:
     """Both figures at the same cut, the top 3, and the rule's figure at any rank beside it."""
-    return (f"under one fixed query per fact, the store's search returns {totals['reachable']} of {totals['probes']} "
-            f"planted facts, {totals['shown']} of them in the top 3, and {totals['covered'] - totals['reachable']} "
-            "more are still in view. This is a floor under one mechanical rule, not what a model can reach. The best "
-            f"query made from each question's own words puts {totals['best_query']} in the top 3. " + WHOLE_WORDS)
+    return (f"under one fixed query per fact, the store's strict search returns {totals['reachable']} of "
+            f"{totals['probes']} planted facts, {totals['shown']} of them in the top 3, and "
+            f"{totals['covered'] - totals['reachable']} more are still in view. This is a floor under one mechanical "
+            "rule, not what a model can reach. The best query made from each question's own words puts "
+            f"{totals['best_query']} in the top 3. " + WHOLE_WORDS + " " + STRICT_SEARCH)
 
 
-def _unreached_text(totals: dict[str, Any], code: Any = str) -> str | None:
+def _unreached_text(totals: dict[str, Any], pinned: bool, code: Any = str) -> str | None:
     """Why the rule's figure is 0 for the classes it reaches none of, and what the next column is."""
     unreached = _unreached(totals)
     if not unreached:
@@ -219,9 +243,11 @@ def _unreached_text(totals: dict[str, Any], code: Any = str) -> str | None:
     named = ", ".join(code(c) for c in unreached[:-1]) + (" and " if len(unreached) > 1 else "") + code(unreached[-1])
     return (f"The rule's query finds none of {named}. For these classes the query is every content word of the "
             "question but its instruction words, and "
-            + ("no stored page holds all of them" if nothing else "no page it returns holds the plant")
-            + ", so this 0 says nothing about the plants. The next column shows what a query made from the question's "
-            "own words finds. Which query a model makes is for the live run.")
+            + ("no stored page holds all of them, so the strict search returns nothing for them" if nothing
+               else "no page the strict search returns for them holds the plant")
+            + ". " + FALLBACK_UNCOUNTED + (" " + pinned_fallback(code) if pinned else "")
+            + " The next column shows what a query made from the question's own words finds. Which query a model "
+            "makes is for the live run.")
 
 
 def _client_text(block: dict[str, Any]) -> str:
@@ -294,7 +320,7 @@ def summary(script: Script, data: dict[str, Any]) -> list[str]:
         "Search reachability, measured when the probe turns start (probes per class):",
         *_table(_reach_table(totals)),
     ]
-    unreached = _unreached_text(totals)
+    unreached = _unreached_text(totals, block["pinned"])
     if unreached:
         out.append("  " + unreached)
     modelled = block["modelled"]
@@ -397,20 +423,20 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
         "hops), and for `paraphrase`, `concluded` and `toolloop` the question's content words without its "
         "instruction words (the fixed phrases the generator wraps every such question in, including the frame "
         "every `concluded` question shares: \"Earlier you had to pick the ..., and you replied with your pick. What "
-        "did you pick?\"). \"By search\" counts the "
-        "probes for which the store's search returned a page holding every statement the answer needs; \"in the top "
-        "3\" those whose page is among the three the search tool shows in detail; \"by search or in view\" adds the "
-        "statements still in the request. \"Best query from the question's words\" tries each single content word "
-        "of the question and each pair of adjacent content words, every pair with a space and with a hyphen, and "
-        "counts the probe when the best of them puts the page in the top 3; for the first five classes the rule's "
-        "query is already taken from the question, so there the column takes the rule's query. " + WHOLE_WORDS + " "
-        "Which query a model makes is for the live run.",
+        "did you pick?\"). \"By search\" counts the probes for which the store's strict search returned a page "
+        "holding every statement the answer needs; \"in the top 3\" those whose page is among the three the search "
+        "tool shows in detail; \"by search or in view\" adds the statements still in the request. \"Best query from "
+        "the question's words\" tries each single content word of the question and each pair of adjacent content "
+        "words, every pair with a space and with a hyphen, and counts the probe when the best of them puts the page "
+        "in the top 3; for the first five classes the rule's query is already taken from the question, so there the "
+        "column takes the rule's query. " + WHOLE_WORDS + " " + STRICT_SEARCH
+        + " Which query a model makes is for the live run.",
         "",
         "| " + " | ".join(table[0]) + " |", "|" + "---|" * len(table[0]),
         *["| " + " | ".join(row) + " |" for row in table[1:]],
         "",
     ]
-    unreached = _unreached_text(totals, lambda cls: f"`{cls}`")
+    unreached = _unreached_text(totals, block["pinned"], lambda word: f"`{word}`")
     if unreached:
         text += [unreached, ""]
     text += [

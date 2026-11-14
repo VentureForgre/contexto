@@ -9,7 +9,8 @@ request at stated rates.
 
 What a replay shows: whether the proxy kept every request of this session under the bound, that every
 request was one the Messages API accepts and none carried a compaction summary or marker, the size of
-every request, and which planted facts the store's search can reach. What it cannot show: answer
+every request, and which planted facts the store's strict search can reach (not counting the search
+tool's approximate fallback, D65). What it cannot show: answer
 accuracy, cache reads, real token counts (there is no tokenizer without a model, so every size is an
 estimate), what a real CLI or a real model does, and what the proxy does with what only Claude Code
 sends. Every environment variable the package reads is held at its default for the length of a
