@@ -151,24 +151,38 @@ at least 30 percent of the weight of the query.
 When no turn holds every word, the query may ask for two facts that sit on two turns. The first
 fact's turn then comes first, followed by turns that share words with it, and the second fact's
 turn can fall far behind or under the floor. So the third of the 3 turns shown in detail goes to the
-best turn for the words the first turn lacks. In a 6,000-turn test session, `staging DB port Redis
-eviction policy` showed the Redis turn first and the staging turn in this place; without it the
-staging turn was not returned at all.
+best turn for the words the first turn lacks. In a 40-turn test session, `staging gateway port redis
+eviction policy` shows the Redis turn first and the staging turn third; without this place the
+staging turn is fifth. In a 100-turn session where turns 20 to 22 hold `staging database port` and
+turn 40 says `backups run at 02:00`, `staging database port bakcups` shows turn 40 third; without
+this place it is not returned at all.
 
-A turn takes this place when it holds an identifier, a number or a path among the lacked words (on
-half the turns or fewer), or when the lacked words it holds weigh at least 30 percent of all the
-lacked words and at least half as much as a word that no turn holds. The second bar keeps out a
-leftover common word. One word passes it when it is on at most `sqrt((n + 1) / 2) - 1/2` of `n`
-turns: 6 of 100 turns, and 54 of 6,000. So a word on more than about 6.6 percent of 100 turns, or
-0.9 percent of 6,000, gets no place. If 12 of 100 turns say `server`, `canary rollout plan server`
-shows no turn for `server`.
+A turn takes this place when the lacked words it holds weigh at least 30 percent of all the lacked
+words, and one of these is true:
 
-Among the turns that pass, the one that holds more of the lacked words wins, then the one that holds
-more of the whole query, then the one with more of the query's words side by side as typed, then
-the newer one. So for `how do I restart the nginx proxy`, a turn that
-says `restart the nginx service` beats a newer turn that says only `restart the laptop`. And when an
-old turn says `prod host is db1` and a newer one `prod host is now db2`, the newer one takes the
-place, even if the old one says it in more places.
+- One of them is an identifier, a number or a path that half the turns or fewer hold.
+- They weigh at least half as much as a word that no turn holds. A word matched through a typo
+  counts at its full weight here, not at half.
+- One of them stands next to its neighbour from the query, in the query's order. In a 100-turn
+  session where `rate` and `limit` are each on 30 turns, `webhook signing secret and API rate limit`
+  shows the turn that says `the API rate limit is 600 a minute` third.
+
+The 30 percent keeps out a common identifier or number when the turn lacks the rarer words. If 40
+of 100 turns say `2024` and 10 say `retention`, then for `deploy pipeline 2024 retention` a turn that
+holds only `2024` gets no place: it holds 0.91 of the lacked 3.18, under the 0.95 needed.
+
+The second rule keeps out a leftover common word. One word passes it when it is on at most
+`sqrt((n + 1) / 2) - 1/2` of `n` turns: 6 of 100 turns, and 54 of 6,000. So a word on more than
+about 6.6 percent of 100 turns, or 0.9 percent of 6,000, gets no place unless it stands next to its
+neighbour from the query. If 12 of 100 turns say `server`, `canary rollout plan server` shows no
+turn for `server`; a turn that says `plan server` would pass.
+
+Among the turns that pass, a turn wins over a paged context block, then the one that holds more of
+the lacked words wins, then the one that holds more of the whole query, then the one with more of
+the query's words side by side as typed, then the newer one. So for `how do I restart the nginx
+proxy`, a turn that says `restart the nginx service` beats a newer turn that says only `restart the
+laptop`. And when an old turn says `prod host is db1` and a newer one `prod host is now db2`, the
+newer one takes the place, even if the old one says it in more places.
 
 ### 4. One typo
 
@@ -249,10 +263,22 @@ case.
 - In a session of thousands of turns, a typo is not searched when the halves of the word are very
   common (search stops after checking 500,000 places for the whole query and treats the word as not
   found).
-- Two facts on two turns are both shown. Four equally rare facts on four turns find nothing: each
-  turn holds a quarter of the query, under the floor, so no turn comes first for the second-fact
-  place to follow. `kestrel osprey harrier condor`, one word per turn, finds nothing. Three equally
-  rare facts on three turns are all returned (a third each).
+- A second fact of one word is not returned when the word is on more than about 6.6 percent of 100
+  turns, or 0.9 percent of 6,000, unless the turn has it next to its neighbour from the query. In a
+  100-turn session, `redis eviction policy cutover` shows the newest turn that says `cutover` when
+  6 turns say it, and no turn for it when 7 do.
+- When no turn holds every word, the order can put an older value first. The rule that the newest
+  turn holding every word is shown in detail holds only among turns that hold every word. If turns
+  10 to 12 hold `staging database port`, turn 13 says `staging prod host is db1` and the newer
+  turn 15 `prod host is now db2`, then `staging database port prod host` shows turn 13 first and
+  puts turn 15 fifth, in the list.
+- One identifier typed in two styles in one query counts as two words: `refresh_token refreshToken`
+  weighs twice as much as one of them and takes two of the 6 words searched.
+- Two facts on two turns are both shown when the second passes the rules for the third place.
+  Four equally rare facts on four turns find nothing: each turn holds a quarter of the query, under
+  the floor, so no turn comes first for the second-fact place to follow. `kestrel osprey harrier
+  condor`, one word per turn, finds nothing. Three equally rare facts on three turns are all
+  returned (a third each).
 - Identifiers that differ only in the separator between two groups of digits do not match:
   `x86_64` does not find `x86-64`, and `build-2026-11-05` does not find `build_2026_11_05`.
 - The exception for an identifier, a number or a path lets a common one through when it is on half

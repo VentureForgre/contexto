@@ -1236,16 +1236,26 @@ unknown page, never read. Tools:
   times the recency prior). The newest turn page that holds every searched word takes one of the 3
   detailed places, as in strict search. When no page holds every searched word, that place goes to
   the second fact of a query whose two facts sit on two pages: the best page for the words that the
-  best page lacks. A page qualifies when it holds a specific word among them that is on at most half
-  the pages, or when the lacked words it holds weigh at least 30 percent of all the lacked words and
-  at least half the weight of a word on no page (`SECOND_BAR` 0.5). The second bar keeps out a
-  leftover common word: one word passes it on at most `sqrt((n + 1) / 2) - 1/2` of `n` pages, 6 of
-  100 and 54 of 6,000, so a word on more than about 6.6 percent of 100 pages or 0.9 percent of
-  6,000 gets no place. Among the pages that qualify the best is, in order: a turn page before a
-  context block, the larger weight of the lacked words, the larger weight of the whole query (so a
-  page that also holds the query's other words beats one that holds only the lacked word), more
-  pairs of words side by side, the newer page (so the latest value wins a tie, D28). It is shown
-  even when it is under the floor. At most 50 hits are returned by the store.
+  best page lacks. A page qualifies when the lacked words it holds weigh at least 30 percent of all
+  the lacked words, and one of three holds: one of them is a specific word on at most half the pages;
+  or they weigh at least half the weight of a word on no page (`SECOND_BAR` 0.5), a word matched
+  through a typo counted here at its full weight, not halved; or one of them stands next to its
+  neighbour from the query, in the query's order (a pair of neighbouring query words that the page
+  holds side by side). The 30 percent keeps out a common specific word when the page lacks the
+  rarer words: with `2024` on 40 of 100 pages and `retention` on 10, a page holding only `2024`
+  gets no place for `deploy pipeline 2024 retention`. The bar keeps out a leftover common word: one
+  word passes it on at most `sqrt((n + 1) / 2) - 1/2` of `n` pages, 6 of 100 and 54 of 6,000, so a
+  word on more than about 6.6 percent of 100 pages or 0.9 percent of 6,000 gets no place unless it
+  stands next to its query neighbour. The pair rule lets through a second fact of fairly common
+  words said as the query says them: with `rate` and `limit` each on 30 of 100 pages, the page
+  that says `API rate limit` takes the place for `webhook signing secret and API rate limit`.
+  Among the pages that qualify the best is, in order: a turn page before a context block, the
+  larger weight of the lacked words, the larger weight of the whole query (so a page that also
+  holds the query's other words beats one that holds only the lacked word), more pairs of words
+  side by side, the newer page (so the latest value wins a tie, D28). It is shown even when it is
+  under the floor, and then the count of matches (`Approximate.total`, from which the reply's
+  `[N more approximate matches not shown; ...]` line is computed) counts it with the pages over
+  the floor. At most 50 hits are returned by the store.
 
   The reply opens with `[no paged-out turn holds every word of that query; approximate matches,
   most words matched first, then newest first:]` in place of the best-pages line, then
@@ -1295,7 +1305,14 @@ unknown page, never read. Tools:
   look at how common the held words are (three words each on 30 of 100 pages, never together,
   return 90 pages); the specific-word exception lets a common identifier or number through (with
   `200` on 34 of 100 pages and the other words on none, `staging deploy failed 200` returns the 34
-  pages).
+  pages); a single-word second fact on more than about 6.6 percent of 100 pages (0.9 percent of
+  6,000) is not returned unless the page has it next to its query neighbour (`redis eviction policy
+  cutover` shows a `cutover` page when 6 of 100 pages say it, none when 7 do); when no page holds
+  every searched word the order can put an older value's page first, so D28's newest-value rule
+  holds only among pages that hold every searched word (`staging database port prod host` with
+  `staging prod host is db1` on an older page and `prod host is now db2` on a newer one shows db1
+  first and db2 fifth); one identifier typed in two styles in one query counts as two words
+  (`refresh_token refreshToken` weighs double and takes two of the 6 word places).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
