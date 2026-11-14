@@ -162,9 +162,24 @@ DYNAMIC_SITES: dict[tuple[str, str, str], frozenset[str]] = {}
 # Sites the scan must ignore: (file, function, the expression used for the name), as the failure message
 # prints it. Two kinds: a dict with an "event" key that never reaches a session log (say, an SSE event built
 # for a stream), and a call whose ``event=`` keyword passes a whole event or some other object and not an event
-# name (``store.log(event=failure)``). The scan ignores that site and no other. Empty today; an entry no site
-# needs fails.
-NOT_SESSION_LOG: frozenset[tuple[str, str, str]] = frozenset()
+# name (``store.log(event=failure)``). The scan ignores that site and no other. An entry no site needs fails.
+NOT_SESSION_LOG: frozenset[tuple[str, str, str]] = frozenset({
+    # contexto serve's own log, $CONTEXTO_HOME/serve.log (ServeLog), not a session's log.jsonl. Its
+    # serve_open and serve_close go through the session's store and are documented.
+    ("src/contexto/serve.py", "ServeService.start", "'serve_start'"),
+    ("src/contexto/serve.py", "ServeService.stop", "'serve_stop'"),
+    ("src/contexto/serve.py", "ServeService.refused", "'request_refused'"),
+    ("src/contexto/serve.py", "ServeService.unrouted", "'unrouted'"),
+    ("src/contexto/serve.py", "ServeService.register_tool_calls", "'tool_use_ambiguous'"),
+    ("src/contexto/serve.py", "ServeService._acquire", "'session_open_failed'"),
+    ("src/contexto/serve.py", "ServeService._acquire", "'session_open'"),
+    ("src/contexto/serve.py", "ServeService._discard", "'session_discarded'"),
+    ("src/contexto/serve.py", "ServeService._finish", "'session_close'"),
+    ("src/contexto/serve.py", "ServeService._reap_loop", "'reap_error'"),
+    ("src/contexto/serve.py", "_ServeHandler._handle", "'serve_error'"),
+    ("src/contexto/serve.py", "_ServeHandler._refuse_stopping", "'stopping_refused'"),
+    ("src/contexto/serve.py", "_ServeHandler._drop_token_headers", "'token_header_dropped'"),
+})
 
 # Events whose dict is filled in by several functions of one file, so its fields are stored where the dict is
 # not built: (file, event). The scan follows the dict from the function that assigns it to a variable: into
@@ -229,7 +244,8 @@ HELPER_FIELDS: dict[tuple[str, str], frozenset[str]] = {
 
 # The words a facts line may use. Each list is repeated under "Reading an entry" in the document; a new writer,
 # place or kind is added in both places.
-WRITERS = frozenset({"proxy", "engine", "launcher (Claude)", "launcher (Codex)", "MCP server", "store"})
+WRITERS = frozenset({"proxy", "engine", "launcher (Claude)", "launcher (Codex)", "service", "MCP server",
+                     "store"})
 PLACES = frozenset({"own line", "`transform_events`", "`usage_events`"})
 KINDS = frozenset({"normal", "notice", "problem"})
 NESTED = {"transform_events": "`transform_events`", "usage_events": "`usage_events`"}  # line key -> its place
@@ -2287,16 +2303,15 @@ def test_a_new_writer_place_or_kind_is_added_in_the_test_and_in_the_document():
                                           "| router | `transform_events` | normal |")), "facts")
     assert facts == (
         "docs/events.md:32 the entry for `plain` names the writer 'router'; use one of: MCP server, engine, launcher "
-        "(Claude), launcher (Codex), proxy, store. For a new writer, add it to WRITERS in tests/test_events_doc.py "
-        "and to the list under \"Reading an entry\" in docs/events.md, then use it")
-    section = ("### Reading an entry\n\nWriter is `proxy`, `engine`, `launcher (Claude)`, `launcher (Codex)` or "
-               "`store`.\nWhere is `own line`, `transform_events` or `usage_events`. Kind is `normal`, `notice` or "
-               "`problem`.\n\n### Next\n\n`MCP server`\n")
+        "(Claude), launcher (Codex), proxy, service, store. For a new writer, add it to WRITERS in "
+        "tests/test_events_doc.py and to the list under \"Reading an entry\" in docs/events.md, then use it")
+    section = ("### Reading an entry\n\nWriter is `proxy`, `engine`, `launcher (Claude)`, `launcher (Codex)`, "
+               "`service` or `store`.\nWhere is `own line`, `transform_events` or `usage_events`. Kind is `normal`, "
+               "`notice` or `problem`.\n\n### Next\n\n`MCP server`\n")
     assert vocabulary_problems(read_document(section)) == [
         "docs/events.md:1 the section \"Reading an entry\" does not name the writer `MCP server`, which WRITERS in "
         "tests/test_events_doc.py allows in a facts line; add it to that section's list, or remove it from WRITERS"]
-    assert vocabulary_problems(read_document(section.replace("`launcher (Codex)` or", "`launcher (Codex)`, `MCP "
-                                                             "server` or"))) == []
+    assert vocabulary_problems(read_document(section.replace("`service` or", "`service`, `MCP server` or"))) == []
     assert vocabulary_problems(read_document(SAMPLE_DOC))[0].startswith(
         "docs/events.md has no heading \"Reading an entry\"")
 

@@ -45,6 +45,7 @@ is never a line of its own: look for it inside a `request` line.
 | [`upstream_4xx`](#upstream_4xx) | proxy | own line | notice |
 | [`hold_skipped`](#hold_skipped) | proxy | own line | notice |
 | [`observe_usage_error`](#observe_usage_error) | proxy | own line | problem |
+| [`tool_calls_hook_error`](#tool_calls_hook_error) | proxy | own line | problem |
 | [`request` (the engine's nested event)](#request-the-engines-nested-event) | engine | `transform_events` | normal |
 | [`count_tokens`](#count_tokens) | engine | `transform_events` | normal |
 | [`rotation`](#rotation) | engine | `transform_events` | normal |
@@ -89,13 +90,24 @@ is never a line of its own: look for it inside a `request` line.
 | [`session_start_unrecognised`](#session_start_unrecognised) | engine | `transform_events` | notice |
 | [`cli_version_error`](#cli_version_error) | engine | `transform_events` | problem |
 | [`hint_mismatch`](#hint_mismatch) | engine | `transform_events` | notice |
+| [`in_turn_batch`](#in_turn_batch) | engine | `transform_events` | normal |
+| [`in_turn_exhausted`](#in_turn_exhausted) | engine | `transform_events` | problem |
+| [`start_text`](#start_text) | engine | `transform_events` | normal |
+| [`start_text_changed`](#start_text_changed) | engine | `transform_events` | normal |
+| [`start_text_unavailable`](#start_text_unavailable) | engine | `transform_events` | problem |
+| [`trusted_conversations_unavailable`](#trusted_conversations_unavailable) | engine | `transform_events` | problem |
+| [`main_records_unavailable`](#main_records_unavailable) | engine | `transform_events` | problem |
+| [`main_record_unmatched`](#main_record_unmatched) | engine | `transform_events` | notice |
 | [`launch`](#launch) | launcher (Claude), launcher (Codex) | own line | normal |
+| [`project_memory`](#project_memory) | launcher (Claude), launcher (Codex) | own line | normal, problem |
 | [`cli_version_check`](#cli_version_check) | launcher (Claude), launcher (Codex) | own line | normal |
 | [`window_budget_warning`](#window_budget_warning) | launcher (Claude), launcher (Codex) | own line | notice |
 | [`exit`](#exit) | launcher (Claude), launcher (Codex) | own line | normal |
 | [`engine_unavailable`](#engine_unavailable) | launcher (Claude), launcher (Codex) | own line | problem |
 | [`affinity_salt_unavailable`](#affinity_salt_unavailable) | launcher (Claude), launcher (Codex) | own line | notice |
 | [`watchdog_unavailable`](#watchdog_unavailable) | launcher (Claude) | own line | notice |
+| [`serve_open`](#serve_open) | service | own line | normal |
+| [`serve_close`](#serve_close) | service | own line | normal |
 | [`mcp_call`](#mcp_call) | MCP server | own line | normal |
 | [`turn_room_missing`](#turn_room_missing) | MCP server | own line | problem |
 | [`search_cache_invalid`](#search_cache_invalid) | MCP server | own line | notice |
@@ -106,6 +118,8 @@ is never a line of its own: look for it inside a `request` line.
 | [`page_quarantined`](#page_quarantined) | store | own line | problem |
 | [`page_unreadable`](#page_unreadable) | store | own line | problem |
 | [`side_room_expired`](#side_room_expired) | store | own line | normal |
+| [`project_session_skipped`](#project_session_skipped) | store | own line | problem |
+| [`project_unavailable`](#project_unavailable) | store | own line | problem |
 
 ## The log
 
@@ -116,9 +130,11 @@ is never a line of its own: look for it inside a `request` line.
 **Format.** One JSON object per line, appended, never rewritten. Keys are sorted, with no whitespace
 between them. Every line has an `event` name and a `ts`.
 
-**Who writes.** The proxy (with the paging engine inside it), the `contexto run` launcher, the MCP
-server, and the session store. The MCP server is a separate process that the CLI starts, so its lines
-interleave with the proxy's in the order they were written.
+**Who writes.** The proxy (with the paging engine inside it), the `contexto run` launcher, the
+`contexto serve` service, the MCP server, and the session store. The MCP server is a separate process
+that the CLI starts, so its lines interleave with the proxy's in the order they were written. The
+service keeps a log of its own as well, `$CONTEXTO_HOME/serve.log` (see [serve.md](serve.md#files)).
+That file is not a session log, and its events are not in this reference.
 
 **`ts`.** The time the line was written, in UTC. The proxy's lines carry microseconds
 (`2026-11-12T09:41:17.482915Z`); every other writer's lines carry whole seconds
@@ -150,8 +166,9 @@ not in its counts.
    step 1 come before it: a line between one run's `exit` and the next `proxy_start` belongs to the
    next run, or to no run (the end of this section).
 3. [`engine_unavailable`](#engine_unavailable) and [`watchdog_unavailable`](#watchdog_unavailable),
-   when they apply, then [`launch`](#launch), [`cli_version_check`](#cli_version_check) and
-   [`window_budget_warning`](#window_budget_warning) when it applies.
+   when they apply, then [`launch`](#launch), [`project_memory`](#project_memory),
+   [`cli_version_check`](#cli_version_check) and [`window_budget_warning`](#window_budget_warning)
+   when it applies.
 4. The run's `request` lines and the other lines of the proxy, the MCP server and the store.
 5. [`proxy_stop_incomplete`](#proxy_stop_incomplete) when it applies, [`proxy_stop`](#proxy_stop),
    then [`mcp_tools_missing`](#mcp_tools_missing) when it applies, then [`exit`](#exit), the last
@@ -167,6 +184,16 @@ runs the proxy alone, writes neither `launch` nor `exit`: stopped with Ctrl+C it
 `proxy_start` and `proxy_stop`, and ended by SIGTERM it writes `proxy_start` alone. A store line can
 also be written outside any run, by a `contexto` command that opens the session (`contexto recall`,
 for example).
+
+A session that `contexto serve` serves has no `proxy_start`, `launch` or `exit`: the service's proxy
+for a session is never started on a port of its own. Each time the service opens the session it
+writes, in this order: the notices from opening it and
+[`affinity_salt_unavailable`](#affinity_salt_unavailable), when there are any, then
+[`serve_open`](#serve_open), the session's `request` lines and the other lines of the proxy, the MCP
+server and the store, then [`mcp_tools_missing`](#mcp_tools_missing) when it applies, and
+[`serve_close`](#serve_close) when the service closes the session. A service that is killed writes no
+`serve_close`. One session's log can hold runs of `contexto run claude` and opens by the service, one
+after another.
 
 **Credentials.** The value of any key named `authorization`, `x-api-key`, `cookie`, `set-cookie` or
 `proxy-authorization` (in any letter case, at any depth) is replaced by `[redacted]` before the line
@@ -265,8 +292,10 @@ The model reads a paged turn back:
   newest turn has no assistant message yet. The engine pages at turn starts. The one exception is a
   [`resync`](#resync) with `paged_changed`, which pages at whatever request finds the change.
 - **Tool loop**: the requests of a turn after its turn start. The model called a tool, and the CLI
-  sends the result back with the turn so far. The engine does not page inside a tool loop to make
-  room, so a turn that grows there can pass the bound.
+  sends the result back with the turn so far. For Claude Code the engine pages inside a tool loop
+  too ([in-turn paging](in-turn-paging.md), D63; see [`in_turn_batch`](#in_turn_batch)). A Codex
+  tool loop, and any tool loop with `--no-in-turn-paging`, is sent whole. A turn that grows there
+  can pass the bound.
 - **Epoch**: the stretch between two rotations of one conversation. Within an epoch the prompt
   prefix does not change, so the prompt cache can be read. `epoch` counts from 0.
 - **`k`**: the index, in the CLI's message list, of the first message still sent. Messages before `k`
@@ -374,12 +403,14 @@ It can rely on this:
 Each entry has one line of facts, then the meaning, then one bullet per field. `event` and `ts` are
 not repeated in the field lists. In the facts line:
 
-- **Writer** is `proxy`, `engine`, `launcher (Claude)`, `launcher (Codex)`, `MCP server` or `store`.
+- **Writer** is `proxy`, `engine`, `launcher (Claude)`, `launcher (Codex)`, `service` (`contexto
+  serve`), `MCP server` or `store`.
 - **Where** is `own line`, `transform_events` or `usage_events`.
 - **Kind** is `normal` (expected in a healthy session), `notice` (worth knowing, the session carries
-  on as designed) or `problem` (Contexto left its designed path, or cannot do part of its job). Two
-  entries, [`over_bound`](#over_bound) and [`epoch_not_resumed`](#epoch_not_resumed), name more than
-  one kind: which one applies depends on the event's fields, and the entry says how.
+  on as designed) or `problem` (Contexto left its designed path, or cannot do part of its job). Three
+  entries, [`over_bound`](#over_bound), [`epoch_not_resumed`](#epoch_not_resumed) and
+  [`project_memory`](#project_memory), name more than one kind: which one applies depends on the
+  event's fields, and the entry says how.
 
 ## The request line
 
@@ -698,6 +729,18 @@ reach the engine. This is a Contexto defect worth reporting.
 
 - `error`: the exception's class name.
 
+### `tool_calls_hook_error`
+
+Writer: proxy. Where: own line. Kind: problem.
+
+Under `contexto serve` only: the service could not record which session the client tool calls in a
+response belong to. The response was relayed as usual. A `contexto_*` tool call from that response
+may then find no session, and the model gets a tool error ([serve.md](serve.md#the-mcp-server)).
+The proxy hands the service the new tool-call ids each time it reads part of a response, so one
+response can log this more than once.
+
+- `error`: the exception's class name.
+
 ## Engine events (nested in request lines)
 
 The paging engine does not write to the log itself. It returns these events to the proxy, which puts
@@ -730,6 +773,11 @@ A `count_tokens` request has a [`count_tokens`](#count_tokens) event in its plac
 - `over_bound`: true when the estimate of what was sent exceeds the bound. An
   [`over_bound`](#over_bound) event precedes it.
 - `degraded`: true when the request was sent in degraded mode.
+- `in_turn_thinking`: only on a request inside a tool loop after in-turn paging has removed thinking
+  in the turn (D63): counts of the thinking blocks in the messages from `k` on, with no content.
+  `kept_before` (before the first stretch whose thinking is removed), `stripped` (removed),
+  `kept_between` (between two such stretches) and `kept_after` (after the last one). Messages folded
+  into a page are not counted.
 - `fallback_failed`: true when the CLI's request was sent unchanged (see
   [`fallback_failed`](#fallback_failed)).
 - `main`: whether this request belongs to the main conversation.
@@ -768,8 +816,9 @@ rebuilt. The first request after a rotation rewrites the cache from the window o
 - `epoch`: the new epoch's number: the conversation's previous epoch plus one.
 - `reason`: `bound` (the estimate passed `bound - headroom`), `min_turn_room` (the recall room for
   the new turn would have been under `min_turn_room`), `window_minimal` (see
-  [`window_minimal`](#window_minimal)), `head_change` (the system prompt or tools changed), or
-  `paged_changed` (see [`resync`](#resync)).
+  [`window_minimal`](#window_minimal)), `head_change` (the system prompt or tools changed),
+  `paged_changed` (see [`resync`](#resync)), or `in_turn` (in-turn paging paged the earlier turns
+  of the window inside a tool loop; an [`in_turn_batch`](#in_turn_batch) follows).
 - `k`: the first message still sent in the new epoch.
 - `retained_messages`: the number of the CLI's messages from `k` on. Messages from before `k` that
   are carried (a `role: "system"` message from a paged turn, or a Codex `developer` item ahead of
@@ -780,8 +829,9 @@ rebuilt. The first request after a rotation rewrites the cache from the window o
   earlier rotations paged ([`carried_paged`](#carried_paged)) are counted too. It is not the number
   of pages in the store: after a restart that did not resume, or a `paged_changed` resync, turns
   paged before are paged and counted again.
-- `fixed_overhead`: `F` in tokens, as used for this decision. Absent with reason `paged_changed`.
-- `window_budget`: `W` in tokens. Absent with reason `paged_changed`.
+- `fixed_overhead`: `F` in tokens, as used for this decision. Absent with reason `paged_changed` or
+  `in_turn`.
+- `window_budget`: `W` in tokens. Absent with reason `paged_changed` or `in_turn`.
 
 ### `page_out`
 
@@ -874,13 +924,27 @@ estimated low, which can page earlier messages out sooner. The launcher says so 
 
 Writer: engine. Where: `transform_events`. Kind: problem.
 
-A turn started with less recall room than `min_turn_room`, and no rotation could restore it. Recall
-and search may run out of room in this turn. Logged once per epoch. It means the bound is small for
-this session: every epoch logging it is a reason to raise `--bound`.
+The recall room is under `min_turn_room`, so recall and search may run out of room in this turn.
+Three cases, told apart by `reason`:
+
+- No `reason`: a turn started with less room than `min_turn_room`, and no rotation could restore it.
+  Logged once per epoch. It means the bound is small for this session: every epoch logging it is a
+  reason to raise `--bound`.
+- `reason: "in_turn_small_bound"`: inside a tool loop, the bound is small next to the system prompt,
+  the tools and the turn's prompt, so in-turn paging holds requests closer to the bound and the room
+  of this request falls under `min_turn_room` (see [in-turn-paging.md](in-turn-paging.md#when-it-runs)).
+  Logged once per turn.
+- `reason: "usage_missing"`: inside a tool loop, the previous request's usage has not arrived, so
+  the estimate is not corrected, and the room published for this request falls under
+  `min_turn_room`. Logged once per turn, and not in degraded mode.
+
+A turn logs at most one of the two in-turn cases.
 
 - `epoch`: the current epoch.
-- `room`: the room the turn starts with, in tokens.
-- `best_room`: the room a rotation for the room would have given.
+- `reason`: `in_turn_small_bound` or `usage_missing`. Absent at a turn start.
+- `room`: the room, in tokens: at a turn start, the room the turn starts with; in a tool loop, the
+  room of this request, never below 0.
+- `best_room`: at a turn start only: the room a rotation for the room would have given.
 - `min_turn_room`: the configured minimum.
 
 ### `head_changed`
@@ -987,7 +1051,7 @@ the `transform_events` of the same `request` line.
 
 | The event | Kind | What it means |
 | --- | --- | --- |
-| `estimate` with `in_tool_loop: true` and no `degraded` | notice | The allowed case (contract rule 5). The turn grew past the bound inside a tool loop, where the engine does not rotate to make room. The next turn start rotates. |
+| `estimate` with `in_tool_loop: true` and no `degraded` | notice | The allowed case (contract rule 5). The turn grew past the bound inside a tool loop, and in-turn paging could not bring it back under or did not run (Codex, or `--no-in-turn-paging`). The next turn start rotates. |
 | `estimate` with `degraded: true` | problem | A consequence of degraded mode, in which the conversation pages nothing. The fault to look at is the [`store_error`](#store_error) or [`page_conflict`](#page_conflict) that started it. |
 | `estimate` with `in_tool_loop: false` and no `degraded` | problem | Over the bound at a turn start. A [`bound_too_small`](#bound_too_small) or [`pdf_allowance`](#pdf_allowance) on the same line says why. With neither, the rotation's sizing did not hold. |
 | `real`, with an `estimate` event on the same line | that event's kind | The real input confirms the estimate. |
@@ -1335,6 +1399,131 @@ that a Claude Code update may have changed what a class of request looks like.
   no parent session), `tool_list` (an auxiliary request with a tool list), or `compaction_summary` (a
   compaction hint with no compaction summary in the messages).
 
+### `in_turn_batch`
+
+Writer: engine. Where: `transform_events`. Kind: normal.
+
+In-turn paging ([in-turn-paging.md](in-turn-paging.md), D63) made room inside a tool loop: one batch
+of stubbed tool results, folded tool rounds and paged earlier turns, on this request. The request
+is rewritten from its first changed message on. When the batch paged the earlier turns of the
+window, their [`page_out`](#page_out) and [`rotation`](#rotation) (reason `in_turn`) come before it
+in the same `transform_events`. Claude Code (the Messages API) only.
+
+- `epoch`: the current epoch, after this batch's rotation if it had one.
+- `trigger`: `result` (the batch only stubbed results the model had not read yet, because the
+  request could not be sent with them), `bound` (the estimate, with the fresh results' `margin`, was
+  over the bound), or `room` (it was past the line in-turn paging holds requests under, and not
+  over the bound; see [in-turn-paging.md](in-turn-paging.md#when-it-runs)).
+- `results_stubbed`: how many tool results were replaced by stubs, the two kinds below included.
+- `own_results_stubbed`: of those, results of Contexto's own `contexto_search`, `contexto_recall`
+  and `contexto_state`, which are stubbed without a page.
+- `unseen_results_stubbed`: of those, results the model had not read yet: ones the request could
+  not be sent with, and, when the request was still over the bound after every other step, the
+  unread results, largest first.
+- `documents_over_bound`: of the results stubbed unread because the request could not be sent with
+  them, how many hold a document. A document is stubbed unread only when it is over the bound on its
+  own.
+- `rounds_folded`: how many tool rounds of the running turn were folded into a page.
+- `turns_paged`: how many earlier turns were paged: the `turns` of this batch's `page_out`.
+- `pages`: one for each stubbed result that is not Contexto's own, one for the folded rounds, and
+  the `pages` of this batch's `page_out`.
+- `estimate_before`: the request's estimate before the batch, in tokens, without `margin`.
+- `estimate_after`: the estimate of what is sent after the batch, in tokens, without `margin`.
+- `margin`: what the batch added to the estimate for the tool results that arrived with this
+  request, in tokens: until usage has measured them, they count at 1.8 bytes per token.
+- `first_changed`: the index, in the CLI's message list, of the first message the batch changed.
+- `resent_tokens`: the estimated tokens of what is sent from `first_changed` on, or of everything
+  sent when the batch changed the first message still sent.
+- `messages`: how many messages the CLI's request had.
+
+### `in_turn_exhausted`
+
+Writer: engine. Where: `transform_events`. Kind: problem.
+
+Inside a tool loop, the request is over the bound by the estimate, and in-turn paging found nothing
+it could page, or the batch on this request left it over the bound. The request is sent as it
+stands. The count the estimate gives a PDF whose pages are not certain (D60), until usage has
+measured it, is left out of this comparison.
+
+- `epoch`: the current epoch.
+- `estimate`: the request's estimate, in tokens, after this request's batch if one ran.
+- `bound`: the bound.
+
+### `start_text`
+
+Writer: engine. Where: `transform_events`. Kind: normal.
+
+Project memory ([project-memory.md](project-memory.md), D69): the first request of a new main
+conversation, at what the engine took for the start of a session, sends records carried from
+earlier sessions of its project. They go with the first turn-start message until the
+conversation's first rotation; after it, the preamble's pinned state holds the same records. Absent
+when the session carries nothing.
+
+- `epoch`: 0.
+- `tokens`: the estimated size of the carried records sent, within the pin budget, in tokens.
+
+### `start_text_changed`
+
+Writer: engine. Where: `transform_events`. Kind: normal.
+
+The carried records the main conversation sends changed, and this request sends the new text, which
+costs one cache miss. The engine reads them again at each turn start of the main conversation while
+it carries records and no turn has been paged (`k` is 0), and at the request that resumed it from an
+epoch record. A record carried was closed, replaced or forgotten, project memory was turned off, or
+a conflict mark changed. A record is never added this way except by a late confirmation.
+
+- `epoch`: the current epoch.
+- `tokens`: the estimated size of the new text, in tokens; 0 when nothing is carried any more.
+
+### `start_text_unavailable`
+
+Writer: engine. Where: `transform_events`. Kind: problem.
+
+The carried records could not be read. At the start of a session it is the session's own ledger
+that failed (a failure in the project is a [`project_unavailable`](#project_unavailable) line
+instead, with nothing carried), and the conversation carries nothing. At a later read (see
+[`start_text_changed`](#start_text_changed)) it is the session's own ledger or the project: a sessions
+directory that cannot be listed, anything reading the project raised, or a session of the project
+whose files may read next time. The request then keeps sending what it sent before. Neither fails
+the request or enters degraded mode.
+
+- `epoch`: 0 at the start of a session; the current epoch at a later read.
+- `error`: the exception's class name.
+
+### `trusted_conversations_unavailable`
+
+Writer: engine. Where: `transform_events`. Kind: problem.
+
+The engine could not add the conversation it trusts as main to the session's `trusted_conversations`
+in `meta.json` (D69). A later engine on this session (after a restart, for example) then trusts
+that conversation only by its other rules, so its pins and closures may not be taken as the main
+conversation's.
+
+- `error`: the exception's class name.
+
+### `main_records_unavailable`
+
+Writer: engine. Where: `transform_events`. Kind: problem.
+
+The engine could not read the main conversation's new messages for its own pins and closures, or
+could not record the ids it found in the session's `main_records` (D69). Only records listed there
+can be carried to later sessions. The messages are read again at the conversation's next request.
+
+- `error`: the exception's class name.
+
+### `main_record_unmatched`
+
+Writer: engine. Where: `transform_events`. Kind: notice.
+
+In the main conversation's history, a `contexto_pin` or `contexto_close` call has a result that is
+not the MCP server's success reply, so no record id is taken from it: whatever it recorded is not
+carried to later sessions. Each engine logs a call once.
+
+- `tool`: `contexto_pin` or `contexto_close`.
+- `reason`: `is_error` (the result is marked as an error), `reply` (its text is not a success
+  reply), `shape` (its content is neither a string nor a list), `parts` (a list without exactly one
+  part) or `part_type` (its one part is not text).
+
 ## Launcher events
 
 `contexto run claude` and `contexto run codex` write these as their own lines.
@@ -1348,8 +1537,8 @@ The proxy is up and the CLI is about to start.
 - `cli`: `claude` or `codex`.
 - `session`: the session id. A new session gets 32 random hex characters; with `--session` it is
   the name the user gave.
-- `config`: the engine settings given on the command line: `bound`, and `window_fraction` and
-  `headroom_floor` when set.
+- `config`: the engine settings given on the command line: `bound`, `window_fraction` and
+  `headroom_floor` when set, and `in_turn_paging: false` when in-turn paging is off.
 - `engine`: `rewrite`, or `identity` when the paging engine could not be loaded.
 - `upstream_source`: as in [`proxy_start`](#proxy_start).
 - `observe_thinking`: whether `--observe-thinking` is on.
@@ -1358,11 +1547,42 @@ The proxy is up and the CLI is about to start.
 - `hint_headers`: Claude Code only: what the launch does with Claude Code's hint headers (D70):
   `stripped` (turned on for the engine and removed before forwarding), `forwarded` (you had them on,
   so they are sent upstream), or `off` (you turned them off).
+- `statusline`: Claude Code only: whether the launch added Contexto's status line (D64,
+  [statusline.md](statusline.md)): `added`, or why not: `off:flag` (`--no-statusline`), `off:env`
+  (`CONTEXTO_NO_STATUSLINE`), `own:<kind>` (a settings file has a `statusLine`),
+  `unreadable:<kind>` (a settings file could not be read as a JSON object), `hooks_off:<kind>` (a
+  settings file sets `disableAllHooks`), `managed_hooks_only`, `unsafe_path` (the command would hold
+  `${`) or `error` (deciding failed). `<kind>` is the highest-ranking such file: `managed`,
+  `main-checkout-local`, `local`, `project` or `user`.
 - `codex_auth`: Codex only: the `--codex-auth` mode.
 - `no_daemon`: Codex only: whether Codex was started with `--no-daemon`, so it leaves no background
   server running.
 - `codex_version_error`: Codex only, when the Codex version could not be read: why, in the values of
   [`cli_version_check`](#cli_version_check)'s `error`.
+
+### `project_memory`
+
+Writer: launcher (Claude), launcher (Codex). Where: own line. Kind: normal, problem.
+
+What project memory ([project-memory.md](project-memory.md), D69) gives this session at launch, in
+counts. The project's directory is never logged; when the project has an earlier session, the
+launcher prints a line that names it. The kind is `normal` with the counts, and `problem` when the
+line has `error` in their place: the counts could not be read, and no line is printed. The launch
+goes on either way.
+
+- `on`: whether project memory is on for this session: false when the session records
+  `project_memory: false`.
+- `earlier`: how many earlier sessions its project has.
+- `carried`: how many records it carries from them. The first request sends those that fit the pin
+  budget, so it can send fewer.
+- `carried_sessions`: how many sessions those records come from.
+- `skipped`: how many of the project's other sessions, earlier or later, were skipped because their
+  ledger could not be read.
+- `unreadable`: how many session directories, of any project, were left out because their
+  `meta.json` could not be read.
+- `error`: in place of every field above: the exception's class name.
+
+The counts are 0 when project memory is off or the session is in no project.
 
 ### `cli_version_check`
 
@@ -1422,7 +1642,8 @@ Writer: launcher (Claude), launcher (Codex). Where: own line. Kind: notice.
 
 The install's affinity salt could not be read or created, so requests go out without the
 `X-Session-Affinity` header. Only an upstream that routes by that header is affected (see
-[cliproxyapi.md](cliproxyapi.md)). `contexto proxy` writes this event too.
+[cliproxyapi.md](cliproxyapi.md)). `contexto proxy` writes this event too, and so does `contexto
+serve`, before a session's [`serve_open`](#serve_open).
 
 - `error`: the exception's class name.
 
@@ -1434,6 +1655,42 @@ The helper process that cleans up if the launcher is killed could not be started
 normally; only a killed launcher would leave Claude Code running and its temporary files behind.
 
 - `error`: the exception's class name.
+
+## Service events
+
+`contexto serve` ([serve.md](serve.md)) writes these two in the log of each session it serves, as
+their own lines. Everything else it logs goes to its own `serve.log`, not to a session's log.
+
+### `serve_open`
+
+Writer: service. Where: own line. Kind: normal.
+
+The service opened the session for a Claude Code session: its first request since the service
+started, or since the service last closed it. The service's proxy and engine for the session are
+ready. This is the line to find an open by, as `proxy_start` is for a run.
+
+- `cli`: `claude`.
+- `session`: the Contexto session id.
+- `created`: true when the service made the session now. A session it makes is kept out of project
+  memory (it records `project_memory: false`). False when the session existed: one the service or
+  `contexto run claude` made.
+- `config`: the engine settings, as in [`launch`](#launch), from `contexto serve`'s command line.
+- `engine`: `rewrite`, or `identity` when the paging engine could not be loaded.
+- `upstream_source`: as in [`proxy_start`](#proxy_start).
+- `observe_thinking`: whether `--observe-thinking` is on.
+- `affinity_header`: whether the proxy adds a session-affinity header to requests.
+
+### `serve_close`
+
+Writer: service. Where: own line. Kind: normal.
+
+The service closed the session. Nothing is lost: the session's next request opens it again, with a
+new [`serve_open`](#serve_open).
+
+- `reason`: `idle` (no request for `--idle-minutes`), `cap` (one more session was needed than
+  `--max-sessions` allows, and this one was the least recently used without a request in flight),
+  or `shutdown` (the service stopped).
+- `requests`: how many requests the service routed to the session since it opened it.
 
 ## MCP server events
 
@@ -1598,3 +1855,25 @@ ends when the engine saw no evidence that its subagent finished.
 - `age_s`: seconds since it was last published.
 - `room_tokens`: the room's size, in tokens.
 - `spent_tokens`: how much of it was used.
+
+### `project_session_skipped`
+
+Writer: store. Where: own line. Kind: problem.
+
+Project memory (D69): another session of this session's project was skipped whole because its
+ledger could not be read: it is unreadable, damaged, or over the size limit. None of its records
+count for this session, carried or not. Logged once per process for each skipped session. The
+skipped session is not named.
+
+- `error`: the exception's class name.
+
+### `project_unavailable`
+
+Writer: store. Where: own line. Kind: problem.
+
+Project memory (D69): reading the session's project failed, so the store went on as if the session
+had no project: nothing is carried from the earlier sessions, and their closures and replacements
+do not apply. The session's own records are read as usual. A store opened read-only does not log
+it.
+
+- `error`: the exception's class name.
