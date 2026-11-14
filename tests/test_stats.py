@@ -1394,3 +1394,25 @@ def test_state_says_note_once_paging_resumed_and_warning_while_it_is_stopped(tmp
     assert cli.main(["state", "--session", "n2"]) == 0
     stopped = capsys.readouterr().out
     assert "\nWarning: " in stopped and "Note:" not in stopped
+
+
+def hinted(line: dict, request_class: str = "main") -> dict:
+    """``line`` with the request-class hint header on the engine's event, as the engine logs it (D70)."""
+    line["transform_events"][-1]["request_class"] = request_class
+    return line
+
+
+def test_a_log_whose_requests_all_carry_a_request_class_can_show_a_compaction_on_any_version(tmp_path):
+    """PR #263 reviews A and B: with hint headers on, a compaction is recognised from
+    `x-claude-code-context-compacted` whatever the summary's wording, so a version the wording was not
+    measured on (2.1.322, which #271 measured the headers on) no longer makes it "cannot be told"."""
+    write_log(tmp_path, "h1", [*launch(0), hinted(request(1, events=(version("2.1.322"),))),
+                               hinted(request(2), "auxiliary")])
+    out = session_stats(tmp_path, "h1")
+    assert out["compaction"] == {"seen": 0, "detectable": True, "reasons": [], "cli_versions": ["2.1.322"]}
+    # One Messages request without the header: the wording decides again, and it was not measured there.
+    write_log(tmp_path, "h2", [*launch(0), hinted(request(1, events=(version("2.1.322"),))), request(2)])
+    assert session_stats(tmp_path, "h2")["compaction"]["reasons"] == ["cli_version_not_measured"]
+    # The header does not stand in for the session id the engine needs.
+    write_log(tmp_path, "h3", [*launch(0), hinted(request(1, events=(version("2.1.322"),), cli_session=False))])
+    assert session_stats(tmp_path, "h3")["compaction"]["reasons"] == ["no_session_id"]

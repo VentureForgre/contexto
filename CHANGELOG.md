@@ -102,7 +102,7 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   own count, so a launch that pages the history again (after an edited CLAUDE.md, a CLI update or
   another `--model`) does not count it twice. The cache share covers only responses that reported
   one. "Claude Code did not compact" is said only for requests from a Claude Code version the
-  check was measured on.
+  check was measured on, or that all carried Claude Code's request-class hint header.
 - The session log has two new fields: `pages` on `proxy_start` and `proxy_stop` (the page files in
   the store), and `cli_session` on a Messages request's entry (whether it carried Claude Code's
   session id).

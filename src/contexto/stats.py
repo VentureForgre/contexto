@@ -468,6 +468,7 @@ class _Tally:
         self.cli_versions: list[str] = []  # the Claude Code versions the engine logged, in order
         self._engine_messages = False  # this engine handled a Messages request
         self._engine_versions: set[str] = set()
+        self._engine_unhinted = False  # one of them carried no request-class hint header (D70)
 
     def _number(self, value: Any) -> int | None:
         """``value`` as a count, or None; a value that is there and cannot be a count is counted. The
@@ -518,13 +519,17 @@ class _Tally:
         """Whether the engine now ending could have shown a compaction: the wording of Claude Code's
         summary is known only for ``COMPACTION_MEASURED_ON``, and the engine logs the version it reads
         from the ``claude-cli`` User-Agent once per engine."""
-        if self._engine_messages:
+        # With the request-class hint header on every Messages request (D70's hints on), a compaction is
+        # recognised from x-claude-code-context-compacted whatever the summary's wording, so the version
+        # does not decide (PR #263 reviews A and B).
+        if self._engine_messages and self._engine_unhinted:
             if not self._engine_versions:
                 self.undetectable.add("cli_version_unknown")
             elif not self._engine_versions <= set(COMPACTION_MEASURED_ON):
                 self.undetectable.add("cli_version_not_measured")
         self._engine_messages = False
         self._engine_versions = set()
+        self._engine_unhinted = False
 
     def finish(self, pages_now: int | None) -> None:
         """The end of the log; ``pages_now`` is the store's page count as it stands, for a run that has
@@ -644,6 +649,8 @@ class _Tally:
                 self._engine_messages = True
                 if engine.get("cli_session") is not True:  # absent in a log from before the engine wrote it
                     self.undetectable.add("no_session_id")
+                if not isinstance(engine.get("request_class"), str):
+                    self._engine_unhinted = True
             else:  # no engine read it (none running, or the transform was skipped or failed): no check ran
                 self.undetectable.add("not_read")
         usage_events = list(_events(event.get("usage_events")))

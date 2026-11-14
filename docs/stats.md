@@ -306,7 +306,10 @@ User-Agent's entrypoint. So the log can show a compaction only when:
   once per run from the `claude-cli/<version>` User-Agent); otherwise `cli_version_unknown`. Any
   other client that posts to `/v1/messages` gets this.
 - every such version is one the summary's wording was measured on, 2.1.314 and 2.1.318; otherwise
-  `cli_version_not_measured`.
+  `cli_version_not_measured`. This and the condition above do not apply to a run in which every
+  Messages request carried Claude Code's request-class hint header (`request_class` on the engine's
+  event; hints on, D70): the engine then recognises a compaction from
+  `x-claude-code-context-compacted` whatever the summary's wording.
 - the log shows Contexto's check of every Messages request: a request with no engine event (no
   engine was running, as under a bare `contexto proxy`; its body was forwarded unread after a
   skipped or failed transform; or the proxy failed after the transform and forwarded the original,
