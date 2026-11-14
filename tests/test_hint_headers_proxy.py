@@ -301,3 +301,27 @@ def test_a_file_that_cannot_be_read_decides_nothing_for_the_hints(tmp_path):
     path.write_text('{"env": {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"},}')
     assert state(tmp_path, {}) == "stripped"
     assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"}) == "forwarded"
+
+
+def test_an_off_value_below_a_file_with_the_marker_still_strips(tmp_path):
+    """Review B of #293: a file with the hints on beside the marker (the printed serve settings merged
+    in) is discounted when deciding whose the hints are, but Claude Code still applies its ``1``, and a
+    file outranks the environment and the user file a project file outranks. An off value below it
+    therefore cannot make the launch ``off`` (which removes nothing): the hints are sent, so the
+    proxy removes them."""
+    merged = {"env": {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1", "CONTEXTO_HINT_HEADERS": "stripped"}}
+    user = tmp_path / "home" / ".claude" / "settings.json"
+    user.parent.mkdir(parents=True)
+    user.write_text(json.dumps(merged))
+    assert state(tmp_path, {"CLAUDE_CODE_GATEWAY_HINT_HEADERS": "0"}) == "stripped"
+    assert state(tmp_path, {}) == "stripped"
+    # The same file in a project, with the user's own off below it.
+    user.unlink()
+    project = tmp_path / "repo"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.json").write_text(json.dumps(merged))
+    hint_settings(user, "0")
+    assert state(tmp_path, {}, cwd=project) == "stripped"
+    # With nothing applying an on value, the user's off still decides.
+    (project / ".claude" / "settings.json").unlink()
+    assert state(tmp_path, {}, cwd=project) == "off"

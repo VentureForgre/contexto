@@ -270,7 +270,8 @@ KEY_HELPER_EXAMPLE = "printenv OPENAI_API_KEY"
 # The whole command the error gives. It names the upstream: without --codex-upstream the requests, and so
 # the key, go to Claude Code's upstream plus /v1, which is no upstream at all on a default setup and
 # need not be OpenAI's on any other.
-KEY_HELPER_COMMAND = ("contexto run --codex-upstream https://api.openai.com/v1 "
+OPENAI_UPSTREAM = "https://api.openai.com/v1"
+KEY_HELPER_COMMAND = (f"contexto run --codex-upstream {OPENAI_UPSTREAM} "
                       f"--codex-key-helper '{KEY_HELPER_EXAMPLE}' codex")
 UPSTREAM_ENV = "CONTEXTO_CODEX_UPSTREAM"
 CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
@@ -559,7 +560,7 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
                codex_bin: str = "codex", env: dict[str, str] | None = None, cwd: Path | None = None,
                home: Path | None = None, claude_upstream: str | None = None,
                codex_home_dir: Path | None = None, contexto_home: Path | None = None,
-               no_daemon: bool = False) -> CodexLaunch:
+               no_daemon: bool = False, named_upstream: str | None = None) -> CodexLaunch:
     """Plan a ``codex`` launch behind the proxy at ``proxy_url`` (no ``/v1``: the upstream carries the
     version path). The caller starts the proxy with ``launch.upstream``, runs ``launch.argv`` with
     ``launch.env``, and calls ``launch.cleanup()`` on exit. ``no_daemon`` (``takes_no_daemon``) puts
@@ -588,10 +589,18 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
                                         f"Pass --codex-key-helper (or set {KEY_HELPER_ENV})", base_env))
     if not helper:
         example = f"With an OpenAI key in $OPENAI_API_KEY, run `{KEY_HELPER_COMMAND}`"
+        # ``upstream`` is the resolved one, given even when the user named none (PR #290 review A): only
+        # --codex-upstream (``named_upstream``) or CONTEXTO_CODEX_UPSTREAM is one the user named.
+        named = named_upstream or base_env.get(UPSTREAM_ENV)
+        if named and named.rstrip("/") != OPENAI_UPSTREAM:
+            # The example's flag replaces an upstream the user named (PR #257 review B): say so.
+            example += f" (it sends Codex's requests to {OPENAI_UPSTREAM}, not to the upstream you named)"
+        # The variable replaces only the helper: without --codex-upstream the key goes to Claude Code's
+        # upstream plus /v1, which need not be OpenAI's (PR #257 review A).
         raise CodexLaunchError(f"no key helper: {notes[0]}. {example}" if notes else
                                "no key helper: Codex gets its API key from a command that prints it. "
-                               f"{example}; or set {KEY_HELPER_ENV} to such a command, or configure apiKeyHelper in "
-                               "Claude Code settings")
+                               f"{example}; or set {KEY_HELPER_ENV} to such a command and still pass "
+                               "--codex-upstream, or configure apiKeyHelper in Claude Code settings")
     if codex_home_dir is not None:
         # Kept under the Contexto session directory so Codex's rollouts stay resumable; only the
         # config (which names the helper command) is removed on exit.
@@ -747,7 +756,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         plan = plan_codex(codex_args, proxy.url, session_id, auth_mode=args.codex_auth,
                           key_helper=args.codex_key_helper, upstream=target, codex_bin=codex,
                           codex_home_dir=paths.session_dir(home, session_id) / "codex-home",
-                          contexto_home=home, no_daemon=no_daemon)
+                          contexto_home=home, no_daemon=no_daemon, named_upstream=args.codex_upstream)
         for note in plan.notes:
             print(f"contexto: {note}", file=stderr)
         store.log({"event": "launch", "cli": "codex", "session": session_id, "config": config,

@@ -1173,6 +1173,9 @@ def test_the_stats_command_prints_a_session_by_id_prefix_or_default(tmp_path):
     assert ambiguous.returncode == 1 and "matches 2 sessions" in ambiguous.stderr and ambiguous.stdout == ""
     missing = contexto(tmp_path, "stats", "zzz")
     assert missing.returncode == 1 and "no session 'zzz'" in missing.stderr
+    # The error names what the user typed (PR #263 review B): the positional SESSION, or --session.
+    assert "(from SESSION)" in missing.stderr and "--session" not in missing.stderr
+    assert "(from --session)" in contexto(tmp_path, "stats", "--session", "zzz").stderr
     both = contexto(tmp_path, "stats", "abc", "--session", "abd")
     assert both.returncode == 2 and "not both" in both.stderr
     assert contexto(tmp_path / "nothing-here", "stats").returncode == 1
@@ -1246,8 +1249,29 @@ def test_a_stop_line_from_another_run_does_not_end_the_next_one(tmp_path):
     write_log(tmp_path, "r1", lines)
     fill_pages(tmp_path, "r1", 10)  # the third run, killed, added 6
     assert session_stats(tmp_path, "r1", last_run=True)["paging"]["pages_added"] == 6
-    whole = session_stats(tmp_path, "r1")["paging"]["pages_added"]
-    assert whole is None or whole <= 10
+    assert session_stats(tmp_path, "r1")["paging"]["pages_added"] == 10  # 0 + 4 + 6
+
+
+def test_a_stop_line_after_the_shared_run_closed_belongs_to_no_run(tmp_path):
+    """PR #263 review A, round 3: Reviewer B's case. A's exit closes the run both launches share; B's own
+    `proxy_stop` and `exit` then arrive with no run open and must not end the next run at their count. The
+    earlier test accepted the wrong value (`whole <= 10`)."""
+    lines = [*launch(0, pages=0), *launch(1, pages=0), *stop(2, pages=4), *stop(3, pages=4), *launch(4, pages=4)]
+    write_log(tmp_path, "r2", lines)
+    fill_pages(tmp_path, "r2", 10)  # the third run, killed, added 6
+    assert session_stats(tmp_path, "r2", last_run=True)["paging"]["pages_added"] == 6
+    assert session_stats(tmp_path, "r2")["paging"]["pages_added"] == 10  # 0 + 4 + 6
+
+
+def test_a_run_whose_clock_steps_back_keeps_its_page_gain(tmp_path):
+    """PR #263 review A, round 3: a run whose `proxy_stop` is dated before its own `proxy_start` (an NTP
+    step, a VM resumed) lost its gain, and the session's `pages_added` became null. Whether a stop line
+    belongs to the run is decided by the order of the lines, not by their times."""
+    lines = [*launch(100, pages=0), request(101), *stop(50, pages=4)]
+    write_log(tmp_path, "r3", lines)
+    fill_pages(tmp_path, "r3", 4)
+    for last_run in (True, False):
+        assert session_stats(tmp_path, "r3", last_run=last_run)["paging"]["pages_added"] == 4, last_run
 
 
 @pytest.mark.parametrize("read,total,text", [(4, 100_000, "under 1%"), (99_996, 100_000, "over 99%")])
@@ -1265,11 +1289,10 @@ def test_one_request_refused_with_415_is_said_in_the_singular(tmp_path):
     assert "1 more refused with 415 before it was read" in text
 
 
-
 def test_state_json_carries_the_faults_stats_json_gives(tmp_path, capsys, monkeypatch):
     """#257 added `state --json` and this pull request the fault report: the JSON carries it under `faults`,
-    the same object `session_faults` gives (what `contexto stats --json` has under that key), so a script
-    sees a stopped store too."""
+    the same object `session_faults` gives (what `contexto stats --last-run --json` has under that key), so a
+    script sees a stopped store too."""
     from contexto import cli
 
     monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path))
@@ -1280,3 +1303,117 @@ def test_state_json_carries_the_faults_stats_json_gives(tmp_path, capsys, monkey
     data = json.loads(capsys.readouterr().out)
     assert data["faults"] == session_faults(tmp_path, "f9")
     assert data["faults"]["degraded"]["now"] is True and data["faults"]["messages"]
+    assert data["log"] == {"missing": False}
+
+
+@pytest.mark.parametrize("how", ["absent", "a directory"])
+def test_state_json_tells_no_log_from_no_faults(tmp_path, capsys, monkeypatch, how):
+    """PR #263 review A: with the log missing or unreadable, `faults` reads `total: 0, now: false`, as for a
+    healthy store; `stats --json` qualifies that with `log.missing`, and `state --json` now carries it too."""
+    from contexto import cli
+
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path))
+    monkeypatch.delenv("CONTEXTO_SESSION", raising=False)
+    store = SessionStore(tmp_path, "g1")
+    store.release()
+    log = tmp_path / "sessions" / "g1" / "log.jsonl"
+    if log.exists():
+        log.unlink()
+    if how == "a directory":
+        log.mkdir()
+    assert cli.main(["state", "--json", "--session", "g1"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["faults"]["total"] == 0 and data["log"] == {"missing": True}
+    assert data["log"]["missing"] is session_stats(tmp_path, "g1", last_run=True, store=False)["log"]["missing"]
+
+
+# Review follow-ups (D64 follow-up pull request)
+
+
+def test_no_count_of_unpaged_requests_when_there_were_none(tmp_path):
+    """PR #263 review A, round 2: a store that fails only where no request is flagged (the recall room under
+    the bound) read "0 requests went out unpaged, and paging had not resumed" in the summary, and "meanwhile
+    0 requests went out unpaged" under --quiet."""
+    from contexto.stats import exit_summary
+
+    write_log(tmp_path, "z1", [*launch(0), request(1, events=(store_error("set_turn_room"), ENTER))])
+    lines = exit_summary(tmp_path, "z1", "claude", 5.0)
+    assert lines[-1] == ("  faults      2 events (degraded_enter 1, store_error 1): paging had not resumed at exit; "
+                         "details: contexto stats z1")
+    stopped = " ".join(session_stats(tmp_path, "z1")["faults"]["messages"])
+    assert "0 requests" not in stopped
+    write_log(tmp_path, "z2", [*launch(0), request(1, events=(store_error("set_turn_room"), ENTER)),
+                               request(2, events=(LEAVE,))])
+    assert exit_summary(tmp_path, "z2", "claude", 5.0, quiet=True) == [
+        "contexto: paging resumed before claude exited."]
+    assert "0 requests" not in " ".join(session_stats(tmp_path, "z2")["faults"]["messages"])
+
+
+def test_one_ignored_value_is_said_in_the_singular(tmp_path):
+    """PR #263 review B, round 3: "1 value in the log were not what their field holds"."""
+    write_log(tmp_path, "v1", [*launch(0), request(1, sent=-10)])
+    text = "\n".join(render(session_stats(tmp_path, "v1")))
+    assert "1 value in the log was not what its field holds" in text
+
+
+def test_the_log_warning_promises_no_summary_below(tmp_path):
+    """PR #263 review A, round 2: with the session directory removed during the run, the warning said
+    "`contexto stats` and the summary below miss what happened", and no summary followed."""
+    from contexto.stats import log_unwritable_message
+
+    gone = log_unwritable_message(FileNotFoundError(2, "No such file or directory"))
+    assert "below" not in gone and "the session directory is gone" in gone
+    full = log_unwritable_message(OSError(28, "No space left on device"))
+    assert "below" not in full and "ENOSPC" in full and "Free space" in full
+
+
+def test_a_log_with_no_usable_time_is_not_called_no_log(tmp_path):
+    """PR #263 review B, round 3: when every `ts` lacks a UTC offset the header read `(1 run, no log)` above
+    a log that shows requests."""
+    lines = [*launch(0), request(1, tokens=41_000)]
+    for line in lines:
+        line["ts"] = line["ts"].removesuffix("Z")
+    write_log(tmp_path, "t1", lines)
+    done = contexto(tmp_path, "stats", "t1")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines()[0] == "Contexto stats for session t1: the whole session (1 run, no usable times)"
+    assert "peak 41,000 of 150,000" in done.stdout
+
+
+def test_state_says_note_once_paging_resumed_and_warning_while_it_is_stopped(tmp_path, capsys, monkeypatch):
+    """PR #263 review A, round 2: always printing `Warning:` passed every test."""
+    from contexto import cli
+
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path))
+    monkeypatch.delenv("CONTEXTO_SESSION", raising=False)
+    write_log(tmp_path, "n1", [*launch(0), request(1, degraded=True, events=(store_error(), ENTER)),
+                               request(2, events=(LEAVE,))])
+    write_log(tmp_path, "n2", [*launch(0), request(1, degraded=True, events=(store_error(), ENTER))])
+    assert cli.main(["state", "--session", "n1"]) == 0
+    resumed = capsys.readouterr().out
+    assert "\nNote: " in resumed and "Warning:" not in resumed
+    assert cli.main(["state", "--session", "n2"]) == 0
+    stopped = capsys.readouterr().out
+    assert "\nWarning: " in stopped and "Note:" not in stopped
+
+
+def hinted(line: dict, request_class: str = "main") -> dict:
+    """``line`` with the request-class hint header on the engine's event, as the engine logs it (D70)."""
+    line["transform_events"][-1]["request_class"] = request_class
+    return line
+
+
+def test_a_log_whose_requests_all_carry_a_request_class_can_show_a_compaction_on_any_version(tmp_path):
+    """PR #263 reviews A and B: with hint headers on, a compaction is recognised from
+    `x-claude-code-context-compacted` whatever the summary's wording, so a version the wording was not
+    measured on (2.1.322, which #271 measured the headers on) no longer makes it "cannot be told"."""
+    write_log(tmp_path, "h1", [*launch(0), hinted(request(1, events=(version("2.1.322"),))),
+                               hinted(request(2), "auxiliary")])
+    out = session_stats(tmp_path, "h1")
+    assert out["compaction"] == {"seen": 0, "detectable": True, "reasons": [], "cli_versions": ["2.1.322"]}
+    # One Messages request without the header: the wording decides again, and it was not measured there.
+    write_log(tmp_path, "h2", [*launch(0), hinted(request(1, events=(version("2.1.322"),))), request(2)])
+    assert session_stats(tmp_path, "h2")["compaction"]["reasons"] == ["cli_version_not_measured"]
+    # The header does not stand in for the session id the engine needs.
+    write_log(tmp_path, "h3", [*launch(0), hinted(request(1, events=(version("2.1.322"),), cli_session=False))])
+    assert session_stats(tmp_path, "h3")["compaction"]["reasons"] == ["no_session_id"]

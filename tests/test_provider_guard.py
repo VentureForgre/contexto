@@ -297,15 +297,28 @@ def test_a_file_contexto_cannot_parse_refuses(tree, content):
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs on this platform")
-def test_a_fifo_is_never_opened_for_reading_and_refuses(tree):
-    """Opened without blocking, found not to be a regular file, and not read."""
+def test_a_fifo_is_never_opened_for_reading_and_refuses(tree, within):
+    """Opened without blocking, found not to be a regular file, and not read. Run with a time limit, so a
+    reader that blocks on the pipe fails here rather than hanging the run."""
     path = tree["cwd"] / PROJECT
     path.parent.mkdir()
     os.mkfifo(path)
-    read = upstream.read_settings_file(path)
+    read = within(10, lambda: upstream.read_settings_file(path))
     assert read.data is None and read.problem == "is not a regular file"
-    assert guard(tree).unread == (("settings:project", "is not a regular file"),)
-    assert resolve_upstream(env={}, cwd=tree["cwd"], home=tree["home"]).source == "default"
+    assert within(10, lambda: guard(tree)).unread == (("settings:project", "is not a regular file"),)
+    assert within(10, lambda: resolve_upstream(env={}, cwd=tree["cwd"], home=tree["home"])).source == "default"
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="no /dev/zero on this platform")
+def test_a_device_in_place_of_a_settings_file_is_not_read(tree, within):
+    """PR #258 review A, round 4: with a FIFO opened without blocking, only a device still depends on the
+    regular-file check; without it a settings path that is a symlink to /dev/zero would be read."""
+    path = tree["cwd"] / PROJECT
+    path.parent.mkdir()
+    path.symlink_to("/dev/zero")
+    read = within(10, lambda: upstream.read_settings_file(path))
+    assert read.data is None and read.problem == "is not a regular file"
+    assert within(10, lambda: guard(tree)).unread == (("settings:project", "is not a regular file"),)
 
 
 def test_a_directory_or_a_file_this_user_cannot_open_passes(tree):

@@ -348,6 +348,76 @@ def test_a_claude_that_cannot_be_started_still_gets_the_provider_check(world, ca
     assert [found[i]["status"] for i in ("claude-upstream", "claude-key")] == ["skip"] * 2
 
 
+def test_a_missing_cli_names_its_install_command_once(world, capsys, fast_mcp):
+    """PR #258 review (both): since #257 the line carries the install command and "If it is installed, add
+    its directory to PATH", and the next step said "Install Codex and put it on PATH" again."""
+    fake_cli(world, "claude", f"{TESTED_CLAUDE} (Claude Code)")
+    _, out, _ = run(capsys)
+    line = line_of(out, "Codex: ")
+    assert line == ("[warn] Codex: 'codex' not found on PATH. Install Codex: curl -fsSL https://chatgpt.com/codex/"
+                    "install.sh | sh (other ways: https://learn.chatgpt.com/docs/codex/cli). If it is installed, add "
+                    "its directory to PATH.")
+    step = out.splitlines()[out.splitlines().index(line) + 1]
+    assert step.strip() == "-> Only `contexto run codex` needs it"
+    assert out.count("Install Codex") == 1
+
+
+@pytest.mark.parametrize("kind", ["not executable", "broken symlink", "directory"])
+def test_the_provider_skip_line_agrees_with_the_claude_line(world, capsys, fast_mcp, kind):
+    """PR #258 review (both): for a `claude` on PATH that is not executable or a broken symlink the skip line
+    said "claude is not on PATH", four lines under a line that names it on PATH."""
+    fake_cli(world, "codex", f"codex-cli {TESTED_CODEX}")
+    target = world.bin / "claude"
+    if kind == "not executable":
+        target.write_text("#!/bin/sh\necho 2.1.318\n")  # mode 0644
+    elif kind == "broken symlink":
+        target.symlink_to(world.tmp / "nowhere")
+    else:
+        target.mkdir()
+    code, found = checks(capsys)
+    assert code == 0 and found["provider"]["status"] == "skip"
+    assert found["provider"]["summary"] == "Cloud provider: not checked, claude is not on PATH or not executable"
+    assert "not on PATH" not in found["claude"]["summary"]
+    target.unlink() if kind != "directory" else target.rmdir()  # missing: the same words, also true
+    _, found = checks(capsys)
+    assert found["provider"]["summary"] == "Cloud provider: not checked, claude is not on PATH or not executable"
+
+
+def test_without_codex_support_the_codex_checks_say_so_and_are_not_a_bug(both, capsys, fast_mcp, monkeypatch):
+    """PR #283 reviews A and B: with contexto.codex missing and `codex` on PATH, the two Codex checks failed
+    as "the check itself failed (ModuleNotFoundError)" with "Report it at ...". `contexto run codex` says
+    "codex support is not installed in this build" and exits 2, so doctor now says that."""
+    monkeypatch.setitem(sys.modules, "contexto.codex", None)  # behaves as not installed
+    code, found = checks(capsys)
+    assert code == 0  # Claude Code is usable, so this is a warning, as a missing codex CLI is
+    assert found["codex"]["status"] == "warn"
+    assert found["codex"]["summary"].endswith(", but codex support is not installed in this build")
+    assert found["codex"]["action"] == "Reinstall Contexto to use `contexto run codex`; until then it exits 2"
+    for check_id, label in (("codex-upstream", "Codex upstream"), ("codex-key", "Codex key helper")):
+        assert found[check_id]["status"] == "skip"
+        assert found[check_id]["summary"] == f"{label}: not checked, codex support is not installed in this build"
+    assert not any("Report it" in (c["action"] or "") for c in found.values())
+    _, out, _ = run(capsys)
+    assert "ModuleNotFoundError" not in out
+    # And with Claude Code unusable too, its step does not tell the user to install Codex, which is there
+    # (Reviewer B, PR #290).
+    (both.bin / "claude").unlink()
+    fake_cli(both, "claude", None, body="#!/nonexistent/interpreter\n")
+    code, found = checks(capsys)
+    assert code == 1 and found["claude"]["status"] == found["codex"]["status"] == "fail"
+    assert found["claude"]["action"].startswith("Install Claude Code and put it on PATH")
+    assert "no Codex support" in found["claude"]["action"] and "or Codex" not in found["claude"]["action"]
+    assert found["codex"]["action"] == "Reinstall Contexto to use `contexto run codex`; until then it exits 2"
+
+
+def test_without_codex_support_or_a_usable_claude_both_cli_checks_fail(world, capsys, fast_mcp, monkeypatch):
+    fake_cli(world, "codex", f"codex-cli {TESTED_CODEX}")
+    monkeypatch.setitem(sys.modules, "contexto.codex", None)
+    code, found = checks(capsys)
+    assert code == 1 and found["claude"]["status"] == found["codex"]["status"] == "fail"
+    assert "at least one" in found["claude"]["action"] and found["codex"]["action"].startswith("Reinstall Contexto")
+
+
 # The upstream ---------------------------------------------------------------------------------------
 
 
@@ -1360,16 +1430,14 @@ def test_a_file_whose_env_is_not_an_object_is_not_read_at_all(both, capsys, fast
     assert found["claude-key"]["status"] == "warn" and found["claude-key"]["details"] == {"found": []}
 
 
-def test_a_fifo_settings_file_is_named_and_the_other_checks_go_on(both, capsys, fast_mcp):
+def test_a_fifo_settings_file_is_named_and_the_other_checks_go_on(both, capsys, fast_mcp, within):
     """Reviewer A's re-review: a named pipe at a settings path is never opened for reading
     (``read_settings_file``), so doctor names it and finishes. The launcher refuses on it (D70: a file
     that is there and cannot be read may turn on a provider), so the provider check fails as it does."""
     pipe = both.cwd / ".claude" / "settings.json"
     pipe.parent.mkdir()
     os.mkfifo(pipe)
-    started = time.monotonic()
-    code, found = checks(capsys)
-    assert time.monotonic() - started < 60
+    code, found = within(60, lambda: checks(capsys))  # a doctor that blocks on the pipe fails, not hangs
     assert found["settings"]["status"] == "warn"
     assert ".claude/settings.json is not a regular file" in found["settings"]["summary"]
     assert found["provider"]["status"] == "fail"

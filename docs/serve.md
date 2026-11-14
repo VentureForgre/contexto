@@ -218,9 +218,17 @@ upstream gets none of them, no prompt id included, just as without the setting.
 `--forward-hint-headers` passes them on, for an upstream gateway that reads them. Leave the
 variable out of the settings and the engine reads its signatures alone.
 
+Beside the hint setting, `--print-settings` writes `CONTEXTO_HINT_HEADERS=stripped`, the marker
+`contexto run claude` writes in its own settings file: it says the `1` is Contexto's, not yours. A
+`contexto run claude` started inside a session that uses the printed file inherits both and strips
+the hints, and so does one that finds both in a settings file the printed settings were merged into.
+To have `contexto run claude` forward the hints to your own gateway, turn them on in your
+environment or in a settings file without the marker.
+
 Keep these settings in their own file passed with `--settings`, as above, where you can. Merged into
-Claude Code's user settings, they reach every Claude Code you start, and a `contexto run claude`
-then counts the hint setting as your own and forwards the hints to its upstream.
+Claude Code's user settings, they reach every Claude Code you start, and they replace a hint
+setting you had there: if you had turned the hints on in that file for your gateway,
+`contexto run claude` strips them from then on, until you turn them on in one of the other places.
 
 Session directories accumulate: every new conversation, every `claude -p` and every `/clear` adds
 one under `$CONTEXTO_HOME/sessions/`. The service never deletes one. Remove old ones with
@@ -385,11 +393,176 @@ the check is outside both limits for the rest of its life, so a long streamed re
 - `contexto mcp --serve` relies on `_meta["claudecode/toolUseId"]`, measured on Claude Code 2.1.322
   and not documented as a stable interface. A client that does not send it gets the "no tool-use
   id" error on every call. Codex does not send it.
-- Measured with API-key clients on Claude Code 2.1.322 on macOS, with `claude -p`. Not run: a
-  claude.ai (OAuth) login, the IDE extensions, the desktop app, the Agent SDK, and the GitHub
-  Action.
+- Measured with API-key clients on macOS: `claude -p` on Claude Code 2.1.322, and the Python Agent
+  SDK 0.2.182 with the Claude Code it bundles (2.1.325), against a fake upstream (see
+  [Recipes](#recipes)). Not run: a claude.ai (OAuth) login, the IDE extensions, the desktop app,
+  the TypeScript Agent SDK, and the GitHub Action.
 
 ## Recipes
 
-Step-by-step setups for each client (the Agent SDK, VS Code, headless `claude -p`), with tests, come
-in a follow-up pull request.
+Each recipe below is run as written by `tests/test_serve_recipes.py`, which takes it from this
+page, at zero spend: a fake upstream on `127.0.0.1` answers with a `contexto_pin` tool call, and the
+test checks that every request reached the store of its own Claude Code session id and that the
+pin landed in that store and no other. What each test does not cover is said under its recipe.
+
+### The Claude Agent SDK (Python)
+
+The SDK starts its own Claude Code process for every `query()`. Give that process the two files
+`--print-settings` and `--print-mcp-config` print, with the service running:
+
+<!-- recipe: sdk-files -->
+```sh
+umask 077
+contexto serve --print-settings > ~/.contexto/serve-settings.json
+contexto serve --print-mcp-config > ~/.contexto/serve-mcp.json
+```
+
+Then pass them as `settings` (Claude Code's `--settings`: the base URL with the token, the hint
+headers, the allow rules for Contexto's tools) and `mcp_servers` (`--mcp-config`: `contexto mcp
+--serve`):
+
+<!-- recipe: sdk-program -->
+```python
+import asyncio
+from pathlib import Path
+
+from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+
+CONTEXTO = Path.home() / ".contexto"  # or your $CONTEXTO_HOME
+
+options = ClaudeAgentOptions(
+    settings=str(CONTEXTO / "serve-settings.json"),
+    mcp_servers=CONTEXTO / "serve-mcp.json",
+)
+
+
+async def main() -> None:
+    async for message in query(prompt="Summarize the README of this repository.", options=options):
+        if isinstance(message, ResultMessage):
+            print(message.result)
+
+
+asyncio.run(main())
+```
+
+The token stays in the settings file, out of the program's source. Each `query()` is a new
+conversation with its own session id, so it gets its own store. The SDK's requests name the entrypoint
+`sdk-py` in their `User-Agent`, and the engine treats them as it treats `claude -p`.
+
+Tested with `claude-agent-sdk` 0.2.182 and the Claude Code it bundles (2.1.325), on macOS: two
+runs of the program, two stores, each with its own pin. Not run: the TypeScript SDK, and an SDK
+pointed at another Claude Code with `cli_path`.
+
+### The VS Code extension
+
+The extension has no `--settings` flag. Its Claude Code reads the user settings file
+(`~/.claude/settings.json`, which the extension shares with the CLI) and the MCP servers saved at
+user scope. Close VS Code, start the service, then merge the printed settings into that file
+(keeping what is there and making it mode 0600, since it now holds the token) and add the MCP
+server at user scope. The user settings file applies to every Claude Code on the machine, so this
+also turns on Claude Code's gateway hint headers for a plain `claude` run outside the service: in a
+repository whose own settings name another base URL, that `claude` sends the hints there with no
+Contexto proxy to remove them. Undo the merge (below) if that matters to you.
+
+<!-- recipe: vscode-setup -->
+```sh
+umask 077
+contexto serve --print-settings | python3 -c '
+import json, os, pathlib, sys
+add = json.load(sys.stdin)
+path = pathlib.Path(os.environ.get("CLAUDE_CONFIG_DIR") or pathlib.Path.home() / ".claude") / "settings.json"
+settings = json.loads(path.read_text()) if path.exists() else {}
+settings.setdefault("env", {}).update(add["env"])
+allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+allow += [rule for rule in add["permissions"]["allow"] if rule not in allow]
+path.parent.mkdir(parents=True, exist_ok=True)
+path.touch(mode=0o600)
+path.chmod(0o600)
+path.write_text(json.dumps(settings, indent=2) + "\n")
+'
+claude mcp remove --scope user contexto 2> /dev/null || true
+claude mcp add-json --scope user contexto "$(contexto serve --print-mcp-config |
+  python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["mcpServers"]["contexto"]))')"
+```
+
+Running it again changes nothing. It needs the standalone `claude` on `PATH` (the extension's own
+copy is not), and it replaces a user-scope MCP server already named `contexto`. Make sure neither
+the extension's `claudeCode.environmentVariables` setting nor the environment VS Code starts in
+sets `ANTHROPIC_BASE_URL`, so nothing competes with the settings file.
+
+From then on every Claude Code that reads these files goes through the service, the terminal's
+`claude` included, and fails to connect while the service is down. `contexto run claude` then needs
+`--upstream URL` (see [Upstream](#upstream)). To undo it, remove the `ANTHROPIC_BASE_URL`,
+`CLAUDE_CODE_GATEWAY_HINT_HEADERS` and `CONTEXTO_HINT_HEADERS` entries and the five
+`mcp__contexto__` allow rules from the settings file, and run
+`claude mcp remove --scope user contexto`.
+
+Not tested in VS Code. The test runs the commands above and then the real `claude -p` with nothing
+but the user's files (no `--settings`, no `--mcp-config`), and checks that its requests and its pin
+reach their own store. The extension starts its own copy of Claude Code, whose version is the
+extension's, so check it once by hand:
+
+1. Start the service (`contexto serve --upstream https://api.anthropic.com`) and run the commands
+   above with VS Code closed.
+2. Open VS Code and a new conversation in the Claude Code panel. Type `/mcp`: `contexto` is listed
+   as connected.
+3. Send a message. `contexto serve --status` shows one open session, and `contexto sessions list`
+   a new session. `~/.contexto/serve.log` has no `unrouted` line for it.
+4. Ask the model to pin a decision (for example "pin the decision: we use tabs") and allow the call.
+   `contexto state --session <the new session>` shows the pin, and the service's stderr shows no
+   warning that Contexto's MCP tools are missing.
+
+### `claude -p` in CI
+
+A GitHub Actions job that starts the service, runs `claude -p` through it and stops it, all in one
+step so the service never outlives the step:
+
+<!-- recipe: ci-workflow -->
+```yaml
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    env:
+      CONTEXTO_REF: main  # pin a tag or commit that has contexto serve
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Contexto and Claude Code
+        run: |
+          pipx install "git+https://github.com/VentureForgre/contexto@${CONTEXTO_REF}"
+          npm install --global @anthropic-ai/claude-code@2.1.322
+      - name: Run claude -p through contexto serve
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          export CONTEXTO_HOME="$RUNNER_TEMP/contexto"
+          umask 077
+          contexto serve --port 0 --upstream https://api.anthropic.com 2> "$RUNNER_TEMP/contexto-serve.log" &
+          serve_pid=$!
+          trap 'kill -TERM "$serve_pid" 2> /dev/null && wait "$serve_pid"' EXIT
+          for _ in $(seq 50); do
+            contexto serve --status > /dev/null && break
+            sleep 0.2
+          done
+          contexto serve --status
+          contexto serve --print-settings > "$RUNNER_TEMP/serve-settings.json"
+          contexto serve --print-mcp-config > "$RUNNER_TEMP/serve-mcp.json"
+          claude -p --settings "$RUNNER_TEMP/serve-settings.json" \
+            --mcp-config "$RUNNER_TEMP/serve-mcp.json" --strict-mcp-config \
+            "Review the changes on this branch and list the risks."
+```
+
+`CONTEXTO_HOME` under `$RUNNER_TEMP` gives each job its own home, token and stores, removed with the
+job's temporary directory, so jobs that share a self-hosted runner never meet. `--port 0` takes a
+free port, and `--print-settings` names the port of the service that runs for this home. The loop
+waits until the service answers; the `trap` stops it with SIGTERM when the script ends, whether
+`claude -p` succeeded or not, and the step fails if `claude -p` does. `--upstream` is explicit
+because a checked-out repository's `.claude/settings.json` could name another base URL. The
+service's stderr is in `$RUNNER_TEMP/contexto-serve.log`. Do not upload `$CONTEXTO_HOME` as an
+artifact: it holds the token, and the stores hold the conversation. Set `CONTEXTO_REF` to a tag or
+commit, not a branch, once a release has `contexto serve`. Do not run the step on code from an
+untrusted pull request: Claude Code runs with the API key in that checkout.
+
+The test runs the step's `run` script with the real `claude` (2.1.322) under the shell GitHub uses
+(`bash --noprofile --norc -eo pipefail`), with the upstream pointed at the fake upstream and a stub
+for the secret, and checks that the service stopped and removed `serve.json`. The install step and
+GitHub's runner were not run.

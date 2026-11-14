@@ -306,20 +306,18 @@ def test_a_settings_file_with_a_number_too_long_for_python_is_read(tmp_path, hom
     assert claude_key_helper(tmp_path, home, {}, trusted_only=False).value == "print-a-key"
 
 
-def test_a_fifo_in_place_of_a_settings_file_is_skipped(tmp_path, home):
+def test_a_fifo_in_place_of_a_settings_file_is_skipped(tmp_path, home, within):
     """Claude Code 2.1.322 skips a named pipe at a settings path (PR #258, Reviewer A's re-review); the
-    reader waited on it for ever, so `contexto run` never started."""
+    reader waited on it for ever, so `contexto run` never started. A reader that blocks fails here after
+    5 s instead of hanging the run (round 4)."""
     import os
-    import time
 
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://user.invalid"}}))
     (tmp_path / ".claude").mkdir()
     os.mkfifo(tmp_path / ".claude" / "settings.json")
-    started = time.monotonic()
-    up = resolve_upstream(env={}, cwd=tmp_path, home=home)
+    up = within(5, lambda: resolve_upstream(env={}, cwd=tmp_path, home=home))
     assert (up.url, up.source) == ("http://user.invalid", "settings:user")
-    assert time.monotonic() - started < 5
 
 
 @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])

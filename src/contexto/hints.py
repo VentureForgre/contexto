@@ -32,10 +32,12 @@ in which case Contexto does not ask for them and the engine reads its signatures
 Limit: Claude Code applies the ``env`` block of the ``--settings`` file to its own environment, so
 every process the session starts inherits ``CLAUDE_CODE_GATEWAY_HINT_HEADERS=1``. A nested
 ``contexto run claude`` tells that value from the user's by the marker written beside it
-(``HINT_MARKER_KEY``). A nested plain ``claude`` that is pointed at another base URL has no Contexto
-proxy in its path, so it sends the hints to that URL. The way out is the explicit off: with
-``CLAUDE_CODE_GATEWAY_HINT_HEADERS=0`` in the environment or the user settings file Contexto sets
-nothing.
+(``HINT_MARKER_KEY``). ``contexto serve --print-settings`` prints the same pair, with ``stripped``,
+so a launch inside a ``serve`` client's session strips too, and so does one that finds the pair in a
+settings file the printed settings were merged into. A nested plain ``claude`` that is pointed at
+another base URL has no Contexto proxy in its path, so it sends the hints to that URL. The way out is
+the explicit off: with ``CLAUDE_CODE_GATEWAY_HINT_HEADERS=0`` in the environment or the user settings
+file Contexto sets nothing.
 
 Only two of the values are ever logged, and only after they were matched against the documented set:
 the class and the compaction trigger. A prompt id, an agent type or a tool name never reaches a log.
@@ -54,6 +56,7 @@ from contexto.upstream import (
     env_falsy,
     env_truthy,
     managed_settings_path,
+    settings_env,
     settings_file_env,
     user_settings_path,
 )
@@ -125,6 +128,15 @@ def without_hint_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {name: value for name, value in headers.items() if name.lower() not in GATED_HINT_HEADERS}
 
 
+def contexto_set_hints_on(settings: dict) -> bool:
+    """Whether a settings file's JSON object turns the hints on beside ``CONTEXTO_HINT_HEADERS`` at
+    ``stripped``: Contexto's own request for them (``contexto serve --print-settings``, or a launcher
+    ``--settings`` file copied elsewhere), not the user's. Values are read as Claude Code reads them
+    (``contexto.upstream.settings_env``)."""
+    return (settings_env(settings, HINT_MARKER_KEY) == STRIPPED
+            and env_truthy(settings_env(settings, HINT_HEADERS_KEY)))
+
+
 def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None = None, home: Path | None = None,
                        files: SettingsFiles | None = None, managed: Path | None = None) -> str:
     """What ``contexto run claude`` does about the hint headers for a launch from ``cwd``:
@@ -154,6 +166,13 @@ def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None
     claude`` inside such a session gets ``off``. With ``forwarded`` the outer launch found the user had
     them on, so the value is the user's; with ``off`` it set nothing.
 
+    A settings file is discounted the same way (``contexto_set_hints_on``): an ``env`` block with the
+    variable on beside the marker ``stripped`` is what ``contexto serve --print-settings`` prints,
+    merged into that file (``docs/serve.md``'s VS Code recipe does so), so its ``1`` is the service's
+    and the next file or the environment decides whether the hints are the user's. Claude Code still
+    applies that ``1``, so an off value below such a file (in the environment, or the user file under a
+    project file) gives ``stripped``, not ``off``.
+
     "Off" is, when the hints are not on, one of ``0``, ``false``, ``no``, ``off`` in the process
     environment (unless it is an outer launch's, as above), in the user settings file, or in the
     managed settings file, which outranks Contexto's ``--settings``. A project file's off value is not
@@ -167,9 +186,15 @@ def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None
     # that launch's; an off value never is.
     own = env.get(HINT_MARKER_KEY) != STRIPPED or not env_truthy(env.get(HINT_HEADERS_KEY))
     found = claude_env_value(HINT_HEADERS_KEY, env=env, cwd=cwd, home=home, files=files, managed=managed,
-                             process_env=own)
+                             process_env=own, skip=contexto_set_hints_on)
     if env_truthy(found.value):
         return FORWARDED
+    # A discounted file still applies in Claude Code: when its on value is what Claude Code would run
+    # with, the hints are sent whatever off value lies below it, so they are removed, never left on.
+    applied = claude_env_value(HINT_HEADERS_KEY, env=env, cwd=cwd, home=home, files=files, managed=managed,
+                               process_env=own)
+    if env_truthy(applied.value):
+        return STRIPPED
     said = (env.get(HINT_HEADERS_KEY) if own else None,
             settings_file_env(files, user_settings_path(home, env), HINT_HEADERS_KEY),
             settings_file_env(files, managed, HINT_HEADERS_KEY))
