@@ -192,7 +192,9 @@ STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
 # D69: the reasons a conversation takes main (D50) after which its own history confirms its pins and
-# closures; ``more_turn_starts`` is not one of them (a subagent without its header, a Codex child).
+# closures (``after_side_request`` only when ``_first_trusted`` also holds: ``_trusted_takeover``);
+# ``more_turn_starts`` is not one of them (a subagent without its header, a Codex child), and trusts only a
+# conversation in ``trusted_conversations``.
 TRUSTED_MAIN_REASONS = frozenset({"new_cli_session", "resumed_cli_session", "compacted", "after_side_request"})
 RETAINED_ROLES = ("user", "assistant", "tool_result")  # A14: the roles set_retained accepts (lane B PR #128)
 # D48: before a ratio is measured, a request whose text would measure above this many bytes a token once
@@ -2362,8 +2364,9 @@ class RewriteEngine:
             self._served_before = None
         # D69: the conversations an earlier engine on this store trusted as main (review A round 6, finding 1),
         # read now for the same reason; a later continue or resume of one is trusted though the epoch record
-        # names another. A conversation's key is the hash of its first message, which for a subagent is its
-        # task, not the user's prompt, so this never trusts a subagent that the record does not name.
+        # names another. A conversation's key is the hash of its first message (for a subagent, its task),
+        # so the list names whatever an engine trusted: the user's conversations, a new session's first
+        # request, and what the stated residues let through (D69).
         known = getattr(self.store, "trusted_conversations", None)
         try:
             self._trusted_before: frozenset[str] = frozenset(known()) if callable(known) else frozenset()
@@ -2632,11 +2635,12 @@ class RewriteEngine:
     def _confirm_main_records(self, key: str, messages: list, events: list[dict]) -> None:
         """D69: record in the store the ids of the records the main conversation's own history shows it
         made (``contexto.mainrecords``), reading only the messages it has not read before. Called only
-        for a trusted main conversation: the engine's first main (main since its own first request), or
-        one that took main by ``TRUSTED_MAIN_REASONS`` (D50's session rules and ``after_side_request``).
-        One that took main by ``more_turn_starts`` from a known main (a subagent without
-        ``X-Claude-Code-Agent-Id``, a Codex child conversation) is not read until it takes main by one of
-        those; a trusted conversation stays trusted when it takes main back by turn starts. A store
+        for a trusted main conversation: the engine's first main (``_first_trusted``), or one that took
+        main by a trusted rule (``_trusted_takeover``: D50's session rules, ``after_side_request`` when
+        ``_first_trusted`` holds, ``more_turn_starts`` for a listed conversation). One that took main by
+        ``more_turn_starts`` from a known main and is not listed (a subagent without
+        ``X-Claude-Code-Agent-Id``, a Codex child conversation) is not read until it takes main by a
+        trusted rule; a trusted conversation stays trusted when it takes main back by turn starts. A store
         without the method records nothing; a failure is the content-free ``main_records_unavailable``
         with the error's class, never a failed request or degraded mode, and the messages stay unread,
         so the next request of the conversation tries the same ids again. A pin or close call whose

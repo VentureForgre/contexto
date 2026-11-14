@@ -40,8 +40,9 @@ state in `epoch.json`, and the pinned records in `ledger.jsonl`. For Codex sessi
 `codex-home/` holds Codex's own transcripts. `meta.json` records the working directory the session
 started in and the Claude Code session ids it served, and for [project memory](project-memory.md)
 the project's root directory (`project`, recorded once), whether the session is out of project
-memory (`project_memory`), the record ids its main conversation made (`main_records`) and the record
-ids forgotten from it (`forgotten`). The session log,
+memory (`project_memory`), the record ids its main conversation made (`main_records`), the keys of
+the conversations the proxy trusted as main (`trusted_conversations`, hashes of each conversation's
+first message, the newest 64) and the record ids forgotten from it (`forgotten`). The session log,
 `log.jsonl`, holds event names, sizes and counts, never prompt or response text. Auth headers and keys are never stored.
 
 `$CONTEXTO_HOME` must be a directory, and `contexto run` refuses one that contains `${`. An existing home keeps its

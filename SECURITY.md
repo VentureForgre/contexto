@@ -155,7 +155,9 @@ persuaded the model to pin something. The defence and what it does not cover are
 What remains: the main conversation also reads untrusted content, and a pin it makes after reading
 it is carried; the heading is advisory, and its effect on a live model is unmeasured; pruning the
 session that closed a record brings the record back; and a symlinked directory belongs to its
-target's project. `main_records` is a list in `meta.json`, a file any process running as you can
-edit, a subagent with a shell included: it records what the proxy saw, not an integrity guarantee,
-and an id added there by hand is carried like one the proxy recorded. The same process could edit
-the ledger or `CLAUDE.md` as easily.
+target's project. `main_records` and `trusted_conversations` are lists in `meta.json`, a file any
+process running as you can edit, a subagent with a shell included: they record what the proxy saw,
+not an integrity guarantee. An id added to `main_records` by hand is carried like one the proxy
+recorded, and a conversation key added to `trusted_conversations` by hand counts as one the proxy
+trusted, so after a restart that conversation's pins are carried once it is the main one. The same
+process could edit the ledger or `CLAUDE.md` as easily.

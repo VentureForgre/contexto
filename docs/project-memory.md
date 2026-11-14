@@ -79,10 +79,21 @@ the main conversation by a restarted proxy or `contexto run --resume`, unless th
 restart did not trust it either). After a restart, another conversation that reaches the proxy
 first is trusted only when a proxy on this session trusted it before (a `--continue` or `--resume`
 of your own conversation) or it is a new Claude Code session; otherwise a restarted proxy may carry
-less, never more. In Codex, a new conversation in a reused session (`contexto run --session ID
+less, never more. The proxy keeps the keys of the last 64 conversations it trusted in the session's
+`meta.json` (`trusted_conversations`). A conversation of yours that is not among them, and is not
+the one the proxy last recorded for a resume, is not trusted after a restart and carries nothing in
+that launch or later ones. That happens at the first launch after upgrading from v0.5.24, which kept
+no such list, and to a conversation that fell off it or whose entry could not be written. `/clear`
+starts a conversation that is carried.
+In Codex, a new conversation in a reused session (`contexto run --session ID
 codex` with a new prompt) is never trusted, because a Codex child conversation cannot be told apart
-from it; a new Codex session is. A conversation also becomes trusted when it became the main
-one after `/clear`, `/resume`, a compaction, or a side request that came first. Claude Code subagents
+from it; a new Codex session is. A Codex child conversation whose first prompt is the same as a
+trusted conversation's is that conversation to the proxy, before and after a restart; on codex-cli
+0.163.0 that changes nothing, since a Codex session's pins are never carried. A conversation also
+becomes trusted when it became the main
+one after `/clear`, `/resume`, a compaction, or a side request that came first. After a restart, one
+that takes over after a side request is trusted only when the rules above would trust it had it
+reached the proxy first. Claude Code subagents
 are told apart by the `X-Claude-Code-Agent-Id` header Claude Code sends with their requests, and never
 take over as the main conversation. A request that carries `X-Claude-Code-Agent-Id` or a parent session id
 is never read for pins, even when it has the main conversation's key, as a fork of the main
@@ -92,7 +103,8 @@ A conversation that became the main one only by having more turn
 starts than the previous main one is not trusted: a subagent whose requests lack that header, resumed
 with SendMessage past the main conversation's turns, or a Codex child conversation given more input.
 Its pins are not carried, and its closures and replacements of other sessions' records count only in
-its own session.
+its own session. The exception is a conversation a proxy on this session trusted before, such as
+your own conversation taking over again after a restart where a subagent reached the proxy first.
 
 Not carried:
 
@@ -238,9 +250,11 @@ backslash escape, so a stored record cannot redraw a line on your terminal. Join
 format characters print as they are, so Persian and Devanagari read normally. A variation selector
 prints as it is only right after a character it varies (an emoji or another non-ASCII symbol, an
 ideograph, or a keycap such as 1️⃣); anywhere else, and after a blank symbol such as U+2800, it and
-the invisible operators U+2061 to U+2064 are escapes, and so is every character of a run of two or
-more zero-width characters, counting blank characters such as U+034F, U+3164 and U+2800 among them.
-One selector after a symbol or an ideograph, or one zero-width character between two letters, can
+the invisible operators U+2061 to U+2064 are escapes. So is every character of a run of two or more
+zero-width characters, counting among them the characters drawn as nothing (U+034F, U+115F, U+1160,
+U+17B4, U+17B5 and U+180B to U+180F), and a zero-width character next to a space. A blank cell
+(U+2800, U+3164 or U+FFA0) prints on its own, so braille art and spaced Hangul read normally, and is
+an escape next to a zero-width character. One selector after a symbol or an ideograph, or one zero-width character between two letters, can
 still carry a few bits that a terminal does not show; the model gets every carried record as ASCII escapes, so this affects
 only what you see. `contexto state --raw` prints the text the model gets, with the heading above and the
 JSON literals, except that those characters in your session's own records are shown as escapes; the

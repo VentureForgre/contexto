@@ -2876,13 +2876,35 @@ the owner's delegation. Open decisions are listed at the end with the options an
       the first conversation to reach a restarted proxy was trusted whatever it was, so a subagent
       without its agent id, or a Codex child, sent while the user's conversation waited on it, had its
       pins confirmed. A conversation an earlier engine on the store trusted as main is trusted again
-      (`meta.json` `trusted_conversations`, the newest 64 conversation keys, written when a key is
-      first trusted): without that list a later `--continue` of the user's own conversation that the
-      record did not name (one started with `--session ID`, or after a `/clear` that never wrote the
-      record) was never trusted, and then wrote `untrusted` into the record, so every later continue
-      carried nothing too (review A round 6, finding 1). A conversation's key is the hash of its
-      first message, which for a subagent is its task, so the list never names one the user did not
-      start. A record whose store holds no served session ids (a store from before D55, an
+      (`meta.json` `trusted_conversations`, the newest 64 conversation keys by last trust: each
+      engine writes a key it trusts once, and a key already listed moves to the end, as review A
+      round 7 finding 6 and review B round 7 N20 asked; a failed write is the content-free
+      `trusted_conversations_unavailable` event with the error's class): without that list a later
+      `--continue` of the user's own conversation that the record did not name (one started with
+      `--session ID`, or after a `/clear` that never wrote the record) was never trusted, and then
+      wrote `untrusted` into the record, so every later continue carried nothing too (review A round
+      6, finding 1). The list overrides the record's `untrusted`, at a resume and for a first main,
+      and a listed conversation that takes main back by `more_turn_starts` is trusted too: after a
+      restart where the record did not resume and a subagent reached the engine first, the user's
+      conversation used to stay untrusted for that launch (review A round 7, finding 2). A
+      conversation's key is the hash of its first message (for a subagent, its task), and the list
+      names whatever an engine trusted: the user's conversations, a new session's first request even
+      when that is a side request, and whatever the residues below let through. A conversation that
+      is not on the list and that the record does not name still takes the old path: it is not
+      trusted, writes `untrusted` once it passes the record's turn count, and every later continue
+      of it carries nothing. That happens at the first launch after an upgrade from v0.5.24, which
+      kept no list, and to a key whose write failed or that fell off the list; `/clear` starts a
+      conversation that is carried (review A round 7, finding 1). After a restart,
+      `after_side_request` trusts the conversation that takes main only when the first-main rules
+      above would trust it. Before review B round 7 (N17), a tool-less side request that reached a
+      restarted engine first was main untrusted, and the next conversation seen with a tool list was
+      trusted whatever it was: a subagent without its agent id, started before main's next turn
+      start, had its pins confirmed, and the list then kept it trusted in later engines over the
+      record's `untrusted`. A Codex child whose first prompt is byte-identical to a listed
+      conversation's has that conversation's key, so it is trusted after a restart, as it already
+      was inside the engine that listed the key, where the two share one state (review B round 7,
+      N18). That is latent: a Codex session confirms nothing in code mode on codex-cli 0.163.0.
+      A record whose store holds no served session ids (a store from before D55, an
       unreadable `meta.json`) counts no session id as new (finding 3). The cost of the rule: a first
       main that is none of these carries nothing until it takes main by a trusted rule; in Codex
       that is a new conversation in a reused session, which a Codex child cannot be told apart

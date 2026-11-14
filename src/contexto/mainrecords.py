@@ -14,12 +14,16 @@ an Agent call, a file, a page) belongs to another tool's call, so neither is eve
 Which main conversation is trusted: the engine (``RewriteEngine._confirm_main_records``) hands a
 conversation's messages to ``scan`` only while it is main and trusted. Trusted are the engine's first
 main conversation (main since its own first request, or the conversation a new engine resumed from the
-epoch record, unless the record says ``untrusted``; after a restart a first main the record does not
-resume is trusted only when the store has no record, the record names it unmarked, or it is a new
-Claude Code session: ``RewriteEngine._first_trusted``) and one that took main by one of D50's session
-rules, ``new_cli_session`` (``/clear``), ``resumed_cli_session`` (``/resume``) or ``compacted``, or by
-``after_side_request`` (``rewrite.TRUSTED_MAIN_REASONS``). One that took main from a known main by
-``more_turn_starts``, the turn-start rule, is not trusted: a Claude Code subagent whose requests lack
+epoch record, unless the record says ``untrusted`` and the conversation is not in the session's
+``trusted_conversations``; after a restart a first main the record does not resume is trusted only when
+the store has no record, the conversation is in ``trusted_conversations``, the record names it
+unmarked, or it is a new Claude Code session: ``RewriteEngine._first_trusted``) and one that took main
+by one of D50's session rules, ``new_cli_session`` (``/clear``), ``resumed_cli_session`` (``/resume``)
+or ``compacted``, by ``after_side_request`` when ``_first_trusted`` holds for it, or by
+``more_turn_starts`` when it is in ``trusted_conversations`` (``RewriteEngine._trusted_takeover``). Each
+conversation an engine trusts is written to that list (``SessionStore.add_trusted_conversation``). One
+that took main from a known main by ``more_turn_starts``, the turn-start rule, and is not in the list
+is not trusted: a Claude Code subagent whose requests lack
 ``X-Claude-Code-Agent-Id`` (by which D50 tells subagents apart; with it a subagent never takes main)
 once SendMessage has resumed it past main's turn starts, or a Codex child conversation given more
 input. Its pins and closures are not confirmed while it is main; if it later takes main by one of the

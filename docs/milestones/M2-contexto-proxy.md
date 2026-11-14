@@ -796,14 +796,20 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       only quotes a reply belongs to another tool's call, so neither is taken. Only a trusted main
       conversation's messages are read: the engine's first main conversation (main since its own
       first request, or resumed from the epoch record by a new engine unless the record says
-      `untrusted`; after a restart a first main that the record does not resume is trusted only
-      when the store has no record, the record names it without `untrusted`, or it is a Claude Code
-      request in a session id the store had not served, with no agent id or parent), or one that took main by one of D50's session rules (`new_cli_session`,
-      `resumed_cli_session`, `compacted`) or by `after_side_request`. One that took main from a
-      known main by `more_turn_starts` (a Claude Code subagent whose requests lack
-      `X-Claude-Code-Agent-Id`, resumed past main's turn starts; a Codex child conversation) is not
-      read until it takes main by one of those; a trusted conversation that takes main back by
-      turn starts stays trusted. A request that carries `X-Claude-Code-Agent-Id` or a
+      `untrusted` and the conversation is not in the session's `trusted_conversations`; after a
+      restart a first main that the record does not resume is trusted only when the store has no
+      record, the conversation is in `trusted_conversations`, the record names it without
+      `untrusted`, or it is a Claude Code request in a session id the store had not served, with no
+      agent id or parent), or one that took main by one of D50's session rules (`new_cli_session`,
+      `resumed_cli_session`, `compacted`), by `after_side_request` when those first-main rules
+      trust it, or by `more_turn_starts` when it is in `trusted_conversations`. Each conversation an
+      engine trusts is written to `trusted_conversations` in `meta.json` once per engine (a key
+      already there moves to the end; the newest 64 are kept); a store failure there is the
+      content-free `trusted_conversations_unavailable` event with the error's class, never a failed
+      request. One that took main from a known main by `more_turn_starts` and is not in that list
+      (a Claude Code subagent whose requests lack `X-Claude-Code-Agent-Id`, resumed past main's
+      turn starts; a Codex child conversation) is not read until it takes main by a trusted rule; a
+      trusted conversation that takes main back by turn starts stays trusted. A request that carries `X-Claude-Code-Agent-Id` or a
       `parent_session_id`, a fork of main with main's key included, or whose
       `x-claude-code-request-class` is `subagent`, `workflow` or `auxiliary` (D70), is never read,
       and the scan position stays where it was. The limits: a pin whose result never reaches a later main

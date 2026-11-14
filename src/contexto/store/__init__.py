@@ -16,7 +16,9 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
   session), ``forgotten`` (record ids ``contexto project forget`` took out of what later sessions carry)
   and ``main_records`` (the record ids the engine saw pinned or closed in the main conversation, the only
   ones carried or removed beyond this session; see ``contexto.store.project`` and
-  ``contexto.mainrecords``),
+  ``contexto.mainrecords``), ``trusted_conversations`` (the keys of the conversations an engine trusted as
+  main, the newest ``TRUSTED_CONVERSATIONS_KEPT`` by last trust, recorded by lane A's engine with
+  ``add_trusted_conversation``; a later engine trusts them again),
   and ``window_tokens`` and ``bytes_per_token``
   (recorded by lane A's engine with ``set_window``; recall sizes chunks from them), and the recall
   rooms: ``turn_room`` (the main conversation's) and ``side_rooms`` (D40, one per side request
