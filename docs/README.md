@@ -15,7 +15,8 @@ install it and how to start it.
   `contexto proxy`, the environment variables, and the supported upstreams.
 - [serve.md](serve.md): `contexto serve`, the engine as a local service for clients Contexto does
   not launch (IDE extensions, the desktop app, the Agent SDK, CI): the token, client settings,
-  routing, the files it writes, and its limits.
+  routing, the files it writes, its limits, and recipes for the Agent SDK, the VS Code extension
+  and `claude -p` in CI.
 - [cliproxyapi.md](cliproxyapi.md): running Contexto with a CLIProxyAPI instance as the upstream:
   setup, checks, and what was tested.
 - [sessions.md](sessions.md): how to tell that Contexto is working, what a session stores and
