@@ -384,6 +384,20 @@ def check_results_json(run):
     assert all(len(sizes) == 1 for sizes in by_turn.values())  # what the note says: one x per turn
     assert max(sum(r["turn"] == turn for r in contexto) for turn in by_turn) > 1  # and some turns have several
     assert all(isinstance(note, str) for note in data["notes"])
+    # #269 Reviewer B lows 1 and 2 at 9a04985c: under the chart, why each line drops, and the three peaks
+    # (the full-context line sets the y axis at about 1M, so the other two are hard to tell apart by eye).
+    modelled = data["replay"]["modelled"]
+    assert data["notes"][1] == (
+        f"The Contexto line drops at each of its {run['expected']['rotations']} rotations: the proxy moves the oldest "
+        "turns out of the request to its store, where they stay searchable, and summarises nothing. The plain Claude "
+        f"Code line drops at each of its {modelled['plain_compactions']} modelled compactions, where Claude Code "
+        "replaces the old turns with a summary. Largest request: Contexto "
+        f"{run['expected']['max_input_estimated']:,} tokens (estimated), plain Claude Code {modelled['plain_max']:,} "
+        f"and full context {modelled['full_max']:,} (modelled).")
+    assert data["notes"][1] == output.drops_note(
+        data["replay"]["rotations"], data["replay"]["modelled"]["plain_compactions"],
+        {arm: max(y for _, y in series[arm]["points"]) for arm in series})
+    assert max(y for _, y in series["contexto"]["points"]) == run["expected"]["max_input_estimated"]
     full = [r for r in rows if r["arm"] == "full"]
     plain = [r for r in rows if r["arm"] == "plain"]
     assert data["replay"]["modelled"] == {"full_max": full[-1]["uncached"],
@@ -488,6 +502,8 @@ def check_the_chart_of_a_replay_names_each_basis_once(run):
         assert "estimated" not in words or "modelled" not in words, words
     notes = " ".join("".join(t.itertext()) for t in root.iter(f"{svg}text") if t.get("font-size") == "11")
     assert "vertical run of points" in notes
+    assert f"{run['expected']['rotations']} rotations" in notes and "replaces the old turns with a summary" in notes
+    assert f"full context {run['results']['replay']['modelled']['full_max']:,}" in notes
     # Reviewer B nit 2: the full-context line crosses the bound at the left, so the label is at the right end.
     (label,) = [t for t in root.iter(f"{svg}text") if t.get("data-bound-label")]
     assert (label.text, label.get("text-anchor")) == ("bound: 150,000 tokens", "end")
