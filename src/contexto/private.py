@@ -72,13 +72,14 @@ def _check_regular(fd: int, path: Path) -> None:
         raise NotRegularFileError(f"{path} is not a regular file")
 
 
-def open_private(path: Path, flags: int) -> int:
-    """``os.open`` with ``O_CREAT`` semantics that leaves the file at 0600; returns the fd.
+def open_private(path: Path, flags: int, *, create: bool = True) -> int:
+    """``os.open`` with ``O_CREAT`` semantics that leaves the file at 0600; returns the fd. With
+    ``create`` false a missing file is ``FileNotFoundError`` and nothing is made.
 
     A symlink at ``path`` is never followed (``NotRegularFileError``), and anything but a regular file there
     is refused (``NotRegularFileError``) without blocking: the open is ``O_NONBLOCK``, so a FIFO does
     not wait for a reader. The descriptor is then made blocking again."""
-    fd = _open_nofollow(path, flags | os.O_CREAT | os.O_NONBLOCK, FILE_MODE)
+    fd = _open_nofollow(path, flags | (os.O_CREAT if create else 0) | os.O_NONBLOCK, FILE_MODE)
     _check_regular(fd, path)
     try:
         os.set_blocking(fd, True)

@@ -613,6 +613,35 @@ def test_a_session_pruned_while_its_open_waits_for_the_lock_is_refused_and_not_r
     assert removed and list((home / "sessions").iterdir()) == []
 
 
+def test_a_session_directory_left_empty_by_prune_is_not_filled_in(home, service, served):
+    """Review of PR #272 (Reviewer A round 3, nit 2): prune unlinks ``live.lock`` and then removes the
+    directory, so for a moment the directory is there and empty. An open then must not make
+    ``live.lock``, ``page.key`` or ``pages/`` in it, which would make prune's ``rmdir`` fail and keep
+    the session."""
+    made = SessionStore(home, "emptied")
+    made.release()
+    directory = home / "sessions" / "emptied"
+    for entry in directory.iterdir():  # the state prune leaves just before its rmdir
+        (__import__("shutil").rmtree if entry.is_dir() else os.unlink)(entry)
+    service.known[ID_A] = "emptied"
+    server, _ = served
+    refused(tool(server, "contexto_state", {}), "cannot be opened", "removed")
+    assert list(directory.iterdir()) == []
+    directory.rmdir()  # prune's last step still succeeds
+
+
+def test_a_store_opened_without_create_needs_its_lock_file(home):
+    from contexto.store import SessionNotFoundError
+
+    (home / "sessions" / "bare").mkdir(parents=True)
+    with pytest.raises(SessionNotFoundError, match="is empty: it is being removed"):
+        SessionStore(home, "bare", create=False)
+    assert list((home / "sessions" / "bare").iterdir()) == []
+    created = SessionStore(home, "bare")  # with create, as the service and --session mode open it
+    assert (home / "sessions" / "bare" / "live.lock").exists()
+    created.release()
+
+
 def test_session_mode_still_opens_a_session_pruned_while_it_opens(home, monkeypatch):
     """``--session`` mode is unchanged: the store's own open recreates the session and says so."""
     import fcntl

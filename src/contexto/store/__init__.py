@@ -104,13 +104,36 @@ def refuse_symlinked_session(session_path: Path) -> None:
                              "under sessions/", str(path))
 
 
+def _open_live(path: Path, create: bool) -> int:
+    """``live.lock`` at ``path``, opened for ``hold_live``. Without ``create`` a missing file is made only
+    in a session directory that holds something else: ``FileNotFoundError`` for an empty one."""
+    flags = os.O_RDWR | os.O_NOFOLLOW
+    if create:
+        return open_private(path, flags)
+    try:
+        return open_private(path, flags, create=False)
+    except FileNotFoundError:
+        try:
+            with os.scandir(path.parent) as entries:
+                empty = next(entries, None) is None
+        except NotADirectoryError:
+            raise FileNotFoundError(errno.ENOENT, "session directory is not a directory", str(path.parent)) from None
+        if empty:
+            raise
+        return open_private(path, flags)
+
+
 def hold_live(session_path: Path, *, create: bool = True) -> tuple[int, bool]:
     """Take a shared ``flock`` on ``session_path/live.lock``; return its descriptor and whether a prune
     deleted the session while it was being opened (D37).
 
     With ``create`` false the session directory is never made: a directory that is missing, or that a
     prune removes while this waits for the lock, raises ``SessionNotFoundError`` instead of being made
-    again, and the second element is always False.
+    again, and so does an empty directory, the state prune leaves between unlinking ``live.lock`` (its
+    last file) and removing the directory: filling it in would make prune's ``rmdir`` fail and keep
+    the session. A directory with other files and no ``live.lock`` (a session made before D37, or one
+    whose damaged lock file was deleted as its repair) gets the file, as with ``create``. The second
+    element is then always False.
 
     Creates the session directory if needed. Blocks while ``sessions prune`` holds the exclusive lock.
     Prune deletes the directory under that lock, so after waiting the descriptor can name an unlinked
@@ -129,7 +152,7 @@ def hold_live(session_path: Path, *, create: bool = True) -> tuple[int, bool]:
         try:
             if create:
                 private_dir(path.parent)
-            fd = open_private(path, os.O_RDWR | os.O_NOFOLLOW)  # in an existing directory, never makes one
+            fd = _open_live(path, create)  # in an existing directory, never makes one
         except NotRegularFileError as e:  # a symlink, FIFO or directory in its place (D59)
             raise LockFileDamagedError(path, e) from e
         except FileNotFoundError as e:
@@ -137,6 +160,9 @@ def hold_live(session_path: Path, *, create: bool = True) -> tuple[int, bool]:
                 if path.parent.is_symlink():
                     raise FileNotFoundError(errno.ENOENT, "session directory is a symlink to a missing target",
                                             str(path.parent)) from e
+                if not create:  # empty: prune has unlinked the lock and is about to remove the directory
+                    raise SessionRemovedError(f"session {path.parent.name!r} is empty: it is being "
+                                              "removed") from None
                 raise
             if not create:
                 raise SessionRemovedError(f"session {path.parent.name!r} was removed while it was being "
