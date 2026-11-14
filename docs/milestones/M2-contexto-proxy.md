@@ -1201,30 +1201,42 @@ unknown page, never read. Tools:
      `` ` ``, `)`, `]`, `?`, `!`, `.`, `,`, `;` and `:` from its end. Stop words are dropped: a fixed
      list of 89 English function and question words (`search.STOP_WORDS`: a, an, the, is, are, do,
      does, did, what, which, where, how, of, on, in, to, and so on). A word with a digit or a symbol
-     is never a stop word. A query with no other word has no approximate matches. At most 6 words
-     are searched, the longest, so the pass costs what a strict miss of 6 words costs.
+     is never a stop word. Stop words are dropped from every query, not only from questions. A query
+     with no other word has no approximate matches. At most 6 words are searched: the specific ones
+     first (an identifier, a number, a code or a path: 3 characters or more with one that is not a
+     letter, or camelCase), then the longest.
   2. Identifier styles. A word written as an identifier (it has `_`, `-` or `.` inside, or a
      capital after its first letter beside small letters, at least 4 other characters, one a
-     letter, and no separator between two digits) is compared without `_`, `-` and `.`, on both sides: `refresh_token`, `refreshToken`,
-     `refresh-token` and `refresh.token` match each other. A plain word, a number, a version and a
-     date are matched as typed, so `12` does not find `1.2`.
+     letter, and no separator between two digits) is compared without `_`, `-` and `.`, on both
+     sides: `refresh_token`, `refreshToken`, `refresh-token` and `refresh.token` match each other.
+     A separator at the start or the end of a word does not make it an identifier (`--force` does
+     not find `enforce`, nor `__init__` `initialize`). A separator between two digits is not
+     dropped on the page either: `port-80` does not find `port8.0`, and `sha.256` finds `sha_256`,
+     not `sha-2.56`. A plain word, a number, a version and a date are matched as typed, so `12`
+     does not find `1.2`.
   3. Any word. A page need not hold every word. Each word weighs its inverse document frequency
-     over the whole store. A page is returned when it holds at least 30 percent of the weight of
-     the words that some page holds. When the store holds some word of the query on no page, the
-     page must also hold more words than the number of those, and what it holds (its words, and
-     the pairs of them it has one after the other as the query does) must not be on more than half
-     the pages together; or it must hold a word that is an identifier, a number or a path and that
-     at most half the pages hold. "Half the pages" applies from 10 pages.
+     over the whole store, and a word that no page holds weighs as a word on no page does
+     (`ln(2n + 2)` for `n` pages), the most a word can. A page is returned when it holds at least
+     30 percent of the weight of the query (`APPROX_FLOOR`). One exception: a page that holds a
+     specific word of the query is returned whatever its share, unless more than half the pages
+     hold that word. There is no other rule and none that depends on the number of pages.
   4. One typo. The longest plain word (6 to 40 small letters once folded, not an identifier) that
      no page holds is looked for with one letter changed, added, left out, or swapped with its
-     neighbour, as a whole word on the page. It weighs half. Only one word per query is tried, and
-     the try is abandoned, deterministically, once more than 500,000 places have been checked.
+     neighbour, as a whole word on the page. It weighs half when it is found. Only one word per
+     query is tried, and the try is abandoned, deterministically, once more than 500,000 places
+     have been checked. A letter added or left out also joins a word and its form one letter
+     longer (`servers` finds `server`): for this step only, and only for a word no page holds, that
+     narrows D34's ruling against stemming.
 
   Order: pages holding every searched word first; then turn pages before context-block pages; then
   the larger share of the weight; then more pairs of words standing one after the other as in the
   query; then relevance as in strict search (a word counted once per text, at most 3, k1 1.2,
   times the recency prior). The newest turn page that holds every searched word takes one of the 3
-  detailed places, as in strict search. At most 50 hits are returned by the store.
+  detailed places, as in strict search. When no page holds every searched word, that place goes to
+  the second fact of a query whose two facts sit on two pages: the best page for the words that the
+  best page lacks, if it holds at least 30 percent of their weight and at least 30 percent of the
+  weight of a word on no page (so a leftover common word gets no place), or a specific word among
+  them. It is shown even when it is under the floor. At most 50 hits are returned by the store.
 
   The reply opens with `[no paged-out turn holds every word of that query; approximate matches,
   most words matched first, then newest first:]` in place of the best-pages line, then
@@ -1239,20 +1251,36 @@ unknown page, never read. Tools:
   nothing either, the reply is the no-hit reply as before. In-view matching is unchanged: a
   retained entry matches only when it holds every word. The `mcp_call` event gains `approximate`
   (true or false) and, when true, `approximate_steps`, a list among `stop_words`, `long_query`,
-  `fold`, `typo`, `any_word` and `punctuation`; it never holds a query word. Cost: one more pass
-  over the store that tests each searched word on each page, as a strict miss of up to 6 words
-  does; the separators are deleted from each page only when a word is written as an identifier; a
-  typo try adds two or three substring scans per page. Measured at 6,000 synthetic pages
+  `fold`, `typo`, `any_word` and `punctuation`, for the pages the reply showed in detail; it never
+  holds a query word. A reply that showed no page (the budget is used up, or the result is too
+  long) is logged `approximate: false`. The fallback runs only when `search` itself returned no
+  page: a strict match whose pages cannot be read when the reply is built is still the no-hit
+  reply. Cost: one more pass over the store. It looks for each searched word once on every page,
+  where strict search stops at a page's first missing word (unless the page was just read from its
+  file and the query has at most 6 words, when it tests them all too), and for each pair of
+  neighbouring words on a page that holds both. The separators are deleted from each page only
+  when a word is written as an identifier. A typo try adds two or three substring scans per page;
+  when the longest candidate turns out to be on a page, the next one is looked for from that page
+  on and only the pages before it are read again. Measured at 6,000 synthetic pages
   (`spikes/m2/scale/store/scale_fallback.py`: CPU seconds on a busy machine, the least of 5 runs,
-  strict and fallback alternating; strict first, then what the fallback adds): one unknown word
-  0.46 and 0.88, of which the typo try is 0.42; an identifier in another style 0.43 and 0.65; one
-  typo, found, 0.48 and 1.14; three known words and one unknown 0.77 and 1.75; a 7-word question
-  with a typo 0.57 and 1.68; six unknown words 1.22 and 1.79. A strict hit costs what it did: it
-  runs the same code, and the fallback is not called. Limits: no stemming, no
-  synonyms, no embeddings; a plain lower-case word does not match a separated form
-  (`retrybudget` does not find `retry_budget`); a typo is found only in a plain word and only as a
-  whole word (`databse` finds `database`, not `databases`); a second typo in the same query is not
-  searched.
+  strict and fallback alternating, so the ratios are what to read; strict, then what the fallback
+  adds, then the total over strict): one unknown word of 3 letters, no typo try, 0.55 and 0.55,
+  2.0 times; one unknown word with a typo try 0.48 and 0.91, 2.9; an identifier in another style
+  0.46 and 0.68, 2.5; one typo, found, 0.33 and 0.74, 3.3; three known words and one unknown 0.46
+  and 0.87, 2.9; a 7-word question with a typo 0.35 and 0.87, 3.5; six unknown words 1.13 and
+  1.61, 2.4. So a miss costs about 2 times a strict miss without a typo try and about 3 with one.
+  With every page held in memory a strict miss is cheaper still (it stops at the first missing
+  word), and the ratio is higher. A strict hit costs what it did: it runs the same code, and the
+  fallback is not called. Limits: no stemming beyond the typo step, no synonyms, no embeddings
+  (`database` does not find `DB`); stop words are dropped even where they are code (`for loops`
+  searches `loops`); a plain lower-case word does not match a separated form (`retrybudget` does
+  not find `retry_budget`, nor `nodejs` `node.js`), while folding sees only the letters (`doneNext`
+  finds `done.Next`); with several styles of one identifier on a page, the matching lines are
+  those of the first style found; a typo is found only in a plain word and only as a whole word
+  (`databse` finds `database`, not `databases`); a second typo in the same query is not searched;
+  four facts on four pages find less than two (a quarter of the query each); with no unknown word
+  the floor does not look at how common the held words are (three words each on 30 of 100 pages,
+  never together, return 90 pages).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
@@ -1405,7 +1433,8 @@ use`, `--session`, `CONTEXTO_SESSION`).
   Paged-out turns only. No hit: a line on stderr, exit 0. When no page holds every word it prints
   the approximate matches of D65 instead: the stderr line then ends `; approximate matches, best
   first:`, and under each hit's index line a line names the words the page matched and the ones it
-  did not. Exit 0 either way.
+  did not. When words were dropped or cut, the `[searched for: ...]` line follows on stderr, as in
+  the tool's reply. Exit 0 either way.
 - `recall` refuses an argument that is not a page id (`pg_` and 16 hex digits) before any path is
   built, exit 1.
 - `state` prints the pinned records by group, or "No pinned records.", then how many turns are

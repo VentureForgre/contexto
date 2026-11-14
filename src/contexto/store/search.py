@@ -60,8 +60,9 @@ no model call. Its steps, each looser than strict matching (``rank_approximate``
 2. A word written as an identifier is compared without ``_``, ``-`` and ``.``, so
    ``refresh_token`` finds a page that says ``refreshToken``.
 3. A page need not hold every word: ``staging database port zzqqxx`` finds the page that holds the
-   first three. A floor keeps noise out (``APPROX_FLOOR``): a page that holds one common word of a
-   five-word query is not returned.
+   first three. A floor keeps noise out (``APPROX_FLOOR``): a page must hold 30 percent of the
+   query's weight, and a word that no page holds counts in that weight. When the query's two facts
+   sit on two pages, the second fact's page is shown beside the first (``_second_page``).
 4. One plain word that no page holds is tried with one letter changed: ``databse`` finds
    ``database``.
 

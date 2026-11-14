@@ -69,8 +69,13 @@ A word with a digit or a symbol in it is never dropped. Words that mean somethin
 such as `not`, `no`, `all`, `set`, `get`, `new`, `self`, `return` and `import`, are not on the list.
 A query made only of stop words has no approximate matches.
 
-At most 6 words are searched. A longer query keeps its 6 longest words, and the `[searched for: ...]`
-line shows which.
+Stop words are dropped from every query, not only from questions: `for loops` searches `loops`, and
+`do while` searches `while`. The `[searched for: ...]` line shows what was searched whenever a word
+was dropped.
+
+At most 6 words are searched. A longer query keeps its identifiers, numbers and paths first, then
+its longest words, and the `[searched for: ...]` line shows which. So a long question that ends in
+`port 6543` still searches `6543`.
 
 ### 2. Identifier styles match each other
 
@@ -88,8 +93,13 @@ pg_fda2a23e71e3ce0e (turn 1)
 
 A word counts as an identifier when it has `_`, `-` or `.` inside it, or a capital after its first
 letter next to small letters (`refreshToken`, `HTTPTimeout`), and has at least 4 other characters,
-one of them a letter, and no separator stands between two digits. A plain word, a number, a version
-and a date are matched as typed, so `12` does not find `1.2`.
+one of them a letter. A separator at the start or the end of a word does not count: `--force` and
+`__init__` are matched as typed, so `--force` does not find `enforce`.
+
+A separator between two digits is never dropped, in the query or in the turn, because dropping it
+makes another number. `12` does not find `1.2`, `port-80` does not find `port8.0`, and `sha.256`
+finds `sha_256` but not `sha-2.56`. A plain word, a number, a version and a date are matched as
+typed.
 
 ### 3. A turn need not hold every word
 
@@ -121,22 +131,27 @@ pg_d3a8859d41f0620c (turn 3)
 ```
 
 A floor keeps noise out. Each word has a weight: the rarer it is in the session, the more it weighs.
+A word that no turn holds weighs the most, as much as a word can. A turn is returned when it holds
+at least 30 percent of the weight of the query.
 
-- A turn must hold at least 30 percent of the weight of the query's words that the session holds
-  somewhere. In a 40-turn session where every turn says `build` and four turns each hold one of
-  four rare words, a turn that holds only `build` holds 0.1 percent of a five-word query and is not
-  returned.
-- When some word of the query is in no turn at all, a turn must also hold more words than the number
-  of those. `nightly backups zzqqxx` finds the turn about nightly backups (2 words held, 1 unknown).
-  `nightly zzqqxx` finds nothing (1 held, 1 unknown).
-- In that case the words the turn holds must also not be on more than half the turns together. If
-  20 of 21 turns say both `return` and `value`, then `return value foo` finds nothing, unless a turn
-  says `return value` in that order and most do not.
-- One exception: a turn that holds an identifier, a number or a path from the query is returned even
-  when the rest of the query is unknown, if at most half the turns hold that word. `What value did
-  retry_budget have earlier?` finds the turn that sets `retry_budget`.
+- In a 40-turn session where every turn says `build` and four turns each hold one of four rare
+  words, a turn that holds only `build` holds 0.1 percent of a five-word query and is not returned.
+- A word that no turn holds counts against every turn. In a 7-turn session, `nightly zzqqxx` finds
+  the turn that says `nightly` (38 percent of the query) and names `zzqqxx` as not matched.
+  `nightly zzqqxx yyqqxx` finds nothing (23 percent).
+- A common word does not carry an unknown one. If 20 of 21 turns say `return` and `value`, then
+  `return value foo` finds nothing.
+- One exception: a turn that holds an identifier, a number or a path from the query is returned
+  whatever its share, unless more than half the turns hold that word. `What value did retry_budget
+  have earlier?` finds the turn that sets `retry_budget`. Such a word has 3 characters or more: `5`
+  alone does not count.
 
-"Half the turns" applies from 10 turns up.
+When no turn holds every word, the query may ask for two facts that sit on two turns. The first
+fact's turn then comes first, followed by turns that share words with it, and the second fact's
+turn can fall far behind or under the floor. So the third of the 3 turns shown in detail goes to the
+best turn for the words the first turn lacks, if those words are not common ones. In a 6,000-turn
+test session, `staging DB port Redis eviction policy` showed the Redis turn first and the staging
+turn in this place; without it the staging turn was not returned at all.
 
 ### 4. One typo
 
@@ -156,6 +171,10 @@ The word must have 6 to 40 letters and be a plain word: no digit, no symbol, not
 number is never corrected, so `SUP-48231` does not find `SUP-48213`. Only one word per query is
 tried, the longest one that no turn holds. A word matched this way weighs half.
 
+One letter left out or added also joins a word and its form with one more letter: `servers` finds
+`server`, and `tokens` finds `token`, when no turn says the word as typed. This is the only place
+where search matches a word to a different form of it.
+
 ## What "approximate" means for the reader
 
 An approximate match is a lead. The line under the page says which words were found and in what
@@ -172,7 +191,8 @@ pg_fca3845691490657 (turn 76) @46 [matched: deploy, finished; not matched: zzqqx
 ```
 
 `contexto search` prints the same matches. A note on stderr (the second line below) says they are
-approximate, and the words line follows each hit's index line:
+approximate, followed by the `[searched for: ...]` line when words were dropped, and the words line
+follows each hit's index line:
 
 ```
 $ contexto search refresh_token zzqqxx keychain
@@ -190,22 +210,40 @@ case.
 
 ## Limits
 
-- No synonyms and no stemming. `overnight` does not find `nightly`, and `restoring` does not find
-  `restore`. (A typo one letter away does: `backups` finds `backup` when no turn says `backups`.)
+- No synonyms and no stemming. `overnight` does not find `nightly`, `restoring` does not find
+  `restore`, and `database` does not find a turn that says `DB`. In the 6,000-turn test session,
+  `What port is the staging database on?` put the turn that says "staging DB port" 26th, behind the
+  turns that hold all three words.
+- The typo step is the one exception to "no stemming", for one letter only: `servers` finds
+  `server`. It applies only to a word that no turn holds as typed.
+- Stop words are dropped from every query. `for loops` searches `loops` and `do while` searches
+  `while`; `which`, `may`, `will`, `can` and `then` are dropped even where they are code or log
+  words.
 - A plain lower-case word is not matched against a separated form. `retrybudget` does not find
-  `retry_budget`; `retryBudget` and `retry-budget` do.
+  `retry_budget`, and `nodejs` does not find `node.js`; `retryBudget`, `retry-budget` and `nodeJs`
+  do.
+- Folding sees only the letters. `doneNext` finds `done.Next` at the end of a sentence, and
+  `a.b@example.com` finds `ab@example.com`.
+- When one turn writes an identifier in several styles, the `>` lines show the first style found.
 - An identifier split by spaces is not joined: `rate-limit` does not find `rate limit`.
 - A typo is found only in a plain word, only as a whole word, and only one per query. `databse`
   finds `database` but not `databases`. A typo in an identifier (`refresh_tokne`) is not found.
 - Typos are for ASCII letters. A word with an accent is matched as typed.
 - In a session of thousands of turns, a typo is not searched when the halves of the word are very
   common (search stops after checking 500,000 places and treats the word as not found).
+- Two facts on two turns are both shown. A query with four facts on four turns finds less: each
+  turn holds a quarter of the query, under the floor, and only the second-fact place can add one.
+  Three equally rare facts on three turns are all returned (a third each).
+- When the query has no unknown word, the floor does not look at how common the held words are.
+  Three words that are each on 30 of 100 turns, never together, return 90 turns: 3 in detail, 10
+  listed, and the rest counted.
 - The conversation still in view is matched strictly only: a line there counts when it holds every
   word.
 - Falling back costs one more pass over the session's turns. On 6,000 synthetic turns of about
-  32 KB each, a one-word query that finds nothing took 0.46 CPU seconds for the strict search and
-  0.88 more for the fallback, 0.42 of that for the typo try; a seven-word question took 0.57 and
-  1.68 more. A query that matches strictly costs what it did before.
+  32 KB each, a query that finds nothing cost about 2 times what the strict search alone costs when
+  no typo is tried, and about 3 times when one is (a one-word query: 0.48 CPU seconds strict, 0.91
+  more for the fallback; a seven-word question with a typo: 0.35 and 0.87 more). A query that
+  matches strictly costs what it did before.
 
 The exact rules are in the design contract,
 [docs/milestones/M2-contexto-proxy.md](milestones/M2-contexto-proxy.md), under `contexto_search`,
