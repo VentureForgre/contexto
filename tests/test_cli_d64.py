@@ -343,7 +343,8 @@ def test_version_command_and_short_flag_print_what_the_version_flag_prints(capsy
 
 def test_all_three_print_the_git_revision_of_a_git_install(capsys, monkeypatch):
     """After #256 `--version` names the revision of an install made from a git URL; `-V` and `contexto
-    version` must print the same line, or the changelog's "as --version does" would be false."""
+    version` must print the same line, or the changelog's "print the same line as `--version`" would be
+    false."""
     line = f"contexto {contexto.__version__} (git main, commit d38e87d2)"
     monkeypatch.setattr(contexto, "_git_install", lambda: " (git main, commit d38e87d2)")
     printed = []
@@ -573,9 +574,18 @@ def test_the_example_typed_as_shown_launches_and_sends_the_key_only_to_openai(ho
     codex_stub(tmp_path, monkeypatch)
     if claude_base_url:
         monkeypatch.setenv("ANTHROPIC_BASE_URL", claude_base_url)
+    started = []
+    real_start = launcher.start_proxy
+
+    def recording_start(store, upstream_url, *rest, **kwargs):
+        started.append(upstream_url)
+        return real_start(store, upstream_url, *rest, **kwargs)
+
+    monkeypatch.setattr(launcher, "start_proxy", recording_start)
     code, _, err = run(capsys, *shlex.split(codex.KEY_HELPER_COMMAND)[1:])
     assert code == 0 and "no upstream" not in err and "no key helper" not in err
     assert "upstream codex-flag" in err  # the flag's URL, not Claude Code's upstream plus /v1
+    assert started == ["https://api.openai.com/v1"]  # the URL the proxy forwards to (PR #257 review B)
     [session] = sessions(home)
     log = (home / "sessions" / session / "log.jsonl").read_text()
     [launch] = [e for e in map(json.loads, log.splitlines()) if e.get("event") == "launch"]
@@ -631,7 +641,9 @@ def test_mcp_server_info_carries_the_package_version():
     assert mcp.SERVER_VERSION == contexto.__version__ != "0.1.0"
 
 
-def test_contexto_mcp_reports_the_version_contexto_version_prints(home):
+def test_contexto_mcp_reports_the_package_version_contexto_version_starts_with(home):
+    """serverInfo carries ``__version__``; `contexto version` prints that, followed by the git revision on an
+    install made from a git URL (PR #257 review B), so the line starts with it."""
     make(home, "s1")
     env = {**os.environ, "CONTEXTO_HOME": str(home)}
     request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -642,7 +654,9 @@ def test_contexto_mcp_reports_the_version_contexto_version_prints(home):
     printed = subprocess.run([sys.executable, "-m", "contexto", "version"], capture_output=True, text=True,
                              env=env, timeout=60)
     version = json.loads(served.stdout.splitlines()[0])["result"]["serverInfo"]["version"]
-    assert printed.returncode == 0 and printed.stdout == f"contexto {version}\n"
+    assert version == contexto.__version__
+    assert printed.returncode == 0 and printed.stdout.startswith(f"contexto {version}")
+    assert printed.stdout.endswith("\n") and printed.stdout.count("\n") == 1
 
 
 # 8. which commands take a session id prefix
@@ -758,3 +772,83 @@ def test_the_json_help_says_what_the_output_can_hold(capsys):
         cli.main(["state", "--help"])
     assert "null, with the error on stderr and exit 1, when they cannot be listed" in " ".join(
         capsys.readouterr().out.split())
+
+
+# Review follow-ups (D64 follow-up pull request)
+
+
+def test_contexto_version_falls_back_to_stderr_with_stdout_closed(capsys, monkeypatch):
+    """PR #257 review A: with stdout closed `--version` and `-V` print on stderr; `contexto version` printed
+    nothing and exited 0."""
+    from contexto.commands import version
+
+    monkeypatch.setattr(sys, "stdout", None)
+    assert version.run(None) == 0
+    assert capsys.readouterr().err == contexto.version_line() + "\n"
+
+
+@pytest.mark.parametrize("target", ["nowhere", "sessions"])  # dangling, and a link to itself
+def test_a_dangling_sessions_symlink_is_not_a_fresh_install(home, capsys, target):
+    """PR #257 reviews A and B: `Path.exists()` follows the link, so a `sessions` symlink to nothing got the
+    first-run hint, while `contexto run` fails there. Every reader names the link instead."""
+    home.mkdir()
+    (home / "sessions").symlink_to(home / target)
+    for argv in (["state"], ["search", "hello"], ["recall", "pg_0001"], ["sessions"], ["sessions", "list", "--json"],
+                 ["sessions", "show", "abc"], ["state", "--json"]):
+        code, out, err = run(capsys, *argv)
+        assert code == 1 and out == "", argv
+        assert err == f"contexto: error: {home / 'sessions'} is a broken symlink (check $CONTEXTO_HOME)\n", argv
+        assert FIRST_RUN not in err, argv
+
+
+def test_a_sessions_symlink_to_a_directory_still_works(home, capsys, tmp_path):
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    home.mkdir()
+    (home / "sessions").symlink_to(real)
+    code, out, err = run(capsys, "sessions", "list", "--json")
+    assert (code, out) == (0, "[]\n"), err
+
+
+def test_the_key_helper_variable_clause_says_to_keep_the_upstream(tmp_path):
+    """PR #257 review A: "or set CONTEXTO_CODEX_KEY_HELPER to such a command" read as a whole alternative to
+    the example, and without --codex-upstream the key goes to Claude Code's upstream plus /v1."""
+    empty = tmp_path / "empty-home"
+    empty.mkdir()
+    with pytest.raises(codex.CodexLaunchError) as exc:
+        codex.plan_codex([], "http://127.0.0.1:43210", "S", env={}, cwd=tmp_path, home=empty,
+                         claude_upstream="https://gateway.invalid")
+    message = str(exc.value)
+    assert f"or set {codex.KEY_HELPER_ENV} to such a command and still pass --codex-upstream, " in message
+    assert "not to the upstream you named" not in message  # nothing was named
+
+
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_the_example_says_it_replaces_an_upstream_the_user_named(tmp_path, how):
+    """PR #257 review B: with an upstream given by --codex-upstream or CONTEXTO_CODEX_UPSTREAM, the example's
+    flag sends the requests to OpenAI instead, which the message did not say."""
+    empty = tmp_path / "empty-home"
+    empty.mkdir()
+    named = "http://127.0.0.1:18432/v1"
+    kwargs = {"upstream": named, "env": {}} if how == "flag" else {"env": {codex.UPSTREAM_ENV: named}}
+    with pytest.raises(codex.CodexLaunchError) as exc:
+        codex.plan_codex([], "http://127.0.0.1:43210", "S", cwd=tmp_path, home=empty, **kwargs)
+    message = str(exc.value)
+    assert f"`{codex.KEY_HELPER_COMMAND}` (it sends Codex's requests to https://api.openai.com/v1, not to the " \
+           "upstream you named)" in message
+    with pytest.raises(codex.CodexLaunchError) as exc:  # naming OpenAI's own address needs no note
+        codex.plan_codex([], "http://127.0.0.1:43210", "S", env={}, cwd=tmp_path, home=empty,
+                         upstream="https://api.openai.com/v1/")
+    assert "not to the upstream you named" not in str(exc.value)
+
+
+def test_the_session_line_quotes_an_id_that_does_not_print(home, capsys):
+    """PR #257 review B: `state`, `search` and `recall` print `session <id> (how)` on stderr; an id holding
+    a newline printed two lines there."""
+    forged = "zz\ncontexto: error: forged"
+    make(home, forged)
+    code, _, err = run(capsys, "state", "--session", "zz")
+    assert code == 0 and err == f"session {forged!r} (--session)\n"
+    make(home, "plain-id")
+    code, _, err = run(capsys, "state", "--session", "plain-id")
+    assert code == 0 and err == "session plain-id (--session)\n"  # an ordinary id prints as before

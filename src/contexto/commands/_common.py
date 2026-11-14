@@ -24,7 +24,10 @@ def add_session_option(parser) -> None:
 
 
 def say_session(session_id: str, how: str) -> None:
-    print(f"session {session_id} ({how})", file=sys.stderr)
+    # An id that does not print (a directory name can hold a newline) as its repr, so it stays one line
+    # (PR #257 review B), as ``named`` shows it in the errors.
+    shown = session_id if session_id.isprintable() else repr(session_id)
+    print(f"session {shown} ({how})", file=sys.stderr)
 
 
 _SHORT_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}

@@ -41,14 +41,17 @@ def run(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     home = contexto_home()
     try:
-        session_id, how = select_session(home, args.session_id if args.session_id is not None else args.session)
+        if args.session_id is not None:
+            session_id, how = select_session(home, args.session_id, "SESSION")
+        else:
+            session_id, how = select_session(home, args.session)
         out = session_stats(home, session_id, last_run=args.last_run)
     except SessionNotFoundError as e:
         return fail(str(e))
     if args.json:
         print(json.dumps(out, indent=2, sort_keys=True))
         return EXIT_OK
-    say_session(session_id, "SESSION" if args.session_id is not None and how == "--session" else how)
+    say_session(session_id, how)
     runs = f"{out['runs']:,} run{'' if out['runs'] == 1 else 's'}"
     scope = f"the latest of {runs}" if args.last_run else f"the whole session ({runs}"
     span, in_runs = out["span_seconds"], out["run_seconds"]

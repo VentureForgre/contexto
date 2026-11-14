@@ -1172,6 +1172,9 @@ def test_the_stats_command_prints_a_session_by_id_prefix_or_default(tmp_path):
     assert ambiguous.returncode == 1 and "matches 2 sessions" in ambiguous.stderr and ambiguous.stdout == ""
     missing = contexto(tmp_path, "stats", "zzz")
     assert missing.returncode == 1 and "no session 'zzz'" in missing.stderr
+    # The error names what the user typed (PR #263 review B): the positional SESSION, or --session.
+    assert "(from SESSION)" in missing.stderr and "--session" not in missing.stderr
+    assert "(from --session)" in contexto(tmp_path, "stats", "--session", "zzz").stderr
     both = contexto(tmp_path, "stats", "abc", "--session", "abd")
     assert both.returncode == 2 and "not both" in both.stderr
     assert contexto(tmp_path / "nothing-here", "stats").returncode == 1
