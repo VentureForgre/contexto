@@ -29,6 +29,7 @@ install it and how to start it.
   with its cause and what to do.
 - [exit-codes.md](exit-codes.md): the exit codes of every command.
 - [cli-updates.md](cli-updates.md): how a new Claude Code or Codex version is tested.
+- [dialect.md](dialect.md): the `Dialect` contract, for adapting the engine to another client's API.
 
 ## Design
 

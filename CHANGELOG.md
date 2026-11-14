@@ -29,6 +29,9 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   ```
 
 - The MCP server reports the package version in `serverInfo` (it said `0.1.0`).
+- `contexto run codex` with a session id that starts with `-` no longer starts Codex without
+  Contexto's tools: the MCP server now gets the id as one `--session=<id>` argument, as Claude Code's
+  already did.
 - `contexto run claude` and `contexto run codex` print a short summary on stderr when the CLI
   exits: the largest prompt against the bound, the pages this run added and the pages the session
   has on disk, the recall and search calls, the share of input read from cache, and whether Claude
