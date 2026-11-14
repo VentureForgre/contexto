@@ -10,6 +10,28 @@ if TYPE_CHECKING:
     import argparse
 
 
+def version_action() -> type[argparse.Action]:
+    """``--version``: print the version line and exit. argparse's own ``version`` action wraps its text to
+    the terminal width, which split a git install's line in two; this prints it whole, and reads the
+    installed metadata only when the option is given. Built on first use, with argparse imported then
+    (D64: see ``build_parser``)."""
+    import argparse
+
+    from contexto import version_line
+
+    class _Version(argparse.Action):
+        def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):
+            super().__init__(option_strings, dest=dest, default=default, nargs=0,
+                             help=help or "show program's version number and exit")
+
+        def __call__(self, parser, namespace, values, option_string=None):
+            # With stdout closed argparse's own action fell back to stderr; keep that.
+            print(version_line(), file=sys.stdout or sys.stderr)
+            parser.exit()
+
+    return _Version
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Imported here, not at the top (D64): `contexto statusline` runs after every assistant message and
     # needs none of these, nor the version, which contexto/__init__.py looks up only when asked.
@@ -17,13 +39,13 @@ def build_parser() -> argparse.ArgumentParser:
     import importlib
     import pkgutil
 
-    from contexto import __version__, commands
+    from contexto import commands
 
     parser = argparse.ArgumentParser(
         prog="contexto",
         description="Durable, recoverable context for very long-running AI sessions.",
     )
-    parser.add_argument("--version", action="version", version=f"contexto {__version__}")
+    parser.add_argument("--version", action=version_action())
     subparsers = parser.add_subparsers(title="commands", metavar="<command>")
     for info in sorted(pkgutil.iter_modules(commands.__path__), key=lambda m: m.name):
         if info.name.startswith("_"):

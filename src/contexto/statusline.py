@@ -233,6 +233,10 @@ def quick_numbers(directory: Path) -> dict[str, Any] | None:
 
     The bound must come from a launch line: ``session_stats`` otherwise takes it from an ``over_bound``
     event anywhere in the log, which only the whole log can answer, so None is returned.
+
+    It assumes the log is one Contexto writes: every request line inside a run, after its proxy start. On
+    request lines with no run around them (a hand-made log), whether paging is stopped can differ from
+    ``contexto stats`` (PR #276's review: 64 of 3,000 random logs of that shape, none the launcher writes).
     """
     try:
         data = read_regular(directory / "log.jsonl")

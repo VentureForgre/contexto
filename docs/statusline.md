@@ -211,6 +211,10 @@ second batch at load average 50 gave a median of 165 ms and a worst of 663 ms fo
 command, at 73 ms of CPU time. On a log ten times as long (28.8 MB) the installed command took 162 ms
 of CPU time, against 555 ms for a read of the whole log.
 
+While paging is stopped, each run reads the whole log, twice, to name the cause, so it is slower
+then: measured in review on a 73 MB log, 0.77 s a run against 0.16 s for the same log while paging
+works (0.05 s on the 6-hour log).
+
 Three things keep it short:
 
 - `contexto statusline` skips the rest of the command line: it loads neither the launcher, the

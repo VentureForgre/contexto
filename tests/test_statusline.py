@@ -886,3 +886,18 @@ def test_the_documentation_names_what_the_code_does():
     for note in ("added", "off:flag", "off:env", "own:", "hooks_off:", "unreadable:", "managed_hooks_only",
                  "unsafe_path", "error"):
         assert f"`{note}" in docs, note
+
+
+def test_the_version_comes_from_the_contexto_proxy_distribution_and_is_still_looked_up_lazily(monkeypatch):
+    """Reviewer A, PR #276: merging #256 (packaging as contexto-proxy) into the lazy lookup had to keep the
+    distribution's name, or every installed user would see 0.0.0+unknown. The name a lookup asks for is
+    checked here without depending on how this checkout is installed."""
+    import importlib.metadata
+
+    import contexto
+
+    asked: list[str] = []
+    monkeypatch.delitem(contexto.__dict__, "__version__", raising=False)
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: asked.append(name) or "9.9.9")
+    assert contexto.__version__ == "9.9.9" and asked == ["contexto-proxy"]
+    assert contexto.version_line().startswith("contexto 9.9.9")

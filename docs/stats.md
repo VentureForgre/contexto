@@ -291,7 +291,7 @@ have cost without Contexto, because the CLI would have compacted.
 |---|---|
 | `compaction.seen` | The times the engine saw Claude Code's main conversation replaced by its compacted one (`main_changed` with reason `compacted`, D50 and D59). |
 | `compaction.detectable` | Whether the log could have shown a compaction, for every run in scope. `"seen": 0` means "Claude Code did not compact" only when this is `true`. |
-| `compaction.reasons` | Why not, when `detectable` is `false`: any of `no_session_id`, `cli_version_unknown`, `cli_version_not_measured` (below). Empty when it is `true`. |
+| `compaction.reasons` | Why not, when `detectable` is `false`: any of `no_session_id`, `cli_version_unknown`, `cli_version_not_measured`, `not_read` (below). Empty when it is `true`. |
 | `compaction.cli_versions` | The Claude Code versions the engine read from the requests' `User-Agent`, in the order seen. |
 
 The engine recognises a compacted conversation by the sentence Claude Code opens its summary with,
@@ -306,6 +306,9 @@ User-Agent's entrypoint. So the log can show a compaction only when:
   other client that posts to `/v1/messages` gets this.
 - every such version is one the summary's wording was measured on, 2.1.314 and 2.1.318; otherwise
   `cli_version_not_measured`.
+- the engine read every Messages request: a request it did not read (no engine was running, as with a
+  request that reached Contexto's proxy before any engine started, or its body was forwarded unread
+  after a skipped or failed transform) was never checked; otherwise `not_read`.
 
 The text makes the claim only then:
 
