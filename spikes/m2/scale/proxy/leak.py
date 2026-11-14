@@ -63,7 +63,7 @@ def main(argv: list[str]) -> int:
                     messages = session.next_messages()
                     for j, (end, reply) in enumerate(synth.request_points(session.shape, session.turn, messages)):
                         body = session.wire.body(messages[:end])
-                        result = run.send(worker.port, body, f"t{session.turn}r{j}", reply)
+                        result = worker.client.send(body, f"t{session.turn}r{j}", reply)
                         upstream.take(f"t{session.turn}r{j}")
                         n += 1
                         probe = worker.call({"cmd": "gc"})

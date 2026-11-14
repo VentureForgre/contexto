@@ -13,16 +13,22 @@ import select
 import sys
 import time
 
-log = sys.argv[1]
-# Claude Code leaves the helper's stdin open, so a plain read() would block until its 10 s timeout.
-ready = [] if sys.stdin.isatty() else select.select([sys.stdin], [], [], 0.3)[0]
-stdin = os.read(sys.stdin.fileno(), 65536).decode("utf-8", "replace") if ready else ""
-try:
-    calls = sum(1 for _ in open(log))
-except OSError:
-    calls = 0
-with open(log, "a") as f:
-    f.write(json.dumps({"t": time.time(), "pid": os.getpid(), "ppid": os.getppid(), "cwd": os.getcwd(),
-                        "argv": sys.argv, "stdin": stdin, "env": dict(os.environ)}) + "\n")
-print(json.dumps({"X-Probe-Helper-Call": str(calls + 1),
-                  "X-Probe-Helper-Sid": os.environ.get("CLAUDE_CODE_SESSION_ID", "absent")}))
+
+def main() -> None:
+    log = sys.argv[1]
+    # Claude Code leaves the helper's stdin open, so a plain read() would block until its 10 s timeout.
+    ready = [] if sys.stdin.isatty() else select.select([sys.stdin], [], [], 0.3)[0]
+    stdin = os.read(sys.stdin.fileno(), 65536).decode("utf-8", "replace") if ready else ""
+    try:
+        calls = sum(1 for _ in open(log))
+    except OSError:
+        calls = 0
+    with open(log, "a") as f:
+        f.write(json.dumps({"t": time.time(), "pid": os.getpid(), "ppid": os.getppid(), "cwd": os.getcwd(),
+                            "argv": sys.argv, "stdin": stdin, "env": dict(os.environ)}) + "\n")
+    print(json.dumps({"X-Probe-Helper-Call": str(calls + 1),
+                      "X-Probe-Helper-Sid": os.environ.get("CLAUDE_CODE_SESSION_ID", "absent")}))
+
+
+if __name__ == "__main__":
+    main()

@@ -22,9 +22,8 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PORT, CAPTURE = int(sys.argv[1]), sys.argv[2]
+PORT, CAPTURE = 0, ""  # set from the command line by main()
 TOOL = os.environ.get("D70_TOOL", "mcp__probe__probe_echo")
-os.makedirs(CAPTURE, exist_ok=True)
 counter = itertools.count(1)
 lock = threading.Lock()
 
@@ -145,6 +144,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
-server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-print("listening", flush=True)
-server.serve_forever()
+def main() -> None:
+    global PORT, CAPTURE
+    PORT, CAPTURE = int(sys.argv[1]), sys.argv[2]
+    os.makedirs(CAPTURE, exist_ok=True)
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    print("listening", flush=True)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

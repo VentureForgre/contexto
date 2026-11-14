@@ -41,7 +41,10 @@ with tarfile.open(sdist) as t:
 kept = [(m, data) for m, data in members if m.name.count("/") != 1 or not m.name.endswith("/pyproject.toml.orig")]
 if len(kept) != len(members):
     tmp = sdist + ".tmp"
-    with open(tmp, "wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz, \
+    # compresslevel=9 is written out: it was GzipFile's default until Python 3.15, which changed it
+    # to 6, and the level changes the sdist's bytes.
+    with open(tmp, "wb") as raw, \
+            gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0) as gz, \
             tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as out:
         for m, data in kept:
             out.addfile(m, None if data is None else io.BytesIO(data))

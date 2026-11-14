@@ -34,13 +34,16 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 # ("# MCP Server Instructions"); when either changes, the head moves by its byte change at
 # OTHER_BYTES_PER_TOKEN. B19 and B21 (main 8571095, dry run #5) grew the definitions from 2,743 to 2,827
 # bytes: 47,600 + ceil(84 / 3.0) = 47,628. D51 grew them to 2,985 bytes and the instructions from 426 to
-# 741: 47,600 + ceil(242 / 3.0) + ceil(315 / 3.0) = 47,786. test_head_follows_contexto_tool_bytes fails
-# when either changes without this.
+# 741: 47,600 + ceil(242 / 3.0) + ceil(315 / 3.0) = 47,786. D65 (search falls back to approximate matches)
+# grew the contexto_search description by 85 bytes, to 3,070 in all, and the instructions by 6, to 747:
+# 47,600 + ceil(327 / 3.0) + ceil(321 / 3.0) = 47,816. D69 (only the user's own words are pinned; a pin
+# in the main conversation can be carried) grew them to 3,285 and 878: 47,600 + ceil(542 / 3.0) +
+# ceil(452 / 3.0) = 47,932. test_head_follows_contexto_tool_bytes fails when either changes without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
-CONTEXTO_TOOL_BYTES = 2_985  # D51
+CONTEXTO_TOOL_BYTES = 3_285  # D65 3,070; D69 adds whose words are pinned and that pins can be carried
 CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE = 426  # main c8f0b08 (unchanged until D51)
-CONTEXTO_INSTRUCTIONS_BYTES = 741  # D51
+CONTEXTO_INSTRUCTIONS_BYTES = 878  # D65 747; D69 adds whose words are pinned
 HEAD = (HEAD_MEASURED
         + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
         + math.ceil((CONTEXTO_INSTRUCTIONS_BYTES - CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN))
@@ -48,7 +51,8 @@ HEAD = (HEAD_MEASURED
 
 def fixed_preamble_tokens() -> int:
     """The pinned text's fixed opening lines (``contexto.store.recall.DEFAULT_LINES``) by the engine's
-    estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it."""
+    estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it,
+    409 with D69's clause on whose words are pinned."""
     from contexto.store.recall import DEFAULT_LINES
     from contexto.tokens import estimate_tokens
 

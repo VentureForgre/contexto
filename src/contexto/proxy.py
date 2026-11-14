@@ -67,6 +67,17 @@ has no stronger session signal; the CLI's own signals (Claude Code's ``X-Claude-
 ``affinity_key(session_id, salt)`` is an HMAC of the session id under a random per-install salt
 (``contexto.private.affinity_salt``), so the session id is not sent and cannot be recovered from the
 key by guessing names.
+
+Gateway hint headers (D70): with ``strip_hint_headers`` the six headers Claude Code sends only when
+``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` is on (``contexto.hints.GATED_HINT_HEADERS``) are left out of
+every request the proxy sends upstream: a transformed one, one forwarded unchanged, and the CLI's own
+request on each fail-open path. The transform still gets them, since it reads the request's class from
+them. ``contexto run claude`` turns the hints on for the engine and sets this, so the upstream gets
+the headers it got before; it leaves it off when the user turned the hints on themselves, or turned
+them off so that Contexto does not ask for them (``contexto.hints.hint_headers_state``). Off by
+default: ``contexto proxy`` and any other
+caller forward every header as received. ``X-Claude-Code-Session-Id``, ``x-claude-code-agent-id`` and
+``x-claude-code-parent-agent-id`` are never removed.
 """
 
 from __future__ import annotations
@@ -91,6 +102,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, loads_bounded
+from contexto.hints import without_hint_headers
 
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
     from compression import zstd as _zstd
@@ -919,7 +931,8 @@ class ContextoProxy:
     def __init__(self, upstream: str, log: SessionLog, transform: Transform = identity_transform, *,
                  observe_usage: ObserveUsage | None = None, observe_thinking: bool = False,
                  upstream_source: str | None = None, affinity_key: str | None = None,
-                 on_tool_calls: Callable[[tuple[str, ...]], None] | None = None) -> None:
+                 on_tool_calls: Callable[[tuple[str, ...]], None] | None = None,
+                 strip_hint_headers: bool = False) -> None:
         parts = urlsplit(upstream)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("upstream must be an http(s) base URL")
@@ -938,6 +951,8 @@ class ContextoProxy:
         self.on_tool_calls = on_tool_calls
         self.observe_thinking = observe_thinking
         self.upstream_source = upstream_source
+        # D70: leave Claude Code's gated hint headers out of what is sent upstream (module docstring).
+        self.strip_hint_headers = strip_hint_headers
         self.transform_lock = threading.Lock()
         self.last_epoch: Any = None  # the engine's epoch from its last successful transform
         self._in_flight = 0  # requests being handled; idle keep-alive connections are not counted
@@ -967,8 +982,25 @@ class ContextoProxy:
         self._thread = threading.Thread(target=self._server.serve_forever, name="contexto-proxy", daemon=True)
         self._thread.start()
         self.log({"event": "proxy_start", "port": self.port, "upstream_source": self.upstream_source,
-                  "observe_thinking": self.observe_thinking})
+                  "observe_thinking": self.observe_thinking, **self._store_pages()})
         return self.port
+
+    def _store_pages(self) -> dict[str, int]:
+        """D64: ``{"pages": n}``, the page files the session's store holds now, for the start and stop
+        lines: ``contexto stats`` takes the pages a run added from the two, because the engine's
+        ``page_out`` counts a turn again each time a launch pages it again. On these lines, not the
+        launcher's ``launch`` and ``exit``, so ``contexto proxy`` and both launchers record it in one
+        place. Empty when the log is not a session store's or the pages cannot be listed. The files are
+        counted by name and never opened, and a failure here never stops the proxy."""
+        try:
+            from contexto.stats import count_pages  # here, so the proxy module loads no reader it may not need
+
+            store = getattr(self.session_log, "store", self.session_log)  # the launcher wraps the store
+            pages_dir = getattr(store, "pages_dir", None)
+            count = count_pages(pages_dir) if pages_dir is not None else None
+        except Exception:
+            count = None
+        return {} if count is None else {"pages": count}
 
     def stop(self) -> None:
         """Stop accepting connections, then wait up to STOP_DRAIN_S for in-flight requests to finish
@@ -987,7 +1019,7 @@ class ContextoProxy:
                 in_flight = self._in_flight
             if in_flight:
                 self.log({"event": "proxy_stop_incomplete", "in_flight": in_flight})
-            self.log({"event": "proxy_stop"})
+            self.log({"event": "proxy_stop", **self._store_pages()})
 
     def serve_forever(self, port: int = 0) -> None:
         """Block until interrupted, starting the server first if needed."""
@@ -1275,7 +1307,9 @@ class _Handler(BaseHTTPRequestHandler):
                 conn.putrequest(self.command, owner.base_path + self.path, skip_host=True,
                                 skip_accept_encoding=True)
                 conn.putheader("Host", owner.upstream_netloc)
-                for name, value in headers.items():
+                # D70: the one place a request's headers are written upstream, so this also covers
+                # the CLI's own request on every fail-open path.
+                for name, value in (without_hint_headers(headers) if owner.strip_hint_headers else headers).items():
                     conn.putheader(name, value)
                 if body or self.command in ("POST", "PUT", "PATCH"):
                     conn.putheader("Content-Length", str(len(body)))
@@ -1389,12 +1423,22 @@ class _Handler(BaseHTTPRequestHandler):
             except (OSError, http.client.HTTPException) as exc:  # IncompleteRead is not an OSError
                 raise _UpstreamReadError from exc
 
+        json_started = False  # an identity JSON body has sent a byte that is not JSON whitespace
+
         def hold_json(held: bytes, chunk: bytes) -> tuple[bytes, bytes]:
             """(bytes to write now, bytes to hold) for one more chunk of a JSON body. The last chunk is
             held; for an identity body, so is every chunk after the last one with a byte that is not
             JSON whitespace, so the client never has the body's closing bracket before the end. A body
-            past the reader's limit registers nothing, and is relayed as a Content-Length body is."""
-            if identity and held and not chunk.strip(b" \t\r\n") and not reader.overflowed:
+            past the reader's limit registers nothing, and is relayed as a Content-Length body is.
+            Whitespace before an identity body's first value completes nothing and goes at once: a
+            gateway that keeps a slow request alive with it reaches the client as before the hold."""
+            nonlocal json_started
+            blank = not chunk.strip(b" \t\r\n")
+            if identity and not json_started:
+                if blank:
+                    return held + chunk, b""
+                json_started = True
+            if identity and held and blank and not reader.overflowed:
                 return b"", held + chunk
             return held, chunk
 

@@ -15,7 +15,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PORT, LOG = int(sys.argv[1]), sys.argv[2]
+PORT, LOG = 0, ""  # set from the command line by main()
 lock = threading.Lock()
 TOOL = {"name": "probe_echo", "description": "Records the call and echoes its arguments.",
         "inputSchema": {"type": "object", "properties": {"note": {"type": "string"}}, "additionalProperties": True}}
@@ -78,6 +78,13 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, {"jsonrpc": "2.0", "id": message["id"], "result": result}, extra)
 
 
-server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-print("listening", flush=True)
-server.serve_forever()
+def main() -> None:
+    global PORT, LOG
+    PORT, LOG = int(sys.argv[1]), sys.argv[2]
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    print("listening", flush=True)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

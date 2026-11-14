@@ -64,7 +64,8 @@ def test_state_json_groups_the_pins_and_counts_the_pages(home, capsys):
     assert code == 0 and err == "session s1 (most recent)\n"  # the session line stays on stderr
     data = json.loads(out)
     assert out == json.dumps(data, indent=2, sort_keys=True) + "\n"
-    assert sorted(data) == ["conflicts", "pages", "pinned", "session", "staleness_checked"]
+    assert sorted(data) == ["carried", "conflicts", "faults", "pages", "pinned", "session", "staleness_checked"]
+    assert data["carried"] == []  # no project: nothing carried (D69)
     assert data["session"] == "s1" and data["pages"] == 2
     assert data["staleness_checked"] is False  # no working directory recorded for this session
     pinned = data["pinned"]
@@ -84,8 +85,10 @@ def test_state_json_on_a_session_with_nothing_pinned_or_paged(home, capsys):
     make(home, "s1", prompts=())
     code, out, _ = run(capsys, "state", "--json")
     assert code == 0
-    assert json.loads(out) == {"session": "s1", "pages": 0, "conflicts": [], "staleness_checked": False,
-                               "pinned": {"open_obligations": [], "active_decisions": [], "verified_facts": []}}
+    data = json.loads(out)
+    assert data.pop("faults")["total"] == 0  # the store fault report (contexto stats --json's), empty here
+    assert data == {"session": "s1", "pages": 0, "conflicts": [], "carried": [], "staleness_checked": False,
+                    "pinned": {"open_obligations": [], "active_decisions": [], "verified_facts": []}}
 
 
 def test_state_json_reports_staleness_when_the_working_directory_is_recorded(home, capsys, tmp_path):
@@ -188,6 +191,74 @@ def test_search_json_counts_every_matching_line_of_a_long_page(home, capsys):
     assert hit["first_match_offset"] < shown[0]["offset"]  # where `recall --offset` starts to read them all
     _, text, _ = run(capsys, "recall", pids[0], "--offset", str(hit["first_match_offset"]))
     assert text.startswith("line 0 mentions zebra")
+
+
+def test_search_json_strict_hits_carry_no_approximate_keys(home, capsys):
+    make(home, "s1", prompts=("set refreshToken to rotate", "unrelated"))
+    data = json.loads(run(capsys, "search", "--json", "refreshToken", "rotate")[1])
+    assert sorted(data) == ["hits", "query", "session", "total"] and data["total"] == 1  # as D64 made it
+
+
+def test_search_json_reports_approximate_hits_and_their_words(home, capsys):
+    """D65: when no page holds every word, --json says the hits are approximate, which words were
+    searched, and per hit the words it matched (how, and as the page writes them) and missed."""
+    _, pids = make(home, "s1", prompts=("set refreshToken to rotate hourly", "unrelated chatter"))
+    code, out, err = run(capsys, "search", "--json", "how", "do", "we", "rotate", "refresh_token", "zzqqxx")
+    assert code == 0 and err == "session s1 (most recent)\n"  # the notes are fields here
+    data = json.loads(out)
+    assert out == json.dumps(data, indent=2, sort_keys=True) + "\n"
+    assert sorted(data) == ["approximate", "hits", "query", "searched", "session", "total"]
+    assert data["approximate"] is True and data["searched"] == ["rotate", "refresh_token", "zzqqxx"]
+    assert data["total"] == 1 and [h["page_id"] for h in data["hits"]] == [pids[0]]
+    hit = data["hits"][0]
+    assert sorted(hit) == ["first_match_offset", "line", "matched", "matches", "matching_lines", "missing",
+                           "page_id", "turn"]
+    assert hit["matched"] == [{"word": "rotate", "how": "exact", "form": "rotate"},
+                              {"word": "refresh_token", "how": "folded", "form": "refreshToken"}]
+    assert hit["missing"] == ["zzqqxx"]
+    matching = [m for m in hit["matches"] if m["match"]]
+    assert len(matching) == hit["matching_lines"] == 1 and "refreshToken" in matching[0]["text"]
+    assert hit["first_match_offset"] == matching[0]["offset"]
+
+
+def test_search_json_approximate_matches_the_text_output(home, capsys):
+    make(home, "s1", prompts=("refreshToken rotates hourly", "the refresh_token cron", "unrelated"))
+    _, text, _ = run(capsys, "search", "refresh-token", "rotates", "zzqqxx")
+    data = json.loads(run(capsys, "search", "--json", "refresh-token", "rotates", "zzqqxx")[1])
+    assert data["approximate"] is True and data["hits"]
+    assert [h["line"] for h in data["hits"]] == [line for line in text.splitlines() if line.startswith("pg_")]
+    shown = [f"  {'>' if m['match'] else ' '} {m['offset']}: {m['text']}" for h in data["hits"] for m in h["matches"]]
+    assert shown == [line for line in text.splitlines() if line.startswith("  ") and not line.startswith("  [")]
+    labels = [line.strip() for line in text.splitlines() if line.startswith("  [matched: ")]
+    as_json = []
+    for h in data["hits"]:
+        label = "matched: " + ", ".join(m["word"] if m["how"] == "exact" else f"{m['word']} as {m['form']}"
+                                        for m in h["matched"])
+        as_json.append(f"[{label}; not matched: {', '.join(h['missing'])}]" if h["missing"] else f"[{label}]")
+    assert labels == as_json  # the words line and the JSON name the same words
+
+
+def test_search_json_approximate_limit_cuts_hits_and_total_counts_every_match(home, capsys):
+    make(home, "s1", prompts=[f"rotate the refreshToken, run {i}" for i in range(4)]
+         + [f"unrelated chatter {i}" for i in range(8)])
+    code, out, err = run(capsys, "search", "--json", "--limit", "2", "refresh_token", "zzqqxx")
+    data = json.loads(out)
+    assert code == 0 and data["approximate"] is True and len(data["hits"]) == 2 and data["total"] == 4
+    assert err == "session s1 (most recent)\n"  # the "more approximate matches" note is `total` here
+
+
+def test_search_json_typo_match_says_so(home, capsys):
+    make(home, "s1", prompts=("the keychain holds the token", "unrelated"))
+    hit = json.loads(run(capsys, "search", "--json", "kexchain", "token")[1])["hits"][0]
+    assert hit["matched"] == [{"word": "kexchain", "how": "typo", "form": "keychain"},
+                              {"word": "token", "how": "exact", "form": "token"}]
+    assert hit["missing"] == []
+
+
+def test_search_json_query_of_stop_words_only_is_strict_and_empty(home, capsys):
+    make(home, "s1", prompts=("hello there",))
+    data = json.loads(run(capsys, "search", "--json", "what", "is", "the")[1])
+    assert data == {"session": "s1", "query": "what is the", "total": 0, "hits": []}  # no fallback ran
 
 
 def test_recall_json_carries_the_text_and_where_to_read_on(home, capsys):

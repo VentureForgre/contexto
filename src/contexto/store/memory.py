@@ -1,4 +1,7 @@
-"""In-memory ``SessionStore`` stand-in with the same methods, for tests (lane A imports this path)."""
+"""In-memory ``SessionStore`` stand-in with the same methods, for tests (lane A imports this path).
+
+It is in no project (D69): ``project()`` is None, ``carried()`` is empty and ``carried_text()`` is ``""``.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +9,7 @@ import json
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +31,10 @@ from contexto.store import (
 )
 from contexto.store.ledger import MemoryLedger
 from contexto.store.pages import build_page, current_stub, render_index, same_content, search_entry
+from contexto.store.project import merged_main_records
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
-from contexto.store.search import rank
+from contexto.store.search import Approximate, SearchEntry, rank, rank_approximate
 
 
 class MemoryStore(LedgerOps):
@@ -56,6 +60,29 @@ class MemoryStore(LedgerOps):
 
     def workdir(self) -> Path | None:
         return self._workdir
+
+    def set_project_memory(self, on: bool) -> None:
+        """As ``SessionStore.set_project_memory``; a memory store has no project either way."""
+        if not isinstance(on, bool):
+            raise ValueError(f"project memory is on or off (a bool), not {on!r}")
+        self._project_memory = on
+
+    def add_main_records(self, record_ids: Iterable[str]) -> None:
+        """As ``SessionStore.add_main_records``, kept in memory; a memory store has no project."""
+        merged = merged_main_records(getattr(self, "_main_records", None), list(record_ids))
+        if merged is not None:
+            self._main_records = merged
+
+    def main_records(self) -> list[str]:
+        return list(getattr(self, "_main_records", ()))
+
+    def add_trusted_conversation(self, key: str) -> None:
+        """As ``SessionStore.add_trusted_conversation``, kept in memory."""
+        kept = [x for x in getattr(self, "_trusted_conversations", []) if x != key]
+        self._trusted_conversations = [*kept, key][-64:]
+
+    def trusted_conversations(self) -> list[str]:
+        return list(getattr(self, "_trusted_conversations", ()))
 
     def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None:
         check_window(window_tokens, bytes_per_token)
@@ -180,8 +207,8 @@ class MemoryStore(LedgerOps):
     def page_ids(self) -> list[str]:
         return [p["id"] for p in sorted(self.pages.values(), key=lambda p: (p["turn"], p["id"]), reverse=True)]
 
-    def search(self, query: str) -> list[str]:
-        """As ``SessionStore.search``; each page's searchable text is kept while the page object stays (D34)."""
+    def _search_entries(self) -> list[SearchEntry]:
+        """Each page's searchable text, kept while the page object stays (D34)."""
         texts = self.__dict__.setdefault("_search_texts", {})
         entries = []
         for page in self._pages():
@@ -189,7 +216,15 @@ class MemoryStore(LedgerOps):
             if kept is None or kept[0] is not self.pages.get(page["id"]):
                 kept = texts[page["id"]] = (self.pages.get(page["id"]), search_entry(page))
             entries.append(kept[1])
-        return rank(entries, query)
+        return entries
+
+    def search(self, query: str) -> list[str]:
+        """As ``SessionStore.search``."""
+        return rank(self._search_entries(), query)
+
+    def search_approximate(self, query: str) -> Approximate:
+        """As ``SessionStore.search_approximate`` (D65)."""
+        return rank_approximate(self._search_entries(), query)
 
     def index_text(self, budget_tokens: int, variant: str | None = None) -> str:
         return render_index(self._pages(), budget_tokens,

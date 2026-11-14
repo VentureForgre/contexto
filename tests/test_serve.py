@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from contexto import __version__, cli, serve, serveclient, servecontract
+from contexto.hints import GATED_HINT_HEADERS
 from contexto.launcher import build_engine, contexto_tool_rules
 from contexto.proxy import REFUSED_MESSAGE
 from contexto.store import SessionStore
@@ -341,6 +342,51 @@ def test_a_request_without_a_session_id_is_forwarded_unchanged_and_makes_no_sess
     assert [e["path"] for e in serve_log(home, "request", 1)] == [path.split("?")[0]]
 
 
+# Gateway hint headers (D70): read by the engine, left out of what goes upstream unless asked for.
+
+HINTS = {"x-claude-code-request-class": "main", "x-claude-code-compaction": "manual",
+         "x-claude-code-context-compacted": "manual", "x-claude-code-prompt-id": "6f1d0b52-4b8e-4d6a-9c1e-2f0a7e3b5d10",
+         "x-claude-code-agent-type": "Explore", "x-claude-code-prev-tool-durations": "Bash=742;Read=9"}
+
+
+def hinted(session: str | None) -> dict[str, str]:
+    return {**headers(session), **HINTS}
+
+
+def gated(sent: dict[str, str]) -> set[str]:
+    return {name.lower() for name in sent} & GATED_HINT_HEADERS
+
+
+def test_the_engine_reads_the_hint_headers_and_the_upstream_never_gets_them(make_service, home):
+    service = make_service()
+    response, _ = call(service, "POST", "/v1/messages?beta=true", body(A), hinted(A))
+    assert response.status == 200
+    _, _, sent, _ = StubUpstream.received[0]
+    assert gated(sent) == set() and sent["X-Claude-Code-Session-Id"] == A
+    settle(service)
+    [store] = sessions(home)
+    [logged] = [e for e in session_log(home, store) if e["event"] == "request"]
+    assert logged["transform_events"][-1]["request_class"] == "main"
+    assert serve_log(home, "serve_start")[0]["hint_headers"] == "stripped"
+
+
+def test_a_request_of_no_session_is_forwarded_without_the_hint_headers(make_service, home):
+    service = make_service()
+    response, _ = call(service, "POST", "/v1/messages?beta=true", body(None), hinted(None))
+    assert response.status == 200
+    _, _, sent, _ = StubUpstream.received[0]
+    assert gated(sent) == set() and sessions(home) == []
+
+
+def test_forward_hint_headers_passes_them_upstream(make_service, home):
+    service = make_service(forward_hint_headers=True)
+    for session in (A, None):
+        response, _ = call(service, "POST", "/v1/messages?beta=true", body(session), hinted(session))
+        assert response.status == 200
+    assert [gated(sent) for _, _, sent, _ in StubUpstream.received] == [set(HINTS)] * 2
+    assert serve_log(home, "serve_start")[0]["hint_headers"] == "forwarded"
+
+
 def test_a_header_and_body_that_disagree_are_forwarded_unchanged(make_service, home):
     service = make_service()
     data = json.dumps(json.loads(body(B)), indent=2).encode()  # bytes the serializer would not reproduce
@@ -454,6 +500,37 @@ def test_a_session_the_launcher_made_for_the_id_is_reused(make_service, home, tm
     # A session the service makes records no working directory: it does not run in the client's.
     post(service, B)
     assert SessionStore.open_existing(home, served(home)[B]).workdir() is None
+
+
+def test_a_session_the_service_makes_stays_out_of_project_memory_after_a_resume(make_service, home, tmp_path):
+    """D70 with D69: the service cannot know a client's directory and routes by session id, so a session
+    it makes records ``project_memory: false``. ``contexto run claude --resume <id>`` then records a
+    directory (``set_workdir``) but keeps memory off (``record_project_memory`` never writes true over
+    false), so the session neither carries a project's records nor gives its own to later sessions."""
+    from contexto.launcher import record_project_memory
+    from contexto.store.project import project_root, project_sessions, session_project
+
+    made = SessionStore(home, "launcher-made")
+    made.set_workdir(tmp_path)
+    made.record_cli_session("claude", A, 100.0)
+    made.release()
+    service = make_service()
+    post(service, A)
+    post(service, B)
+    by_service = served(home)[B]
+    meta = lambda name: json.loads((home / "sessions" / name / "meta.json").read_text())  # noqa: E731
+    assert meta(by_service)["project_memory"] is False
+    assert "project_memory" not in meta("launcher-made")  # a session the launcher made keeps its own choice
+    service.stop()
+    resumed = SessionStore(home, by_service)  # as `contexto run claude --resume <id>` opens it
+    resumed.set_workdir(tmp_path)
+    record_project_memory(resumed, True)
+    resumed.release()
+    after = meta(by_service)
+    assert after["project_memory"] is False and after["workdir"] == str(tmp_path.resolve())
+    assert session_project(home, by_service, after, own=lambda: []) is None  # carries nothing in
+    members = {m.id: m for m in project_sessions(home, project_root(tmp_path)).sessions}
+    assert members[by_service].memory is False and members["launcher-made"].memory is True  # gives nothing out
 
 
 def test_two_ids_one_launcher_session_share_one_engine(make_service, home):
@@ -916,17 +993,6 @@ def test_an_upstream_that_is_the_service_itself_is_refused(url, loops):
     assert token not in message and "7837/" not in message  # never the URL
 
 
-@pytest.mark.parametrize("env, named", [
-    ({}, []), ({"CLAUDE_CODE_USE_BEDROCK": "1"}, ["CLAUDE_CODE_USE_BEDROCK"]),
-    ({"CLAUDE_CODE_USE_VERTEX": "true", "CLAUDE_CODE_USE_FOUNDRY": "0", "CLAUDE_CODE_USE_MANTLE": ""},
-     ["CLAUDE_CODE_USE_VERTEX"]),
-    ({"CLAUDE_CODE_USE_ANTHROPIC_AWS": " Yes ", "CLAUDE_CODE_USE_MANTLE": "on", "CLAUDE_CODE_USE_OTHER": "1"},
-     ["CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS"]),
-])
-def test_cloud_provider_variables_are_found(env, named):
-    assert serve.cloud_provider_variables(env) == named
-
-
 # The command
 
 
@@ -1002,9 +1068,16 @@ def test_help_lists_the_serve_options(capsys):
     out = capsys.readouterr().out
     assert done.value.code == 0
     for option in ("--port", "--upstream", "--bound", "--max-sessions", "--idle-minutes", "--print-settings",
-                   "--print-mcp-config", "--rotate-token", "--status"):
+                   "--print-mcp-config", "--rotate-token", "--status", "--forward-hint-headers"):
         assert option in out
     assert "--host" not in out
+
+
+def test_the_command_forwards_the_hint_headers_only_when_asked(home, running, upstream):
+    for args, state in (((), "stripped"), (("--forward-hint-headers",), "forwarded")):
+        service = running(*args)
+        assert serve_log(home, "serve_start")[-1]["hint_headers"] == state
+        assert service.stop() == 0
 
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
@@ -1171,6 +1244,52 @@ def test_after_a_stop_signal_whoever_binds_the_port_is_never_sent_the_token(home
     assert refused.value.kind == serveclient.NOT_RUNNING and "serve.json" in refused.value.reason
 
 
+def test_a_resolve_call_retrying_when_the_service_stops_never_reaches_the_ports_next_owner(make_service, home):
+    """Round-3 review (Reviewer B, minor 1): a call the service answered 404 is asked again for up to
+    2 s. When the service stops during a wait and another program binds the freed port, the retry must
+    not reach it: before each retry the client checks again, as before the first try, that the service
+    that answered still holds the lock and that its record still names the port."""
+    service = make_service()
+    port, waits, recorders = service.port, [], []
+
+    def stop_and_take_the_port(seconds: float) -> None:
+        waits.append(seconds)
+        if len(waits) == 2:  # the second wait: the first retry was answered by the service itself
+            service.stop()
+            recorders.append(Recorder(until(lambda: bind(port), "the service's port to be free", timeout=20)))
+
+    try:
+        with pytest.raises(serveclient.ResolveError) as refused:
+            serveclient.resolve(home, "toolu_01D70retrying", sleep=stop_and_take_the_port)
+    finally:
+        for recorder in recorders:
+            recorder.close()
+    assert len(waits) == 2 and len(recorders) == 1
+    assert recorders[0].received == []
+    assert refused.value.kind == serveclient.NOT_RUNNING
+
+
+@pytest.mark.parametrize("change", ["record removed", "another pid", "another port", "token replaced"])
+def test_a_retry_is_not_sent_once_the_services_record_changed(make_service, home, change):
+    service = make_service()
+    state = json.loads((home / serve.STATE_FILE).read_text())
+
+    def change_the_record(seconds: float) -> None:
+        if change == "record removed":  # the service is stopping: it removes its record before its port
+            (home / serve.STATE_FILE).unlink(missing_ok=True)
+        elif change == "token replaced":
+            serve.rotate_token(home)
+        else:
+            moved = {"another pid": {**state, "pid": state["pid"] + 1},
+                     "another port": {**state, "port": state["port"] + 1}}[change]
+            serve.write_atomic(home / serve.STATE_FILE, json.dumps(moved).encode())
+
+    with pytest.raises(serveclient.ResolveError) as refused:
+        serveclient.resolve(home, "toolu_01D70changed", sleep=change_the_record)
+    assert refused.value.kind == serveclient.NOT_RUNNING
+    assert service.health()["resolve"] == {"found": 0, "unknown": 1}  # the first try only
+
+
 def test_a_hangup_ignored_at_start_stays_ignored(home, running):
     """``nohup contexto serve &`` must outlive its terminal."""
     service = running(hangup=signal.SIG_IGN)
@@ -1266,6 +1385,42 @@ def test_print_settings_is_a_claude_code_settings_file(home):
     assert "CLAUDE_CODE_USE_BEDROCK" in warned.stderr and token not in warned.stderr
 
 
+def user_settings(home: Path, env: dict) -> Path:
+    """Claude Code's user settings file in the test's own user home (``child_env``'s ``HOME``)."""
+    path = home.parent / "user-home" / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"env": env}))
+    return path
+
+
+@pytest.mark.parametrize("value", ["1", 1.0, ["1"]])
+def test_print_settings_warns_about_a_switch_in_the_user_settings_file(home, value):
+    """D70: the launcher's provider check (``contexto.upstream.cloud_provider``), with its reading of a
+    settings file's value, decides the service's warning too."""
+    user_settings(home, {"CLAUDE_CODE_USE_BEDROCK": value})
+    warned = run_cli(home, "--print-settings")
+    assert warned.returncode == 0 and "ANTHROPIC_BASE_URL" in json.loads(warned.stdout)["env"]
+    assert "CLAUDE_CODE_USE_BEDROCK" in warned.stderr and "user settings" in warned.stderr
+    assert "does not reach contexto serve" in warned.stderr
+
+
+def test_print_settings_warns_about_a_switch_in_a_project_file_and_an_unreadable_file(home, tmp_path):
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.json").write_text(json.dumps({"env": {"CLAUDE_CODE_USE_VERTEX": "true"}}))
+    warned = run_cli(home, "--print-settings", cwd=project)
+    assert "CLAUDE_CODE_USE_VERTEX" in warned.stderr and ".claude/settings.json" in warned.stderr
+    user_settings(home, {})
+    (home.parent / "user-home" / ".claude" / "settings.json").write_text('{"env": {"CLAUDE_CODE_USE_MANTLE": 1,}}')
+    unread = run_cli(home, "--print-settings")
+    assert unread.returncode == 0 and "could not read" in unread.stderr
+
+
+def test_print_settings_is_quiet_when_a_settings_file_turns_the_switch_off(home):
+    user_settings(home, {"CLAUDE_CODE_USE_BEDROCK": "0"})
+    assert run_cli(home, "--print-settings").stderr == ""
+
+
 def test_print_settings_names_a_running_services_port(home, running):
     service = running()
     printed = run_cli(home, "--print-settings")
@@ -1355,6 +1510,15 @@ def test_status_without_a_service_makes_no_request(home, listener):
     with pytest.raises(serveclient.ResolveError):
         serveclient.resolve(home, "toolu_01D70stale")
     assert listener.connections() == 0
+
+
+def test_the_service_warns_about_a_switch_in_the_user_settings_file(home, running):
+    user_settings(home, {"CLAUDE_CODE_USE_FOUNDRY": True})
+    service = running()
+    text = until(lambda: (lambda lines: "CLAUDE_CODE_USE_FOUNDRY" in lines and lines)("\n".join(service.stderr_lines)),
+                 "the provider warning on the service's stderr")
+    assert "user settings" in text and "Microsoft Foundry" in text
+    assert service.stop() == 0
 
 
 def test_the_service_warns_about_a_cloud_provider_and_a_small_bound(home, running):

@@ -52,6 +52,53 @@ same design after Claude Code works.
   and Contexto's key are different signals and may map to different credentials, so the key pins
   only requests that carry no CLI signal. The launch event records `affinity_header` (true when the
   header is sent).
+- Gateway hint headers (D70). Claude Code (2.1.273 or later) sends six more headers when
+  `CLAUDE_CODE_GATEWAY_HINT_HEADERS` is on, and with a custom base URL only then:
+  `x-claude-code-request-class`, `x-claude-code-context-compacted`, `x-claude-code-compaction`,
+  `x-claude-code-prompt-id`, `x-claude-code-agent-type` and `x-claude-code-prev-tool-durations`.
+  `contexto run claude` turns them on in its `--settings` file, and the engine reads the first three
+  (main selection below). The proxy then leaves all six out of every request it sends upstream: a
+  transformed request, a request it forwards unchanged (`count_tokens`, any other path), and the
+  CLI's own request on each fail-open path (rule 14's failed transform, rule 18, the last-resort
+  forward). The header names match in any case. So the upstream gets the same headers, in the same
+  order, and the same bytes as for the request Claude Code sends with the hints off, and the prompt
+  cache is not affected. A launch is in one of three states, decided once and recorded in the
+  launch event as `hint_headers`:
+  - `stripped`: the default, as just described.
+  - `forwarded`: the user turned the hints on themselves, so the six pass through unchanged, as
+    they did before D70. "On" is the value Claude Code would run with without Contexto's
+    `--settings`: the managed settings file's `env` block if it sets the variable, else the first
+    settings file `env` block that sets it, in the order and under the trust rule of the upstream
+    resolution below (a project file counts as `claude -p` reads it, with no trust record needed,
+    and not at all while `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set), else the process
+    environment; on is `1`, `true`, `yes` or `on` in any case, with surrounding whitespace ignored.
+    Measured on 2.1.322: a settings file's value wins over the environment's in both directions, a
+    project file's wins over the user file's, and Contexto's `--settings` value wins over a
+    project file's `0`. That managed settings come first is from Claude Code's documentation.
+    Interactively Claude Code applies a project file only after its trust dialog, so a project
+    file that turns the hints on lets them reach the upstream before the folder is trusted.
+  - `off`: the hints are not on, and the user set the variable to `0`, `false`, `no` or `off` in
+    the process environment or their user settings file (or the managed settings file does, which
+    outranks `--settings`). The launcher leaves the variable out of its `--settings` file, Claude
+    Code sends no hint header, the engine reads its signatures, and the proxy removes nothing.
+
+  Claude Code applies the `env` block of the `--settings` file to its own environment, so every
+  process the session starts inherits `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` (measured). The launcher
+  therefore writes its state beside it as `CONTEXTO_HINT_HEADERS`, and a nested
+  `contexto run claude` that finds `stripped` there does not count the inherited value as the
+  user's (with `forwarded` it does, since the user had the hints on; a settings file's value counts
+  either way). Limit: a nested plain `claude` pointed at another base URL also inherits the `1` and
+  sends the hints to that URL, with no Contexto proxy in its path. The way out is the `off` state.
+  Only the managed settings file is read (`/Library/Application Support/ClaudeCode/managed-settings.json`
+  on macOS, `/etc/claude-code/managed-settings.json` on Linux); managed settings delivered another
+  way are not seen.
+  `X-Claude-Code-Session-Id`, `x-claude-code-agent-id` and `x-claude-code-parent-agent-id` are sent
+  without the variable and are always forwarded. `contexto proxy` and `contexto run codex` do not
+  ask for the hints and remove nothing (`ContextoProxy(strip_hint_headers=...)` is off by default).
+  `contexto serve` asks for them in the settings `--print-settings` prints and removes the six from
+  every request it forwards unless started with `--forward-hint-headers` (Standing service).
+  No hint value is stored or logged except the request class and the compaction trigger, each
+  only after it matched its documented set.
 
 ## Architecture
 
@@ -60,6 +107,7 @@ contexto run claude ...      (launcher)
   |-- starts proxy on 127.0.0.1:<free port> for session S, upstream = the URL Claude would use
   |-- starts nothing else; Claude Code spawns the MCP server itself from --mcp-config
   `-- execs: claude --settings=<tmp file: env.ANTHROPIC_BASE_URL=proxy,
+                                         env.CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 (D70),
                                          permissions.allow=Contexto's 5 tools (D44)> \
                     --mcp-config=<tmp file: contexto mcp --session S> [user args]
              (one argument per flag: --mcp-config takes several files, so in the two-argument form
@@ -109,9 +157,10 @@ client (started by anything)           mcp server (contexto mcp --serve, started
   passed the check has 5 s in total for its request head and a refused body, after which its read
   side is shut; at most 64 such connections are open, and one more takes the place of the oldest
   whose request line has not shown the token (checked with a peek, by the handler before it reads
-  and by the accept thread before it closes one, so a token holder's connection is not the one
-  closed; when all 64 have shown it, the new connection is closed). A connection that passed is
-  outside both limits.
+  and by the accept thread before it closes one, so a connection whose request line has arrived up
+  to the slash after the token is not the one closed; one whose line arrives in pieces can be,
+  since the handler's buffered read can take the rest before the accept thread peeks; when all 64
+  have shown it, the new connection is closed). A connection that passed is outside both limits.
 - Routing. The id is the `X-Claude-Code-Session-Id` header (a plain id, at most 128 characters),
   else `session_id` in `metadata.user_id`. A request with no id, an id that is not a plain id, or a
   header and body that differ (`session_id_mismatch`) is forwarded unchanged through the identity
@@ -133,7 +182,11 @@ client (started by anything)           mcp server (contexto mcp --serve, started
   failure is remembered for 5 s per id. A session the service creates records no working directory.
 - Sessions. Each open session has its own engine, transform lock and session log; the rewrite
   engine's rules apply to it unchanged, and degraded mode, the stream hold and fail-open are the launcher path's
-  code. At most `--max-sessions` (64) are open; one idle for `--idle-minutes` (60) is closed, and
+  code. The engine reads Claude Code's hint headers as under `contexto run claude` (the signatures
+  stay the fallback); each session's proxy and the proxy for unrouted requests remove the six gated
+  ones before forwarding (`strip_hint_headers`) unless `--forward-hint-headers` is given, and
+  `serve_start` logs `hint_headers` (`stripped` or `forwarded`). The service has no `off` state of
+  its own: it cannot see its clients' settings, and a client without the variable sends none. At most `--max-sessions` (64) are open; one idle for `--idle-minutes` (60) is closed, and
   the least recently used is closed to make room. Closing flushes the recorded ids, runs the
   missing-tools report, logs, and releases the store; the next request reopens the session and the
   engine resumes from its epoch record (rule 16). A session with a request in flight is never
@@ -156,19 +209,24 @@ client (started by anything)           mcp server (contexto mcp --serve, started
   response and before it writes the bytes that carry it, whether the stream is held or relayed
   with a `Content-Length` (`hold_skipped`), with or without `usage`. A JSON body is read when it has
   ended, so the proxy holds back what completes it (its last chunk and any whitespace after it), with
-  a `Content-Length` or chunked, and writes that after the ids are handed over: an id resolves
+  a `Content-Length` or chunked, and writes that after the ids are handed over (whitespace before
+  an identity body's first value is not held: it completes nothing, and a gateway may send it to
+  keep a slow request alive; this applies to `contexto run` too): an id resolves
   before the client can act on the call whenever the response is not content-encoded. For a
   response upstream encoded although the proxy asked for identity, the id is read from a decoded
   side copy that can trail the client's decoder; the MCP server's retry (after a 404, six tries in
   all, the last started within 2 s of the first; each try has 2 s in total, so a call ends within
-  4 s) covers that. An id two sessions registered is ambiguous and resolves as unknown
+  4 s) covers that. Before each retry the client checks again that a service holds the lock and
+  that `serve.json` and `serve.token` give the port, pid and token of the first try, and otherwise
+  ends the call as not running with nothing more sent. An id two sessions registered is ambiguous and resolves as unknown
   (`tool_use_ambiguous`, a count). Claude Code 2.1.322 gives an MCP server the `tool_use` id of
   each call (`_meta["claudecode/toolUseId"]`) and nothing else that names the session.
 - MCP server. `contexto mcp --serve` (exactly one of `--session S` and `--serve`) has no session:
   it lists the five tools with no service running, and for each `tools/call` resolves the call's
   tool-use id through the service, then opens that existing session (never one it creates; the
   8 most recently used stay open; the store is opened with `create=False`, so a session removed or
-  pruned while it is being opened is refused, not made again) and runs the tool code of `--session`
+  pruned while it is being opened is refused, not made again, and so is an empty session directory,
+  the state prune leaves just before its `rmdir`) and runs the tool code of `--session`
   mode against it. Any step
   that fails is a tool error and nothing is read or written; there is no fallback session. It
   writes the store's `tools/list` record at a store's first resolved call.
@@ -186,9 +244,14 @@ client (started by anything)           mcp server (contexto mcp --serve, started
   service's token, is refused with a pointer to `--upstream`; the service never falls back to
   another upstream. `contexto run claude` and `contexto proxy` refuse an upstream that is this
   home's service (a loopback URL whose first path segment is the token, compared in constant time)
-  with a usage error pointing to `--upstream`. The service warns at start when its own environment sets a cloud-provider switch
-  (`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_MANTLE`, `_ANTHROPIC_AWS`): Claude Code then
-  sends nothing to `ANTHROPIC_BASE_URL` (measured on 2.1.322).
+  with a usage error pointing to `--upstream`. The service warns at start and in `--print-settings`
+  when the check `contexto run claude` refuses a launch by (`contexto.upstream.cloud_provider`)
+  finds a cloud-provider switch on (`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_MANTLE`,
+  `_ANTHROPIC_AWS`) in its environment or a settings file read from its directory, or a settings
+  file it cannot read: Claude Code then sends nothing to `ANTHROPIC_BASE_URL` (measured on
+  2.1.322). It warns rather than refuses, since its clients start elsewhere. `contexto mcp --serve`
+  runs the same check on its own environment and directory and names what it finds in its "unknown
+  tool call" error. That one check is the only definition of the switches and of how they are read.
 - Out of scope: listening off loopback, more than one user, and any request path but Claude Code's
   Messages API (Codex, Chat Completions, Bedrock and Vertex paths are forwarded unchanged).
 
@@ -206,6 +269,54 @@ directory's files are (D52, 27 layouts with Claude Code 2.1.314). Else `ANTHROPI
 process environment; else `https://api.anthropic.com`. The launcher's own flag-level `--settings`
 outranks all of these, which is what makes the proxy attachment work. Organization-managed
 settings still outrank `--settings`; document that limit.
+
+Cloud providers (D70): with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+`CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE` or `CLAUDE_CODE_USE_ANTHROPIC_AWS` on, Claude Code
+2.1.322 sends every request to that provider's own endpoint and none to `ANTHROPIC_BASE_URL`, not
+even `HEAD /api/hello`, so the proxy would see nothing and the session would run with no bound.
+`contexto run claude` refuses such a launch (exit 2) before it opens a session, with a message that
+names the variable, each place it is on (the process environment, or which settings file's `env`
+block; never a path of the user's or the value) and what to do. `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`
+(Claude Platform on Google Cloud, on no documentation page) is refused too: it is in the 2.1.318 and
+2.1.322 programs, and on 2.1.318, at `1` in the environment or a project file's `env` block, it sent
+every request to its own endpoint and none through the proxy (D64, `spikes/m2/providers`).
+
+The check fails closed. It does not predict which value Claude Code ends up with: a switch counts
+when it is on in the process environment or in the `env` block of any settings file Contexto can
+find, whatever the precedence between them and whatever the folder's trust state. The files are
+those of the base URL above (the main checkout's and the folder's project files, and the user
+file) and the managed settings file (`/Library/Application Support/ClaudeCode/managed-settings.json`
+on macOS, `/etc/claude-code/managed-settings.json` on Linux; managed settings delivered another way
+are not seen). A project file can therefore only cause a refusal, never let a launch through. The
+reason: Claude Code does not apply every file Contexto can read. Measured on 2.1.322, with the
+environment at `1` and a project file at `0`, Claude Code still went to the provider when the file
+also held `NaN` or a schema error, or when it ran with `--setting-sources user`; and `claude -p`
+drops a project file's `env` while `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set, where the
+interactive CLI applies it once its dialog is accepted. Accepted cost: a refusal Claude Code would
+not have needed, when the environment says on and a file Claude Code does apply says off (measured:
+the file wins), or when a file Claude Code ignores says on. The message says so and names what to
+unset.
+
+A file value is on when JavaScript's `String()` of it is `1`, `true`, `yes` or `on` in any case
+with surrounding whitespace ignored: a JSON `true`, the numbers `1`, `1.0` and `1e0`, and a list
+whose items join with commas to one of those words (`["1"]`, `[1]`, `[["1"]]`, `[true]`) are on;
+`0`, `false`, `no`, `2`, `1.5`, `"1.0"`, `[]`, `["1","1"]`, `null`, an object, any other text and the
+empty string are off. Measured for `CLAUDE_CODE_USE_BEDROCK` in the process environment and in the
+user settings file; a project file was measured with `"1"`, `"0"`, `1.0`, `1e0` and `["1"]`, and the
+other four switches with `1`, `true` and `0` (D70).
+
+Settings files are read once per launch, through one reader with a bound: a regular file only, at
+most 4 MiB, with a UTF-8 byte order mark accepted as Claude Code accepts one. It parses as Claude
+Code 2.1.322 does (measured for D64): an integer past Python's 4,300-digit limit is read (as
+JavaScript's Infinity), and a file holding `NaN` or `Infinity` is not valid JSON. A file that does
+not exist, or that this user cannot open, counts as absent: Claude Code cannot read it either. A
+file that is there and that Contexto could not read (not a regular file, larger than the bound, not
+valid JSON) is not evidence that a switch is off, so the launch is refused with a message naming
+that file, unless it was read whole and its text cannot name a switch. A file whose `env` is not an
+object sets nothing (Claude Code loads nothing from it, `apiKeyHelper` included) and refuses nothing.
+
+`claude --version` and `--help` alone are not checked. Not covered: managed settings that are not
+in that file, and `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` (not measured).
 
 Project settings trust (D52): every settings file above except the user's comes with the
 repository. `contexto run claude` and `contexto proxy` use them as Claude Code does: Claude Code
@@ -387,7 +498,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    (341 tokens, haiku via the owner's proxy): a
    `role: "system"` message before the first retained turn-start message returns 400; after it,
    or merged into it as text, returns 200. No `tool_result` is displaced. In the first epoch `k = 0`, nothing is carried separately, and the
-   preamble is empty. Every other request field passes through unchanged, including
+   preamble is empty; the one addition while `k = 0` is rule 19's start text (D69), and without one
+   the messages are forwarded as sent. Every other request field passes through unchanged, including
    `cache_control`, `anthropic-beta`, `stream`, and `thinking`.
 2. **Thinking.** For every retained message that existed when `E` was created, strip thinking and
    redacted-thinking blocks deterministically on every request, so the transformed prefix is
@@ -662,7 +774,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       (hashes only), `head_tokens` and the rule it was measured under (`head_rule`, 2 since D61),
       `initial_carried`, `max_turn_growth`, the turn-start counters
       (`last_turn_start_n`, `last_turn_count`, `last_carried_text_count`, `carried_text_streak`),
-      `window_budget`, `window_minimal_count`, and `turn_room_low_epoch`; the whole engine
+      `window_budget`, `window_minimal_count`, and `turn_room_low_epoch`; rule 19's `start_text`,
+      only when it is not empty and `k = 0` (D69); `untrusted`, `true` only for a main conversation
+      the engine did not trust (rule 19, D69); the whole engine
       configuration (every setting, including the recall preamble options and budgets); the
       dialect; the model named by the request; the conversation's identity as the engine keys
       it (a hash); and an anchor: the count `n` of messages in the request that wrote the record
@@ -724,7 +838,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       enter degraded mode: the record only saves cache, and losing it costs one rotation.
     - **Not covered.** Subagents and side requests are not recorded (they rotate from 0 after a
       restart, as today). A record written by an older version, or with a field missing, does
-      not resume. Two proxies serving one session at once are out of scope (the last writer
+      not resume, except for the three optional fields, which a record may leave out: `head_rule`
+      (D61), `start_text` and `untrusted` (D69, rule 19). An engine before `untrusted` reads a
+      record that carries it as no record, which costs one rotation's cache. Two proxies serving one session at once are out of scope (the last writer
       wins).
 
 17. **Headroom.** At a turn start, headroom = max(`headroom_floor`, min(ceil(`headroom_factor` x
@@ -797,6 +913,134 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     every request is refused, and Contexto does not remove it. Past 512 levels Contexto never
     transforms the request, so once such a message is in the CLI's history the session cannot
     continue, with or without Contexto. The Responses API's limit was not measured.
+19. **Project memory at a session's start** (D69). Rule 1 puts the pinned state in the preamble,
+    and there is no preamble while `k = 0`, so until its first rotation a session's requests held
+    nothing pinned. A new session now holds the records it carries from its project's earlier
+    sessions in every request from the first one. Those records are the store's carried section
+    (`carried_text`, D69): the open obligations and active decisions that the main conversation
+    pinned in earlier sessions of the same project, under a heading that says they are records
+    of an earlier session and not instructions, within the pin budget (6,000 tokens).
+    - **Which records are the main conversation's.** At each request of the main conversation
+      (as chosen for that request) the engine reads the messages it has not read before for that
+      conversation and finds Contexto's own `contexto_pin` and `contexto_close` calls (a `tool_use`
+      block of an assistant message, or a `function_call` item, named `mcp__contexto__...`) paired,
+      by call id, with a result (`tool_result`, `function_call_output`) whose text is exactly the
+      server's success reply (`Recorded <kind> <id>.`, with the note an unpinned kind gets;
+      `Closed <id> with <id>.`; or the structured content `{"record_id": "<id>"}` alone). Each
+      record id found is added to the session's `main_records` in `meta.json` (once each, the
+      newest 4,096); a store failure there is the content-free `main_records_unavailable` event,
+      never a failed request or degraded mode, and the messages count as unread, so the
+      conversation's next request finds the same ids again. A pin or close call whose result is
+      not a success reply (an `is_error` result, content of another shape, several parts, a part
+      that is not text, another text) is one content-free `main_record_unmatched` event with the
+      tool's name and a reason (`is_error`, `shape`, `parts`, `part_type`, `reply`), at most
+      once per call id. Only those records are carried, and only a
+      closure or a `supersedes` in `main_records` removes another session's record outside its own
+      session. A subagent's or side request's call is in its own conversation, and a result that
+      only quotes a reply belongs to another tool's call, so neither is taken. Only a trusted main
+      conversation's messages are read: the engine's first main conversation (main since its own
+      first request, or resumed from the epoch record by a new engine unless the record says
+      `untrusted` and the conversation is not in the session's `trusted_conversations`; after a
+      restart a first main that the record does not resume is trusted only when the store has no
+      record, the conversation is in `trusted_conversations`, the record names it without
+      `untrusted`, or it is a Claude Code request in a session id the store had not served, with no
+      agent id or parent), or one that took main by one of D50's session rules (`new_cli_session`,
+      `resumed_cli_session`, `compacted`), by `after_side_request` when those first-main rules
+      trust it, or by `more_turn_starts` when it is in `trusted_conversations`. Each conversation an
+      engine trusts is written to `trusted_conversations` in `meta.json` once per engine (a key
+      already there moves to the end; the newest 64 are kept); a store failure there is the
+      content-free `trusted_conversations_unavailable` event with the error's class, never a failed
+      request. One that took main from a known main by `more_turn_starts` and is not in that list
+      (a Claude Code subagent whose requests lack `X-Claude-Code-Agent-Id`, resumed past main's
+      turn starts; a Codex child conversation) is not read until it takes main by a trusted rule; a
+      trusted conversation that takes main back by turn starts stays trusted. A request that carries `X-Claude-Code-Agent-Id` or a
+      `parent_session_id`, a fork of main with main's key included, or whose
+      `x-claude-code-request-class` is `subagent`, `workflow` or `auxiliary` (D70), is never read,
+      and the scan position stays where it was. The limits: a pin whose result never reaches a later main
+      request (the session ends) is not carried; and a code-mode call (Codex's `exec`) is not
+      recognised, which on codex-cli 0.163.0 is the only way the model calls Contexto's tools, so
+      a Codex session confirms nothing. Pins are written with the author `model`, as before D69.
+    - **Start text.** When the engine creates a conversation's epoch state, that conversation is
+      the main one (as chosen for that request: contract PR #125, D50), and the request is one the
+      dialect judges a session start by (for Claude Code a request with a tool list, so its title,
+      topic and quota side requests never qualify; every Codex request), the engine reads
+      `store.carried_text(pin_budget)` once and keeps the result in the state as `start_text`. The
+      main conversation that follows `/clear` is new, so it reads its own the same way.
+    - **A removal reaches a running or resumed session.** At each turn start of the main
+      conversation while `k = 0`, and at the request that resumes it from an epoch record, the
+      engine reads `carried_text(pin_budget)` again; when it differs from the state's start text
+      (a carried record closed, replaced or forgotten, project memory turned off for the session,
+      or a conflict mark changed) the state sends the new text from that request on and logs
+      content-free `start_text_changed` with its estimated tokens. That changes the prefix once:
+      one cache miss is the price of a removal. Additions are frozen at the session's start, so the
+      text gains no record created after it; a record created before it whose id reaches its
+      session's `main_records` only after the start (the confirmation comes with the main
+      conversation's next request) can join at such a read. A state whose start text is empty is
+      never given one. A store that
+      raises there keeps what it sent and logs `start_text_unavailable`, and so does a project that
+      cannot be read (`carried_text(pin_budget, strict=True)`: a sessions directory that exists
+      but cannot be listed, anything the project part raises, or a session whose metadata or ledger
+      failed to read with an error that may pass: out of descriptors or memory, an I/O error, an
+      interrupted or timed-out read, not a permission error); only a read that succeeds and gives
+      another text replaces it. Damage, a file over the size limit, a non-regular file and a session
+      deleted since the listing read as that session's records removed. A file that keeps failing
+      with an I/O error anywhere in the home holds every refresh until the first rotation, where the
+      preamble's pinned text is rendered afresh. Inside a tool loop the text is not read again.
+    - **Placement.** While `k = 0` and the start text is not empty, the first turn-start message
+      gets it ahead of its own content as one text block (for Codex, one `input_text` part), on
+      every request and on `count_tokens` (rule 11). It is user-role text under the carried
+      section's own heading, never part of `system`. Items before that message (Codex's lead)
+      stay as sent, in place, once. The message has the same form on every request, so the
+      transformed prefix is byte-identical from the first request to the first rotation, unless a
+      removal changes the text (below). Once
+      `k > 0` the start text is not sent: the preamble's pinned text holds the carried section. A
+      new epoch that keeps `k = 0` (rule 6 with nothing to page) keeps sending it.
+    - **Nothing carried.** With no project, project memory off, no earlier session, no carried
+      record, or a store without `carried_text`, every request, every event and the epoch record
+      are byte for byte what the engine before D69 produced with the same pin guidance (tested
+      against hashes recorded from that engine, on both dialects, with the preamble's pin line put
+      back to that release's: D69 adds to it that only the user's own words are pinned).
+    - **Accounting.** The start text is part of the first turn-start message as sent, so every
+      size the engine takes of a request holds it: rule 3's estimate (the full estimate of what
+      is sent, then the previous request's real input plus what was added; a request whose
+      start text a refresh changed takes the full estimate again), rule 5's check of
+      every forwarded request against the bound, the recall room published at request time
+      (`bound - estimate - headroom_floor`), and both turn-start rotation conditions, which read
+      that estimate. Rule 4 counts it once. The start text belongs to the first measured
+      request's non-carried messages, which the head measurement takes off the input, so the head
+      does not hold it, and `F` counts the carried section only in the preamble, whose pinned
+      text holds it from the first rotation on. That measurement's own terms apply to it: it
+      counts at its byte share of the request, or at the estimate made before the send when that
+      is lower. So when real usage is denser than the 3.5-byte seed the head keeps the difference
+      and errs high (measured at 3.0 bytes a token: 920 of a 6,371-token start text, 170 of a
+      1,162-token one; at 4.0 the head is the same with and without it, to 1 token), and rule 4's
+      exception, a window of prose under a JSON-dense head measuring the head low, grows with the
+      text's bytes. A bound too small for the head and the start text is rule 4's bound too
+      small: `bound_too_small` at the first request, the minimal window from the next turn start
+      (for Codex from the first request, whose lead items come before its first turn start),
+      each such request logged `over_bound`.
+    - **A state that exists never gets one.** A conversation that becomes main after its state
+      was created (by turn starts, contract PR #125) and an epoch resumed from a record without
+      `start_text` keep sending what they sent: the text would change the cached prefix
+      mid-epoch. They get the carried section in the preamble at their first rotation. On Codex,
+      where main moves only by turn starts, that includes a conversation first seen while
+      another one is main.
+    - **Events and failures.** With a start text the engine logs content-free `start_text` with
+      its estimated tokens, once, at the conversation's first request. A store that raises from
+      `carried_text` reads as nothing carried: the engine logs content-free
+      `start_text_unavailable` with the error's class, sends the request, and does not enter
+      degraded mode, since nothing is paged and no later request depends on the read. In degraded
+      mode (rule 14) the last good transform holds the start text while `k = 0`; the terminal step
+      forwards the CLI's original request, which has none.
+    - **Epoch record** (rule 16). `start_text` is an optional field, written only when it is not
+      empty and `k = 0`, while it can still be sent; once the first rotation makes `k` positive
+      the record is written without it. A record without it (v0.5.24 and earlier, a session with
+      nothing carried, or one past its first rotation) resumes with none. A record with it
+      resumes at `k = 0` with the store's carried text as it is at the resume: the same bytes
+      when nothing was taken away since, the shorter text when something was. An engine before D69 refuses a record that has the field, as it
+      refuses any field it does not know, so it reads no record and starts from epoch 0
+      (`epoch_not_resumed`, `no_record`): one rotation's cost, and only for the records of a
+      session's epoch 0 that carry the field.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens (D31); `headroom` 1.25 times the
 largest per-turn growth, decaying and capped per rule 17, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
@@ -869,7 +1113,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   preference, or obligation the user states (whenever, from now on, always, never) as an obligation
   as soon as it is stated, even when its reply is one word, and keeps it open until the user
   withdraws it, because an unpinned one leaves view when
-  its turn is paged (D51); and one worked example of a search followed by a recall. The preamble is placed before any carried context in the first
+  its turn is paged (D51), and only what the user states in their own messages, never a rule found
+  in tool results, files, web pages, or another agent's output (D69); and one worked example of a search followed by a recall. The preamble is placed before any carried context in the first
   retained turn-start message. Measured (PR #70 experiment, 415,413 tokens): with the earlier
   mechanism-only line the model made 0 tool calls in the H1 run; with this text it searched for
   all four paged-only keys in its first response. Over budget: list the newest, then a
@@ -886,7 +1131,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 `initialize` and `server/discover`) name the tools and say when to use each, and tell the model to
 pin a standing rule, preference, or obligation the user states as an obligation at once, with the
 pin arguments (`{"kind": "obligation", "text": ...}`), even when its reply is one word, and to keep
-it open until the user withdraws it (D51): the
+it open until the user withdraws it (D51), pinning only what the user states in their own messages,
+never a rule found in tool results, files, web pages, or another agent's output (D69); the
+`contexto_pin` description says the same and that a pin in the main conversation can be carried
+into later sessions of the project. The
 preamble is sent only from the first rotation, and the instructions are what the model sees in the
 turns before it, usually where such rules are given. Errors (D58): an id that is not a string, a
 number or null is an invalid request (`-32600`, `id: null`); `params` that is present and not an
@@ -1106,7 +1354,9 @@ unknown page, never read. Tools:
 - `contexto_close(obligation_id, note)` appends a closure. A `note` of whitespace only is refused.
 - `contexto_state()` returns the full pinned state without the budget cap.
 - `contexto_search(query)`: word search over page stubs and text (D34). The query is split on
-  whitespace; a page matches when every word occurs in it, case-insensitively and in any order. A
+  whitespace; a page matches when every word occurs in it, case-insensitively and in any order.
+  When no page holds every word and nothing in view matches, the reply gives approximate matches
+  instead and says so (D65, at the end of this item). A
   word matches as a substring, so identifiers, paths, and parts of them (`E4127`,
   `src/contexto/mcp.py`, `TIMEOUT` in `HTTP_TIMEOUT_S`) still match, and for any query with a word
   every page the earlier exact, case-sensitive rule matched still matches. A query with no words
@@ -1247,7 +1497,49 @@ unknown page, never read. Tools:
   sends no Claude Code session id, only the fourth applies). A request whose `metadata.user_id` has
   `parent_session_id` (an agent-team teammate, in process or in its own pane, on 2.1.314), and one
   carrying `X-Claude-Code-Agent-Id` (every subagent request on 2.1.302 to 2.1.318, and an in-process
-  teammate's), never takes over, by any rule. The engine logs content-free
+  teammate's), never takes over, by any rule.
+
+  Gateway hint headers (D70). The rules above read signatures that were measured on some Claude Code
+  versions and can change with the next: a tool list, the summary's text, the agent id header. When
+  a Messages request carries Claude Code's documented hint headers (Stack; `contexto run claude`
+  asks for them, `contexto proxy` does not), each one decides in place of its signature, request by
+  request, and the signature decides when the header is absent or its value is not one of the
+  documented ones:
+
+  | Header and value | What it decides | Without it |
+  |---|---|---|
+  | `x-claude-code-request-class: main` | The request counts as one "with a tool list" in the rules above and in the session-start check, whatever its tool list | It has a tool list |
+  | `x-claude-code-request-class: compaction` | The same as `main` | The same |
+  | `x-claude-code-request-class: subagent` or `workflow` | Not counted as one with a tool list; never takes over main, by any rule; not checked for Contexto's tools | `X-Claude-Code-Agent-Id` or `parent_session_id`; without those, the turn-start rule |
+  | `x-claude-code-request-class: auxiliary` | The same, whatever its tool list | It has no tool list |
+  | any other class value | Nothing | The signatures |
+  | `x-claude-code-context-compacted`, any value | The conversation is Claude Code's compaction of main, whatever its first message says; the rule's other conditions (main's session id and entrypoint, main idle when there is no turn start) are unchanged. A compaction that keeps a pending tool call hands over at the request that carries the header, also when a side request used its key first | The first message is the compaction summary; a compaction that keeps a pending call hands over only at its key's first request (D59), else at the conversation's next turn start |
+  | `x-claude-code-compaction` | Nothing | Nothing |
+
+  The class `compaction` is the request that summarizes the conversation: main's own history with
+  the instructions appended, under main's key (measured on 2.1.314, 2.1.318 and 2.1.322). It is
+  main's request and goes through main's epoch, so it is paged under the bound like any main turn;
+  it has no path of its own, and it does not mark anything compacted.
+  `x-claude-code-context-compacted` is sent once, on the first main request after a compaction, so
+  the summary text still marks every request that does not carry it. The first conversation an
+  engine sees is main whatever its class, as before; a side class is only kept from taking main
+  over, and the main conversation's first turn start then takes it (`after_side_request`).
+
+  The engine's `request` event records `request_class` when the request carried a known class, and
+  `compaction` and `context_compacted` (the trigger: `auto`, `manual`, `reactive`, or `other` for a
+  value outside that set) when it carried those headers; a `count_tokens` request is not
+  classified. When a header and a signature disagree the header
+  decides, except that a request with `X-Claude-Code-Agent-Id` never takes over whatever its class,
+  and the engine logs content-free `hint_mismatch` (`header`, `value`, `signature`) once per engine
+  for each pair: class `main` or `compaction` with an agent id (`agent_id`) or without a tool list
+  (`no_tool_list`); class `subagent` or `workflow` with neither an agent id nor a
+  `parent_session_id` (`no_agent_id`); class `auxiliary` with a tool list (`tool_list`); and
+  `context_compacted` on a request whose first message is not the summary (`compaction_summary`).
+  That event is the early warning that a signature drifted. The summary text without the header is
+  not logged: a resumed session's compacted transcript has the text and no header. Codex requests
+  are not classified by these headers.
+
+  The engine logs content-free
   `main_changed` with `reason` (`new_cli_session`, `resumed_cli_session`, `compacted`,
   `after_side_request`, or `more_turn_starts`) and the request's `turn_starts` on the request that takes over; never the
   session id. Main moves only at a request, never at a response: a response that arrives after
@@ -1273,8 +1565,9 @@ unknown page, never read. Tools:
   which measures retrieval of paged-out content. Measured basis (live run #2 chain
   analysis, builder-3, zero spend): 4 of H1's 5 extra chain misses had a newer link in the retained
   window, but the model answered from a search reply whose newest paged hit looked current.
-  Results are charged against the per-turn room. No embeddings and no similarity matching
-  (owner: not RAG): only the query's own words, ranked lexically (D34). Speed and memory (D34,
+  Results are charged against the per-turn room. No embeddings, no model call and no similarity
+  matching (owner: not RAG): only the query's own words, ranked lexically (D34), and when no page
+  holds every word, the approximate matches of D65, which are lexical too. Speed and memory (D34,
   D39): each process lists `pages/` on every call to pick up new pages and drop quarantined ones (a
   file is read again only if its inode, size, or modification time changed); pages stay immutable
   and the store format is unchanged. The proxy keeps each page's id, turn, stub, and index line.
@@ -1307,6 +1600,136 @@ unknown page, never read. Tools:
   reads and renders each of the up to 53 pages it shows, with no cap on their size (D41; a per-search
   byte budget is a tracked follow-up).
 
+  Approximate matches (D65). The rules above are strict search, and D65 does not change them: a
+  query that some paged page holds every word of, or that matches a line in view, gets the same
+  pages in the same order and the same reply as before, byte for byte
+  (`tests/test_search_golden.py` holds 210 such replies recorded before the change). Only when the
+  strict query finds no paged page and no line in view does the server call
+  `SessionStore.search_approximate(query)`, which ranks pages by the part of the query they hold
+  (`contexto.store.search.rank_approximate`; deterministic, no dependency, no model call). The
+  steps:
+  1. Words. `"`, `'`, `` ` ``, `(` and `[` are dropped from the start of each word and `"`, `'`,
+     `` ` ``, `)`, `]`, `?`, `!`, `.`, `,`, `;` and `:` from its end. Stop words are dropped: a fixed
+     list of 89 English function and question words (`search.STOP_WORDS`: a, an, the, is, are, do,
+     does, did, what, which, where, how, of, on, in, to, and so on). A word with a digit or a symbol
+     is never a stop word. Stop words are dropped from every query, not only from questions. A query
+     with no other word has no approximate matches. At most 6 words are searched: the specific ones
+     first (an identifier, a number, a code or a path: 3 characters or more with one that is not a
+     letter, or camelCase), then the longest.
+  2. Identifier styles. A word written as an identifier (it has `_`, `-` or `.` inside, or a
+     capital after its first letter beside small letters, at least 4 other characters, one a
+     letter, and no separator between two digits) is compared without `_`, `-` and `.`, on both
+     sides: `refresh_token`, `refreshToken`, `refresh-token` and `refresh.token` match each other.
+     A separator at the start or the end of a word does not make it an identifier (`--force` does
+     not find `enforce`, nor `__init__` `initialize`). A word typed twice is an identifier when
+     either spelling is one, so `refreshtoken refreshToken` and `refreshToken refreshtoken` both
+     find `refresh_token`. A separator between two digits is not dropped on the page either:
+     `port-80` does not find `port8.0`, and `sha.256` finds `sha_256`, not `sha-2.56`. A plain
+     word, a number, a version and a date are matched as typed, so `12` does not find `1.2`.
+  3. Any word. A page need not hold every word. Each word weighs its inverse document frequency
+     over the whole store, and a word that no page holds weighs as a word on no page does
+     (`ln(2n + 2)` for `n` pages), the most a word can. A page is returned when it holds at least
+     30 percent of the weight of the query (`APPROX_FLOOR`). One exception: a page that holds a
+     specific word of the query is returned whatever its share, unless more than half the pages
+     hold that word. There is no other rule and none that depends on the number of pages.
+  4. One typo. The longest plain word (6 to 40 small letters once folded, not an identifier) that
+     no page holds is looked for with one letter changed, added, left out, or swapped with its
+     neighbour, as a whole word on the page. It weighs half when it is found. Only one word per
+     query is matched this way, and the try is abandoned, deterministically, once more than
+     500,000 places have been checked for the query, counted over every word looked for. A
+     letter added or left out also joins a word and its form one letter longer (`servers` finds
+     `server`): for this step only, and only for a word no page holds, that narrows D34's ruling
+     against stemming.
+
+  Order: pages holding every searched word first; then turn pages before context-block pages; then
+  the larger share of the weight; then more pairs of words standing one after the other as in the
+  query; then relevance as in strict search (a word counted once per text, at most 3, k1 1.2,
+  times the recency prior). The newest turn page that holds every searched word takes one of the 3
+  detailed places, as in strict search. When no page holds every searched word, that place goes to
+  the second fact of a query whose two facts sit on two pages: the best page for the words that the
+  best page lacks. A page qualifies when the lacked words it holds weigh at least 30 percent of all
+  the lacked words, and one of three holds: one of them is a specific word on at most half the pages;
+  or they weigh at least half the weight of a word on no page (`SECOND_BAR` 0.5), a word matched
+  through a typo counted here at its full weight, not halved; or one of them stands next to its
+  neighbour from the query, in the query's order (a pair of neighbouring query words, stop words
+  included, that the page holds with one space between them, matched as a substring). A specific
+  word whose own weight reaches the bar needs no 30 percent: words that no page holds outweigh it
+  otherwise (`staging database port e4127 replica cutover` at 1,000 pages shows the `e4127` page
+  third). The 30 percent keeps out a common specific word when the page lacks the
+  rarer words: with `2024` on 40 of 100 pages and `retention` on 10, a page holding only `2024`
+  gets no place for `deploy pipeline 2024 retention`. The bar keeps out a leftover common word: one
+  word passes it on at most `sqrt((n + 1) / 2) - 1/2` of `n` pages, 6 of 100 and 54 of 6,000, so a
+  word on more than about 6.6 percent of 100 pages or 0.9 percent of 6,000 gets no place unless it
+  stands next to its query neighbour. A common word next to its neighbour by accident passes too
+  (a log line `listening port server api-1 started` for `staging database port server`). The pair
+  rule lets through a second fact of fairly common
+  words said as the query says them: with `rate` and `limit` each on 30 of 100 pages, the page
+  that says `API rate limit` takes the place for `webhook signing secret and API rate limit`.
+  Among the pages that qualify the best is, in order: a turn page before a context block, the
+  larger weight of the lacked words, the larger weight of the whole query (so a page that also
+  holds the query's other words beats one that holds only the lacked word), more pairs of words
+  side by side, the newer page (so the latest value wins a tie, D28). It is shown even when it is
+  under the floor, and then the count of matches (`Approximate.total`, from which the reply's
+  `[N more approximate matches not shown; ...]` line is computed) counts it with the pages over
+  the floor. At most 50 hits are returned by the store.
+
+  The reply opens with `[no paged-out turn holds every word of that query; approximate matches,
+  most words matched first, then newest first:]` in place of the best-pages line, then
+  `[searched for: ...]` when words were dropped. It shows at most 3 pages in detail and lists at
+  most 10 more (not 50: a page that holds only some of the words can be one of thousands). The
+  page line and the listed row keep their shapes (`pg_... (turn N)`, and `pg_... (turn N) @offsets`).
+  Under each detailed page line, and after the offsets of each listed row, a line names the words
+  the page matched and the ones it did not, with the form found on the page for a folded or typo
+  match: `[matched: port, refresh_token as refreshToken; not matched: zzqqxx]`. A page's matching
+  lines are chosen by the forms found on it. The reply ends with the coverage block, is charged to
+  the recall room and held to the per-call limit like any search reply; when the fallback finds
+  nothing either, the reply is the no-hit reply as before. In-view matching is unchanged: a
+  retained entry matches only when it holds every word. The `mcp_call` event gains `approximate`
+  (true or false) and, when true, `approximate_steps`, a list among `stop_words`, `long_query`,
+  `fold`, `typo`, `any_word` and `punctuation`, for the pages the reply showed in detail; it never
+  holds a query word. A reply that showed no page (the budget is used up, or the result is too
+  long) is logged `approximate: false`. The fallback runs only when `search` itself returned no
+  page: a strict match whose pages cannot be read when the reply is built is still the no-hit
+  reply. Cost: one more pass over the store. It looks for each searched word once on every page,
+  where strict search stops at a page's first missing word (unless the page was just read from its
+  file and the query has at most 6 words, when it tests them all too), and for each pair of
+  neighbouring words on a page that holds both. The separators are deleted from each page only
+  when a word is written as an identifier. A typo try adds two or three substring scans per page;
+  when the longest candidate turns out to be on a page, the next one is looked for from that page
+  on and only the pages before it are read again. Measured at 6,000 synthetic pages
+  (`spikes/m2/scale/store/scale_fallback.py`: CPU seconds on a busy machine, the least of 5 runs,
+  strict and fallback alternating, so the ratios are what to read; strict, then what the fallback
+  adds, then the total over strict): one unknown word of 3 letters, no typo try, 0.55 and 0.55,
+  2.0 times; one unknown word with a typo try 0.48 and 0.91, 2.9; an identifier in another style
+  0.46 and 0.68, 2.5; one typo, found, 0.33 and 0.74, 3.3; three known words and one unknown 0.46
+  and 0.87, 2.9; a 7-word question with a typo 0.35 and 0.87, 3.5; six unknown words 1.13 and
+  1.61, 2.4. So a miss costs about 2 times a strict miss without a typo try and about 3 with one.
+  With every page held in memory a strict miss is cheaper still (it stops at the first missing
+  word), and the ratio is higher: 2.0 to 11 times at 1,000 synthetic pages on a busy machine (reviewer B on PR
+  #267), at most 0.13 CPU seconds a miss. A strict hit costs what it did: it runs the same code, and the
+  fallback is not called. Limits: no stemming beyond the typo step, no synonyms, no embeddings
+  (`database` does not find `DB`); stop words are dropped even where they are code (`for loops`
+  searches `loops`); a plain lower-case word does not match a separated form (`retrybudget` does
+  not find `retry_budget`, nor `nodejs` `node.js`), while folding sees only the letters (`doneNext`
+  finds `done.Next`); with several styles of one identifier on a page, the matching lines are
+  those of the first style found; a typo is found only in a plain word and only as a whole word
+  (`databse` finds `database`, not `databases`); a second typo in the same query is not searched;
+  four equally rare facts on four pages find nothing (a quarter of the query each, so no page comes
+  first for the second-fact place: `kestrel osprey harrier condor` returns 0 pages); identifiers
+  that differ only in the separator between two digit groups do not match (`x86_64` does not find
+  `x86-64`, nor `build-2026-11-05` `build_2026_11_05`); with no unknown word the floor does not
+  look at how common the held words are (three words each on 30 of 100 pages, never together,
+  return 90 pages); the specific-word exception lets a common identifier or number through (with
+  `200` on 34 of 100 pages and the other words on none, `staging deploy failed 200` returns the 34
+  pages); a single-word second fact on more than about 6.6 percent of 100 pages (0.9 percent of
+  6,000) is not returned unless the page has it next to its query neighbour (`redis eviction policy
+  cutover` shows a `cutover` page when 6 of 100 pages say it, none when 7 do); when no page holds
+  every searched word the order can put an older value's page first, so D28's newest-value rule
+  holds only among pages that hold every searched word (`staging database port prod host` with
+  `staging prod host is db1` on an older page and `prod host is now db2` on a newer one shows db1
+  first and db2 fifth); one identifier typed in two styles in one query counts as two words
+  (`refresh_token refreshToken` weighs double and takes two of the 6 word places).
+
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
 
@@ -1314,7 +1737,9 @@ before relying on a paged-out detail.
 without the tools (measured: until v0.2.8, `contexto run codex` registered a bare `contexto` command,
 and with it off PATH codex-cli 0.163.0 ran with no Contexto tool and no error). So the proxy checks
 the main conversation's requests (the same choice as `publishes`; subagents and side requests may
-lack the tools and are not judged), never `count_tokens`:
+lack the tools and are not judged, and neither is a request whose `x-claude-code-request-class` is
+`subagent`, `workflow` or `auxiliary` while it is main for having arrived first, D70), never
+`count_tokens`:
 
 - Messages API: present when `tools` names an `mcp__contexto__` tool, or, with tool search, the
   system prompt or a role `system` message lists one by name on its own line (Claude Code 2.1.302),
@@ -1405,7 +1830,8 @@ starting the CLI. The log gets `cli_version_check` (`cli`, `version`, `tested`, 
 `User-Agent` (`claude-cli/<v>`, `codex_<surface>/<v>`) and logs `cli_version` (`cli`, `client`,
 `version`, `tested`, `tested_versions`) once per distinct version, at most 8, and
 `cli_version_untested` once for the first untested one. It judges the session start once, on the
-first request that has a tool list (for the Responses API, any request) and carries the CLI's
+first request that has a tool list (for the Responses API, any request; for a Claude Code request
+with a known `x-claude-code-request-class`, one whose class is `main` or `compaction`, D70) and carries the CLI's
 injected context (a role `system` message or a `<system-reminder>` block; for Codex, a developer item
 in the lead). That is the main conversation's first request: side requests have no tool list, and
 subagents start from a main turn's tool call. The engine's `publishes` choice of main is not used,
@@ -1426,7 +1852,7 @@ checked. The routine for testing a new version is `docs/cli-updates.md`.
 the proxy alone, for tests), `contexto serve` (the standing service, D70; also `--print-settings`,
 `--print-mcp-config`, `--rotate-token`, `--status`), `contexto mcp`, `contexto sessions list|show <id>`,
 `contexto sessions prune`, `contexto recall <page id>`, `contexto search <words>`, `contexto state`.
-Exit codes and `--help` documented in README.
+Exit codes are documented in `docs/exit-codes.md`; each command has `--help`.
 
 Store-reading commands (D57). A session is named by its id or a unique prefix of it (an exact id
 wins; a prefix of several ids is an error naming them, exit 1) in `--session` and `CONTEXTO_SESSION`
@@ -1456,7 +1882,11 @@ use`, `--session`, `CONTEXTO_SESSION`).
 - `search WORDS... [--session ID] [--limit N]` (default 10) runs the store search `contexto_search`
   uses (pages holding every word, best first, D34) and prints each hit's index line, then its last
   three matching lines with context, each with the offset `recall PAGE_ID --offset N` reads from.
-  Paged-out turns only. No hit: a line on stderr, exit 0.
+  Paged-out turns only. No hit: a line on stderr, exit 0. When no page holds every word it prints
+  the approximate matches of D65 instead: the stderr line then ends `; approximate matches, best
+  first:`, and under each hit's index line a line names the words the page matched and the ones it
+  did not. When words were dropped or cut, the `[searched for: ...]` line follows on stderr, as in
+  the tool's reply. Exit 0 either way.
 - `recall` refuses an argument that is not a page id (`pg_` and 16 hex digits) before any path is
   built, exit 1.
 - `state` prints the pinned records by group, or "No pinned records.", then how many turns are
@@ -1557,7 +1987,9 @@ A store resumed while prune deletes its session waits, starts empty, and prints 
   secrets) stays in `$TMPDIR`.
 - Checks before any session is opened, each a usage error (exit 2) unless noted: Contexto's own
   `contexto run` options right after `claude` (the message shows the command with them moved before
-  `claude`); a malformed upstream URL, named with its source; a `$CONTEXTO_HOME` that is not a
+  `claude`); a cloud-provider switch that is on anywhere Contexto can see, or a settings file it
+  could not read (D70, see Upstream resolution); a malformed upstream
+  URL, named with its source; a `$CONTEXTO_HOME` that is not a
   directory; and `${` in the home, the session id or the interpreter path, which Claude Code would
   expand in the MCP config (2.1.314 expands `${VAR}` and `${VAR:-x}` in `command`, `args` and `env`,
   keeps `$VAR`, and has no escape). A `claude` on PATH that is not executable, a broken symlink or a

@@ -63,6 +63,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--idle-minutes", type=float, default=DEFAULT_IDLE_MINUTES,
                         help=f"close a session idle this long (default {DEFAULT_IDLE_MINUTES:g}); its next "
                              "request reopens it")
+    parser.add_argument("--forward-hint-headers", action="store_true",
+                        help="pass Claude Code's gateway hint headers (request class, prompt id, agent type, tool "
+                             "durations, compaction) on to the upstream; by default the engine reads them and "
+                             "they are removed before forwarding")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--print-settings", action="store_true",
                        help="print a Claude Code settings JSON for a client (the base URL with the token, hint "

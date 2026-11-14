@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from contexto import cli, mcp, serveclient, servecontract
+from contexto import cli, mcp, serveclient, servecontract, upstream
 from contexto.commands import mcp as mcp_command
 from contexto.store import SessionStore
 
@@ -145,10 +145,18 @@ def clock():
     return Clock()
 
 
+def user_home(home: Path) -> Path:
+    """The test's stand-in for the user's home directory, where Claude Code's user settings live."""
+    return home.parent / "user-home"
+
+
 def make_server(home, clock, environ=None, budget=None):
+    """A ``--serve`` server whose provider check reads the test's own user home and working directory,
+    never the developer's Claude Code settings or this checkout's."""
     err = io.StringIO()
-    server = mcp_command.serve_server(home, budget, io.StringIO(), err, environ=environ or {}, clock=clock,
-                                      sleep=clock.sleep)
+    server = mcp_command.serve_server(home, budget, io.StringIO(), err,
+                                      environ={"HOME": str(user_home(home)), **(environ or {})}, cwd=home.parent,
+                                      clock=clock, sleep=clock.sleep)
     return server, err
 
 
@@ -457,8 +465,54 @@ def test_a_provider_switch_is_on_for_the_values_the_service_reads_as_on(home, se
 
 def test_serve_server_reads_the_switch_from_the_process_environment_by_default(home, service, clock, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "true")
-    server = mcp_command.serve_server(home, None, io.StringIO(), io.StringIO(), clock=clock, sleep=clock.sleep)
+    monkeypatch.setenv("HOME", str(user_home(home)))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    server = mcp_command.serve_server(home, None, io.StringIO(), io.StringIO(), cwd=home.parent, clock=clock,
+                                      sleep=clock.sleep)
     refused(tool(server, "contexto_state", {}), "CLAUDE_CODE_USE_VERTEX")
+
+
+def settings_with(path: Path, env: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"env": env}))
+
+
+# D70: one provider check for the launcher, the service and this server (contexto.upstream.cloud_provider),
+# so a switch Claude Code reads from a settings file is named here as the launcher would refuse it.
+
+@pytest.mark.parametrize("value", ["1", 1, 1.0, ["1"], True])
+def test_a_switch_in_the_user_settings_file_is_named(home, service, clock, value):
+    settings_with(user_home(home) / ".claude" / "settings.json", {"CLAUDE_CODE_USE_BEDROCK": value})
+    server, _ = make_server(home, clock)
+    message = refused(tool(server, "contexto_state", {}), "CLAUDE_CODE_USE_BEDROCK", "user settings",
+                      "bypasses the service")
+    assert "Amazon Bedrock" in message
+
+
+def test_a_switch_in_a_project_settings_file_is_named(home, service, clock):
+    settings_with(home.parent / ".claude" / "settings.local.json", {"CLAUDE_CODE_USE_FOUNDRY": "true"})
+    server, _ = make_server(home, clock)
+    refused(tool(server, "contexto_state", {}), "CLAUDE_CODE_USE_FOUNDRY", ".claude/settings.local.json")
+
+
+def test_a_settings_file_that_cannot_be_read_is_named(home, service, clock):
+    path = user_home(home) / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"env": {"CLAUDE_CODE_USE_BEDROCK": "1",}}')  # a trailing comma: not JSON for Python
+    server, _ = make_server(home, clock)
+    refused(tool(server, "contexto_state", {}), "could not read", "user settings")
+
+
+def test_a_switch_set_off_in_a_settings_file_is_not_named(home, service, clock):
+    settings_with(user_home(home) / ".claude" / "settings.json", {"CLAUDE_CODE_USE_BEDROCK": "0"})
+    server, _ = make_server(home, clock)
+    assert "CLAUDE_CODE_USE" not in refused(tool(server, "contexto_state", {}), "ANTHROPIC_BASE_URL")
+
+
+def test_the_server_and_the_launcher_share_one_provider_check():
+    assert mcp.PROVIDER_SWITCHES == tuple(upstream.CLOUD_PROVIDER_KEYS)
+    assert not hasattr(servecontract, "CLOUD_PROVIDER_VARIABLES")
+    assert not hasattr(servecontract, "cloud_provider_variables")
 
 
 def test_a_refused_token_is_its_own_error_and_is_not_retried(home, service, bystander, served, clock):
@@ -557,6 +611,35 @@ def test_a_session_pruned_while_its_open_waits_for_the_lock_is_refused_and_not_r
     server, _ = served
     refused(tool(server, "contexto_state", {}), "cannot be opened", "removed while it was being opened")
     assert removed and list((home / "sessions").iterdir()) == []
+
+
+def test_a_session_directory_left_empty_by_prune_is_not_filled_in(home, service, served):
+    """Review of PR #272 (Reviewer A round 3, nit 2): prune unlinks ``live.lock`` and then removes the
+    directory, so for a moment the directory is there and empty. An open then must not make
+    ``live.lock``, ``page.key`` or ``pages/`` in it, which would make prune's ``rmdir`` fail and keep
+    the session."""
+    made = SessionStore(home, "emptied")
+    made.release()
+    directory = home / "sessions" / "emptied"
+    for entry in directory.iterdir():  # the state prune leaves just before its rmdir
+        (__import__("shutil").rmtree if entry.is_dir() else os.unlink)(entry)
+    service.known[ID_A] = "emptied"
+    server, _ = served
+    refused(tool(server, "contexto_state", {}), "cannot be opened", "removed")
+    assert list(directory.iterdir()) == []
+    directory.rmdir()  # prune's last step still succeeds
+
+
+def test_a_store_opened_without_create_needs_its_lock_file(home):
+    from contexto.store import SessionNotFoundError
+
+    (home / "sessions" / "bare").mkdir(parents=True)
+    with pytest.raises(SessionNotFoundError, match="is empty: it is being removed"):
+        SessionStore(home, "bare", create=False)
+    assert list((home / "sessions" / "bare").iterdir()) == []
+    created = SessionStore(home, "bare")  # with create, as the service and --session mode open it
+    assert (home / "sessions" / "bare" / "live.lock").exists()
+    created.release()
 
 
 def test_session_mode_still_opens_a_session_pruned_while_it_opens(home, monkeypatch):

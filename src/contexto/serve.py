@@ -129,7 +129,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -138,6 +138,7 @@ from urllib.parse import urlsplit
 
 from contexto import __version__, servecontract
 from contexto.canonical import loads_bounded
+from contexto.hints import FORWARDED, STRIPPED
 from contexto.launcher import (
     CLAUDE_SESSION_HEADER,
     CLI_SESSION_ID,
@@ -201,7 +202,15 @@ from contexto.servecontract import (
 )
 from contexto.store import SessionStore, redact
 from contexto.store.prune import SessionLiveError, SessionNotFoundError, remove_session
-from contexto.upstream import Upstream, resolve_upstream, untrusted_note
+from contexto.upstream import (
+    CloudProvider,
+    SettingsFiles,
+    Upstream,
+    cloud_provider,
+    cloud_provider_note,
+    resolve_upstream,
+    untrusted_note,
+)
 
 DEFAULT_PORT = 7837
 DEFAULT_MAX_SESSIONS = 64
@@ -314,16 +323,13 @@ def mcp_config_payload(home: Path) -> dict[str, Any]:
 # Guards
 
 
-def cloud_provider_variables(env: Mapping[str, str] | None = None) -> list[str]:
-    """The cloud-provider switches ``env`` (default the process environment) turns on
-    (``servecontract.cloud_provider_variables``)."""
-    return servecontract.cloud_provider_variables(os.environ if env is None else env)
-
-
-def cloud_provider_warning(names: list[str], what: str) -> str:
-    return (f"warning: {', '.join(names)} {'is' if len(names) == 1 else 'are'} set in {what}. Claude Code with a "
-            f"cloud-provider switch sends nothing to ANTHROPIC_BASE_URL, so a client started that way does not "
-            f"reach contexto serve and its prompt is not bounded.")
+def cloud_provider_warning(found: CloudProvider) -> str:
+    """The warning for what ``contexto.upstream.cloud_provider`` found: the check ``contexto run claude``
+    refuses a launch by, read from this process's environment and directory (D70). The service warns
+    and does not refuse: its clients are started elsewhere, with their own environment and directory,
+    and a Claude Code started here would bypass it."""
+    return (f"warning: {cloud_provider_note(found)}. A Claude Code client with a cloud-provider switch on does "
+            f"not reach contexto serve, and its prompt is not bounded.")
 
 
 def check_upstream_loop(upstream: Upstream, port: int, token: str) -> None:
@@ -443,14 +449,17 @@ class RouteRecorder(SessionRecorder):
 def build_session_proxy(upstream: Upstream, log: Any, transform: Callable[..., Any],
                         observe_usage: Callable[..., Any] | None, *, observe_thinking: bool,
                         affinity_key: str | None,
-                        on_tool_calls: Callable[[tuple[str, ...]], None] | None = None) -> ContextoProxy:
+                        on_tool_calls: Callable[[tuple[str, ...]], None] | None = None,
+                        strip_hint_headers: bool = True) -> ContextoProxy:
     """The one place a session's proxy is built. It is never started: the service's handler uses it as
     its ``owner`` for a request of that session (transform, lock, usage callback, tool-call hook, log,
-    upstream). A ``ContextoProxy`` option that every ``serve`` session should have (such as one that
-    strips the gated hint headers before forwarding) is passed here."""
+    upstream). A ``ContextoProxy`` option that every ``serve`` session should have is passed here:
+    ``strip_hint_headers`` leaves Claude Code's gated hint headers out of what is sent upstream (D70);
+    the engine reads them either way."""
     return ContextoProxy(upstream.url, log, transform, observe_usage=observe_usage,
                          observe_thinking=observe_thinking, upstream_source=upstream.source,
-                         affinity_key=affinity_key, on_tool_calls=on_tool_calls)
+                         affinity_key=affinity_key, on_tool_calls=on_tool_calls,
+                         strip_hint_headers=strip_hint_headers)
 
 
 def body_session(request: Any) -> tuple[str | None, str | None]:
@@ -566,7 +575,7 @@ class ServeService:
                  engine_factory: Callable[..., Any] = build_engine,
                  clock: Callable[[], float] = time.monotonic, reaper: bool = True,
                  cap_wait_s: float = CAP_WAIT_S, unchecked_deadline_s: float = UNCHECKED_DEADLINE_S,
-                 max_unchecked: int = MAX_UNCHECKED_CONNECTIONS) -> None:
+                 max_unchecked: int = MAX_UNCHECKED_CONNECTIONS, forward_hint_headers: bool = False) -> None:
         if not TOKEN_PATTERN.fullmatch(token):
             raise ValueError("not a serve token")
         self.home = Path(home)
@@ -575,6 +584,9 @@ class ServeService:
         self.token_bytes = token.encode("ascii")
         self.config = dict(config) if config else {"bound": DEFAULT_BOUND}
         self.observe_thinking = observe_thinking
+        # D70: the printed settings turn Claude Code's gateway hint headers on for the engine; the six
+        # gated ones are removed before anything is forwarded unless --forward-hint-headers asks for them.
+        self.forward_hint_headers = forward_hint_headers
         self.max_sessions = max_sessions
         self.idle_s = idle_s
         self.stderr = stderr or sys.stderr
@@ -586,7 +598,8 @@ class ServeService:
         self.max_unchecked = max_unchecked
         self.log = ServeLog(self.home, token)
         # Requests that belong to no session: forwarded with the identity transform, logged in serve.log.
-        self.passthrough = ContextoProxy(upstream.url, self.log, upstream_source=upstream.source)
+        self.passthrough = ContextoProxy(upstream.url, self.log, upstream_source=upstream.source,
+                                         strip_hint_headers=not forward_hint_headers)
         self.port = 0
         self._lock = threading.Lock()  # the registry: held to look up or change it, never across I/O
         self._freed = threading.Condition(self._lock)  # notified when a session's last request finishes
@@ -668,7 +681,7 @@ class ServeService:
         self.log.log({"event": "serve_start", "port": self.port, "pid": os.getpid(), "version": __version__,
                       "upstream_source": self.upstream.source, "config": self.config,
                       "observe_thinking": self.observe_thinking, "max_sessions": self.max_sessions,
-                      "idle_s": self.idle_s})
+                      "idle_s": self.idle_s, "hint_headers": FORWARDED if self.forward_hint_headers else STRIPPED})
         return self.port
 
     def _already_running(self) -> str:
@@ -809,10 +822,15 @@ class ServeService:
         the time it spends as the newest connection is the time a connection would need to become the
         oldest of 64, and the line is in the socket from that moment. Whether it is the token is read
         here without taking it from the socket (``shows_token``, a peek), and the handler takes the
-        same look before it reads anything (``vouch``), so a request line that carries the token is
-        never mistaken for a silent connection however the handler and this thread interleave. A
-        process without the token then cannot close a token holder's connection by opening more of
-        its own, however fast it opens them; it can only close its own."""
+        same look before it reads anything (``vouch``), so a request line that has arrived up to the
+        slash after the token is recognised whichever of the two looks first. A process without the
+        token then cannot close such a connection by opening more of its own, however fast it opens
+        them; it can only close its own. Not covered: a request line that arrives in pieces. The
+        handler's look sees only the first piece, its buffered read then takes the rest off the
+        socket, and this thread's later peek finds nothing, so that connection can be closed here
+        while it is the oldest unchecked one (round-3 review, with the cap held full: a 2 ms gap
+        between the pieces was answered 25 of 25 times, 5 ms 15 of 25, 30 ms 1 of 23). A client that
+        connects and waits before it sends is in the same position (docs/serve.md, "Limits")."""
         for connection, _ in sorted(self._unchecked.items(), key=lambda item: item[1]):
             if connection in self._vouched:
                 continue
@@ -1147,18 +1165,24 @@ class ServeService:
 
     def _open(self, session_id: str, created: bool) -> _Session:
         """Open the store and build its engine and proxy, as ``launcher.start_proxy`` does for a launch.
-        No working directory is recorded (see the module docstring). When this fails for a session
+        No working directory is recorded (see the module docstring). A session the service makes is
+        kept out of project memory (D69): the service routes by session id and cannot know the client's
+        directory, so it records ``project_memory: false`` before the engine reads it, and a later
+        ``contexto run claude --resume <id>`` never turns it back on. When this fails for a session
         being made, the directory it made is removed again."""
         store = None
         try:
             store = SessionStore(self.home, session_id)
+            if created:
+                store.set_project_memory(False)
             transform, observe_usage, engine_name = self.engine_factory(store, self.config)
             recorder = RouteRecorder(transform, store)
             notices = SessionNotices(store, self.stderr, session_id, self._notices(session_id))
             proxy = build_session_proxy(
                 self.upstream, notices, recorder, observe_usage, observe_thinking=self.observe_thinking,
                 affinity_key=session_affinity_key(store, self.upstream.url),
-                on_tool_calls=lambda tool_call_ids: self.register_tool_calls(tool_call_ids, session_id))
+                on_tool_calls=lambda tool_call_ids: self.register_tool_calls(tool_call_ids, session_id),
+                strip_hint_headers=not self.forward_hint_headers)
             store.log({"event": "serve_open", "cli": "claude", "session": session_id, "created": created,
                        "config": self.config, "engine": engine_name, "upstream_source": self.upstream.source,
                        "observe_thinking": self.observe_thinking,
@@ -1652,9 +1676,9 @@ def _chosen_port(args: Any, home: Path) -> int:
 
 def print_settings(args: Any, home: Path, stdout, stderr) -> int:
     token = ensure_token(home)
-    names = cloud_provider_variables()
-    if names:
-        print(f"contexto serve: {cloud_provider_warning(names, 'this environment')}", file=stderr)
+    found = cloud_provider(cwd=Path.cwd())
+    if found is not None:
+        print(f"contexto serve: {cloud_provider_warning(found)}", file=stderr)
     print(json.dumps(settings_payload(_chosen_port(args, home), token), indent=2), file=stdout)
     return 0
 
@@ -1747,7 +1771,9 @@ def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
         raise ServeError(f"--max-sessions must be at least 1, got {args.max_sessions}", EXIT_USAGE)
     if not args.idle_minutes > 0:
         raise ServeError(f"--idle-minutes must be above 0, got {args.idle_minutes}", EXIT_USAGE)
-    upstream = resolve_upstream(args.upstream, cwd=Path.cwd())
+    files = SettingsFiles()  # each settings file read once, for the provider check and the upstream
+    provider = cloud_provider(cwd=Path.cwd(), files=files)
+    upstream = resolve_upstream(args.upstream, cwd=Path.cwd(), files=files)
     token = ensure_token(home)
     port = DEFAULT_PORT if args.port is None else args.port
     check_upstream_loop(upstream, port, token)  # first: a malformed URL's error can quote part of it
@@ -1755,7 +1781,8 @@ def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
     try:
         service = ServeService(home, upstream, token, config=engine_config(options),
                                observe_thinking=options.observe_thinking, max_sessions=args.max_sessions,
-                               idle_s=args.idle_minutes * 60, stderr=stderr)
+                               idle_s=args.idle_minutes * 60, stderr=stderr,
+                               forward_hint_headers=args.forward_hint_headers)
     except ValueError as exc:
         raise ServeError(f"invalid upstream (from {upstream.source}): {exc}", EXIT_USAGE) from None
     try:
@@ -1771,10 +1798,8 @@ def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
         if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: no project base URL (D52)
             note = untrusted_note("env.ANTHROPIC_BASE_URL", upstream.ignored, "Pass --upstream", os.environ)
             print(f"contexto serve: {note}", file=stderr, flush=True)
-        names = cloud_provider_variables()
-        if names:
-            print(f"contexto serve: {cloud_provider_warning(names, 'the environment of this service')}",
-                  file=stderr, flush=True)
+        if provider is not None:
+            print(f"contexto serve: {cloud_provider_warning(provider)}", file=stderr, flush=True)
         warning = start_warning(options.bound, options.headroom_floor, assumed_overhead())
         if warning:
             print(f"contexto serve: {warning}", file=stderr, flush=True)
