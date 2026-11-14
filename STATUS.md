@@ -4,7 +4,7 @@ Updated 2026-11-14 by claude (D64: let the user see Contexto working, PRs #257, 
 #261, #283 and #290, and the D64 entry in `docs/DECISIONS.md`), and earlier the same day (D63:
 in-turn paging, the replay harness PR #268 and the engine PR #274, merged and not released,
 recorded in the docs PR #295), (D70: `contexto serve` for clients Contexto does not launch, PRs
-#271, #272, #275 and #277, with the recipes in its follow-up), and (D66: the benchmark
+#271, #272, #275, #277, #293 and #294, merged and not released), and (D66: the benchmark
 `contexto bench`, PRs #255, #262, #264, #269, #273, #289 and #286, recorded in the docs PR #282).
 Before that, 2026-11-13 (D69, project memory: PR #279,
 the first of its two pull requests, unreleased), and 2026-11-12 (v0.5.24: the 2026-11-05 QA run and
@@ -95,7 +95,7 @@ compaction never fires, and accuracy equals full context.
   bound 150,000, with 0 `over_bound` in every scenario. Codex is not covered. Tested at zero spend
   only: whether an enforcing account accepts the in-loop thinking strip is under "Needs the owner".
   Guide: `docs/in-turn-paging.md`; numbers under "In-turn paging (D63)" below.
-- `contexto serve` (D70, PRs #271, #272, #275, #277, unreleased): the engine as a standing service on
+- `contexto serve` (D70, PRs #271, #272, #275, #277, #293, #294, unreleased): the engine as a standing service on
   `127.0.0.1:7837` for Claude Code clients Contexto does not launch (the IDE extensions, the desktop
   app, the Agent SDK, `claude -p` in CI). It requires a token in the base URL path, routes each
   Claude Code session to its own store, gives those clients Contexto's tools through
@@ -103,7 +103,10 @@ compaction never fires, and accuracy equals full context.
   headers are read in preference to text signatures, under `contexto run` too, and stripped before
   forwarding. `contexto run claude` refuses a launch Claude Code would send to a cloud provider. The
   recipes for the Python Agent SDK and headless `claude -p` ran with the real binary against a fake
-  upstream; the VS Code recipe was not run in an IDE. Guides: `docs/serve.md`, `docs/dialect.md`.
+  upstream; the VS Code recipe was not run in an IDE. Claude Code settings files are decoded as
+  Claude Code 2.1.322 decodes them (malformed UTF-16LE, bad UTF-8), a refused upstream is never
+  echoed, and a base path that is not ASCII is percent-encoded as Claude Code sends it (#294).
+  Guides: `docs/serve.md`, `docs/dialect.md`.
 - Seeing Contexto work (D64, PRs #257, #258, #263, #276, #261, #283, #290, unreleased):
   `contexto stats` (the peak prompt against the bound, pages, recalls and searches, store faults;
   `--last-run`, `--json`) and a short summary of the run when the CLI exits (`--quiet` or
@@ -838,7 +841,10 @@ Still open:
   Action, a claude.ai (OAuth) login or on Linux with a real client (steps in `docs/serve.md`).
   `contexto stats` on a session the service made shows its requests and faults but no bound, CLI
   or run count. `contexto run codex` does not apply the serve-upstream refusal that
-  `contexto run claude` and `contexto doctor` do. Out of scope: listening beyond loopback,
+  `contexto run claude` and `contexto doctor` do. A base path is not yet encoded exactly as Claude
+  Code sends it in three small cases: `|`, `[` and `]` are percent-encoded where Claude Code sends
+  them as they are, a backslash goes out as `%5C` where Claude Code turns it into `/`, and a `..`
+  segment is sent as written where Claude Code removes it. Out of scope: listening beyond loopback,
   several users, Chat Completions, Bedrock and Vertex request paths, other agents.
 - D64, left open (each checked on `main` at 26663b16): `commands/run.py`'s `register()` imports
   `contexto.codex` catching only `ImportError`, so a codex module that is broken, not missing, makes
