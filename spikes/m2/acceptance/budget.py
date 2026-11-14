@@ -38,12 +38,16 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 # grew the contexto_search description by 85 bytes, to 3,070 in all, and the instructions by 6, to 747:
 # 47,600 + ceil(327 / 3.0) + ceil(321 / 3.0) = 47,816. D69 (only the user's own words are pinned; a pin
 # in the main conversation can be carried) grew them to 3,285 and 878: 47,600 + ceil(542 / 3.0) +
-# ceil(452 / 3.0) = 47,932. test_head_follows_contexto_tool_bytes fails when either changes without this.
+# ceil(452 / 3.0) = 47,932. D69's search of earlier sessions gives a session with a project view (every
+# session the launcher starts, unless --no-project-memory) the scope and session arguments, the recall and pin
+# description words and the instructions' clause on an earlier session's text, and the acceptance run is such a
+# session, so the head counts that server's list: 3,722 and 926 bytes, 47,600 + ceil(979 / 3.0) + ceil(500 / 3.0)
+# = 48,094. test_head_follows_contexto_tool_bytes fails when either changes without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
-CONTEXTO_TOOL_BYTES = 3_285  # D65 3,070; D69 adds whose words are pinned and that pins can be carried
+CONTEXTO_TOOL_BYTES = 3_722  # D65 3,070; D69 3,285, and 3,722 with a project view (search of earlier sessions)
 CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE = 426  # main c8f0b08 (unchanged until D51)
-CONTEXTO_INSTRUCTIONS_BYTES = 878  # D65 747; D69 adds whose words are pinned
+CONTEXTO_INSTRUCTIONS_BYTES = 926  # D65 747; D69 878, and 926 with a project view
 HEAD = (HEAD_MEASURED
         + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
         + math.ceil((CONTEXTO_INSTRUCTIONS_BYTES - CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN))

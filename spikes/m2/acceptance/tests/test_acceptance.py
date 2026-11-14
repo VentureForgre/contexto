@@ -1046,15 +1046,17 @@ def test_head_follows_contexto_tool_bytes():
     # The head is derived (intake 2026-10-16 09:42Z): the measured 47,600 plus Contexto's own tool
     # definitions' byte change at 3.0 bytes per token. If the definitions change, update
     # budget.CONTEXTO_TOOL_BYTES (and the head with it) before any live approval.
-    from contexto.mcp import INSTRUCTIONS, TOOLS
+    # The acceptance session has a project view, as every session the launcher starts without
+    # --no-project-memory does (D69), so its server lists PROJECT_TOOLS and sends PROJECT_INSTRUCTIONS.
+    from contexto.mcp import PROJECT_INSTRUCTIONS, PROJECT_TOOLS
 
     as_sent = [{"name": "mcp__contexto__" + t["name"], "description": t["description"], "input_schema": t["inputSchema"]}
-               for t in TOOLS]
+               for t in PROJECT_TOOLS]
     measured = sum(len(json.dumps(t, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) for t in as_sent)
     assert measured == budget.CONTEXTO_TOOL_BYTES, f"Contexto's tool definitions are {measured} bytes; update budget.HEAD"
-    instructions = len(INSTRUCTIONS.encode("utf-8"))  # in Claude Code's system prompt, so in the head too (D51)
+    instructions = len(PROJECT_INSTRUCTIONS.encode("utf-8"))  # in Claude Code's system prompt, so in the head too (D51)
     assert instructions == budget.CONTEXTO_INSTRUCTIONS_BYTES, f"the MCP instructions are {instructions} bytes"
-    assert budget.HEAD == budget.Params().head == 47_932
+    assert budget.HEAD == budget.Params().head == 48_094
     assert budget.HEAD == budget.HEAD_MEASURED + math.ceil(
         (budget.CONTEXTO_TOOL_BYTES - budget.CONTEXTO_TOOL_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN) + math.ceil(
         (budget.CONTEXTO_INSTRUCTIONS_BYTES - budget.CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN)
