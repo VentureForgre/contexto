@@ -1,6 +1,6 @@
 # Milestone 2: Contexto proxy (context virtual memory)
 
-Status: contract, implemented on main (released from v0.1.0, whose releases up to v0.4.0 were deleted in D62; latest v0.5.8). Owner: intake.lead under D0. Date: 2026-10-16.
+Status: contract, implemented on main (released from v0.1.0, whose releases up to v0.4.0 were deleted in D62; latest v0.5.24; D63 and the later decisions are on main and not released yet). Owner: intake.lead under D0. Date: 2026-10-16.
 Why this design: `docs/research/M0-recommendation.md`. Decisions D16 to D21.
 
 ## Outcome
@@ -676,9 +676,15 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    - **Tight bound.** When `T - (head + fixed + the turn-start message) < 2 * min_turn_room`, where
      `fixed` is what the engine adds that no batch can page (rule 19's carried records while `k = 0`,
      the preamble after), the line is
-     `bound - headroom_floor - min_turn_room / 4` for the trigger, the batch and step 0, a fresh
-     result is tested at the session's ratio, and the room may fall under `min_turn_room`
-     (`turn_room_low`, `reason: "in_turn_small_bound"`, once per turn).
+     `bound - headroom_floor - min_turn_room / 4` for the trigger, the batch and step 0. A fresh
+     result is shown once when the request with it fits under `bound - 2 * (min_turn_room / 4)`
+     (54,000 at bound 60,000) at the session's ratio, measured head or not, and under `bound -
+     min_turn_room / 4` (57,000) with each fresh result counted at the tool-output seed of 1.5 bytes
+     a token; one that fails either test is stubbed on arrival. That request gives up the headroom
+     floor and the recall room: the room may be 0 (`turn_room_low`, `reason:
+     "in_turn_small_bound"`, once per turn) and `contexto_recall` is refused there. A result denser
+     than 1.5 bytes a token can still take it over the bound, logged from usage (D63: 50 KB results
+     at 1.2 bytes a token reached 64,184 of 60,000).
    - **A batch** pages down to a target: `floor + 0.25 * (line - floor)` (D63's cost measurement:
      deeper batches re-send less and run fewer), where `floor`
      is the estimate less everything steps 1 to 3 could free, and at most `line - 2 *
@@ -697,8 +703,14 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
         Steps 0 to 4 use certain estimates only: a PDF whose pages are not certain (D60 counts it
         as `PDF_MAX_PAGES`) counts as nothing in a batch, and while unread its D60 count is left
         out of the batch's estimate, so it is sent whole once, as without in-turn paging
-        (`pdf_pages_uncertain` as before); once read, a later batch may stub it, counted as freeing
-        nothing. An `over_bound` the API's count then shows is logged from usage.
+        (`pdf_pages_uncertain` as before). An `over_bound` the API's count then shows is logged
+        from usage. Once usage has measured the first request that carried it, the PDF costs that
+        request's real input less the estimate of everything else in it (never under 0), shared
+        over the unmeasured PDFs it carried in proportion to their size as sent (the base64 data's
+        length; for a PDF by URL or file id, its block's JSON length, so its share can be low) and
+        keyed by that size and a SHA-256 digest of the same bytes. From then on rule 3's estimate
+        and every count in a batch use that cost, and stubbing it frees it; before that usage, a
+        later batch may stub it once read, counted as freeing nothing.
      1. Older tool results are replaced by stubs, oldest first, across the retained window
         (earlier retained turns included), never a result the model has not read. A text result is
         stubbed only when its content is at least 2,048 bytes and at least twice its stub, a byte
@@ -753,7 +765,11 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      costs the loop its thinking. They run only when together they could free at least
      `min_turn_room`, and never on the request right after a batch that ran one of them, unless
      the request's estimate is over `T` (its room would fall under `min_turn_room`) or it would be
-     over the bound. So a turn that cannot be paged further does
+     over the bound. Until a response's usage has arrived since the last batch, none of them runs
+     unless the request is over the bound itself (step 0 still does); a loop request whose
+     published room falls under `min_turn_room` while the previous request's usage is missing logs
+     `turn_room_low` with `reason: "usage_missing"`, once per turn (shared with
+     `in_turn_small_bound`). So a turn that cannot be paged further does
      not pay a rewrite on every request; its recall room can then be under `min_turn_room` until
      enough has accumulated.
    - **Stubs.** A stub replaces a `tool_result`'s `content` with one string and keeps
@@ -802,7 +818,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      older than the conversation in view, while one paged inside a turn can be newer than an earlier
      copy in view.
    - **Switch.** `in_turn_paging` (default on), a configuration setting under rule 16's check:
-     `contexto run --no-in-turn-paging`, or `CONTEXTO_IN_TURN_PAGING=0`. Off, a turn that grows
+     `contexto run --no-in-turn-paging`, `contexto serve --no-in-turn-paging`, or
+     `CONTEXTO_IN_TURN_PAGING=0`. Off, a turn that grows
      past the bound is sent as is, as before D63. Restarting with it off in the middle of a loop
      that was paging fails rule 16's check (`settings_changed`) and forwards that turn's raw
      history until the next turn start.
@@ -958,7 +975,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       id; `strips` as index ranges; `batches`; `rewrote`, the message count of the last request
       whose batch rewrote the prefix; `lists`, each folds page as turn-start index, folds covered,
       page id and level, a level absent read as 0; `room_low`; positions and page ids, no
-      conversation text); rule 19's
+      conversation text); `document_costs`, only once usage has measured a PDF whose pages are not
+      certain (D63: `[size, digest, tokens]` each, a 32-hex-digit digest, the newest 64 kept;
+      written also from the usage that measures one, so a restart keeps it); rule 19's
       `start_text`, only when it is not empty and `k = 0` (D69); `untrusted`, `true` only for a
       main conversation the engine did not trust (rule 19, D69); the whole engine
       configuration (every setting, including the recall preamble options and budgets); the
@@ -1024,13 +1043,14 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     - **Not covered.** Subagents and side requests are not recorded (they rotate from 0 after a
       restart, as today; a subagent's in-turn edits go with it, so its next request over the
       trigger pages again and loses the loop's thinking once more). A record with a required field
-      missing does not resume, except for the four optional fields, which a record may leave out:
-      `head_rule` (D61), `in_turn` (D63), `start_text` and `untrusted` (D69, rule 19). An engine
+      missing does not resume, except for the optional fields, which a record may leave out:
+      `head_rule` (D61), `in_turn` and `document_costs` (D63), `start_text` and `untrusted` (D69,
+      rule 19); a record without `document_costs` resumes with no measured PDF costs. An engine
       before `untrusted` reads a record that carries it as no record, which costs one rotation's
       cache. A record written before D63 has no `in_turn_paging` setting and no `in_turn` field: it
       resumes under either value of the setting, with no in-turn edits. A release before D63 does
       not resume a record this one wrote (`settings_changed`, or `no_record` when the record has
-      `in_turn`, which its store refuses as an unknown field) and starts from epoch 0. Two proxies
+      `in_turn` or `document_costs`, which its store refuses as unknown fields) and starts from epoch 0. Two proxies
       serving one session at once are out of scope (the last writer wins).
 
 17. **Headroom.** At a turn start, headroom = max(`headroom_floor`, min(ceil(`headroom_factor` x
@@ -1058,7 +1078,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     run are unchanged. The cost: in synthetic sessions with two large reads, a band of second-read
     sizes (about 6,000 tokens wide three turns later, up to about 36,000 eight turns later with a
     30,000-token head) now goes over the bound inside its tool loop where the stuck session's
-    minimal window had kept it under; the largest later read kept under the bound is never below
+    minimal window had kept it under (measured with the loop sent whole, before D63; with in-turn
+    paging on, rule 5 pages such a loop); the largest later read kept under the bound is never below
     that of a session with no outlier at the same turn.
 18. **Nesting depth** (D45). Contexto reads JSON that comes from outside it through one bounded
     reader (`contexto.canonical.loads_bounded`): request and response bodies, SSE events, MCP
