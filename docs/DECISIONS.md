@@ -3537,6 +3537,14 @@ the owner's delegation. Open decisions are listed at the end with the options an
       run in the client's directory. Pinned file sources of such a session are not checked for
       staleness and `--continue` does not find it by directory; `--resume <id>` does. A session the
       launcher created keeps its directory.
+    - **Project memory (D69) is off for a session the service creates.** It records
+      `project_memory: false` before its engine starts, so it carries nothing in and gives nothing to
+      later sessions. A later `contexto run claude --resume <id>` records a directory and so a project,
+      but never writes `true` over `false`, so it stays out. Without this, the resume made the session
+      a member of that directory's project, and the service, which routes by session id, would carry
+      that project's records into whichever client it next routed there (review B, after the merge of
+      #279). Rejected: keeping the project from the resume and documenting it. A session the launcher
+      created keeps its own setting when the service serves it.
     - **A new session id is a new store.** `/clear` starts a new id (D50), so under `serve` what was
       paged out or pinned before it stays in the earlier store. Under the launcher one store serves
       the whole launch. Nothing in a request links the new id to the old one.

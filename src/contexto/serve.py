@@ -1165,11 +1165,16 @@ class ServeService:
 
     def _open(self, session_id: str, created: bool) -> _Session:
         """Open the store and build its engine and proxy, as ``launcher.start_proxy`` does for a launch.
-        No working directory is recorded (see the module docstring). When this fails for a session
+        No working directory is recorded (see the module docstring). A session the service makes is
+        kept out of project memory (D69): the service routes by session id and cannot know the client's
+        directory, so it records ``project_memory: false`` before the engine reads it, and a later
+        ``contexto run claude --resume <id>`` never turns it back on. When this fails for a session
         being made, the directory it made is removed again."""
         store = None
         try:
             store = SessionStore(self.home, session_id)
+            if created:
+                store.set_project_memory(False)
             transform, observe_usage, engine_name = self.engine_factory(store, self.config)
             recorder = RouteRecorder(transform, store)
             notices = SessionNotices(store, self.stderr, session_id, self._notices(session_id))

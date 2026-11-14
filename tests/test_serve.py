@@ -502,6 +502,37 @@ def test_a_session_the_launcher_made_for_the_id_is_reused(make_service, home, tm
     assert SessionStore.open_existing(home, served(home)[B]).workdir() is None
 
 
+def test_a_session_the_service_makes_stays_out_of_project_memory_after_a_resume(make_service, home, tmp_path):
+    """D70 with D69: the service cannot know a client's directory and routes by session id, so a session
+    it makes records ``project_memory: false``. ``contexto run claude --resume <id>`` then records a
+    directory (``set_workdir``) but keeps memory off (``record_project_memory`` never writes true over
+    false), so the session neither carries a project's records nor gives its own to later sessions."""
+    from contexto.launcher import record_project_memory
+    from contexto.store.project import project_root, project_sessions, session_project
+
+    made = SessionStore(home, "launcher-made")
+    made.set_workdir(tmp_path)
+    made.record_cli_session("claude", A, 100.0)
+    made.release()
+    service = make_service()
+    post(service, A)
+    post(service, B)
+    by_service = served(home)[B]
+    meta = lambda name: json.loads((home / "sessions" / name / "meta.json").read_text())  # noqa: E731
+    assert meta(by_service)["project_memory"] is False
+    assert "project_memory" not in meta("launcher-made")  # a session the launcher made keeps its own choice
+    service.stop()
+    resumed = SessionStore(home, by_service)  # as `contexto run claude --resume <id>` opens it
+    resumed.set_workdir(tmp_path)
+    record_project_memory(resumed, True)
+    resumed.release()
+    after = meta(by_service)
+    assert after["project_memory"] is False and after["workdir"] == str(tmp_path.resolve())
+    assert session_project(home, by_service, after, own=lambda: []) is None  # carries nothing in
+    members = {m.id: m for m in project_sessions(home, project_root(tmp_path)).sessions}
+    assert members[by_service].memory is False and members["launcher-made"].memory is True  # gives nothing out
+
+
 def test_two_ids_one_launcher_session_share_one_engine(make_service, home):
     made = SessionStore(home, "launcher-made")
     made.record_cli_session("claude", A, 100.0)

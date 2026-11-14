@@ -371,11 +371,13 @@ the check is outside both limits for the rest of its life, so a long streamed re
   serving. `/compact` and `--resume <id>` keep the id.
 - A session the service makes records no working directory when the service makes it: the service
   does not run in the client's directory. Pinned file sources of such a session are not checked for
-  staleness, and `contexto run claude --continue` does not find it by directory. It is in no project
-  either, so project memory ([project-memory.md](project-memory.md)) carries nothing into it and
-  nothing it pins into a later session. `contexto run claude --resume <id>` does find it, and
-  records the directory it runs in: from then on the session belongs to that directory's project,
-  under `contexto run` and under the service alike.
+  staleness, and `contexto run claude --continue` does not find it by directory. `contexto run claude
+  --resume <id>` does find it, and records the directory it runs in.
+- A session the service makes records `project_memory: false`, so project memory
+  ([project-memory.md](project-memory.md)) carries nothing into it and nothing it pins into a later
+  session, also after `contexto run claude --resume <id>`: the service routes by session id and
+  cannot know a client's directory. A session the launcher made keeps its own setting when the
+  service serves it.
 - `contexto mcp --serve` relies on `_meta["claudecode/toolUseId"]`, measured on Claude Code 2.1.322
   and not documented as a stable interface. A client that does not send it gets the "no tool-use
   id" error on every call. Codex does not send it.
