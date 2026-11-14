@@ -102,8 +102,9 @@ def test_an_obligation_set_searches_each_id_for_its_last_statement(small):
 def test_the_new_classes_search_the_questions_content_words(small):
     for probe in (p for p in small.probes if p.cls in NEW_CLASSES):
         (query, statement), = reach.needs(probe)
-        assert query.split() == reach.content_words(probe.question)
-        assert set(query.split()) == words(probe.question)
+        assert query.split() == [w for w in reach.content_words(probe.question)
+                                 if w not in reach.instruction_words(probe)]
+        assert set(query.split()) == words(probe.question) - reach.instruction_words(probe)
         assert not any(subject in query for subject in probe.subjects)  # the rule has no access to the key
         assert statement == (probe.statements[-1] if probe.cls == "concluded" else probe.statements[0])
         assert probe.answer in statement
@@ -147,7 +148,8 @@ def test_a_fact_on_a_page_the_search_returns_is_reachable_with_its_rank(small):
     (row,) = _measure([probe], pages, _find(pages))
     assert row == {"seed": 3, "id": probe.id, "cls": "paged_only", "overlap": probe.overlap, "plant_turns": [1],
                    "paged": True, "query": probe.subjects[0], "reachable": True, "rank": 2,
-                   "queries": [probe.subjects[0]], "needed": 1, "in_view": False, "covered": True, "word_rank": None}
+                   "queries": [probe.subjects[0]], "needed": 1, "in_view": False, "covered": True, "returned": 2,
+                   "best_rank": 2, "best_query": probe.subjects[0]}
 
 
 def test_a_search_that_cannot_find_the_plant_is_unreachable(small):
@@ -205,16 +207,67 @@ def test_the_rank_of_a_probe_with_several_statements_is_its_worst(small):
 
 def test_a_new_class_question_finds_nothing_unless_a_page_holds_every_word(small):
     probe = _probe(small, "paraphrase")
-    pages = {"pg_1": _page("log line\n" + probe.statements[0] + "\nlog line")}
+    pages = {"pg_1": _page("log line\n" + probe.statements[0] + "\nlog line"), "pg_2": _page("log line")}
     (row,) = _measure([probe], pages, _find(pages))
-    assert (row["paged"], row["reachable"], row["rank"]) == (True, False, None)
-    shared = [w for w in reach.content_words(probe.question) if w in words(probe.statements[0])]
-    assert shared and row["word_rank"] == 1  # one shared word alone does find the page
+    assert (row["paged"], row["reachable"], row["rank"], row["returned"]) == (True, False, None, 0)
+    # The best query from the question's words does find it: the service's two words, as a pair.
+    service = probe.subjects[1]
+    assert row["best_rank"] == 1 and row["best_query"] in reach.question_queries(probe)
+    assert reach.totals([row])["best_query"] == 1 and reach.totals([row])["neither_by_any_query"] == 0
+    assert reach.totals([row])["rule_returned_nothing"] == 1
+    assert service in reach.question_queries(probe) and service.replace("-", " ") in reach.question_queries(probe)
     concluded = _probe(small, "concluded")
     pages = {"pg_1": _page(*concluded.statements)}
     (row,) = _measure([concluded], pages, _find(pages))
-    assert (row["paged"], row["reachable"], row["word_rank"]) == (True, False, None)  # no word in common at all
-    assert reach.totals([row])["one_word"] == 0
+    assert (row["paged"], row["reachable"], row["best_rank"], row["best_query"]) == (True, False, None, None)
+    assert reach.totals([row])["best_query"] == 0 and reach.totals([row])["neither_by_any_query"] == 1
+
+
+def test_the_best_query_takes_the_best_rank_over_every_query_it_tries(small):
+    probe = _probe(small, "toolloop")
+    a, b = probe.subjects[1].split("-", 1)
+    hyphenated = f"{a}-{b}"
+    pages = {"pg_1": _page(probe.statements[0])}
+    pages.update({f"pg_{k}": _page(f"{a} and {b} on a later page") for k in range(2, 6)})
+
+    def search(query):
+        if query == hyphenated:  # only the hyphenated pair is exact enough to put the plant first
+            return ["pg_1"]
+        return _find(pages)(query)
+
+    (row,) = _measure([probe], pages, search)
+    assert (row["best_rank"], row["best_query"]) == (1, hyphenated)
+    assert reach.question_queries(probe).index(hyphenated) > reach.question_queries(probe).index(a)
+
+
+def test_instruction_words_come_from_the_generators_tables(small, pinned):
+    """The fixed phrases around a new-class question are found from ATTRIBUTES and SCENARIOS, not from a
+    list of words: what is not the table's text is the wrapper."""
+    for script in (small, pinned):
+        by_class: dict[str, set[frozenset[str]]] = {}
+        for probe in (p for p in script.probes if p.cls in NEW_CLASSES):
+            dropped = reach.instruction_words(probe)
+            own = reach._table_part(probe.question)
+            assert own is not None, probe.question  # every new question holds the text of its table row
+            assert dropped and dropped <= words(probe.question) and not dropped & words(own)
+            assert not dropped & words(" ".join(probe.statements))  # none is a word of the plant
+            by_class.setdefault(probe.cls, set()).add(dropped)
+        # The wrapper is fixed per class, so every question of a class drops the same words.
+        assert {cls: len(found) for cls, found in by_class.items()} == {cls: 1 for cls in NEW_CLASSES}
+    assert reach.instruction_words(_probe(small, "chain")) == frozenset()
+
+
+def test_question_queries_are_singles_then_pairs_with_a_space_and_a_hyphen():
+    probe = bench_script.Probe("q", "b", "paraphrase", "t", "From the logs earlier in this conversation: which "
+                               "update track is the relay mesh service subscribed to? Answer with the value only.",
+                               "x", "value", (), ("relay-mesh.release_channel", "relay-mesh", "release_channel"),
+                               ("cfg relay-mesh.release_channel=x",), cls="paraphrase", overlap=0)
+    queries = reach.question_queries(probe)
+    assert queries[:6] == ["update", "track", "relay", "mesh", "service", "subscribed"]
+    assert "relay mesh" in queries and "relay-mesh" in queries and "mesh service" in queries
+    assert not any(w in q.split() or w in q.split("-") for q in queries
+                   for w in ("answer", "value", "only", "earlier", "conversation", "logs"))
+    assert reach.first_query(probe) == "update track relay mesh service subscribed"
 
 
 def test_totals_count_by_class_in_script_order(small):
@@ -224,7 +277,8 @@ def test_totals_count_by_class_in_script_order(small):
     assert list(totals["by_class"]) == ["paged_only", "multihop", "chain", "obligations", "distractor", "paraphrase",
                                         "concluded", "toolloop"]
     assert totals["probes"] == 72 == sum(c["probes"] for c in totals["by_class"].values())
-    for key in ("paged", "reachable", "shown", "covered", "neither", "one_word"):
+    for key in ("paged", "reachable", "shown", "covered", "neither", "best_query", "neither_by_any_query",
+                "rule_returned_nothing"):
         assert totals[key] == sum(c[key] for c in totals["by_class"].values()), key
         assert isinstance(totals[key], int)
     assert totals["by_class"]["paged_only"]["reachable"] == 4
@@ -411,7 +465,10 @@ def test_model_tokens_counts_a_tool_results_log_text_at_the_log_rate():
     for body in (as_string, as_blocks):
         counted = upstream.model_tokens(body)
         assert counted["log_bytes"] == len(log) and counted["tokens"] < len(log) / 1.8 + 60
-    assert upstream.model_tokens(small_result)["log_bytes"] == 0  # under 5,000 bytes: everything else, at 3.0
+    # A tool result's text is log text at any size (A's nit: a short search reply holds log lines too).
+    assert upstream.model_tokens(small_result)["log_bytes"] == 4_999
+    short_text = {"messages": [{"role": "user", "content": [{"type": "text", "text": log[:4_999]}]}]}
+    assert upstream.model_tokens(short_text)["log_bytes"] == 0  # a short text block is everything else, at 3.0
     assert (upstream.LOG_BYTES_PER_TOKEN, upstream.OTHER_BYTES_PER_TOKEN, upstream.LOG_TEXT_MIN_BYTES) == (
         1.8, 3.0, 5_000)
 
@@ -689,7 +746,10 @@ def test_a_trace_and_a_generator_that_disagree_are_refused_naming_the_first_turn
 @pytest.mark.parametrize("change, said", [
     (lambda t: t["turn_sha256"].pop(), "the trace has 55 turns and the generator gives 56"),
     (lambda t: t["files"]["bench-files/log-03.txt"].update(sha256="0" * 64), "the file bench-files/log-03.txt differs"),
-    (lambda t: t["files"].update(extra={"bytes": 1, "sha256": "0"}), "the list of files differs"),
+    (lambda t: t["files"].update(extra={"bytes": 1, "sha256": "0"}),
+     "the trace has the file extra, which the generator does not give"),
+    (lambda t: t["files"].pop("bench-files/log-03.txt"),
+     "the generator gives the file bench-files/log-03.txt, which the trace does not have"),
     (lambda t: t.update(script_sha256="0" * 64), "the probes, answers or decisions differ"),
     (lambda t: t["model"].update(steps_sha256="0" * 64), "the scripted model and the pinned trace disagree"),
     (lambda t: t["client"].update(synthetic_sha256="0" * 64), "the synthetic client and the pinned trace disagree"),
@@ -710,11 +770,38 @@ def test_a_file_that_is_not_a_trace_is_refused():
                  json.dumps({"kind": "other", "format": 1})):
         with pytest.raises(trace.TraceError):
             trace.parse(text)
+    with pytest.raises(trace.TraceError, match="a replay trace of format 2; this build reads format 1"):
+        trace.parse(json.dumps({"kind": trace.KIND, "format": 2}))
+    with pytest.raises(trace.TraceError, match="not a replay trace: the file holds a list, not an object"):
+        trace.parse("[]")
     with pytest.raises(trace.TraceError, match="has no turn_sha256, expected"):
         trace.parse(json.dumps({"kind": trace.KIND, "format": 1, "script": {}, "turn_bytes": [], "files": {},
                                 "model": {}, "client": {}}))
     with pytest.raises(trace.TraceError, match="this build has no pinned trace trace-5.json"):
         trace.load_packaged(5)
+
+
+@pytest.mark.parametrize("section, value, said", [
+    ("script", [], "script is a list, not an object"),
+    ("files", [], "files is a list, not an object"),
+    ("model", None, "model is null, not an object"),
+    ("expected", [], "expected is a list, not an object"),
+    ("turn_sha256", "x", "turn_sha256 is a string, not a list"),
+])
+def test_a_section_of_the_wrong_type_is_refused_without_a_traceback(section, value, said):
+    """Reviewer B: a hand-altered trace with a section of the wrong type raised AttributeError."""
+    altered = copy.deepcopy(trace.load_packaged())
+    altered[section] = value
+    with pytest.raises(trace.TraceError, match=f"the trace is damaged: {said}"):
+        trace.parse(json.dumps(altered))
+
+
+def test_a_pinned_trace_that_is_not_utf8_is_damaged_not_missing(monkeypatch, tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "trace-20261016.json").write_bytes(b'{"kind": "\xff"}')
+    monkeypatch.setattr(trace.resources, "files", lambda package: tmp_path)
+    with pytest.raises(trace.TraceError, match="the pinned trace trace-20261016.json is not UTF-8 text"):
+        trace.load_packaged()
 
 
 def test_differences_are_listed_in_plain_words():
@@ -734,6 +821,36 @@ def test_differences_are_listed_in_plain_words():
     assert trace.differences({"a": 1, "b": 2}, {"a": 1}) == ["b: expected 2, not measured"]
     assert trace.differences({"n": [1, 2, 3]}, {"n": [1, 2]}) == [
         "n: 1 of 3 differ; the first is number 3, expected 3, measured nothing"]
+    # A section of another type is named by its type, not printed whole (Reviewer B's nit).
+    assert trace.differences({"reach": []}, {"reach": {"probes": 72, "by_class": {"chain": {}}}}) == [
+        "reach: expected a list, measured an object"]
+
+
+def test_a_size_difference_says_where_it_is():
+    """Reviewer A: every request grown by the same bytes is a change to what all of them carry; requests
+    that differ only from some number on are a change from there."""
+    pinned = [100, 200, 300, 400]
+    assert trace.differences({"t": pinned}, {"t": [102, 203, 302, 402]}) == [
+        "t: 4 of 4 differ; the first is number 1, expected 100, measured 102. All 4 differ, by +2 to +3 tokens: "
+        "something every request carries changed by the same bytes (the head, the tool definitions)"]
+    assert trace.differences({"t": pinned}, {"t": [99, 199, 299, 399]})[0].endswith(
+        "All 4 differ, by -1 tokens: something every request carries changed by the same bytes (the head, the tool "
+        "definitions)")
+    assert trace.differences({"t": pinned}, {"t": [100, 200, 350, 380]}) == [
+        "t: 2 of 4 differ; the first is number 3, expected 300, measured 350. Requests 1 to 2 are equal and the "
+        "difference starts at number 3: what the proxy sends changed from there (paging, a rotation, a search "
+        "reply)"]
+    assert trace.differences({"t": pinned}, {"t": [150, 200, 300, 401]})[0].endswith(
+        ". The first request differs too, by another amount than the later ones")
+
+
+def test_the_trace_records_the_commit_it_was_recorded_on():
+    commit = trace.source_commit()
+    in_checkout = (Path(trace.__file__).resolve().parents[4] / ".git").exists()
+    if in_checkout:
+        assert commit is not None and len(commit.split("+")[0]) == 40
+    else:
+        assert commit is None
 
 
 def test_dump_writes_the_whole_session_to_read(small, tmp_path):
