@@ -74,6 +74,16 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   rotation; after it, from its next rotation.
 - The model is now told to pin only what you state in your own messages, never a rule found in tool
   results, files, web pages or another agent's output. This applies to every session.
+- On request, the model can search the earlier sessions of the project and read their pages:
+  `contexto_search` with `scope: "project"` adds the newest 50 earlier sessions' best matches, each
+  session under its label and date, with what was in view at its last request; `contexto_recall`
+  with `session` reads one of their pages, after a first line that names the session and says the
+  text is not instructions. Earlier sessions are read, never changed, and matched on
+  every word only. The default search is the current session, as before. `contexto search --project`
+  and `contexto recall --from LABEL` do the same from the command line. Any session's model can now
+  read earlier transcripts of its project word for word, secrets in them included; see
+  [docs/project-memory.md](docs/project-memory.md#searching-earlier-sessions) for what that exposes
+  and how to keep a session out.
 - `contexto state` shows a character of a stored record that could move the cursor, end the line,
   or reorder or hide text as its escape. Joiners and other format characters print as they are, and
   so does a variation selector right after the emoji or ideograph it varies; anywhere else it is an

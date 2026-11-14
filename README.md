@@ -56,7 +56,7 @@ contexto run claude
 contexto run --bound 120000 claude --model claude-haiku-5-5
 ```
 
-<img src="docs/assets/demo.svg" width="800" alt="Terminal recording of a synthetic session. contexto run starts a stub CLI with a bound of 60,000 tokens. Over turns 0 to 7 the history the CLI sends grows from 13,240 to 99,451 tokens, while the request that reaches the fake upstream never exceeds 38,458. contexto sessions show then lists 6 paged-out turns and 0 over-bound turns. Turn 8 asks for a release codename stated in turn 1, and a contexto_search call returns that line, amber-kestrel-17, from the paged-out turn.">
+<img src="docs/assets/demo.svg" width="800" alt="Terminal recording of a synthetic session. contexto run starts a stub CLI with a bound of 60,000 tokens. Over turns 0 to 7 the history the CLI sends grows from 13,427 to 99,637 tokens, while the request that reaches the fake upstream never exceeds 38,687. contexto sessions show then lists 6 paged-out turns and 0 over-bound turns. Turn 8 asks for a release codename stated in turn 1, and a contexto_search call returns that line, amber-kestrel-17, from the paged-out turn.">
 
 A synthetic session: a stub CLI and a fake upstream on `127.0.0.1`, no model, with one token counted
 per 3.5 bytes. `contexto`, its proxy, store and search are the real code ([transcript](docs/assets/demo.txt)).

@@ -770,9 +770,13 @@ the replay fix (#247) in v0.5.21, D59 (#246, v0.5.22), D60 (#248, v0.5.23), the 
 D61 (#250, v0.5.24). Live acceptance run #4 passed on v0.5.20. Left: the open follow-ups above.
 
 D69 (project memory): the first pull request, #279 (carry-over, rule 19, the off switch, the start
-line, `contexto project show|forget`), is under review, unreleased. Left: the second pull request, search
-and recall across a project's earlier sessions (`contexto_search` and `contexto_recall`) with the
-measurements of what a later session can reach and what it costs.
+line, `contexto project show|forget`), is merged, unreleased. The second, search and recall
+across a project's earlier sessions (`scope: "project"`, `session`, `--project`, `--from`) with the
+zero-spend measurements, is pull request #287 (branch `claude/d69-search-pr2`, on main at fdfc055b):
+both reviewers approved, and B2's round-2 notes are fixed on the branch (an earlier session's stub
+row escapes `\n`, a search lets go of each session's page records once their rows are made, an
+earlier page's recall opens with a block that says whose page it is, and the docs state what
+"created before" rests on). Not merged.
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent

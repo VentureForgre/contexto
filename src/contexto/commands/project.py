@@ -424,7 +424,7 @@ def _forget_sessions(args: argparse.Namespace, home: Path, view: Project) -> int
     forgotten = [member.id for member in already]
     if chosen:
         print(f"Sessions to take out of project memory ({len(chosen)}): later sessions of this project will "
-              "carry nothing from them; what they closed or replaced stays closed or replaced.")
+              "carry nothing from them or search them; what they closed or replaced stays closed or replaced.")
         table = [("ID", "CREATED", "LAST ACTIVITY", "PAGES", "RECORDS", "CARRIED", "NOTES")]
         table += [(*row.cells(), row.notes(IN_USE_NOTE)) for row in _rows(home, view, view.carried(), chosen)]
         _table(table, indent="  ")
