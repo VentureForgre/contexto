@@ -3605,8 +3605,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
       does, whatever `--forward-hint-headers` says (that is the service's choice, not the user's
       settings). The launcher discounts the process environment's value under that marker as before,
       and now also a settings file whose `env` block sets the variable on beside `stripped`: such a
-      file is read as not setting the variable, and the next file or the environment decides
-      (`contexto.hints.contexto_set_hints_on`). An off value is never discounted. Tested with the
+      file is read as not setting the variable when deciding whether the hints are the user's, and
+      the next file or the environment decides that (`contexto.hints.contexto_set_hints_on`). An off
+      value is never discounted. Claude Code still applies such a file's `1`, so an off value below
+      it (in the environment, or the user file under a project file) gives `stripped`, not `off`
+      (review B of #293). Tested with the
       fake `claude`: both ways, the upstream got no gated header and the launch logged `stripped`.
       Limit: merged into the user settings file, the printed block replaces a hint setting the user
       had there, so a user who had turned the hints on in that file for their own gateway gets
