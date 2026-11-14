@@ -416,25 +416,28 @@ def session_live(home: Path, session_id: str) -> bool:
 
 
 def run_started(home: Path, session_id: str) -> float | None:
-    """When the latest run of ``session_id`` started: its newest ``proxy_start`` line's time, to the second
-    (the log's times are UTC, written to the second or finer). None when the log cannot be read or has
-    no such line."""
-    import calendar
+    """When the latest run of ``session_id`` started: its newest ``proxy_start`` line's time, in full (the
+    log writes UTC with microseconds). The line is found by searching the bytes from the end, so a long
+    run's request lines are not split and parsed. None when the log cannot be read or has no such line."""
+    from datetime import UTC, datetime
 
     try:
         data = read_regular(session_dir(home, session_id) / "log.jsonl")
     except OSError:
         return None
-    for _, line in _lines_back(data):
-        if b"proxy_start" not in line:
-            continue
-        event = _event(line)
+    end = len(data)
+    while (at := data.rfind(b"proxy_start", 0, end)) >= 0:
+        start = data.rfind(b"\n", 0, at) + 1
+        stop = data.find(b"\n", at)
+        event = _event(data[start:stop if stop >= 0 else len(data)])
+        end = start
         if event is None or event.get("event") != "proxy_start":
             continue
         try:
-            return float(calendar.timegm(time.strptime(str(event.get("ts", ""))[:19], "%Y-%m-%dT%H:%M:%S")))
-        except (ValueError, OverflowError):
+            when = datetime.fromisoformat(str(event.get("ts", "")))
+        except ValueError:
             return None
+        return (when if when.tzinfo else when.replace(tzinfo=UTC)).timestamp()
     return None
 
 
@@ -673,9 +676,9 @@ DESCRIPTION = (
     "'PAGING STOPPED' comes first when a store failure has stopped paging. The session is --session, else "
     "$CONTEXTO_SESSION, else the session serving the Claude Code session named by session_id in the JSON "
     "on stdin; when stdin names one, $CONTEXTO_SESSION counts only while a launch has it open and it has "
-    "served that Claude Code session. With no session, or on any error, it prints nothing and exits 0, so "
-    "a status line script of your own can call it and append what it prints. docs/statusline.md has the "
-    "details.")
+    "served that Claude Code session in its current run. With no session, or on any error, it prints "
+    "nothing and exits 0, so a status line script of your own can call it and append what it prints. "
+    "docs/statusline.md has the details.")
 
 
 def add_arguments(parser: Any) -> None:

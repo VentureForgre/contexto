@@ -451,6 +451,19 @@ def test_a_session_reopened_for_another_conversation_does_not_serve_the_old_one(
     # The same conversation resumed in the new launch is recorded again at its first request there.
     store.record_cli_session("claude", CLAUDE_ID, IN_RUN + 5)
     assert command(tmp_path, stdin=claude_stdin()).stdout == "ctx 11k/150k\n"
+    # The start time is compared in full: a last request of the earlier run in the same second as the
+    # new run's start is still the earlier run's (Reviewer A, PR #276 round 3).
+    started = {"event": "proxy_start", "port": 1, "ts": "2027-01-15T08:00:00.600000Z"}
+    write_log(tmp_path, "aaaa11", [started, launch(0)[1] | {"ts": started["ts"]}, request(1, tokens=11_000)])
+    at = statusline.run_started(tmp_path, "aaaa11")
+    assert at == 1_800_000_000.6 or abs(at - 1_800_000_000.6) < 1e-6
+    store.record_cli_session("claude", OTHER_ID, 1_800_000_000.2)
+    assert statusline.serves_in_this_run(tmp_path, "aaaa11", 1_800_000_000.2) is False
+    assert statusline.serves_in_this_run(tmp_path, "aaaa11", 1_800_000_000.7) is True
+    # A line that only mentions the word is not a proxy start; the newest real one counts.
+    write_log(tmp_path, "aaaa11", [*launch(0), request(1, tokens=11_000),
+                                   {"event": "note", "text": "proxy_start", "ts": "2027-01-15T09:00:00Z"}])
+    assert statusline.run_started(tmp_path, "aaaa11") == 1_800_000_000.0
     # A log with no proxy start, or none that can be read, serves nothing.
     write_log(tmp_path, "aaaa11", [request(1, tokens=11_000)])
     assert statusline.serving_session(tmp_path, CLAUDE_ID) is None
