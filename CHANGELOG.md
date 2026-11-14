@@ -76,7 +76,8 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   or reorder or hide text as its escape. Joiners and other format characters print as they are, and
   so does a variation selector right after the emoji or ideograph it varies; anywhere else it is an
   escape. One zero-width character between letters prints (a ZWNJ in Persian, a ZWJ in an emoji);
-  a run of them, or one next to a space, is escapes.
+  a run of them, or one next to a space, is escapes, except a Mongolian variation selector that ends
+  a word.
 - Records pinned before this release are never carried, so project memory starts empty.
 - `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
   described in the command's `--help`; an error is still one line on stderr with the usual exit
@@ -126,6 +127,21 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 - The session log has two new fields: `pages` on `proxy_start` and `proxy_stop` (the page files in
   the store), and `cli_session` on a Messages request's entry (whether it carried Claude Code's
   session id).
+- `contexto run claude` shows Contexto's numbers in Claude Code's status line, for example
+  `ctx 112k/150k · 41 paged · 3 recalls · 5 searches`, and `PAGING STOPPED` when the store fails.
+  `41 paged` counts the page files kept on disk for the whole session, from every conversation in
+  it (subagents' too), which the model can read back; it is not a count of turns. A prompt that
+  differs from the bound but would shorten to the same text gets decimals (`150.9k/150k`), so one
+  over the bound never reads as at it.
+  It is added only when no settings file Claude Code reads has a status line of its own, because
+  Contexto's would replace it; `--no-statusline` or `CONTEXTO_NO_STATUSLINE=1` turns it off. A status
+  line you set up mid-session gets `ctx: your status line needs a restart`, after `PAGING STOPPED`
+  when paging is stopped.
+  `contexto statusline` prints the line, so a status line script of your own can include it. When
+  Claude Code names its session on stdin, the script shows `$CONTEXTO_SESSION`'s numbers only while
+  that session is open and serving it in its current run, so nothing until a conversation's first
+  request; with no variable, nothing when two open launches serve the conversation. See
+  docs/statusline.md.
 - New command: `contexto doctor` checks what `contexto run` needs from the directory you run it
   in, and prints one line per check with the next step under a warning or a failure. It checks
   Python, the `claude` and `codex` CLIs and their versions, the Claude Code settings files, the

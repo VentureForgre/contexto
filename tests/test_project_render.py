@@ -564,6 +564,40 @@ def test_real_text_with_joiners_blanks_and_spaces_prints_as_it_is(text):
     assert safe_text(text) == text
 
 
+@pytest.mark.parametrize("pair", [("\U0001bca0", "\U0001bca1"), ("\U0001bca2", "\U0001bca3"),
+                                  ("\U0001d173", "\U0001d174"), ("\U0001d175", "\U0001d17a"),
+                                  ("\U00013430", "\U00013431"), ("\U00013439", "\U0001343f"),
+                                  ("\U00016fe4", "\U00016fe4"), ("\U00016fe4", "​")])
+def test_a_run_of_default_ignorable_format_characters_is_shown_as_escapes(pair):
+    """Review B round 8, N22 (pocP): the shorthand format controls U+1BCA0 to U+1BCA3, the musical
+    formatting controls U+1D173 to U+1D17A and the hieroglyph format controls U+13430 to U+1343F, which a
+    terminal draws as nothing, and the Khitan filler U+16FE4 are zero-width characters for the run rule,
+    so a run of them between two letters, which spells text in its pattern, is escapes."""
+    hidden = "".join(pair[int(bit)] for bit in "1011001110001011")
+    shown = safe_text("a" + hidden + "b")
+    assert shown.isascii() and shown.startswith("a\\") and shown.endswith("b")
+    assert safe_text(f"a{pair[0]}b") == f"a{pair[0]}b"  # one alone prints, as any zero-width character
+
+
+MONGOLIAN_SELECTORS = ["᠋", "᠌", "᠍", "᠏"]
+
+
+@pytest.mark.parametrize("fvs", MONGOLIAN_SELECTORS)
+def test_a_word_final_mongolian_variation_selector_before_a_space_prints(fvs):
+    """Review A round 8, nit 2: a Mongolian free variation selector follows a letter and can end a word, so
+    one after a letter and before a space prints; a run of them, one after a space, and one between two
+    spaces are still escapes (N19)."""
+    text = f"ᠪᠠᠷ{fvs} ᠲᠠ"
+    assert safe_text(text) == text
+    for hidden in (f"ᠠ{fvs}{fvs} ᠲ", f"ᠠ {fvs}ᠲ", f"ᠠ {fvs} ᠲ", f"{fvs} ᠲ"):
+        assert fvs not in safe_text(hidden), hidden
+    gaps = " ".join(MONGOLIAN_SELECTORS[int(bit)] for bit in "01101000") + " "
+    assert safe_text("Use ISO dates. " + gaps).isascii()
+    assert safe_text("᠎ ").isascii()  # the vowel separator is not a selector: next to a space, an escape
+    # Review B on #288, N25: only after a Mongolian letter; after a Latin one each word could carry a bit.
+    assert fvs not in safe_text(f"Use{fvs} ISO{fvs} dates.")
+
+
 def test_a_blank_cell_prints_on_its_own_and_is_an_escape_next_to_a_zero_width_character():
     for cell in ("\u2800", "\u3164", "\uffa0"):
         assert safe_text(f"a{cell}{cell} {cell}b") == f"a{cell}{cell} {cell}b"
