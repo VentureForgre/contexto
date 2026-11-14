@@ -1,9 +1,9 @@
 # Contexto status
 
-Updated 2026-11-14 by claude (D66: the benchmark `contexto bench`, PRs #255, #262, #264, #269 and
-#273, recorded in the docs PR #282). Before that, 2026-11-13 (D69, project memory: PR #279, the
-first of its two pull requests, unreleased), and 2026-11-12 (v0.5.24: the 2026-11-05 QA run and the
-fix round, PRs #232 to #250, D48 to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0
+Updated 2026-11-14 by claude (D66: the benchmark `contexto bench`, PRs #255, #262, #264, #269, #273,
+#289 and #286, recorded in the docs PR #282). Before that, 2026-11-13 (D69, project memory: PR #279,
+the first of its two pull requests, unreleased), and 2026-11-12 (v0.5.24: the 2026-11-05 QA run and
+the fix round, PRs #232 to #250, D48 to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0
 releases, D62, and the README rewrite, D68). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
@@ -98,7 +98,8 @@ it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
 
 - Merged into `main`: #255 (script generator, statistics, `--script-only`) as f826c464, #262 (scale
   harness) as c46de5b4, #264 (`--report`, `--chart`, cost at published prices) as 6e4e6b12, #273
-  (the live runner, `--dry-run`) as 66336669 and #269 (`--replay`) as c476834f; docs in #282. The
+  (the live runner, `--dry-run`) as 66336669, #269 (`--replay`) as c476834f, #289 (the replay
+  after D69) as 93b40c1d and #286 (the reviewers' follow-ups) as f5c8f29a; docs in #282. The
   benchmark is not in a release yet: releases are cut by hand and batched (D67, RELEASING.md). From
   a checkout: `uv run contexto bench ...`, with a live run's `--out` outside the work tree.
 - Protocols: `d27`, the 54 probes of runs #3 and #4, byte-identical to the spike's script; `v2`
@@ -108,18 +109,34 @@ it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
 - Verdict rule: a direction is named only when the pooled difference is significant (Tango interval
   excludes 0 and exact McNemar p < 0.05) and the seed-level sign-flip p < 0.05, both the same way.
   Fewer than 6 seeds cannot reach 0.05 (2 / 2^5 = 0.0625).
-- Scoring: exact match, three deliberate differences from the spike's: an unanswered probe is never
+- Scoring: exact match, four deliberate differences from the spike's: an unanswered probe is never
   correct; more answer lines in markdown are read (bold or backticked ids, numbered and `+` items);
-  a fenced line yields to an answer for the same id outside any fence. A blockquote line stays
-  unread, as in the spike.
+  a fenced line yields to an answer for the same id outside any fence; a line whose answer is the
+  probe's own question, word for word, is no answer (#286). A blockquote line stays unread, as in
+  the spike.
 - Replay, keyless (`contexto bench --replay`), pinned session of 952,971 estimated tokens (6.35
-  times the bound; head 21,306): 138 requests, the first 44,302 estimated tokens and the largest
-  116,306, 0 over the bound, 14 rotations, 47 pages, no failure event, no compaction marker.
-  Search reach under mechanical queries, by the store's strict search: 48 of 72 by the fixed rule
-  (54 with facts still in view), 60 by the best query from the question's words; the search tool's
-  D65 fallback also answers 1 of the 18 the strict rule misses (`q_r_02`). Modelled, not run: full
-  context's last request 977,410; plain Claude Code 8 compactions, largest request 140,441. It
-  cannot show accuracy or cache reads. Chart: `docs/bench/request-size-synthetic.svg`.
+  times the bound; head 21,377): 138 requests, the first 44,373 estimated tokens and the largest
+  116,067, 0 over the bound, 14 rotations, 46 pages, no failure event, no compaction marker.
+  Search reach under mechanical queries, by the store's strict search: 43 of 72 by the fixed rule,
+  all 43 in the top 3 (54 with facts still in view; 59 paged), 55 by the best query from the
+  question's words; the search tool's D65 fallback also answers 1 of the 18 the strict rule misses
+  (`q_r_02`). Modelled, not run: full context's last request 977,481; plain Claude Code 8
+  compactions, largest request 140,512. It cannot show accuracy or cache reads. Chart:
+  `docs/bench/request-size-synthetic.svg`, whose note says the Contexto drops are rotations and the
+  plain drops modelled compactions.
+- The replay's head carries Contexto's five tools under their real names with fixed synthetic
+  descriptions (#289), because the proxy reads only their names, hash and size; the preamble stays
+  measured. D69 (#279) had lengthened a tool description and the preamble's pin rule, which moved
+  every rotation from turn 33 on one turn earlier and failed the pinned replay on `main` (8 tests)
+  until #289 re-recorded the trace. Both pull requests had passed alone: the ruleset does not
+  require branches to be up to date, so CI never ran them together. Requiring it, or a merge queue,
+  would catch this; that is the owner's call.
+- A live run's reservation journal (`reservations.jsonl`, #286) notes every billed request before
+  it is forwarded, and a request it cannot note is not sent. On resume, requests in flight at a
+  kill (manifest `in_flight`, `requests_in_flight`, `in_flight_tokens`) and torn request records
+  count in the spend at their reservations; every request record carries `reserved_tokens`. The
+  report's upper cost bound counts unanswered, torn and in-flight requests (`no_record` in
+  `results.json`).
 - Plain arm: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` = bound + 33,000 (183,000 at 150,000); the 33,000
   was read in the Claude Code 2.1.322 bundle, not documented, not confirmed live. Stub runs with
   the real 2.1.322 compacted at `pre_tokens` 147,140 to 168,178.
@@ -695,14 +712,13 @@ Still open:
   connection for every request (914 in one short run); on an HTTPS upstream each also pays a TCP
   connect, a TLS handshake and about 2.5 ms to build the SSL context (the handshake cost not
   measured).
-- D66 follow-ups: a code pull request is planned for the reviewers' remaining lows: notes on the
-  request-size chart (Contexto's drops are rotations, not compactions; the full-context line
-  squeezes the y axis); a reach column on the `contexto_search` tool's own reply; report wording
-  nits; the scale harness's lows (its 30 s port pool is shared across burst threads; the
-  `TCP_NODELAY` test passes without the driver's line; a docstring and a README sentence on the
-  Linux wait); a test that runs the real `claude --version` with the user's `HOME`, to be isolated.
-  Also the owner's minimum live run (above, under "Benchmark (D66)"), which would also confirm the
-  plain arm's 33,000-token reserve live.
+- D66 follow-ups: the reviewers' lows were fixed in #286; what they left on purpose is in
+  [#291](https://github.com/VentureForgre/contexto/issues/291) (a restated question that is not
+  word for word still overrides an answer; the replay's signal window after it ends; refusals for
+  hand-damaged scripts; the journal line not synced to disk; a zoomed chart panel; the search-reach
+  note under a chart that plots no search). A reach column on the `contexto_search` tool's own
+  reply is not built and not in an issue. Also the owner's minimum live run (above, under
+  "Benchmark (D66)"), which would also confirm the plain arm's 33,000-token reserve live.
 - A head denser than the 3.5 text seed is estimated low until the first usage, on Codex and Claude
   alike, so tool-loop requests can still go over the bound unflagged when no response carries an
   input count (12 of 32 synthetic Codex sessions in D61's measurement, 445 requests in reviewer A's).
