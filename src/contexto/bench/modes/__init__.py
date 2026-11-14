@@ -12,6 +12,14 @@ A mode is one module here whose name does not start with an underscore. It provi
     flag's value is neither None nor False, so a flag that takes a value must default to None.
 ``run(args) -> int``
     Runs the mode with the parsed namespace and returns the exit code.
+``OWN_OPTIONS`` (optional)
+    The option strings, as added in ``add_arguments``, that belong to this mode alone, for example
+    ``("--dump-trace",)``. ``contexto.commands.bench`` exits 2 with a message when one of them is
+    set (its value differs from its default) while another mode runs, so ``contexto bench
+    --dump-trace DIR`` without ``--replay`` does not quietly start the live run with the user's key.
+    The live run lists its own options too (a key helper, say), so they are refused beside a mode
+    flag. List every option the mode adds except its ``FLAG`` and the ones it shares through
+    ``add_option``; an option listed here but not added is reported as a mode bug, also with exit 2.
 
 The common options (``--seed``, ``--seeds``, ``--repeats``, ``--bound``, ``--protocol``,
 ``--turn-kbytes``, ``--out``) are defined once in ``contexto.commands.bench``; a mode reads them from

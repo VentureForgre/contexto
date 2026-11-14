@@ -1,22 +1,51 @@
 name: Release
 
-# A release creates a v{version} tag on the merged commit and a GitHub Release with the
-# sdist, wheel and SHA256SUMS attached, plus a GitHub build provenance attestation for the sdist
-# and wheel. It never pushes a commit: main is protected by a ruleset with no bypass actors, and
-# semantic-release runs with --no-commit. See RELEASING.md.
+# Releases are cut by hand. Merging a pull request never releases: this workflow has no push
+# trigger, only a manual run (Actions tab, or `gh workflow run release.yml --ref main`) with an
+# action. Every action is run from main:
 #
-# Releases are off until the repository variable RELEASES_ENABLED is set to "true"
-# (Settings > Secrets and variables > Actions > Variables). Unset or any other value:
-# no tag, no release, no asset upload, on push or on manual dispatch.
+#   release    Cut the next release from main. The version comes from the Conventional Commits since
+#              the last v* tag. Creates the v{version} tag on the commit the run was started on and
+#              a GitHub Release with the sdist, wheel and SHA256SUMS attached, plus a GitHub build
+#              provenance attestation for the sdist and wheel. It never pushes a commit: main is
+#              protected by a ruleset with no bypass actors, and semantic-release runs with
+#              --no-commit. If PyPI publishing is on, the pypi job then publishes the same files.
+#   reattach   Rebuild and re-attach the sdist, wheel and SHA256SUMS of an existing tag.
+#   publish    Publish the assets of an existing tag's GitHub Release to PyPI.
+#
+# See RELEASING.md and docs/pypi-publishing.md.
+#
+# Two repository variables switch this on (Settings > Secrets and variables > Actions > Variables):
+#
+#   RELEASES_ENABLED       Unless it is "true", every run only prints that releases are off.
+#   PYPI_PUBLISH_ENABLED   Unless it is "true", nothing is sent to PyPI. A release still completes on
+#                          GitHub, and says in a notice that PyPI publishing is off.
+#
+# Which jobs run (R = RELEASES_ENABLED is "true", P = PYPI_PUBLISH_ENABLED is "true"):
+#
+#   action    R    P    jobs that run
+#   any       no   any  disabled
+#   release   yes  no   request, ci, release, then pypi-disabled (a notice) if a release was created
+#   release   yes  yes  request, ci, release, then pypi if a release was created
+#   reattach  yes  any  request, reattach
+#   publish   yes  no   request, pypi-disabled (fails, saying that publishing is off)
+#   publish   yes  yes  request, pypi
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Existing release tag whose sdist and wheel should be rebuilt and re-attached (for example v0.5.24)"
+      action:
+        description: "release: cut the next release from main. reattach: rebuild an existing tag's assets. publish: send an existing tag's assets to PyPI."
         required: true
+        type: choice
+        default: release
+        options:
+          - release
+          - reattach
+          - publish
+      tag:
+        description: "Existing release tag, for reattach and publish (for example v0.5.24). Leave empty for release."
+        required: false
         type: string
 
 permissions:
@@ -37,20 +66,44 @@ jobs:
       - name: Report that releases are off
         run: echo "::notice::Releases are disabled. Set the repository variable RELEASES_ENABLED to true to enable them (see RELEASING.md)."
 
+  # Checks the inputs before anything else runs: every action only from main, a release without a
+  # tag, a reattach or publish with a vX.Y.Z tag. Every other job needs it. It catches a mistaken
+  # run. It cannot stop a run started from another ref, which executes that ref's copy of this file
+  # and of the script: the `pypi` environment's branch rule and the attestation check do that.
+  request:
+    if: vars.RELEASES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the action, the tag and the ref
+        env:
+          ACTION: ${{ inputs.action }}
+          TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
+        run: bash .github/scripts/release-request.sh "$ACTION" "$TAG" "$REF"
+
   ci:
-    if: github.event_name == 'push' && vars.RELEASES_ENABLED == 'true'
+    needs: request
+    if: inputs.action == 'release' && vars.RELEASES_ENABLED == 'true'
     uses: ./.github/workflows/ci.yml
 
   release:
     needs: ci
-    if: github.event_name == 'push' && vars.RELEASES_ENABLED == 'true'
+    if: inputs.action == 'release' && vars.RELEASES_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
       # actions/attest-build-provenance: sign the provenance with the job's OIDC token and store it.
       id-token: write
       attestations: write
+    outputs:
+      released: ${{ steps.plan.outputs.released }}
+      tag: ${{ steps.plan.outputs.tag }}
     steps:
+      # On a manual run GITHUB_SHA is the head of main when the run was started. The checkout is of
+      # that commit even if main has moved since (CI takes minutes), so that commit is tagged.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
@@ -70,6 +123,7 @@ jobs:
           last=$($PSR version --print-last-released-tag || true)
           next=$($PSR version --print-tag)
           echo "Last released: ${last:-none}. Next: ${next:-none}."
+          echo "last=$last" >> "$GITHUB_OUTPUT"
           # With no tags and no feat, fix, or perf commit, semantic-release proposes v0.0.0
           # ("Initial Release"); that is not a release.
           if [ -n "$next" ] && [ "$next" != "$last" ] && [ "$next" != "v0.0.0" ] \
@@ -77,11 +131,19 @@ jobs:
             echo "released=true" >> "$GITHUB_OUTPUT"
             echo "tag=$next" >> "$GITHUB_OUTPUT"
           else
-            echo "No releasable commits since ${last:-the start of history}; nothing to release."
+            echo "::notice::No releasable commits since ${last:-the start of history}; nothing to release."
             echo "released=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build, tag the merged commit, and create the release (no commit)
+      # Before anything is built or tagged: CHANGELOG.md must have the section "## X.Y.Z (date)".
+      - name: Check that the changelog has a section for this version
+        if: steps.plan.outputs.released == 'true'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          LAST: ${{ steps.plan.outputs.last }}
+        run: python3 -I .github/scripts/changelog-check.py "$TAG" --last-released "$LAST"
+
+      - name: Build, tag the commit, and create the release (no commit)
         if: steps.plan.outputs.released == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -126,7 +188,8 @@ jobs:
           gh release upload "$TAG" "${files[@]}" dist/SHA256SUMS --clobber
 
   reattach:
-    if: github.event_name == 'workflow_dispatch' && vars.RELEASES_ENABLED == 'true'
+    needs: request
+    if: inputs.action == 'reattach' && vars.RELEASES_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -167,7 +230,10 @@ jobs:
           $PSR changelog --post-to-release-tag "$TAG"
       - name: Rebuild at the tagged version
         run: |
-          git checkout --quiet --detach "refs/tags/$TAG"
+          # --force: semantic-release's changelog command rewrites CHANGELOG.md in the work tree
+          # when the file holds its "<!-- version list -->" marker, and a plain checkout would then
+          # stop on the local change, after the release was created.
+          git checkout --quiet --force --detach "refs/tags/$TAG"
           # Drop files main's checkout left behind (semantic-release writes CHANGELOG.md), so the
           # sdist holds exactly the tagged tree.
           git clean -ffdx
@@ -196,3 +262,172 @@ jobs:
             exit 0
           fi
           gh release upload "$TAG" "${files[@]}" dist/SHA256SUMS --clobber
+
+  # Publishes a release's files to PyPI by trusted publishing: PyPI exchanges this job's OIDC token
+  # for a short-lived upload credential. No API token is stored anywhere.
+  #
+  # When it runs. It needs the release job only to run after it and to read its outputs, so the `if`
+  # starts with !cancelled(): without a status function a job is skipped whenever a job it needs
+  # was skipped, and release is skipped on action=publish. The rest of the condition then says
+  # exactly when to run:
+  #   - both switches are on;
+  #   - the inputs passed the request job;
+  #   - and either this run's release job succeeded and created a release (its tag is published),
+  #     or the action is publish (the tag input is published).
+  # A failed or cancelled release job, or a run with nothing to release, publishes nothing. The
+  # GitHub release is complete before this job starts, and no job needs this one, so a failure here
+  # leaves the GitHub release as it is; `action=publish` with the tag retries it.
+  #
+  # The job runs in the GitHub environment "pypi". The trusted publisher on PyPI is registered with
+  # that environment name, so PyPI refuses an OIDC token from any other job of this workflow. That
+  # matters because release and reattach also hold an OIDC token (for the attestation) and run
+  # python-semantic-release, which is fetched from PyPI. This job runs no tool fetched at run time:
+  # pinned actions, the pinned uv, the runner's gh, sha256sum and python3 (standard library only).
+  #
+  # The environment exists and is limited to the branch main (Settings > Environments > pypi,
+  # "Selected branches and tags"). That rule, which lives in the repository's settings and not in
+  # this file, is what stops a run started from another ref: such a run executes its own copy of
+  # this workflow, without these checks, and PyPI does not look at the ref. Never delete the
+  # environment or its branch rule while the publisher is registered (docs/pypi-publishing.md).
+  pypi:
+    needs: [request, release]
+    if: >-
+      !cancelled()
+      && vars.RELEASES_ENABLED == 'true'
+      && vars.PYPI_PUBLISH_ENABLED == 'true'
+      && needs.request.result == 'success'
+      && (
+        inputs.action == 'publish'
+        || (inputs.action == 'release' && needs.release.result == 'success' && needs.release.outputs.released == 'true')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: pypi
+      url: https://pypi.org/project/contexto-proxy/
+    # id-token: the OIDC token PyPI exchanges. contents: the checkout and the release download.
+    # attestations: read-only, for `gh attestation verify` (the REST reference asks for it; the
+    # endpoint also answers without it for a public repository, which cannot be relied on).
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+    env:
+      PROJECT: contexto-proxy
+      TAG: ${{ inputs.action == 'publish' && inputs.tag || needs.release.outputs.tag }}
+    steps:
+      # The commit the run was started on. In a run from main these are main's scripts; the
+      # environment's branch rule, not the request job, is what keeps other refs out of this job.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          # The same uv as every other job. Nothing is built or installed here, so no cache.
+          version: "0.13.7"
+          enable-cache: false
+
+      - name: Check that gh, uv, python3 and sha256sum are on the runner
+        run: |
+          gh --version | head -1
+          uv --version
+          python3 --version
+          sha256sum --version | head -1
+
+      - name: Refuse anything but an existing release tag on main
+        run: bash .github/scripts/reattach-verify.sh "$TAG"
+
+      # The very files of the GitHub Release, not a rebuild.
+      - name: Download the wheel, sdist and checksums from the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir "$RUNNER_TEMP/pypi-dist"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/pypi-dist" \
+            --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
+          ls -l "$RUNNER_TEMP/pypi-dist"
+
+      # One wheel and one sdist, both in SHA256SUMS with matching digests, metadata Name
+      # contexto-proxy and Version equal to the tag. Refuses a build from before the rename
+      # (Name: contexto) and a build from a checkout (0.0.0+checkout).
+      - name: Check the files against SHA256SUMS, the project name and the tag's version
+        run: |
+          python3 -I .github/scripts/pypi-publish.py verify \
+            --dist "$RUNNER_TEMP/pypi-dist" --project "$PROJECT" --tag "$TAG"
+          cd "$RUNNER_TEMP/pypi-dist"
+          sha256sum --check --strict SHA256SUMS
+
+      # Release assets can be replaced by anyone with write access. This check ties the bytes to
+      # reviewed code: an attestation for this repository, signed by release.yml as it was on main
+      # (--source-ref; --signer-workflow alone matches a run from any ref), on a hosted runner.
+      # The source commit is not pinned: a reattach run's commit is main's head at that time.
+      - name: Check that release.yml on main built both files (build provenance attestation)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for file in "$RUNNER_TEMP"/pypi-dist/*.whl "$RUNNER_TEMP"/pypi-dist/*.tar.gz; do
+            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref refs/heads/main --deny-self-hosted-runners
+          done
+
+      # 404: both files. Same digests already there: only the missing files, or none. Another
+      # digest, or any other answer: fail, and upload nothing.
+      - name: Ask PyPI what it already has for this version
+        id: plan
+        run: |
+          python3 -I .github/scripts/pypi-publish.py plan \
+            --dist "$RUNNER_TEMP/pypi-dist" --project "$PROJECT" --tag "$TAG" \
+            --output "$RUNNER_TEMP/pypi-upload.txt"
+
+      # --trusted-publishing always: fail unless the OIDC exchange works; never fall back to another
+      # credential. --check-url: uv compares each file with PyPI's index once more and stops on a
+      # file of the same name with other contents. --no-attestations: uv would upload PEP 740
+      # attestation files lying next to the artifacts, and there are none (see RELEASING.md).
+      - name: Upload to PyPI by trusted publishing
+        if: steps.plan.outputs.upload_count != '0'
+        run: |
+          mapfile -t files < "$RUNNER_TEMP/pypi-upload.txt"
+          uv publish \
+            --trusted-publishing always \
+            --publish-url https://upload.pypi.org/legacy/ \
+            --check-url https://pypi.org/simple/ \
+            --no-attestations \
+            "${files[@]}"
+
+      - name: Check that PyPI lists both files with the release's checksums
+        run: |
+          python3 -I .github/scripts/pypi-publish.py confirm \
+            --dist "$RUNNER_TEMP/pypi-dist" --project "$PROJECT" --tag "$TAG"
+          echo "Published $PROJECT ${TAG#v}: https://pypi.org/project/$PROJECT/${TAG#v}/" >> "$GITHUB_STEP_SUMMARY"
+
+  # The other half of the pypi job's condition: the same runs, with PyPI publishing off. A release
+  # gets a notice, so it is clear why nothing went to PyPI. action=publish fails, because the one
+  # thing it was asked to do did not happen.
+  pypi-disabled:
+    name: PyPI publishing is off
+    needs: [request, release]
+    if: >-
+      !cancelled()
+      && vars.RELEASES_ENABLED == 'true'
+      && vars.PYPI_PUBLISH_ENABLED != 'true'
+      && needs.request.result == 'success'
+      && (
+        inputs.action == 'publish'
+        || (inputs.action == 'release' && needs.release.result == 'success' && needs.release.outputs.released == 'true')
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report that PyPI publishing is off
+        env:
+          ACTION: ${{ inputs.action }}
+          TAG: ${{ inputs.action == 'publish' && inputs.tag || needs.release.outputs.tag }}
+        run: |
+          why="PyPI publishing is off: the repository variable PYPI_PUBLISH_ENABLED is not set to true."
+          how="To turn it on, follow docs/pypi-publishing.md; then run this workflow with action=publish and tag $TAG."
+          if [ "$ACTION" = publish ]; then
+            echo "::error::$why $TAG was not published. $how"
+            exit 1
+          fi
+          echo "::notice::$why $TAG is on GitHub Releases only. $how"

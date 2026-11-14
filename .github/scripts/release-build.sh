@@ -4,6 +4,9 @@
 #
 # The version is stamped into this checkout's pyproject.toml only. Nothing is committed:
 # the release workflow runs semantic-release with --no-commit.
+#
+# The files written here are the release: the workflow attaches them to the GitHub Release, and
+# the pypi job later publishes those same assets (it downloads them; it does not run this script).
 set -euo pipefail
 
 : "${NEW_VERSION:?NEW_VERSION must be set by semantic-release}"

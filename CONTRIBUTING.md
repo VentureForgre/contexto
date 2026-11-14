@@ -56,7 +56,7 @@ pip install -e . pytest
 pytest -q
 ```
 
-The suite runs on macOS and Linux. Windows is not supported (see the README's Platforms note).
+The suite runs on macOS and Linux. Windows is not supported (see [Platforms](docs/install.md#platforms)).
 
 ## What CI runs
 
@@ -76,9 +76,10 @@ that did not change. Workflow runs on pull requests from forks wait for a mainta
   ruleset: changes reach it only through a pull request with a passing `ci` check.
 - The pull request title must be a [Conventional Commit](https://www.conventionalcommits.org/),
   for example `fix: recall reads a page written by an older release`. Pull requests are squash
-  merged, so the title becomes the commit on `main`, and it decides the release: `feat:` is a minor
-  release, `fix:` and `perf:` a patch, and `docs:`, `test:`, `build:`, `ci:`, `chore:` and
-  `refactor:` none. The table is in [RELEASING.md](RELEASING.md#conventional-commits).
+  merged, so the title becomes the commit on `main`. Merging does not release anything. The title
+  decides how far the next release moves the version: `feat:` makes it at least a minor release,
+  `fix:` and `perf:` at least a patch, and `docs:`, `test:`, `build:`, `ci:`, `chore:` and
+  `refactor:` have no effect. The table is in [RELEASING.md](RELEASING.md#conventional-commits).
 - For a bug fix, add a test that fails without the fix.
 - Run the suite and the lint before you push.
 - A change to what the proxy does to requests is a change to the design contract,
@@ -107,8 +108,12 @@ contribution is licensed under the same terms.
   part of the package.
 - `docs/milestones/`: design contracts. `docs/DECISIONS.md`: decisions and their reasons.
 - [docs/cli-updates.md](docs/cli-updates.md): how a new Claude Code or Codex version is tested.
+- [docs/README.md](docs/README.md): the index of the guides, design records and research notes.
 
 ## Releases
 
-Releases are automated from the Conventional Commits on `main`. [RELEASING.md](RELEASING.md)
-describes the workflow, the version rules, and recovery.
+Releases are cut by hand and batched, normally no more than one a week; a security fix or a fix
+for a broken release ships the same day. Merging a pull request never releases by itself. The
+maintainer starts the release workflow, which computes the version from the Conventional Commits
+on `main` since the last release and requires a section for it in `CHANGELOG.md`.
+[RELEASING.md](RELEASING.md) describes the rule, the steps, the version rules, and recovery.
