@@ -1390,9 +1390,11 @@ class _ServeHandler(_Handler):
     def _refuse_stopping(self, path_only: str) -> None:
         """A request that passed the checks after ``stop`` began: not routed or forwarded, answered with
         a 503 and its connection closed, so a kept-alive connection sends nothing more to a service
-        that is going away. The body is read and dropped first, so the answer is not lost to a reset."""
+        that is going away. The body is read and dropped first, so the answer is not lost to a reset,
+        unless the client waits for ``100 Continue`` before sending it: that one is never sent here."""
         self.service.log.log({"event": "stopping_refused", "method": self.command, "path": path_only})
-        if self._body is None:
+        expects = (self.headers.get("Expect") or "").strip().lower() == "100-continue"
+        if self._body is None and not expects:
             self._discard_body()
         self.close_connection = True
         payload = json.dumps({"type": "error", "error": {"type": "overloaded_error",

@@ -1705,6 +1705,31 @@ def test_during_the_drain_a_request_on_a_kept_connection_is_refused_and_routed_n
     assert stopped["in_flight"] == 0 and "hurried" not in stopped and stopped["sessions_closed"] == 2
 
 
+def test_during_the_drain_a_request_that_expects_100_continue_is_refused_without_waiting_for_its_body(
+        make_service, home, tool_upstream):
+    service = make_service(upstream=tool_upstream)
+    kept = socket.create_connection(("127.0.0.1", service.port), timeout=30)
+    kept.sendall(health_request(service))
+    assert one_response(kept).startswith(b"HTTP/1.1 200 ")
+    streamed = threading.Thread(target=lambda: post(service, B, stream=True))
+    streamed.start()
+    assert ToolUpstream.block_sent.wait(30)
+    stopper = threading.Thread(target=service.stop)
+    stopper.start()
+    try:
+        until(lambda: not (home / serve.STATE_FILE).exists(), "the service to stop advertising itself")
+        kept.sendall(b"POST /%s/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Claude-Code-Session-Id: %s\r\n"
+                     b"Expect: 100-continue\r\nContent-Length: 5000\r\n\r\n" % (service.token.encode(), C.encode()))
+        answer = closed_within(kept)  # the body is never sent: the answer must not wait for it
+        assert answer.startswith(b"HTTP/1.1 503 ") and b"100 Continue" not in answer
+        assert serve.STOPPING_MESSAGE.encode() in answer
+    finally:
+        ToolUpstream.gate.set()
+        stopper.join(30)
+        streamed.join(30)
+        kept.close()
+
+
 def test_shutdown_under_keep_alive_load_finishes_what_is_in_flight_and_leaves_no_stray_store(make_service, home):
     """Clients on kept-alive connections send requests back to back, a new conversation every third
     request, while the service stops: the drain covers only the requests already in flight, every
