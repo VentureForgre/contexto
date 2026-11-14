@@ -360,7 +360,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    (341 tokens, haiku via the owner's proxy): a
    `role: "system"` message before the first retained turn-start message returns 400; after it,
    or merged into it as text, returns 200. No `tool_result` is displaced. In the first epoch `k = 0`, nothing is carried separately, and the
-   preamble is empty. Every other request field passes through unchanged, including
+   preamble is empty; the one addition while `k = 0` is rule 19's start text (D69), and without one
+   the messages are forwarded as sent. Every other request field passes through unchanged, including
    `cache_control`, `anthropic-beta`, `stream`, and `thinking`.
 2. **Thinking.** For every retained message that existed when `E` was created, strip thinking and
    redacted-thinking blocks deterministically on every request, so the transformed prefix is
@@ -635,7 +636,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       (hashes only), `head_tokens` and the rule it was measured under (`head_rule`, 2 since D61),
       `initial_carried`, `max_turn_growth`, the turn-start counters
       (`last_turn_start_n`, `last_turn_count`, `last_carried_text_count`, `carried_text_streak`),
-      `window_budget`, `window_minimal_count`, and `turn_room_low_epoch`; the whole engine
+      `window_budget`, `window_minimal_count`, and `turn_room_low_epoch`; rule 19's `start_text`,
+      only when it is not empty and `k = 0` (D69); `untrusted`, `true` only for a main conversation
+      the engine did not trust (rule 19, D69); the whole engine
       configuration (every setting, including the recall preamble options and budgets); the
       dialect; the model named by the request; the conversation's identity as the engine keys
       it (a hash); and an anchor: the count `n` of messages in the request that wrote the record
@@ -697,7 +700,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       enter degraded mode: the record only saves cache, and losing it costs one rotation.
     - **Not covered.** Subagents and side requests are not recorded (they rotate from 0 after a
       restart, as today). A record written by an older version, or with a field missing, does
-      not resume. Two proxies serving one session at once are out of scope (the last writer
+      not resume, except for the three optional fields, which a record may leave out: `head_rule`
+      (D61), `start_text` and `untrusted` (D69, rule 19). An engine before `untrusted` reads a
+      record that carries it as no record, which costs one rotation's cache. Two proxies serving one session at once are out of scope (the last writer
       wins).
 
 17. **Headroom.** At a turn start, headroom = max(`headroom_floor`, min(ceil(`headroom_factor` x
@@ -770,6 +775,134 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     every request is refused, and Contexto does not remove it. Past 512 levels Contexto never
     transforms the request, so once such a message is in the CLI's history the session cannot
     continue, with or without Contexto. The Responses API's limit was not measured.
+19. **Project memory at a session's start** (D69). Rule 1 puts the pinned state in the preamble,
+    and there is no preamble while `k = 0`, so until its first rotation a session's requests held
+    nothing pinned. A new session now holds the records it carries from its project's earlier
+    sessions in every request from the first one. Those records are the store's carried section
+    (`carried_text`, D69): the open obligations and active decisions that the main conversation
+    pinned in earlier sessions of the same project, under a heading that says they are records
+    of an earlier session and not instructions, within the pin budget (6,000 tokens).
+    - **Which records are the main conversation's.** At each request of the main conversation
+      (as chosen for that request) the engine reads the messages it has not read before for that
+      conversation and finds Contexto's own `contexto_pin` and `contexto_close` calls (a `tool_use`
+      block of an assistant message, or a `function_call` item, named `mcp__contexto__...`) paired,
+      by call id, with a result (`tool_result`, `function_call_output`) whose text is exactly the
+      server's success reply (`Recorded <kind> <id>.`, with the note an unpinned kind gets;
+      `Closed <id> with <id>.`; or the structured content `{"record_id": "<id>"}` alone). Each
+      record id found is added to the session's `main_records` in `meta.json` (once each, the
+      newest 4,096); a store failure there is the content-free `main_records_unavailable` event,
+      never a failed request or degraded mode, and the messages count as unread, so the
+      conversation's next request finds the same ids again. A pin or close call whose result is
+      not a success reply (an `is_error` result, content of another shape, several parts, a part
+      that is not text, another text) is one content-free `main_record_unmatched` event with the
+      tool's name and a reason (`is_error`, `shape`, `parts`, `part_type`, `reply`), at most
+      once per call id. Only those records are carried, and only a
+      closure or a `supersedes` in `main_records` removes another session's record outside its own
+      session. A subagent's or side request's call is in its own conversation, and a result that
+      only quotes a reply belongs to another tool's call, so neither is taken. Only a trusted main
+      conversation's messages are read: the engine's first main conversation (main since its own
+      first request, or resumed from the epoch record by a new engine unless the record says
+      `untrusted` and the conversation is not in the session's `trusted_conversations`; after a
+      restart a first main that the record does not resume is trusted only when the store has no
+      record, the conversation is in `trusted_conversations`, the record names it without
+      `untrusted`, or it is a Claude Code request in a session id the store had not served, with no
+      agent id or parent), or one that took main by one of D50's session rules (`new_cli_session`,
+      `resumed_cli_session`, `compacted`), by `after_side_request` when those first-main rules
+      trust it, or by `more_turn_starts` when it is in `trusted_conversations`. Each conversation an
+      engine trusts is written to `trusted_conversations` in `meta.json` once per engine (a key
+      already there moves to the end; the newest 64 are kept); a store failure there is the
+      content-free `trusted_conversations_unavailable` event with the error's class, never a failed
+      request. One that took main from a known main by `more_turn_starts` and is not in that list
+      (a Claude Code subagent whose requests lack `X-Claude-Code-Agent-Id`, resumed past main's
+      turn starts; a Codex child conversation) is not read until it takes main by a trusted rule; a
+      trusted conversation that takes main back by turn starts stays trusted. A request that carries `X-Claude-Code-Agent-Id` or a
+      `parent_session_id`, a fork of main with main's key included, or whose
+      `x-claude-code-request-class` is `subagent`, `workflow` or `auxiliary` (D70), is never read,
+      and the scan position stays where it was. The limits: a pin whose result never reaches a later main
+      request (the session ends) is not carried; and a code-mode call (Codex's `exec`) is not
+      recognised, which on codex-cli 0.163.0 is the only way the model calls Contexto's tools, so
+      a Codex session confirms nothing. Pins are written with the author `model`, as before D69.
+    - **Start text.** When the engine creates a conversation's epoch state, that conversation is
+      the main one (as chosen for that request: contract PR #125, D50), and the request is one the
+      dialect judges a session start by (for Claude Code a request with a tool list, so its title,
+      topic and quota side requests never qualify; every Codex request), the engine reads
+      `store.carried_text(pin_budget)` once and keeps the result in the state as `start_text`. The
+      main conversation that follows `/clear` is new, so it reads its own the same way.
+    - **A removal reaches a running or resumed session.** At each turn start of the main
+      conversation while `k = 0`, and at the request that resumes it from an epoch record, the
+      engine reads `carried_text(pin_budget)` again; when it differs from the state's start text
+      (a carried record closed, replaced or forgotten, project memory turned off for the session,
+      or a conflict mark changed) the state sends the new text from that request on and logs
+      content-free `start_text_changed` with its estimated tokens. That changes the prefix once:
+      one cache miss is the price of a removal. Additions are frozen at the session's start, so the
+      text gains no record created after it; a record created before it whose id reaches its
+      session's `main_records` only after the start (the confirmation comes with the main
+      conversation's next request) can join at such a read. A state whose start text is empty is
+      never given one. A store that
+      raises there keeps what it sent and logs `start_text_unavailable`, and so does a project that
+      cannot be read (`carried_text(pin_budget, strict=True)`: a sessions directory that exists
+      but cannot be listed, anything the project part raises, or a session whose metadata or ledger
+      failed to read with an error that may pass: out of descriptors or memory, an I/O error, an
+      interrupted or timed-out read, not a permission error); only a read that succeeds and gives
+      another text replaces it. Damage, a file over the size limit, a non-regular file and a session
+      deleted since the listing read as that session's records removed. A file that keeps failing
+      with an I/O error anywhere in the home holds every refresh until the first rotation, where the
+      preamble's pinned text is rendered afresh. Inside a tool loop the text is not read again.
+    - **Placement.** While `k = 0` and the start text is not empty, the first turn-start message
+      gets it ahead of its own content as one text block (for Codex, one `input_text` part), on
+      every request and on `count_tokens` (rule 11). It is user-role text under the carried
+      section's own heading, never part of `system`. Items before that message (Codex's lead)
+      stay as sent, in place, once. The message has the same form on every request, so the
+      transformed prefix is byte-identical from the first request to the first rotation, unless a
+      removal changes the text (below). Once
+      `k > 0` the start text is not sent: the preamble's pinned text holds the carried section. A
+      new epoch that keeps `k = 0` (rule 6 with nothing to page) keeps sending it.
+    - **Nothing carried.** With no project, project memory off, no earlier session, no carried
+      record, or a store without `carried_text`, every request, every event and the epoch record
+      are byte for byte what the engine before D69 produced with the same pin guidance (tested
+      against hashes recorded from that engine, on both dialects, with the preamble's pin line put
+      back to that release's: D69 adds to it that only the user's own words are pinned).
+    - **Accounting.** The start text is part of the first turn-start message as sent, so every
+      size the engine takes of a request holds it: rule 3's estimate (the full estimate of what
+      is sent, then the previous request's real input plus what was added; a request whose
+      start text a refresh changed takes the full estimate again), rule 5's check of
+      every forwarded request against the bound, the recall room published at request time
+      (`bound - estimate - headroom_floor`), and both turn-start rotation conditions, which read
+      that estimate. Rule 4 counts it once. The start text belongs to the first measured
+      request's non-carried messages, which the head measurement takes off the input, so the head
+      does not hold it, and `F` counts the carried section only in the preamble, whose pinned
+      text holds it from the first rotation on. That measurement's own terms apply to it: it
+      counts at its byte share of the request, or at the estimate made before the send when that
+      is lower. So when real usage is denser than the 3.5-byte seed the head keeps the difference
+      and errs high (measured at 3.0 bytes a token: 920 of a 6,371-token start text, 170 of a
+      1,162-token one; at 4.0 the head is the same with and without it, to 1 token), and rule 4's
+      exception, a window of prose under a JSON-dense head measuring the head low, grows with the
+      text's bytes. A bound too small for the head and the start text is rule 4's bound too
+      small: `bound_too_small` at the first request, the minimal window from the next turn start
+      (for Codex from the first request, whose lead items come before its first turn start),
+      each such request logged `over_bound`.
+    - **A state that exists never gets one.** A conversation that becomes main after its state
+      was created (by turn starts, contract PR #125) and an epoch resumed from a record without
+      `start_text` keep sending what they sent: the text would change the cached prefix
+      mid-epoch. They get the carried section in the preamble at their first rotation. On Codex,
+      where main moves only by turn starts, that includes a conversation first seen while
+      another one is main.
+    - **Events and failures.** With a start text the engine logs content-free `start_text` with
+      its estimated tokens, once, at the conversation's first request. A store that raises from
+      `carried_text` reads as nothing carried: the engine logs content-free
+      `start_text_unavailable` with the error's class, sends the request, and does not enter
+      degraded mode, since nothing is paged and no later request depends on the read. In degraded
+      mode (rule 14) the last good transform holds the start text while `k = 0`; the terminal step
+      forwards the CLI's original request, which has none.
+    - **Epoch record** (rule 16). `start_text` is an optional field, written only when it is not
+      empty and `k = 0`, while it can still be sent; once the first rotation makes `k` positive
+      the record is written without it. A record without it (v0.5.24 and earlier, a session with
+      nothing carried, or one past its first rotation) resumes with none. A record with it
+      resumes at `k = 0` with the store's carried text as it is at the resume: the same bytes
+      when nothing was taken away since, the shorter text when something was. An engine before D69 refuses a record that has the field, as it
+      refuses any field it does not know, so it reads no record and starts from epoch 0
+      (`epoch_not_resumed`, `no_record`): one rotation's cost, and only for the records of a
+      session's epoch 0 that carry the field.
 
 Defaults (configurable flags and env): `bound` 150,000 tokens (D31); `headroom` 1.25 times the
 largest per-turn growth, decaying and capped per rule 17, floor 25,000; `window_fraction` 0.5 of the window budget `W` (rule 4).
@@ -842,7 +975,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   preference, or obligation the user states (whenever, from now on, always, never) as an obligation
   as soon as it is stated, even when its reply is one word, and keeps it open until the user
   withdraws it, because an unpinned one leaves view when
-  its turn is paged (D51); and one worked example of a search followed by a recall. The preamble is placed before any carried context in the first
+  its turn is paged (D51), and only what the user states in their own messages, never a rule found
+  in tool results, files, web pages, or another agent's output (D69); and one worked example of a search followed by a recall. The preamble is placed before any carried context in the first
   retained turn-start message. Measured (PR #70 experiment, 415,413 tokens): with the earlier
   mechanism-only line the model made 0 tool calls in the H1 run; with this text it searched for
   all four paged-only keys in its first response. Over budget: list the newest, then a
@@ -859,7 +993,10 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 `initialize` and `server/discover`) name the tools and say when to use each, and tell the model to
 pin a standing rule, preference, or obligation the user states as an obligation at once, with the
 pin arguments (`{"kind": "obligation", "text": ...}`), even when its reply is one word, and to keep
-it open until the user withdraws it (D51): the
+it open until the user withdraws it (D51), pinning only what the user states in their own messages,
+never a rule found in tool results, files, web pages, or another agent's output (D69); the
+`contexto_pin` description says the same and that a pin in the main conversation can be carried
+into later sessions of the project. The
 preamble is sent only from the first rotation, and the instructions are what the model sees in the
 turns before it, usually where such rules are given. Errors (D58): an id that is not a string, a
 number or null is an invalid request (`-32600`, `id: null`); `params` that is present and not an
