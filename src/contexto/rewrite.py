@@ -1824,7 +1824,9 @@ def _rewrite(request: dict, state: EpochState | None, store: Store, config: Conf
         else:
             events.append({"event": "resync", "epoch": state.epoch, "kind": "window_changed",
                            "matched": match, "previous_messages": previous_n, "messages": n})
-            state = replace(state, last_input_tokens=None, inturn=inturn.clipped(state.inturn, match))
+            # D63: the in-turn edits before the change stand; a fold keeps only its whole rounds before it.
+            edits = inturn.clipped(state.inturn, match, messages, _dialect())
+            state = replace(state, last_input_tokens=None, inturn=edits)
         previous_n = match
 
     try:

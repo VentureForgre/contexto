@@ -326,9 +326,11 @@ def test_a_stub_keeps_the_blocks_keys_and_says_how_to_read_the_result_back():
     text = inturn.stub_text(inturn.MESSAGES, call, result, "pg_0123456789abcdef")
     stubbed = inturn.MESSAGES.with_stubs(item, {0: text})
     assert stubbed["content"][0] == {**result, "content": text} and stubbed["content"][1] == item["content"][1]
-    assert "tool: Bash\n" in text and "command: pytest -q " + "x" * 190 + " ...\n" in text
+    # A long command keeps its start and its end, its middle cut out and marked (Reviewer A, finding 9).
+    assert "tool: Bash\n" in text
+    assert "command: pytest -q " + "x" * 90 + " [... 210 characters ...] " + "x" * 100 + "\n" in text
     assert "was: 29 bytes, 3 lines, 1 image " in text and "page: pg_0123456789abcdef\n" in text
-    assert 'contexto_recall with page_id "pg_0123456789abcdef"' in text and "contexto_search" in text
+    assert 'the contexto_recall tool, call it with page_id "pg_0123456789abcdef"' in text and "contexto_search" in text
     assert text == inturn.stub_text(inturn.MESSAGES, copy.deepcopy(call), copy.deepcopy(result), "pg_0123456789abcdef")
 
 
@@ -434,25 +436,32 @@ def test_a_rewrite_right_after_a_rewrite_only_when_the_room_would_fall_under_min
 
     config = Config()
     line, trigger = inturn.page_line(config), inturn.trigger(config)
-    # Between the line and T (the output allowance): the room is still min_turn_room, so the prefix is not
-    # rewritten a second time in a row. The result is sized to land there, counted at 1.8 bytes a token.
     cli = after_first_batch()
     first = batches(cli)[0]
-    assert first["first_changed"] < first["messages"] - 1 and cli.state.inturn.rewrote == first["messages"]
-    size = int((line + 1_500 - cli.sent[-1].real - 150) * 1.8)
-    cli.results([output("wide", size)])
-    after = cli.send([("Read", {"file_path": "next.py"})])
-    event = after.events[-1]
-    assert "in_turn_batch" not in after.names and after.room >= config.min_turn_room
-    margin = inturn.fresh_margin(after.messages[-1:], cli.engine.estimator, ANTHROPIC)
-    assert line < event["estimate"] + margin <= trigger
+    previous_n = first["messages"]
+    assert first["first_changed"] < previous_n - 1 and cli.state.inturn.rewrote == previous_n
+    cli.results([output("next", 1_500)])  # the request right after the rewrite: a small result, no margin
+    request = cli.request()
+    messages, state = request["messages"], cli.state
+
+    def page(estimate: int) -> tuple[object, int | None, list[dict]]:
+        events: list[dict] = []
+        new, after = inturn.page(request, messages, previous_n, estimate, state, cli.store, config,
+                                 cli.engine.estimator, events)
+        return new, after, events
+
+    # Between the line and T (the output allowance): the room published is still min_turn_room, so the
+    # prefix is not rewritten a second time in a row.
+    new, after, events = page(line + 1_500)
+    assert new is state and after is None and not events
     # Over T, the room would fall under min_turn_room: the batch runs although the last request rewrote.
-    cli = after_first_batch()
-    size = int((trigger + 4_000 - cli.sent[-1].real - 150) * 1.8)
-    cli.results([output("wider", size)])
-    again = cli.send([("Read", {"file_path": "next.py"})])
-    assert "in_turn_batch" in again.names and again.room >= config.min_turn_room
-    assert next(e for e in again.events if e["event"] == "in_turn_batch")["unseen_results_stubbed"] == 0
+    # The estimate is what must be over T (the harness's rule counts the request, not the 1.8 count of a
+    # fresh result, which would rewrite prefixes that still fit).
+    new, after, events = page(trigger + 2_000)
+    (batch,) = [e for e in events if e["event"] == "in_turn_batch"]
+    assert batch["first_changed"] < previous_n and batch["unseen_results_stubbed"] == 0
+    assert after is not None and config.bound - after - config.headroom_floor >= config.min_turn_room
+    assert new.inturn.rewrote == len(messages)
 
 
 def test_over_the_bound_with_nothing_left_to_page_is_logged():
@@ -688,11 +697,16 @@ def test_a_store_failure_in_a_batch_degrades_and_sends_the_request_unpaged():
     assert cli.sent[-1].events[-1]["degraded"] is True
     assert any(e["in_tool_loop"] and e.get("degraded") for e in cli.events("over_bound"))
     assert len([s for s in cli.sent if "degraded_enter" in s.names]) == 1 and not batches(cli)
-    # The next turn start tries the store once, leaves degraded mode, and in-turn paging works again.
+    # Each later request of the loop over the line tries the store again (rule 14 as D63 amends it); once
+    # it works the engine leaves degraded mode and runs the batch on that request.
+    failed = len(cli.events("store_error"))
+    assert failed > 1  # each retry while the store was still broken stayed degraded, with no new degraded_enter
     store.broken = False
-    cli.send()
+    left = cli.send()
+    assert "degraded_leave" in left.names and "in_turn_batch" in left.names and not cli.state.degraded
+    assert left.estimate <= inturn.page_line(SMALL) and "degraded" not in left.events[-1]
     cli.prompt("Go on.")
-    assert "degraded_leave" in cli.send([("Read", {"file_path": "z.py"})]).names
+    cli.send([("Read", {"file_path": "z.py"})])
     cli.results([output("z", RESULT)])
     cli.loop(12, lambda r: output(f"again-{r}", RESULT))
     assert batches(cli) and cli.sent[-1].estimate <= SMALL.bound
@@ -940,8 +954,11 @@ def test_only_as_many_unread_results_are_stubbed_as_needed():
     assert_bound_held(cli)
     (batch,) = batches(cli)
     assert batch["trigger"] == "result" and batch["unseen_results_stubbed"] == 1 == batch["results_stubbed"]
-    results = cli.sent[-1].messages[-2]["content"]
-    assert results[0]["content"].startswith("[Contexto paged out") and results[1] == cli.history[-2]["content"][1]
+    results = cli.sent[-1].messages[-1]["content"]  # the final request ends with the results message
+    stubbed = [r["content"].startswith("[Contexto paged out") for r in results]
+    assert sorted(stubbed) == [False, True]  # one stubbed, the larger (equal here); the other read whole
+    whole = stubbed.index(False)
+    assert results[whole] == cli.history[-2]["content"][whole]
 
 
 class FailsOnce(MemoryStore):

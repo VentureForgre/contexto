@@ -80,10 +80,16 @@ STUB_MIN_RATIO = 2  # and at least this many times its stub
 FRESH_BYTES_PER_TOKEN = 1.8
 OUTPUT_ALLOWANCE_SHARE = 4  # the response's output allowance: min_turn_room over this
 HEADWAY_ROOMS = 2  # a batch leaves this many min_turn_room of growth before the line when it can
-LOCATOR_CHARS = 200  # characters of a path, command or input a stub shows
-NOTE_NAMES = 12  # tools and files a fold note lists
-LOCATOR_KEYS = ("file_path", "path", "notebook_path", "command", "pattern", "url", "query")
-PATH_KEYS = ("file_path", "path", "notebook_path")
+LOCATOR_CHARS = 200  # characters of a path, command or input a stub shows; a longer one loses its middle
+NOTE_NAMES = 12  # tool names a fold note counts
+NOTE_CALLS = 40  # calls a fold note lists, each with its locator
+NOTE_CALL_CHARS = 120  # characters of a locator in a fold note's list
+NOTE_CALLS_BUDGET = 1_600  # characters of the whole list
+# What a stub shows of a call, by the first key its input has: the command of a shell call, the pattern
+# or query of a search (with where it searched), else the address or the path of what it read or wrote.
+LOCATOR_KEYS = ("command", "pattern", "query", "url", "file_path", "notebook_path", "path")
+SEARCH_KEYS = ("pattern", "query")
+PATH_KEYS = ("file_path", "notebook_path", "path")
 PLACEHOLDER_PAGE = "pg_" + "0" * 16  # sizes a stub before its page is written; ids have one length
 RESULT_PAGE = "result"  # page kinds; a page without one is a whole turn
 ROUNDS_PAGE = "rounds"
@@ -140,7 +146,9 @@ class Round(NamedTuple):
     """One tool round of a turn: an assistant message and what follows up to the next one."""
 
     removed: tuple[int, ...]  # the indexes a fold takes out; a carried system message stays in place
-    foldable: bool  # False when a message of the round holds carried content, or is already folded
+    # False when a message of the round holds carried content or content the user put there
+    # (``MessagesInTurn.user_authored``): the round then stays where it is, and folds run around it.
+    foldable: bool
 
 
 class MessagesInTurn:
@@ -207,18 +215,26 @@ class MessagesInTurn:
         page = [{"role": "assistant", "content": [call]}] if call is not None else []
         return [*page, {"role": "user", "content": [result]}]
 
-    def describe(self, call: dict | None) -> tuple[str, str, str]:
-        """(tool name, locator line, arguments) of a call, for a stub."""
+    def describe(self, call: dict | None, limit: int = LOCATOR_CHARS) -> tuple[str, str, str]:
+        """(tool name, locator line, arguments) of a call, for a stub: what to run again to get the result
+        back. The locator is the call's command, its search pattern and where it searched, or the path
+        it read, exact but on one line (``_clip``); without any of them, its whole input."""
         name = call.get("name") if call is not None else None
         name = name if isinstance(name, str) and name else "unknown"
         tool_input = call.get("input") if call is not None else None
         arguments = canonical_json(tool_input) if isinstance(tool_input, (dict, list, str)) else "{}"
-        locator = f"input: {_clip(arguments)}"
+        locator = f"input: {_clip(arguments, limit)}"
         if isinstance(tool_input, dict):
-            for key in LOCATOR_KEYS:
-                if isinstance(tool_input.get(key), str) and tool_input[key]:
-                    locator = f"{key}: {_clip(tool_input[key])}"
-                    break
+            def text(key: str) -> str | None:
+                value = tool_input.get(key)
+                return value if isinstance(value, str) and value else None
+
+            key = next((key for key in LOCATOR_KEYS if text(key) is not None), None)
+            if key is not None:
+                locator = f"{key}: {_clip(text(key), limit)}"
+                where = next((text(k) for k in PATH_KEYS if text(k) is not None), None)
+                if key in SEARCH_KEYS and where is not None:
+                    locator += f" (in {_clip(where, limit)})"
         return name, locator, _clip(arguments)
 
     def with_note(self, item: dict, note: str) -> dict:
@@ -227,11 +243,30 @@ class MessagesInTurn:
         blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
         return {**item, "content": [*blocks, {"type": "text", "text": note}]}
 
+    def user_authored(self, item: dict) -> bool:
+        """Whether a user message inside a tool loop holds something the user put there, next to the tool
+        results: a text block that is not a context block (Claude Code's ``<system-reminder>`` text) and
+        not empty, an image, a document, any block that is not a ``tool_result``. Claude Code sends what
+        is typed after Esc this way, after ``[Request interrupted by user ...``, which counts too."""
+        if not isinstance(item, dict) or item.get("role") != "user":
+            return False
+        for b in _blocks(item):
+            if not isinstance(b, dict) or b.get("type") == "tool_result":
+                continue
+            if b.get("type") == "text":
+                text = b.get("text")
+                if not isinstance(text, str) or not text.strip() or _rw().is_context_block(b):
+                    continue
+            return True
+        return False
+
     def rounds(self, items: list[dict], start: int, end: int) -> list[Round]:
         """The tool rounds of ``items[start:end]`` in order, the newest included. A fold removes a
         round's assistant message, its tool-result message, any other user message and hook output; a
-        carried system message stays where it is. A round that holds carried content next to its results
-        (nested memory, D46) is not foldable: its rules would leave the request."""
+        carried system message stays where it is. A round is not foldable when it holds carried content
+        next to its results (nested memory, D46), whose rules would leave the request, or content the
+        user typed or pasted mid-turn (``user_authored``), which the model must keep seeing: it stays in
+        place, whole, and the folds before and after it leave it there."""
         rw = _rw()
         rounds: list[Round] = []
         current: list[int] | None = None
@@ -251,7 +286,7 @@ class MessagesInTurn:
                 if rw.classify_system(items, i) == rw.HOOK_OUTPUT:
                     current.append(i)
                 continue
-            if rw._is_tool_round(item) and rw._carried_at(item, False):
+            if (rw._is_tool_round(item) and rw._carried_at(item, False)) or self.user_authored(item):
                 foldable = False
             current.append(i)
         if current is not None:
@@ -259,8 +294,9 @@ class MessagesInTurn:
         return rounds
 
     def note_facts(self, items: list[dict]) -> tuple[int, list[str], list[str]]:
-        """(rounds, tool names, file paths) of folded messages, in order of first use."""
-        rounds, tools, paths = 0, [], []
+        """(rounds, tool names, calls) of folded messages, in order: a call is its tool name and locator
+        (``describe``), what the model needs to run it again."""
+        rounds, tools, calls = 0, [], []
         for item in items:
             if item.get("role") != "assistant":
                 continue
@@ -268,14 +304,10 @@ class MessagesInTurn:
             for b in _blocks(item):
                 if not (isinstance(b, dict) and b.get("type") == "tool_use"):
                     continue
-                if isinstance(b.get("name"), str) and b["name"]:
-                    tools.append(b["name"])
-                tool_input = b.get("input")
-                for key in PATH_KEYS:
-                    value = tool_input.get(key) if isinstance(tool_input, dict) else None
-                    if isinstance(value, str) and value:
-                        paths.append(value)
-        return rounds, tools, paths
+                name, locator, _ = self.describe(b, NOTE_CALL_CHARS)
+                tools.append(name)
+                calls.append(f"{name} {locator}")
+        return rounds, tools, calls
 
 
 MESSAGES = MessagesInTurn()
@@ -283,9 +315,18 @@ MESSAGES = MessagesInTurn()
 
 # Stubs and notes: pure functions of the CLI's blocks and the page id -----------------------------
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f\u2028\u2029]")
+
+
 def _clip(text: str, limit: int = LOCATOR_CHARS) -> str:
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[:limit] + " ..."
+    """``text`` on one line, so it cannot add a line a stub's format reads: each control character
+    becomes a space, nothing else changes (two spaces in a path stay two). Longer than ``limit``, its
+    middle is cut out and marked, so the start and the end (a file's name) stay."""
+    text = _CONTROL.sub(" ", text).strip()
+    if len(text) <= limit:
+        return text
+    keep = limit // 2
+    return f"{text[:keep]} [... {len(text) - 2 * keep:,} characters ...] {text[-keep:]}"
 
 
 def _was(size: Size) -> str:
@@ -313,13 +354,18 @@ def stub_text(hooks: Any, call: dict | None, result: dict, page_id: str) -> str:
                 f"arguments: {arguments}\n"
                 f"{_was(size)}\n"
                 "To get it back, call the tool again with the same arguments.]")
-    return ("[Contexto paged out this tool result to keep the request under its bound. Nothing was lost.\n"
+    # Worded for any conversation: one without Contexto's tools (a subagent given only some tools, or a
+    # head where tool search defers them) has the call above the stub to run again. Not a branch on the
+    # tool list, so the stub stays a pure function of the CLI's blocks and the page id.
+    return (f"[Contexto paged out this tool result to keep the request under its bound. The original is stored "
+            f"in page {page_id}.\n"
             f"tool: {name}\n"
             f"{locator}\n"
             f"{_was(size)}\n"
             f"page: {page_id}\n"
-            f'To read it, call contexto_recall with page_id "{page_id}" (pass the next offset to continue a long '
-            "page). contexto_search finds lines in it. You can also run the tool call again.]")
+            f'If you have the contexto_recall tool, call it with page_id "{page_id}" to read it (pass the next '
+            "offset to continue a long page); contexto_search finds lines in it. Without it, run the tool call "
+            "again.]")
 
 
 _STUB_PAGE = re.compile(r"\npage: (pg_[0-9a-f]{16})\n")
@@ -357,12 +403,20 @@ def _counted(names: list[str]) -> str:
     return ", ".join(shown) or "none"
 
 
-def _listed(names: list[str]) -> str:
-    unique = list(OrderedDict.fromkeys(names))
-    shown = [_clip(name) for name in unique[:NOTE_NAMES]]
-    if len(unique) > NOTE_NAMES:
-        shown.append(f"and {len(unique) - NOTE_NAMES} more")
-    return ", ".join(shown) or "none"
+def _calls(calls: list[str]) -> str:
+    """The calls a fold note lists, in order, up to ``NOTE_CALLS`` and ``NOTE_CALLS_BUDGET`` characters;
+    the rest are counted."""
+    shown: list[str] = []
+    used = 0
+    for call in calls[:NOTE_CALLS]:
+        if shown and used + len(call) + 2 > NOTE_CALLS_BUDGET:
+            break
+        shown.append(call)
+        used += len(call) + 2
+    text = "; ".join(shown) or "none"
+    if len(calls) > len(shown):
+        text += f"; and {len(calls) - len(shown):,} more calls"
+    return text
 
 
 _NOTES: OrderedDict[tuple[str, int], str] = OrderedDict()
@@ -370,24 +424,26 @@ _NOTES_LOCK = threading.Lock()  # engines of several sessions can share a proces
 
 
 def fold_note(hooks: Any, removed: list[dict], page_id: str) -> str:
-    """The note a fold leaves in the turn-start message: how many rounds, which tools and files, their
-    size, and the page. ``removed`` is what the page holds (a stubbed result stays a stub there). Kept
-    per page id, which names its content, so the messages are measured once per process."""
+    """The note a fold leaves in the turn-start message: how many rounds, which tools, the calls with
+    what each ran or read (enough to run them again where Contexto's tools are not available), their
+    size, and the page. ``removed`` is what the folded messages were as sent (a stubbed result is its
+    stub). Kept per page id and count, so the messages are measured once per process."""
     key = (page_id, len(removed))
     with _NOTES_LOCK:
         note = _NOTES.get(key)
         if note is not None:
             _NOTES.move_to_end(key)
             return note
-    rounds, tools, paths = hooks.note_facts(removed)
+    rounds, tools, calls = hooks.note_facts(removed)
     size = sum(len(canonical_bytes(m)) for m in removed)
     note = (f"[Contexto folded {rounds:,} earlier tool round{'s' if rounds != 1 else ''} of this turn into page "
-            f"{page_id} to keep the request under its bound. Nothing was lost.\n"
+            f"{page_id} to keep the request under its bound. They are stored in page {page_id}.\n"
             f"tools: {_counted(tools)}\n"
-            f"files: {_listed(paths)}\n"
+            f"calls: {_calls(calls)}\n"
             f"was: {size:,} bytes\n"
-            f'To read them, call contexto_recall with page_id "{page_id}" (pass the next offset to continue; the '
-            "page is long). contexto_search finds lines in it.]")
+            f'If you have the contexto_recall tool, call it with page_id "{page_id}" to read them (pass the next '
+            "offset to continue; the page is long); contexto_search finds lines in them. Without it, run the "
+            "calls again.]")
     with _NOTES_LOCK:
         _NOTES[key] = note
         while len(_NOTES) > _NOTE_CACHE_SIZE:
@@ -477,18 +533,35 @@ def after_epoch(edits: InTurn, k: int, strip_upto: int) -> InTurn:
         strips=_merged([(max(a, strip_upto), b) for a, b in edits.strips]))
 
 
-def clipped(edits: InTurn, matched: int) -> InTurn:
-    """Rule 10's resync inside the window: the CLI changed its history from ``matched`` on, so an edit
-    that names a message there no longer has one. Edits before it stand."""
+def clipped(edits: InTurn, matched: int, messages: list[dict], dialect: Any) -> InTurn:
+    """Rule 10's resync inside the window: the CLI changed its history from ``matched`` on (``messages``
+    is its new history), so an edit that names a message there no longer has one. Edits before it stand.
+
+    A fold keeps only whole rounds: it is cut back to the last round that ends before ``matched``, so
+    that no call stays folded while its results are sent, nor the other way round, whichever role the
+    message at ``matched`` has; a fold with no whole round left is dropped. Its note then lists what it
+    still folds, and its page (which holds the rest too) is unchanged. A thinking strip keeps its old
+    end (clipped to the new history's length): the thinking of a message after ``matched`` was produced
+    under the edits before it, which stand."""
     if edits == EMPTY or extent(edits) <= matched:
         return edits
+    n = len(messages)
+    starts_round = matched >= n or dialect.is_assistant(messages[matched])
     folds = []
     for start, ranges, page_id in edits.folds:
-        kept = tuple((a, min(b, matched)) for a, b in ranges if a < matched)
-        if start < matched and kept:
-            folds.append((start, kept, page_id))
+        removed = [i for a, b in ranges for i in range(a, b)]
+        if start >= matched or not removed:
+            continue
+        if removed[-1] >= matched:
+            # The cut: ``matched`` itself when a round starts there, else the call message of the round
+            # that ``matched`` is part of, which goes back into the request with the rest of its round.
+            calls = [i for i in removed if i < matched and dialect.is_assistant(messages[i])]
+            cut = matched if starts_round else (calls[-1] if calls else removed[0])
+            removed = [i for i in removed if i < cut]
+        if removed:
+            folds.append((start, _spans(removed), page_id))
     return edits._replace(stubs=tuple(s for s in edits.stubs if s[0] < matched), folds=tuple(folds),
-                          strips=_merged([(a, min(b, matched)) for a, b in edits.strips]))
+                          strips=_merged([(a, min(b, n)) for a, b in edits.strips if a < n]))
 
 
 # The epoch record (rule 16) -----------------------------------------------------------------------
@@ -576,22 +649,33 @@ def page(request: dict, messages: list[dict], previous_n: int, estimate: int, st
     the state unchanged and None when no batch ran.
 
     Rule 14: a store failure keeps the state from before the attempt and enters degraded mode; the
-    request is sent unpaged. Pages a failed batch already wrote are rewritten identically by the next."""
+    request is sent unpaged. Pages a failed batch already wrote are rewritten identically by the next.
+    In degraded mode every later request of the loop whose estimate passes the line retries: the batch
+    is attempted as if not degraded, and when it writes its pages the engine leaves degraded mode
+    (``degraded_leave``) and sends the batch; a failure stays degraded. A loop has no turn start to
+    retry at, and a subagent's has none at all, so waiting for one would leave it unbounded."""
     rw = _rw()
     dialect = rw._dialect()
     hooks = dialect.in_turn
-    if (hooks is None or not config.in_turn_paging or state.degraded
-            or not callable(getattr(store, "page_parts", None))):
+    if hooks is None or not config.in_turn_paging or not callable(getattr(store, "page_parts", None)):
         return state, None
     margin = fresh_margin(view(messages, state, dialect)[previous_n:], estimator, dialect)
     if estimate + margin <= page_line(config):
         return state, None
+    retry = state.degraded
     calls, attempt = rw.StoreCalls(store), []
     try:
-        new, after = _batch(request, messages, previous_n, estimate, margin, state, calls, config, estimator,
-                            attempt, hooks)
+        new, after = _batch(request, messages, previous_n, estimate, margin,
+                            replace(state, degraded=False) if retry else state, calls, config, estimator, attempt,
+                            hooks)
     except rw.STORE_FAILURES as error:
         return rw.enter_degraded(state, rw.store_failure(error, calls, state), events), None
+    if retry:
+        if after is None:  # no batch was due, so the store was not tried: still degraded
+            events.extend(attempt)
+            return state, None
+        events.append({"event": "degraded_leave", "epoch": state.epoch})
+        new = replace(new, conflict_page=None)
     events.extend(attempt)
     return new, after
 
@@ -677,9 +761,11 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         huge.append(c)
         least -= c.saving
     # A batch that changes earlier messages rewrites the cached prefix. The request right after one starts
-    # no other unless it would be over the bound; and none starts for less than min_turn_room.
+    # no other unless without it the request would publish less than min_turn_room (its estimate over
+    # T, the room's own line) or be over the bound; and none starts for less than min_turn_room.
     after_rewrite = state.inturn.rewrote == previous_n and state.inturn.rewrote > 0
-    may_rewrite = over_bound or (not after_rewrite and freeable >= config.min_turn_room)
+    may_rewrite = over_bound or (freeable >= config.min_turn_room
+                                 and (not after_rewrite or estimate > trigger(config)))
     if not (huge or may_rewrite):
         return state, None
     before = state
