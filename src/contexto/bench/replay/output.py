@@ -82,10 +82,24 @@ def manifest(script: Script, turns: int, measured: Any, version: str, pinned: bo
     }
 
 
-def notes(script: Script, pinned: bool) -> list[str]:
+def drops_note(rotations: int, compactions: int, peaks: dict[str, int]) -> str:
+    """Why each line of the request-size chart drops, and each line's largest request. The two drops
+    look alike on the chart and are not: a rotation keeps the old turns, a compaction replaces them.
+    The full-context line sets the y axis, so the other two peaks are given in numbers."""
+    return (f"The Contexto line drops at each of its {_plural(rotations, 'rotation')}: the proxy moves the oldest "
+            "turns out of the request to its store, where they stay searchable, and summarises nothing. The plain "
+            f"Claude Code line drops at each of its {compactions} modelled "
+            f"compaction{'' if compactions == 1 else 's'}, where Claude Code replaces the old turns with a summary. "
+            f"Largest request: Contexto {peaks['contexto']:,} tokens (estimated), plain Claude Code "
+            f"{peaks['plain']:,} and full context {peaks['full']:,} (modelled).")
+
+
+def notes(script: Script, pinned: bool, drops: str | None = None) -> list[str]:
+    """The notes printed under the chart and in ``results.json``; ``drops`` is ``drops_note``."""
     out = [
         "Synthetic: a generated session replayed through the real Contexto proxy against a local fake upstream. "
         "No model was called.",
+        *([drops] if drops else []),
         f"Request sizes are estimates, not token counts: {RATES_TEXT}, with no tokenizer.",
         "The full-context and plain Claude Code lines are modelled from the script, not run: one request per turn "
         f"on the script's own estimate ({lines.RATES_TEXT}).",
@@ -115,9 +129,13 @@ def results(script: Script, manifest_data: dict[str, Any], rows: list[dict[str, 
                                   for r in part]}
     plain = [r for r in rows if r["arm"] == "plain"]
     sizes = bench_script.estimate(script)
+    drops = None
+    if all(series[arm]["points"] for arm in series):
+        drops = drops_note(measured.rotations, lines.compactions(plain),
+                           {arm: max(y for _, y in series[arm]["points"]) for arm in series})
     return {
         "format": FORMAT, "kind": "replay", "manifest": manifest_data, "request_series": series,
-        "bound": script.bound, "notes": notes(script, pinned),
+        "bound": script.bound, "notes": notes(script, pinned, drops),
         "replay": {
             "turns": measured.turns, "requests": len(measured.requests), "max_input_estimated": measured.max_input,
             "over_bound": measured.over_bound, "rotations": measured.rotations,

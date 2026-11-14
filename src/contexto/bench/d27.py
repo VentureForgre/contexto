@@ -353,9 +353,9 @@ def build_script(seed: int, turns: int, turn_bytes: int, bound: int) -> tuple[Sc
 
 
 # Scoring: exact match after normalization, as spikes/m0/fidelity/scoring.py, except that an answer
-# line may be written in markdown, that a line in a blockquote is never read, and that a line in a
-# fenced code block yields to an answer for the same id outside any fence (contexto.bench.script.score
-# names the differences).
+# line may be written in markdown, that a line in a blockquote is never read, that a line in a fenced
+# code block yields to an answer for the same id outside any fence, and that a line restating the
+# probe's own question is no answer (contexto.bench.script.score names the differences).
 
 _TRIM = " \t\r\n\"'`*_.,;:!"  # the spike's, plus "*" and "_": markdown emphasis; no generated answer has either
 # After the leading "-", "*" and spaces are dropped (as the spike does): a list marker ("-", "*", "+", or a
@@ -384,6 +384,36 @@ def _fence(line: str) -> tuple[str, int] | None:
     return match.group(1)[0], len(match.group(1))
 
 
+def answer_lines(text: str) -> dict[str, list[str]]:
+    """Every answer read for each id, in the order ``parse_answers`` prefers them: the lines outside
+    any fence, last first, then the lines inside a fence, last first. ``script.score`` takes the first
+    that is not the probe's own question restated."""
+    outside: dict[str, list[str]] = {}
+    fenced: dict[str, list[str]] = {}  # answers read inside a code fence; an answer outside any fence wins
+    fence: tuple[str, int] | None = None
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if fence is not None:
+            mark = _fence(stripped)
+            if mark is not None and mark[0] == fence[0] and mark[1] >= fence[1] and not stripped.strip(mark[0]):
+                fence = None
+                continue
+            line = stripped.lstrip("-* ")
+            if not line.startswith(">") and (match := _ANSWER_LINE.match(line)):
+                fenced.setdefault(match.group(1), []).insert(0, match.group(2))
+            continue
+        line = stripped.lstrip("-* ")
+        if (mark := _fence(line)) is not None:  # also a fence opened in a list item ("- ```")
+            fence = mark
+            continue
+        if line.startswith(">") or stripped.startswith(">"):
+            continue
+        match = _ANSWER_LINE.match(line)
+        if match:
+            outside.setdefault(match.group(1), []).insert(0, match.group(2))
+    return {key: [*outside.get(key, []), *fenced.get(key, [])] for key in {**fenced, **outside}}
+
+
 def parse_answers(text: str) -> dict[str, str]:
     """Parse ``q_<id>: <answer>`` lines (``=`` also separates). The last line for an id wins; other
     lines are ignored. A line may be markdown: a list item or a numbered item, with ``**``, ``__`` or
@@ -398,30 +428,11 @@ def parse_answers(text: str) -> dict[str, str]:
     nothing else; a fence may open after a list marker; a fence never closed runs to the end of the
     text) is read, but an answer for the same id on a line outside any fence wins over it, wherever
     the two stand. So a reply that writes all its answers in a code fence is scored, and a note or
-    file the reply quotes in a fence after its answers cannot override them. The spike read only
-    ``q_<id>: x`` after leading ``-``, ``*`` and spaces, inside a code fence as well as outside, with
-    the last line winning; every other line it read is read the same."""
-    answers: dict[str, str] = {}
-    fenced: dict[str, str] = {}  # answers read inside a code fence; an answer outside any fence wins
-    fence: tuple[str, int] | None = None
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if fence is not None:
-            mark = _fence(stripped)
-            if mark is not None and mark[0] == fence[0] and mark[1] >= fence[1] and not stripped.strip(mark[0]):
-                fence = None
-                continue
-            line = stripped.lstrip("-* ")
-            if not line.startswith(">") and (match := _ANSWER_LINE.match(line)):
-                fenced[match.group(1)] = match.group(2)
-            continue
-        line = stripped.lstrip("-* ")
-        if (mark := _fence(line)) is not None:  # also a fence opened in a list item ("- ```")
-            fence = mark
-            continue
-        if line.startswith(">") or stripped.startswith(">"):
-            continue
-        match = _ANSWER_LINE.match(line)
-        if match:
-            answers[match.group(1)] = match.group(2)
-    return {**fenced, **answers}
+    file the reply quotes in a fence cannot override answers written outside any fence. Answers
+    written in a fence are not protected that way: among fenced lines the last still wins, so a later
+    fence that quotes answer-shaped lines overrides them. In this benchmark the only answer-shaped
+    lines a reply can quote are the probe turn's own questions, which ``script.score`` sets aside
+    (``answer_lines`` gives it every candidate). The spike read only ``q_<id>: x`` after leading
+    ``-``, ``*`` and spaces, inside a code fence as well as outside, with the last line winning; every
+    other line it read is read the same."""
+    return {key: lines[0] for key, lines in answer_lines(text).items()}

@@ -26,9 +26,17 @@ What is counted:
   then a range: the requests that were read, and that plus each unreadable request's reservation
   (``reserved_tokens``) priced at the model's highest per-token price
   (``prices.reservation_cost``). Without a reservation the cost is only a lower bound, and says so.
+- A request that has no record also bounds the cost: one the upstream got and never answered
+  (``unanswered_tokens`` on each attempt in the manifest) and one whose record a killed run cut short
+  (``counted_tokens`` in ``torn_lines``), and one the reservation journal has with no record, in flight
+  when a run was killed or its record cut short (``in_flight`` in the manifest). The live run kept
+  their reservations as spent, because the provider may have billed them, and the upper figure adds
+  them at the model's highest price. A torn record whose fragment named no unit is in the total over
+  every request only; one the journal counts (``counted_from: "journal"``) is counted as in flight.
 
 - A session whose manifest entry gives no count of its request records (``records.Run.unchecked``)
-  is named under "What was run": a ``requests.jsonl`` cut short at its end cannot be detected.
+  is named under "What was run": only a count shows a lost request record, so without one a record
+  lost anywhere in the session, or a ``requests.jsonl`` cut short, cannot be detected.
 
 Words. The manifest calls one arm on one seed, run once, a unit; ``results.md`` calls it a session
 throughout. A manifest ``label`` is printed in the title of ``results.md``, under "What this run
@@ -108,6 +116,10 @@ class _Group:
     probes: dict[Key, dict[str, dict[str, Any]]] = field(default_factory=dict)
     requests: dict[Key, list[dict[str, Any]]] = field(default_factory=dict)
     ttl: dict[Key, str] = field(default_factory=dict)
+    # Requests with no record, per unit and attempt (``_no_record``), and the torn records whose
+    # fragment named no unit of this model.
+    kept: dict[Key, dict[int, dict[str, int]]] = field(default_factory=dict)
+    kept_unplaced: dict[str, int] = field(default_factory=lambda: _nothing_kept())
 
 
 def label(arm: str) -> str:
@@ -170,6 +182,11 @@ def _group(runs: Sequence[records.Run]) -> dict[str, _Group]:
             origin[(model, key)] = position
             group.units[key] = unit
             group.ttl[key] = unit.get("cache_ttl") or manifest["cache_ttl"] or DEFAULT_CACHE_TTL
+            group.kept[key] = _unit_kept(unit)
+        for entry in manifest.get("torn_lines") or []:
+            _place_torn(group, entry)
+        for entry in manifest.get("in_flight") or []:
+            _place_in_flight(group, entry)
         for row in run.probes:
             group.probes.setdefault(records.unit_key(row), {})[row["id"]] = row
         for row in run.requests:
@@ -180,6 +197,75 @@ def _group(runs: Sequence[records.Run]) -> dict[str, _Group]:
             rows.sort(key=lambda r: (records.attempt(r), r["n"]))
         _check_group(group)
     return groups
+
+
+def _nothing_kept() -> dict[str, int]:
+    return {"unanswered": 0, "torn": 0, "in_flight": 0, "reserved_tokens": 0, "without_reservation": 0}
+
+
+def _unit_kept(unit: Mapping[str, Any]) -> dict[int, dict[str, int]]:
+    """A unit's requests that got no response, per attempt, with the reservations the run kept for
+    them: from each entry of ``attempts``, or from the unit itself when it has none."""
+    entries = [a for a in unit.get("attempts") or []] or [{**unit, "attempt": records.attempt(unit)}]
+    out: dict[int, dict[str, int]] = {}
+    for entry in entries:
+        kept = out.setdefault(entry["attempt"], _nothing_kept())
+        kept["unanswered"] += entry.get("requests_unanswered") or 0
+        kept["reserved_tokens"] += entry.get("unanswered_tokens") or 0
+    return out
+
+
+def _place_torn(group: _Group, entry: Mapping[str, Any]) -> None:
+    """Count a request record a killed run tore against its unit and attempt when the fragment named
+    them, else against the model's total only."""
+    if entry["file"] != "requests.jsonl" or entry["action"] != "moved":
+        return  # a probe line, or a whole record that only lost its newline (counted by its record)
+    if entry.get("counted_from") == "journal":
+        return  # counted with the journal's requests in flight (``_place_in_flight``)
+    key = (entry.get("arm"), entry.get("seed"), entry.get("repeat"))
+    if key in group.units and isinstance(entry.get("attempt"), int):
+        kept = group.kept.setdefault(key, {}).setdefault(entry["attempt"], _nothing_kept())
+    else:
+        kept = group.kept_unplaced
+    kept["torn"] += 1
+    if entry.get("counted_tokens") is None:
+        kept["without_reservation"] += 1
+    else:
+        kept["reserved_tokens"] += entry["counted_tokens"]
+
+
+def _place_in_flight(group: _Group, entry: Mapping[str, Any]) -> None:
+    """Count a request the reservation journal has with no record against its unit and attempt."""
+    key = (entry.get("arm"), entry.get("seed"), entry.get("repeat"))
+    if key in group.units and isinstance(entry.get("attempt"), int):
+        kept = group.kept.setdefault(key, {}).setdefault(entry["attempt"], _nothing_kept())
+    else:
+        kept = group.kept_unplaced
+    kept["in_flight"] += 1
+    reserved = entry.get("reserved_tokens")
+    if isinstance(reserved, int) and not isinstance(reserved, bool):
+        kept["reserved_tokens"] += reserved
+    else:
+        kept["without_reservation"] += 1
+
+
+def _no_record(group: _Group, keys: Iterable[Key], which: str = "all") -> dict[str, int]:
+    """The requests of ``keys`` that have no record: ``unanswered`` (no response from the upstream),
+    ``torn`` (a record a killed run cut short), ``in_flight`` (a journal entry with no record), the
+    tokens reserved for them and how many carry no reservation. ``which`` is ``all`` attempts, the
+    ``final`` one (the attempt the manifest names) or the ``earlier`` ones."""
+    out = _nothing_kept()
+    for key in keys:
+        at = records.attempt(group.units[key]) if key in group.units else 0
+        for attempt, kept in group.kept.get(key, {}).items():
+            if which == "all" or (attempt == at) == (which == "final"):
+                for name in out:
+                    out[name] += kept[name]
+    return out
+
+
+def _add(*counts: Mapping[str, int]) -> dict[str, int]:
+    return {name: sum(c[name] for c in counts) for name in _nothing_kept()}
 
 
 def _check_group(group: _Group) -> None:
@@ -274,7 +360,7 @@ def _retries(group: _Group, keys: Sequence[Key], table: Mapping[str, Any]) -> di
     earlier = {key: _earlier(group, key) for key in keys}
     rows = [r for of_key in earlier.values() for r in of_key]
     tokens = _tokens(rows)
-    cost, upper = _costs_of(group, earlier, table)
+    cost, upper = _costs_of(group, earlier, table, _no_record(group, keys, "earlier"))
     return {"sessions": sum(1 for key in keys if records.attempt(group.units[key]) > 0),
             "attempts": sum(records.attempt(group.units[key]) for key in keys),
             "requests": len(rows), "tokens": tokens["input"] + tokens["output"],
@@ -293,23 +379,28 @@ def _price_order(model: str, table: Mapping[str, Any]) -> list[str]:
 
 def _costs(group: _Group, keys: Iterable[Key],
            table: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, float] | None]:
-    """The cost of every request of ``keys``: see ``_costs_of``."""
-    return _costs_of(group, {key: group.requests.get(key, []) for key in keys}, table)
+    """The cost of every request of ``keys``, every attempt's requests with no record included: see
+    ``_costs_of``."""
+    keys = list(keys)
+    return _costs_of(group, {key: group.requests.get(key, []) for key in keys}, table, _no_record(group, keys))
 
 
-def _costs_of(group: _Group, rows: Mapping[Key, Sequence[Mapping[str, Any]]],
-              table: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, float] | None]:
+def _costs_of(group: _Group, rows: Mapping[Key, Sequence[Mapping[str, Any]]], table: Mapping[str, Any],
+              kept: Mapping[str, int] | None = None) -> tuple[dict[str, float], dict[str, float] | None]:
     """The cost of the requests whose usage was read, at every model of the table, and the upper
-    bound that adds each unreadable request's reservation at the model's highest price. The upper
-    bound is None when an unreadable request carries no reservation: then nothing bounds it.
-    ``rows`` holds the requests of each unit to price, at that unit's cache lifetime."""
+    bound that adds each unreadable request's reservation, and the reservations ``kept`` for
+    requests with no record (``_no_record``), at the model's highest price. The upper bound is None
+    when one of them carries no reservation: then nothing bounds it. ``rows`` holds the requests of
+    each unit to price, at that unit's cache lifetime."""
     lower = {model: math.fsum(price_tables.cost(_read(of_key), model, group.ttl[key], table)
                               for key, of_key in rows.items())
              for model in _price_order(group.model, table)}
     unread = _unreadable(r for of_key in rows.values() for r in of_key)
-    if unread["without_reservation"]:
+    kept = kept or _nothing_kept()
+    if unread["without_reservation"] or kept["without_reservation"]:
         return lower, None
-    return lower, {model: usd + price_tables.reservation_cost(unread["reserved_tokens"], model, table)
+    reserved = unread["reserved_tokens"] + kept["reserved_tokens"]
+    return lower, {model: usd + price_tables.reservation_cost(reserved, model, table)
                    for model, usd in lower.items()}
 
 
@@ -338,7 +429,8 @@ def _arm(group: _Group, arm: str, bound: int, table: Mapping[str, Any]) -> dict[
     sizes = [_input(r) for r in _read(requests)]
     compactions = [group.units[key]["compactions"] for key in keys]
     cost, upper = _costs(group, keys, table)
-    completed, completed_upper = _costs_of(group, {key: _final(group, key) for key in keys}, table)
+    completed, completed_upper = _costs_of(group, {key: _final(group, key) for key in keys}, table,
+                                           _no_record(group, keys, "final"))
     block = _proportion(rows)
     block = {"units": len(keys), "seeds": [key[1] for key in keys], **block}
     block.update({
@@ -347,6 +439,7 @@ def _arm(group: _Group, arm: str, bound: int, table: Mapping[str, Any]) -> dict[
         "by_class": {cls: _proportion(of_class) for cls, of_class in _by_class(rows).items()},
         "tokens": _tokens(requests),
         "unreadable": _unreadable(requests),
+        "no_record": _no_record(group, keys),
         "retries": _retries(group, keys, table),
         "max_input": max(sizes, default=0),
         "over_bound": sum(1 for size in sizes if size > bound),
@@ -622,7 +715,8 @@ def _series(group: _Group) -> dict[str, Any]:
 
 
 def _plain_compaction(group: _Group, bound: int) -> dict[str, Any] | None:
-    units = [(key, unit) for key, unit in group.units.items() if key[0] == "plain"]
+    units = sorted(((key, unit) for key, unit in group.units.items() if key[0] == "plain"),
+                   key=lambda item: (group.seeds.index(item[0][1]), item[0][2]))  # not the manifest's order
     if not units:
         return None
     values = [v for _, unit in units for v in unit["compaction_pre_tokens"]]
@@ -645,11 +739,13 @@ def _model_block(group: _Group, bound: int, table: Mapping[str, Any]) -> dict[st
     noise = {arm: _noise(group, arm) for arm in group.arms}
     pairs = {f"{a}_vs_{b}": _pair(group, a, b) for a, b in PAIRS if a in arms and b in arms}
     every = [r for rows in group.requests.values() for r in rows]
-    cost, upper = _costs(group, group.requests, table)
+    kept = _add(_no_record(group, group.units), group.kept_unplaced)
+    cost, upper = _costs_of(group, group.requests, table, kept)
     return {"arms": arms, "pairs": pairs, "noise": noise, "request_series": _series(group),
             "plain_compaction": _plain_compaction(group, bound),
             "all_requests": {"units": len(group.requests), "tokens": _tokens(every),
-                             "unreadable": _unreadable(every), "cost": cost, "cost_upper": upper,
+                             "unreadable": _unreadable(every), "no_record": kept, "cost": cost,
+                             "cost_upper": upper,
                              "retried_sessions": sum(1 for unit in group.units.values()
                                                      if records.attempt(unit) > 0)}}
 
@@ -767,7 +863,8 @@ def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any]
         "arms": None, "pairs": None, "noise": None, "plain_compaction": None, "all_requests": None,
         "by_model": None, "charts": [], "charts_skipped": [],
         "unchecked": [{"model": run.manifest["model"], "arm": key[0], "seed": key[1], "repeat": key[2],
-                       "attempts": list(attempts)} for run in runs for key, attempts in run.unchecked],
+                       "attempts": list(attempts), "last_attempt": _last_attempt(run, key)}
+                      for run in runs for key, attempts in run.unchecked],
     }
     if one:
         results.update(blocks[first.model])
@@ -871,28 +968,35 @@ def _what_was_run(results: Mapping[str, Any]) -> list[str]:
 UNCHECKED_SHOWN = 8  # sessions named one by one; more are counted
 
 
+def _last_attempt(run: records.Run, key: Key) -> int:
+    return next(records.attempt(u) for u in run.manifest["units"] if records.unit_key(u) == key)
+
+
 def _unchecked_words(results: Mapping[str, Any]) -> list[str]:
-    """The sentence about sessions whose request records the manifest does not count, if any."""
+    """The sentence about sessions whose request records the manifest does not count, if any. Only
+    the counts show a lost record (``records.read_run``), so without one a record lost anywhere in
+    the attempt goes unnoticed, as does a file cut short."""
     unchecked = results.get("unchecked") or []
     if not unchecked:
         return []
-    ran = sum(1 for u in results["manifest"]["units"] if u["status"] != "not_run")
-    if len(unchecked) >= ran:
-        return ["- The manifest gives no count of request records for any session, so a `requests.jsonl` cut short "
-                "at the end of a session cannot be detected."]
+    attempts = sum(records.attempt(u) + 1 for u in results["manifest"]["units"] if u["status"] != "not_run")
+    if sum(len(u["attempts"]) for u in unchecked) >= attempts:
+        return ["- The manifest gives no count of request records for any session, so a lost request record, or a "
+                "`requests.jsonl` cut short, cannot be detected."]
     several = len({u["model"] for u in unchecked}) > 1 or results["manifest"].get("model") is None
     names = []
     for u in unchecked[:UNCHECKED_SHOWN]:
         words = f"{_inline(u['arm'])}, seed {u['seed']}, repeat {u['repeat']}"
-        if u["attempts"] != [0]:
+        if u.get("last_attempt", 0) > 0:  # a session run more than once: say which of its attempts
             words += f", attempt{'s' if len(u['attempts']) > 1 else ''} {_and([str(a) for a in u['attempts']])}"
         names.append(f"{u['model']}, {words}" if several else words)
     if len(unchecked) > UNCHECKED_SHOWN:
         names.append(f"and {len(unchecked) - UNCHECKED_SHOWN} more")
     one = len(unchecked) == 1
     return [f"- The manifest gives no count of request records for {_plural(len(unchecked), 'session')} "
-            f"({'; '.join(names)}), so a `requests.jsonl` cut short at the end of {'it' if one else 'one of them'} "
-            "cannot be detected. Every other session's count was checked."]
+            f"({'; '.join(names)}), so a request record lost from {'it' if one else 'them'}, or a `requests.jsonl` "
+            f"cut short at the end of {'it' if one else 'one of them'}, cannot be detected. Every other count was "
+            "checked."]
 
 
 def _accuracy(block: Mapping[str, Any], h: str) -> list[str]:
@@ -1103,6 +1207,7 @@ def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str
                       f"{a['tokens']['output']:,}", f"{a['max_input']:,}", a["over_bound"],
                       "not applicable" if a["compactions"] is None else a["compactions"], a["http_errors"]]
                      for arm, a in block["arms"].items()])
+    lines += _no_record_words(block["all_requests"]["no_record"])
     if not any(a["retries"]["sessions"] or a["unreadable"]["requests"] for a in arms.values()):
         return [*lines, "No session was run more than once, and the usage of every request was read.", ""]
     priced = next((m for a in arms.values() for m in a["retries"]["cost"]), None)
@@ -1126,6 +1231,34 @@ def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str
     return lines
 
 
+def _no_record_words(kept: Mapping[str, int]) -> list[str]:
+    """The paragraph on requests that have no record, when there are any."""
+    if not kept["unanswered"] and not kept["torn"] and not kept["in_flight"]:
+        return []
+    parts = []
+    if kept["unanswered"]:
+        parts.append(f"{_plural(kept['unanswered'], 'request')} got no response from the upstream (the connection "
+                     "failed or closed before a status line)")
+    if kept["torn"]:
+        parts.append(f"a killed run cut short {_plural(kept['torn'], 'request record')}")
+    if kept["in_flight"]:
+        parts.append(f"{_plural(kept['in_flight'], 'request')} had been sent with no whole record when a run was "
+                     "killed (in flight, or the record cut short)")
+    many = kept["unanswered"] + kept["torn"] + kept["in_flight"] > 1
+    said = ", and ".join(parts)
+    return [f"{said[0].upper()}{said[1:]}, so "
+            f"{'they have' if many else 'it has'} no record in the table above. The live run kept "
+            f"{'their reservations' if many else 'its reservation'} as spent, because the provider may have billed "
+            f"{'them' if many else 'it'}, and the cost below counts "
+            f"{'them' if many else 'it'} in its upper figure.", ""]
+
+
+def _bounded(a: Mapping[str, Any]) -> bool:
+    """Whether an arm's cost is a range or a lower bound rather than one figure."""
+    return bool(a["unreadable"]["requests"] or a["no_record"]["reserved_tokens"]
+                or a["no_record"]["without_reservation"])
+
+
 def _usd_span(low: float, high: float | None) -> str:
     """One figure, a range up to an upper bound, or a lower bound when there is no upper one."""
     if high is None:
@@ -1143,9 +1276,12 @@ def _lifetime_words(prices: Mapping[str, Any]) -> str:
     used = {ttl for d in lifetimes for ttls in d["by_arm"].values() for ttl in ttls} or {prices["cache_ttl"]}
     assumed = any(d["assumed"] for d in lifetimes)
     if len(used) == 1:
-        return (f"Cache writes are priced at the {_rate(sorted(used, key=_lifetime_order))} for every arm, because "
-                "a request record does not carry its cache lifetime."
-                + (" The manifest does not record a cache lifetime, so 5 minutes is assumed." if assumed else ""))
+        rate = _rate(sorted(used, key=_lifetime_order))
+        if assumed:
+            return (f"Cache writes are priced at the {rate} for every arm. A request record does not carry its cache "
+                    "lifetime and the manifest does not record a cache lifetime, so 5 minutes is assumed.")
+        return (f"Cache writes are priced at the {rate} for every arm, the cache lifetime the manifest records; a "
+                "request record does not carry its own.")
     parts = []
     for d in lifetimes:
         arms_at: dict[tuple[str, ...], list[str]] = {}
@@ -1183,7 +1319,12 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, 
             "No row is a bill: what an account was charged depends on how it pays, and these are published prices "
             "only.")
     unread = {arm: a["unreadable"] for arm, a in arms.items() if a["unreadable"]["requests"]}
-    apart = ", apart from the requests whose usage could not be read (below)," if unread else ","
+    kept = {arm: a["no_record"] for arm, a in arms.items()
+            if a["no_record"]["reserved_tokens"] or a["no_record"]["without_reservation"]}
+    apart = (", apart from the requests whose usage could not be read or that have no record (below),"
+             if unread and kept else
+             ", apart from the requests whose usage could not be read (below)," if unread else
+             ", apart from the requests that have no record (below)," if kept else ",")
     lines = [f"{h} Cost at published prices", "",
              f"The token classes of each arm are {_basis_words(bases)}{apart} and are priced here at every model in "
              f"the price table, request by request. {rows} {bill} Each cell is USD per session, then the total "
@@ -1220,6 +1361,26 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, 
                          f"{'them' if many else 'it'}, each priced at the model's highest price per token in the "
                          "table, and is an upper bound if no request used more than its reservation. The cost is "
                          "between the two.")
+    for arm, k in kept.items():
+        many = k["unanswered"] + k["torn"] + k["in_flight"] > 1
+        parts = []
+        if k["unanswered"]:
+            parts.append(f"{_plural(k['unanswered'], 'request')} got no response from the upstream")
+        if k["torn"]:
+            parts.append(f"{_plural(k['torn'], 'request record')} {'were' if k['torn'] > 1 else 'was'} cut short "
+                         "by a killed run")
+        if k["in_flight"]:
+            parts.append(f"{_plural(k['in_flight'], 'request')} {'were' if k['in_flight'] > 1 else 'was'} in flight "
+                         f"(or {'their records' if k['in_flight'] > 1 else 'its record'} cut short) when a run was "
+                         "killed")
+        line = (f"- {label(arm)}: {' and '.join(parts)}, so {'they have' if many else 'it has'} no record. The live "
+                f"run counted {'their reservations' if many else 'its reservation'}, {k['reserved_tokens']:,} tokens, "
+                f"as spent, because the provider may have billed {'them' if many else 'it'}; the higher figure adds "
+                "those tokens at the model's highest price per token.")
+        if k["without_reservation"]:
+            line += (f" The run recorded no reservation for {k['without_reservation']} of them, so nothing bounds "
+                     "their cost and the figure is a lower bound.")
+        lines.append(line)
     retried = {arm: a["retries"] for arm, a in arms.items() if a["retries"]["sessions"]}
     for arm, r in retried.items():
         a = arms[arm]
@@ -1245,8 +1406,27 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, 
                  f"{total['tokens']['requests']:,} requests, {total['tokens']['input']:,} input and "
                  f"{total['tokens']['output']:,} output tokens, {_usd(total['cost'][first])} at the prices of "
                  f"{first}.")
-        u = total["unreadable"]
-        if u["requests"]:
+        u, k = total["unreadable"], total["no_record"]
+        if k["reserved_tokens"] or k["without_reservation"]:
+            parts = []
+            if u["requests"]:
+                parts.append(f"{_plural(u['requests'], 'more request')} could not have "
+                             f"{'their' if u['requests'] > 1 else 'its'} usage read")
+            if k["unanswered"]:
+                parts.append(f"{_plural(k['unanswered'], 'more request')} got no response")
+            if k["torn"]:
+                parts.append(f"{_plural(k['torn'], 'more request record')} {'were' if k['torn'] > 1 else 'was'} cut "
+                             "short")
+            if k["in_flight"]:
+                parts.append(f"{_plural(k['in_flight'], 'more request')} {'were' if k['in_flight'] > 1 else 'was'} "
+                             f"in flight (or {'their records' if k['in_flight'] > 1 else 'its record'} cut short) "
+                             "when a run was killed")
+            without = u["without_reservation"] + k["without_reservation"]
+            every = every.removesuffix(".") + "; " + " and ".join(parts) + (
+                f"; their reservations bring the cost to at most {_usd(total['cost_upper'][first])}."
+                if total["cost_upper"] is not None else
+                f"; nothing bounds the cost of {without} of them, so these figures are a lower bound.")
+        elif u["requests"]:
             every = every.removesuffix(".") + (
                 f"; {_plural(u['requests'], 'more request')} whose usage could not be read "
                 + (f"{'bring' if u['requests'] > 1 else 'brings'} the cost to at most "
@@ -1261,7 +1441,7 @@ def _cost_cell(a: Mapping[str, Any], model: str) -> str:
     be read, or a lower bound when nothing bounds it."""
     low, total = a["cost_per_unit"][model], a["cost"][model]
     sessions = _plural(a["units"], "session")
-    if not a["unreadable"]["requests"]:
+    if not _bounded(a):
         return f"{_usd(low)} ({_usd(total)} over {sessions})"
     if a["cost_upper"] is None:
         return f"{_usd(low)} or more ({_usd(total)} or more over {sessions})"

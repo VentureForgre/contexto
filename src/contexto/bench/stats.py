@@ -284,7 +284,7 @@ def seed_level(differences: Sequence[float], resamples: int = 10_000, seed: int 
         method = "monte-carlo"
     if n < SEED_INTERVAL_MIN_SEEDS:
         interval, note = None, SEED_INTERVAL_FEWER
-    elif len(set(values)) == 1:
+    elif max(values) - min(values) <= 1e-12:  # equal up to rounding: 70/72 - 68/72 is not bit-equal to 2/72
         interval, note = None, SEED_INTERVAL_SAME
     else:
         interval, note = t_interval(values), None
