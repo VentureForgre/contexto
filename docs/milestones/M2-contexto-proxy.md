@@ -554,15 +554,21 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
         paged; then the largest go first, until the rest fits. Otherwise older content is paged
         to make room, and the result is stubbed by a later batch once the model has read it. An
         unread result sits after the last thinking block, so stubbing it strips nothing and
-        changes no earlier message.
+        changes no earlier message. Steps 1 to 4 are sized from the request as step 0 leaves it:
+        `floor`, the target and the headway line are computed again after step 0 stubs a result.
+        Steps 0 to 4 use certain estimates only: a PDF whose pages are not certain (D60 counts it
+        as `PDF_MAX_PAGES`) counts as nothing in a batch, and while unread its D60 count is left
+        out of the batch's estimate, so it is sent whole once, as without in-turn paging
+        (`pdf_pages_uncertain` as before); once read, a later batch may stub it, counted as freeing
+        nothing. An `over_bound` the API's count then shows is logged from usage.
      1. Older tool results are replaced by stubs, oldest first, across the retained window
         (earlier retained turns included), never a result the model has not read. A text result is
         stubbed only when its content is at least 2,048 bytes and at least twice its stub, a byte
         rule, so the choice never depends on the measured ratio; a result holding an image or a
         document whenever its stub frees something (media is priced by pixels and pages); and only
         when its content is a string or text, image and document blocks (a tool reference is left
-        alone). A document result over the bound on its own is stubbed on arrival (step 0); other
-        documents are read whole first. The
+        alone). A document result over the bound on its own, by a certain estimate, is stubbed on
+        arrival (step 0); other documents are read whole first. The
         original goes to a result page (Store). The results of Contexto's own search, recall and
         state calls (D51) are copies of pages: they get a stub that gives the call's arguments,
         and no page.
@@ -581,11 +587,17 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
         then each earlier fold as its round numbers and page id. The note is at most 6,000 bytes,
         call ids included: it lists ids within 1,200 bytes, the newest fold's first and then whole
         folds before it, newest first, and names any other fold's rounds page as a whole, which
-        covers every call reachable from it. When the note would pass 6,000 bytes, every fold but
-        the newest is written to a folds page (kind `folds`) as its own note, with every call id
-        and its rounds page, and the note names that page instead of each; when it fills again, a
-        new folds page takes them all. Every folded call of the running turn is so reachable from
-        the request within three pages. The page holds the rounds as sent (a stubbed result as its stub), except
+        covers every call reachable from it. When the note would pass 6,000 bytes, the folds
+        since the previous folds page, but the newest, are written to a folds page (kind `folds`,
+        level 0) as their own notes, with every call id and its rounds page, and the note names
+        that page instead of each; each fold's note is stored once. When eight folds pages of one
+        level are named (`FOLDS_FANOUT`), a folds page of the next level names them instead, one
+        line each in fold-note form ("folded R earlier tool rounds of this turn (rounds a to b)
+        into K pages listed in page X", `listed under page` for a page of level 1 or more). Every
+        folded call of the running turn is so reachable from the request: through the index
+        levels (logarithmic in the number of folds pages, base 8), a folds page, the rounds page
+        and its result page. The note's last sentence says that without Contexto's tools only the
+        calls it lists can be run again. The page holds the rounds as sent (a stubbed result as its stub), except
         that a result of Contexto's own tools, which has no page, is held whole.
         A note goes on the turn-start message only, never into a results message, where the API
         wants the `tool_result` blocks first. The turn-start message and the newest round always
@@ -645,10 +657,12 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      `messages`. A loop request with strip ranges carries `in_turn_thinking` on its `request` event:
      counts of thinking blocks `kept_before` the first range, `stripped`, `kept_between` and
      `kept_after` the last (no content).
-   - **Search.** A hit from an in-turn page is marked `[this turn, paged result]` (`folded rounds`,
-     `list of folds`) on the line after its header; the search reply and the tool description say a
-     hit from an earlier turn is older than the conversation in view, while one marked this turn
-     can be newer than an earlier copy in view.
+   - **Search.** A hit from an in-turn page is marked with the turn the page was written in,
+     `[paged inside turn N, tool result]` (`folded rounds`, `list of folds`), on the line after its
+     header, from the page alone, so the same in every later turn (the server cannot tell the
+     running turn for certain); the search reply and the tool description say an unmarked hit is
+     older than the conversation in view, while one paged inside a turn can be newer than an earlier
+     copy in view.
    - **Switch.** `in_turn_paging` (default on), a configuration setting under rule 16's check:
      `contexto run --no-in-turn-paging`, or `CONTEXTO_IN_TURN_PAGING=0`. Off, a turn that grows
      past the bound is sent as is, as before D63. Restarting with it off in the middle of a loop
@@ -804,7 +818,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       epoch has in-turn edits (D63: `stubs` as message index, block index and page id, empty for
       one of Contexto's own results; `folds` as turn-start index, removed index ranges and page
       id; `strips` as index ranges; `batches`; `rewrote`, the message count of the last request
-      whose batch rewrote the prefix; positions and page ids, no conversation text); rule 19's
+      whose batch rewrote the prefix; `lists`, each folds page as turn-start index, folds covered,
+      page id and level, a level absent read as 0; `room_low`; positions and page ids, no
+      conversation text); rule 19's
       `start_text`, only when it is not empty and `k = 0` (D69); `untrusted`, `true` only for a
       main conversation the engine did not trust (rule 19, D69); the whole engine
       configuration (every setting, including the recall preamble options and budgets); the
@@ -1113,9 +1129,11 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   `rounds`: the tool rounds folded out of a running turn, as the CLI sent them, except that a
   result already stubbed stays a stub (its original is in its result page), so nothing is stored
   twice; a result of Contexto's own tools, which has no page, is held whole. `folds`: a turn's
-  earlier fold notes, once its note reached its cap. An in-turn page may carry `seq` (the CLI-history
-  index of its first message, so a turn's pages sort in order) and a result page `locator` (its call
-  as a stub names it); neither is in the id, and a page without them sorts by turn and id as before. `kind` is not part of the page id, which still hashes `{turn, messages}` only. An
+  fold notes since the previous folds page once its note reached its cap (level 0), or the folds
+  pages of the level below (an index). An in-turn page may carry `seq` (the CLI-history index of its
+  first message, so a turn's pages sort in order) and a result page `locator` (its call as a stub
+  names it) and `block` (its result's block index, so parallel results sort in their calls' order);
+  none is in the id, and a page without them sorts by turn and id as before. `kind` is not part of the page id, which still hashes `{turn, messages}` only. An
   in-turn page carries the turn number its turn gets when it is paged whole and does not count as
   a paged turn; a side conversation's (a subagent's) carries the main conversation's current
   turn number, so search's recency prior ranks it as recent. The index lists turn and rounds

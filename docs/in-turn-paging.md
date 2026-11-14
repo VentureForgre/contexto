@@ -25,8 +25,8 @@ the model reads it only when it could not be sent at all: when the system prompt
 the new results together would not fit even with everything older paged (a 300 KB dump, for
 example). The limit is on the sum of the results that arrived together: two parallel reads of 100 KB
 each can fit one at a time but not both, and then only as many are paged as needed, largest first;
-the rest are read whole. Otherwise Contexto makes room by paging older content, in this order,
-stopping as soon as it has freed enough:
+the rest are read whole. Then, sized from the request with any such result already a stub, Contexto
+makes room by paging older content, in this order, stopping as soon as it has freed enough:
 
 1. Replaces older tool results with stubs, oldest first.
 2. Pages the earlier turns still in the window, as a turn start would.
@@ -72,8 +72,13 @@ call again to see an image. A result that held a document (a PDF from `Read`) is
 model has read it, and its stub says so, with the page count when it is certain and the size:
 `was: 0 bytes, 0 lines, 1 document, 10 pages, 41,233 bytes (the page keeps it byte for byte, but
 recall shows text only, not a document's contents; run the call again to see the document)`. A
-document too large for the bound on its own is stubbed before the model reads it. Tool search
-results (`tool_reference`) are never stubbed.
+document too large for the bound on its own, by a page count Contexto is certain of, is stubbed
+before the model reads it. A PDF whose pages Contexto cannot count for certain is counted at the
+API's maximum of 600 pages so that it is never estimated low, which says nothing about its real
+size: it is sent whole once, as without in-turn paging (the session log records
+`pdf_pages_uncertain`), nothing older is paged to make room for that estimate, and a later batch may
+stub it once the model has read it. If the API's count then shows that request over the bound, the
+log records `over_bound`. Tool search results (`tool_reference`) are never stubbed.
 
 The wording is the same in every conversation. A subagent given only some tools, or a session where
 tool search has deferred Contexto's tools, may not have `contexto_recall`; the stub then tells the
@@ -99,19 +104,22 @@ tools: Grep x40, Read x12
 calls: Grep pattern: TODO (in src/a.py); Grep pattern: TODO (in src/b.py); Read file_path: src/c.py; ...; and 12 more calls
 call ids: toolu_01Ab... toolu_01Cd...; and 9 more, in the same page
 was: 48,224 bytes
-earlier folds of this turn: rounds 1 to 160 in 4 pages listed in page pg_51c0e2a9d8b74f13 (ids: ...); rounds 161 to 212 in pg_2b7d... (ids: ...)
-If you have the contexto_recall tool, call it with a page_id named here to read them (pass the next offset to continue; a page is long); contexto_search finds lines in them. Without it, run the calls again.]
+earlier folds of this turn: rounds 1 to 160 in 34 pages listed in page pg_51c0e2a9d8b74f13; rounds 161 to 198 in pg_2b7d06a1e94c3f58; rounds 199 to 212 in pg_7c19e5b0a2d48f63 (ids: toolu_01Ef... toolu_01Gh...)
+If you have the contexto_recall tool, call it with a page_id named here to read them (pass the next offset to continue; a page is long); contexto_search finds lines in them. Without it, you can run again the calls listed here; the other calls of these rounds are named only in those pages.]
 ```
 
 The newest fold is described in full: the `calls:` line lists its first 40 calls (at most 1,600
 characters), each with what it ran or read, so a conversation without Contexto's tools can run them
-again. Earlier folds are listed by their rounds and page. The note is never more than 6,000 bytes
-(about 2,000 tokens), call ids included: it lists the ids of the newest folds only, and each page it
-names holds, or leads to, every result of the rounds it stands for. When the note would pass that
-size, the earlier folds' own notes, each with every call id and its page, go into one folds page
-(not listed in the index; search and recall reach it) and the note names that page instead. The
-note then grows again by one short item a fold until the next folds page, so over 2,000 folded rounds
-it stays under 6,000 bytes.
+again; the note says that only those can be. Earlier folds are listed by their rounds and page. The
+note is never more than 6,000 bytes (about 2,000 tokens), call ids included: it lists the ids of the
+newest folds only, and each page it names holds, or leads to, every result of the rounds it stands
+for. When the note would pass that size, the notes of the folds since the previous folds page, each
+with every call id and its page, go into a new folds page (not listed in the index; recall reaches
+it) and the note names that page instead. Each fold's note is stored once. When the note names
+eight folds pages, an index page lists them and the note names it instead (`listed under page`);
+eight index pages get an index page of their own, and so on. The note then names a few pages
+however long the loop, and every result is a few pages from it: at 2,000 folds, 950,843 bytes of
+folds pages in all, about what the folds' own notes take once.
 
 ## Reading a result back
 
@@ -119,10 +127,10 @@ The stored page holds the tool call and its result exactly as Claude Code sent t
 
 - The model calls `contexto_recall` with the page id from the stub. A long page comes in chunks;
   each reply gives the offset of the next one.
-- `contexto_search` finds lines inside paged results, like any other page. A hit from a page of the
-  running turn is marked `[this turn, paged result]` (or `folded rounds`): it can be newer than an
-  older copy of the same file still in view, so the model is told to prefer the newest by turn, then
-  by position.
+- `contexto_search` finds lines inside paged results, like any other page. A hit from a page written
+  inside a turn is marked with that turn, `[paged inside turn 4, tool result]` (or `folded rounds`,
+  `list of folds`): it can be newer than an older copy of the same file still in view, so the model
+  is told to prefer the newest by turn, then by position. The mark is the same in every later turn.
 - From a terminal: `contexto recall pg_3f9c1a7b22d04e61 --session <id>` (add `--offset N` to read on).
 - The page index in the prompt lists whole turns and folded rounds. It does not list single
   results, which would crowd out everything else; the stub in the request names each one.

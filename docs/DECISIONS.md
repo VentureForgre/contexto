@@ -3605,6 +3605,27 @@ the owner's delegation. Open decisions are listed at the end with the options an
   after the first rotation. Before (merging D69): a bound too small for the carried records was not
   seen as tight, so with records carried it logged no `turn_room_low` where the same session whose
   head alone did not fit did (`tests/test_project_start_bound.py`).
+  Every later step of the batch is sized from the request as step 0 leaves it: what cannot be paged,
+  the target and the escalation line are computed again once step 0 has stubbed a result. Before
+  (Reviewer A at 7575c76f, finding 2) they still counted the stubbed result, so steps 1 to 3 did
+  nothing. With the defaults, 43 rounds of 6 KB reads and then a 400 KB result with three 40 KB
+  reads beside it went out at 119,343 with a room of 5,657: two of the 40 KB reads stubbed unread
+  and the 43 older results whole. Now the 400 KB result alone is stubbed, older content is paged,
+  and the three reads go out whole at 57,580 by the reviewer's fake upstream. At bound 40,000 the
+  reviewer's random session (seed 30) went over the bound three times with `in_turn_exhausted`
+  while stubbable results and foldable rounds were left; it no longer does, and the reviewer's 40
+  random sessions pass (`tests/test_inturn.py`, two cases).
+  Step 0 and step 4 use certain estimates only. A PDF whose pages are not certain counts as the
+  API's maximum under D60, so that it is never estimated low; step 0 took that count for "over the
+  bound on its own" and stubbed it on arrival on every read, so inside a tool loop the model could
+  never read it (Reviewer A at 7575c76f, finding 1: a one-page 22 KB PDF, three reads, three stubs;
+  5 of 80 PDFs on the reviewer's machine were not counted). Inside a batch such a PDF counts as
+  nothing: its D60 count leaves the batch's pressure while it is unread, so it is sent once as
+  v0.5.24 sends it (`pdf_pages_uncertain` logged as before, and the request's estimate-only
+  `over_bound` too), and nothing older is paged to make room for an estimate. Once read, a later
+  batch may stub it like any result, counted as freeing nothing. If the API's count then shows the
+  request over the bound, that is the `over_bound` logged from usage, as today. A PDF counted with
+  certainty over the bound is still stubbed on arrival.
   (b) The room at response time. The line is `T` less a quarter of `min_turn_room` (3,000), an
   allowance for the output: an output of up to 9,000 tokens still leaves half of `min_turn_room`.
   (c) The estimate of a result that has just arrived. For the trigger and every decision of a
@@ -3649,14 +3670,22 @@ the owner's delegation. Open decisions are listed at the end with the options an
   as its round numbers and page. Call ids are listed within 1,200 bytes, the newest fold's first and
   then the folds just before it, each whole or not at all; an older fold is named by its rounds page
   alone, a reference to the page as a whole that covers every call reachable from it. When the note
-  would pass 6,000 bytes, a folds page (kind `folds`, byte-exact and searchable) takes every fold but
-  the newest, each as its own note with every call id and its rounds page, and the note names that
-  page instead of each of them; when the note fills again, a new folds page takes them all again,
-  so a result is always within three pages of the note (folds page, rounds page, its result page).
-  The orchestrator's decision: before it, every folded call's id stayed in the note, about 31 bytes
-  a folded call, the one part that grew. Measured over 2,000 folded rounds (334 folds): the note
-  peaks at 5,996 bytes in every cycle, three folds pages of 77, 150 and 221 KB beside 1.66 MB of
-  rounds pages, and every folded result reachable from the note (`tests/test_inturn.py`). A note
+  would pass 6,000 bytes, a folds page (kind `folds`, byte-exact) takes the folds since the previous
+  folds page but the newest, each as its own note with every call id and its rounds page, and the
+  note names that page instead of each of them. Each fold's note is stored once. When eight folds
+  pages of one level are named, an index page of the next level (`FOLDS_FANOUT`) names them instead,
+  one line each in fold-note form ("folded R earlier tool rounds of this turn (rounds a to b) into K
+  pages listed in page X"), so the levels count like digits in base 8: the note names at most seven
+  pages a level, and three index levels reach 512 folds pages, a result then six pages from the
+  note. `lists` in the epoch record holds each folds page with its level; a record without a level
+  reads as level 0. Before (Reviewer A at 7575c76f, finding 5) each new folds page stored every
+  earlier fold's note again: 546 KB at 199 folds, 1.82 MB at 335, growing faster than the folds.
+  Measured at 2,000 one-round folds: 487,938 bytes of folds pages at 1,000 folds and 950,843 at
+  2,000, two index pages, each fold's note once (954,000 bytes in all), and every call reachable
+  within eight pages (`tests/test_inturn.py`). The orchestrator's decision: before the cap, every
+  folded call's id stayed in the note, about 31 bytes a folded call, the one part that grew.
+  Measured over 2,000 folded rounds (334 folds): the note never passes 6,000 bytes, and every folded
+  result is reachable from the note (`tests/test_inturn.py`). A note
   is built only when a fold is added. Before: one note per fold piled up (82
   notes, 31,478 bytes after 400 rounds with a 92,000-token head), and past 256 folds every note
   was rebuilt on every request.
@@ -3664,28 +3693,35 @@ the owner's delegation. Open decisions are listed at the end with the options an
   it byte for byte; the stub says it was a document, its page count when certain and its size, and
   that recall shows text only, so running the call again returns the document (the store's
   rendering has no text form of a document, so the stub says that rather than promising one). A
-  document result over the bound on its own is stubbed on arrival (`documents_over_bound` in the
-  event). Before (B1, B8): a PDF in every result folded every round and passed the bound at 996 of
+  document result over the bound on its own, by a certain estimate, is stubbed on arrival
+  (`documents_over_bound` in the event); an uncertain PDF never is (see (a)). Before (B1, B8): a PDF in every result folded every round and passed the bound at 996 of
   1,000 rounds; one damaged PDF made every request a rewrite.
   (j) Stub and note wording holds in any conversation and never branches on the tool list (with
   tool search on, Contexto's tools are deferred and absent from `tools`): "The original is stored
   in page ...; if you have the contexto_recall tool, call it with page_id ...; without it, run the
-  tool call again." "Nothing was lost" is gone. A stub names a call by what it ran or read: the
+  tool call again." "Nothing was lost" is gone. A fold note lists at most 40 calls of its newest
+  fold, so it says "without it, you can run again the calls listed here; the other calls of these
+  rounds are named only in those pages" (Reviewer A at 7575c76f, finding 6). A stub names a call by what it ran or read: the
   command of a shell call, the pattern or query of a search with where it searched, the URL, or
   the path, exact but on one line, the middle elided and marked past 200 characters (A4, A9).
   (k) Search and recall no longer say that the conversation in view is newer than any hit. A hit
-  from an in-turn page is marked `[this turn, paged result]` (or folded rounds), and the text says
-  that a hit from an earlier turn is older than the conversation in view while one marked this
-  turn can be newer than an earlier copy in view, so prefer the newest by turn, then by position
-  (B2). Contexto's own calls are still not searched (D51).
+  from an in-turn page is marked with the turn it was written in, `[paged inside turn 4, tool
+  result]` (or `folded rounds`, `list of folds`), and the text says that an unmarked hit is older
+  than the conversation in view while one paged inside a turn can be newer than an earlier copy in
+  view, so prefer the newest by turn, then by position (B2). The label comes from the page alone,
+  so it is the same in every later turn; the MCP server cannot tell the running turn for certain
+  (the in-view snapshot can be missing or stale), so no hit says "this turn". Before (Reviewer A at
+  7575c76f, finding 4) a turn-0 result searched in turn 6 was marked `[this turn, paged result]`.
+  Contexto's own calls are still not searched (D51).
   (l) Rule 14 inside a loop. After a store failure, each later request of the conversation whose
   estimate passes the line retries the batch; one that writes its pages leaves degraded mode
   (`degraded_leave`) and is sent paged. Before (A5): one `OSError` left a subagent's loop at 202,700
   at bound 60,000 until a turn start it never had.
   (m) `contexto sessions show` and the index: in-turn pages carry an optional `seq` (their first
   message's index in the CLI's history) so a turn's pages list in order, and a result page an
-  optional `locator` (its call as a stub names it); neither is in the page id, and pages without
-  them sort as before. Stub and note words are not taken as a page's identifiers (B6).
+  optional `locator` (its call as a stub names it) and `block` (its result's block index, so the
+  parallel results of one message list in their calls' order, not by page id); none is in the
+  page id, and pages without them sort as before. Stub and note words are not taken as a page's identifiers (B6).
   (n) Thinking shape in the log. The `request` event of a loop request with in-turn strips carries
   `in_turn_thinking`: counts of thinking blocks kept before the first strip range, stripped, kept
   between ranges and kept after the last, with no content.
@@ -3709,7 +3745,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   an assistant message and a user message) or `rounds` (folded tool rounds, a stubbed result
   staying a stub); absent, a whole turn, as every page written before. `kind` is not in the page
   id; `folds` (a turn's earlier fold notes, see (h)) came with the review round. Pages may also carry
-  `seq` and, a result page, `locator` (see (m)); neither is in the id, and older releases ignore both.
+  `seq` and, a result page, `locator` and `block` (see (m)); none is in the id, and older releases
+  ignore them.
   The index lists turn and rounds pages, not result or folds pages; search and recall reach all.
   In-turn pages do not advance `turns_paged`. The epoch record gains the optional `in_turn` field
   (positions and page ids; `lists` and `room_low` optional) and its configuration gains `in_turn_paging`. Old stores and records
