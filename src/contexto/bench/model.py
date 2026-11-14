@@ -223,8 +223,8 @@ class Script:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Script:
-        if not isinstance(data, dict) or data.get("format") != FORMAT:
-            found = data.get("format") if isinstance(data, dict) else type(data).__name__
+        found = data.get("format") if isinstance(data, dict) else type(data).__name__
+        if not isinstance(data, dict) or type(found) is not int or found != FORMAT:  # True is not 1
             raise ValueError(f"not a benchmark script of format {FORMAT} (found {found!r})")
         try:
             files = data["files"]
@@ -253,6 +253,8 @@ class Script:
         """Refuse a script whose parts do not fit together, so a damaged file fails here and not
         later with an index error or a file written outside the session. Each problem names its
         field; turn numbers in the messages count from 1."""
+        from contexto.bench.d27 import normalize  # d27 imports this module
+
         n = len(self.turns)
         if len(self.kinds) != n:
             raise ValueError(f"not a benchmark script: kinds: {n} turns but {len(self.kinds)} kinds")
@@ -275,6 +277,9 @@ class Script:
                 problems.append(f"probes: {p.id!r} has kind {p.kind!r}")
             if p.cls not in D27_CLASSES + NEW_CLASSES:
                 problems.append(f"probes: {p.id!r} has class {p.cls!r}")
+            if not normalize(p.answer):
+                problems.append(f"probes: {p.id!r} has an answer that is empty after normalisation, so no reply "
+                                "can score correct")
         problems += [f"paged_only: unknown probe {i!r}" for i in self.paged_only if i not in by_id]
 
         k = len(self.probe_turn_ids)
@@ -311,11 +316,16 @@ class Script:
                 problems.append(f"decisions: the value of {where} is not the answer of {d.probe!r}")
             if d.reply != f"DECISION {d.label}: {d.value}":
                 problems.append(f"decisions: the reply of {where} is not 'DECISION <label>: <value>'")
+            if 0 <= d.turn < n and (not d.label.strip() or f"DECISION {d.label}:" not in self.turns[d.turn]):
+                problems.append(f"decisions: the label of {where} is not asked for in that turn, so no reply "
+                                "can be judged right")
         problems += [f"decisions: decision turn {i + 1} has no decision" for i, kind in enumerate(self.kinds)
                      if kind == "decision" and i not in seen]
 
         for path in self.files:
-            problem = _path_problem(path)
+            parts = path.split("/")
+            above = next((a for a in ("/".join(parts[:i]) for i in range(1, len(parts))) if a in self.files), None)
+            problem = _path_problem(path) or (f"is below the file {above!r}" if above else None)
             if problem:
                 problems.append(f"files: {path!r} {problem}")
         for path in self.reads:
@@ -373,10 +383,13 @@ def _list(value: Any, field: str) -> list[Any]:
 
 def _path_problem(path: str) -> str | None:
     """What is wrong with a file path a script carries, or None. A path must be relative, use ``/``,
-    have no empty, ``.`` or ``..`` part, and lie under ``FILE_DIR``: the runner writes these files
-    into the session's working directory."""
+    hold no control character (U+0000 to U+001F), have no empty, ``.`` or ``..`` part, and lie under
+    ``FILE_DIR``: the runner writes these files into the session's working directory. A path below
+    another of the script's files is refused in ``Script._check_shape``."""
     if not path:
         return "is empty"
+    if any(ord(c) < 0x20 for c in path):  # NUL fails the write; a newline breaks the tool-loop turn's list
+        return "holds a control character"
     if "\\" in path:
         return "holds a backslash"
     if path.startswith("/") or re.match(r"^[A-Za-z]:", path):
@@ -402,3 +415,5 @@ def _loads(text: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"not JSON: {exc}") from exc
+    except RecursionError as exc:
+        raise ValueError("not JSON: nested too deeply to read") from exc

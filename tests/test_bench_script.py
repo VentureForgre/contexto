@@ -270,6 +270,20 @@ DAMAGE = [
     ("probes", lambda p: [{**p[0], "overlap": 1.5}, *p[1:]], "overlap"),
     ("probes", lambda p: [{**p[0], "kind": "list"}, *p[1:]], "probes: 'q_p_01' has kind 'list'"),
     ("probes", lambda p: [{**p[0], "cls": "riddle"}, *p[1:]], "probes: 'q_p_01' has class 'riddle'"),
+    # Reviewer B's nit 2 at 74bdf083:
+    ("files", lambda f: {"bench-files/a\x00b.txt": "x", **f}, "files: 'bench-files/a\\x00b.txt' holds a control"),
+    ("files", lambda f: {"bench-files/a\nb.txt": "x", **f}, "files: 'bench-files/a\\nb.txt' holds a control"),
+    ("files", lambda f: {"bench-files/a\tb.txt": "x", **f}, "files: 'bench-files/a\\tb.txt' holds a control"),
+    ("files", lambda f: {"bench-files/a\x1fb.txt": "x", **f}, "files: 'bench-files/a\\x1fb.txt' holds a control"),
+    ("reads", lambda r: ["bench-files/a\nb.txt", *r], "reads: 'bench-files/a\\nb.txt' holds a control"),
+    ("files", lambda f: {"bench-files/log-01.txt/x": "x", **f},
+     "files: 'bench-files/log-01.txt/x' is below the file 'bench-files/log-01.txt'"),
+    ("decisions", lambda d: [{**d[0], "label": "DX-0000", "reply": f"DECISION DX-0000: {d[0]['value']}"}, *d[1:]],
+     "decisions: the label of the decision for turn"),
+    ("decisions", lambda d: [{**d[0], "label": "", "reply": f"DECISION : {d[0]['value']}"}, *d[1:]],
+     "decisions: the label of the decision for turn"),
+    ("probes", lambda p: [{**p[0], "answer": "`\"`."}, *p[1:]], "probes: 'q_p_01' has an answer that is empty"),
+    ("probes", lambda p: [{**p[0], "answer": ""}, *p[1:]], "probes: 'q_p_01' has an answer that is empty"),
 ]
 
 
@@ -281,6 +295,18 @@ def test_from_json_refuses_a_damaged_script_and_names_the_field(v2, field, edit,
     kinds[0] = "chat"
     with pytest.raises(ValueError, match="kinds: unknown turn kind 'chat'"):
         Script.from_dict({**v2.to_dict(), "kinds": kinds})
+
+
+@pytest.mark.parametrize("found", [True, 1.0, "1", None, 2])
+def test_from_json_refuses_a_format_that_is_not_the_integer_1(v2, found):
+    with pytest.raises(ValueError, match=re.escape(f"not a benchmark script of format 1 (found {found!r})")):
+        Script.from_dict({**v2.to_dict(), "format": found})
+
+
+def test_from_json_refuses_json_nested_too_deeply_as_damage():
+    for text in ("[" * 200_000 + "]" * 200_000, '{"a":' * 200_000 + "1" + "}" * 200_000):
+        with pytest.raises(ValueError, match="not JSON: nested too deeply"):
+            Script.from_json(text)
 
 
 def test_from_json_accepts_both_protocols_undamaged():
