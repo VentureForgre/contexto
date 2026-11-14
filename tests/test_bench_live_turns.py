@@ -287,3 +287,21 @@ def test_the_plain_arms_compaction_requests_count_in_its_largest_input(env, tmp_
     inputs = [r["uncached"] + r["cache_write"] + r["cache_read"] for r in records if r["main"] or r["compaction"]]
     assert plain["max_input"] == max(inputs) and plain["over_bound"] == sum(1 for x in inputs if x > 70_000)
     assert plain["compaction_max_input"] == max(r["uncached"] + r["cache_write"] + r["cache_read"] for r in flagged)
+
+
+def test_the_upstream_defaults_to_the_environment_and_the_manifest_says_where_it_came_from(monkeypatch):
+    import argparse
+
+    from contexto.bench.modes import _live_options
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    args = argparse.Namespace(upstream=None)
+    assert (_live_options.upstream(args), _live_options.upstream_source(args)) == (
+        "https://api.anthropic.com", "default")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8317")
+    assert (_live_options.upstream(args), _live_options.upstream_source(args)) == ("http://127.0.0.1:8317",
+                                                                                  "environment")
+    args.upstream = "https://gw.example.test"
+    assert _live_options.upstream_source(args) == "flag"
+    note = runner.upstream_note("environment")
+    assert "$ANTHROPIC_BASE_URL (no --upstream was given)" in note and "never its host" in note
