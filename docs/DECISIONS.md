@@ -4396,11 +4396,14 @@ the owner's delegation. Open decisions are listed at the end with the options an
     is still the commit the merge was tested with; if it has moved, start again at (a). Pass
     `gh pr merge --match-head-commit <approved head>`, which guards the pull request's head, not
     `main`. This narrows the window in which another thread's merge can land first; it does not
-    close it while the ruleset does not require branches to be up to date (`strict=false`), which
-    D66 (4) names along with a merge queue as what would. Used: (a) for #263 with #273, #283 with #269 and #261 with #290; (b)
+    close it while the ruleset does not require branches to be up to date (`strict=false`). D66 (4)
+    names what would: requiring up-to-date branches, or a merge queue. Used: (a) for #263 with #273, #283 with #269 and #261 with #290; (b)
     for #263 with #281 (`CHANGELOG.md`), #276 with #288 (`CHANGELOG.md`, and `launcher.py`, where
     #288 changed `NoticeLog`, which #276 does not touch) and #261 with #293 (`docs/README.md` and
-    `docs/serve.md`), each after a scratch merge on which the tests above passed. #290 with #293 was not checked; see Incidents. Reason:
+    `docs/serve.md`), each after a scratch merge on which the pull request's own tests and those of
+    the shared files passed (for #261 with #293, `tests/test_events_doc.py` and
+    `tests/test_docs_links.py`); the replay and in-turn baseline tests joined the list after these
+    merges. #290 with #293 was not checked; see Incidents. Reason:
     a new review round for each move of `main` would never have caught up, and (a) and (b) leave
     the reviewed code unchanged while (c) is where a merge can change it.
   - **Incidents.**
