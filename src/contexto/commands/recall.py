@@ -31,7 +31,8 @@ def register(subparsers) -> None:
                     "rendering and limit as the MCP contexto_recall tool). `contexto sessions show` lists "
                     "the page ids; `contexto search` finds them with the offsets of their matching lines. "
                     "With --json, one object: session, page_id, offset, text, total_chars (the whole turn's "
-                    "length) and next_offset (the --offset that reads on, null at the end).")
+                    "length) and next_offset (the --offset that reads on, null at the end); with --from, "
+                    "from too: the earlier session's id (session), label and date, null for this session.")
     parser.add_argument("page_id", metavar="PAGE_ID",
                         help="the page to print, for example pg_0123456789abcdef")
     add_session_option(parser)
@@ -83,7 +84,11 @@ def run(args: argparse.Namespace) -> int:
     except ValueError as e:
         return fail(str(e))
     if args.json:  # next_offset says what the note below says
-        print(json.dumps({"session": session_id, "page_id": args.page_id, **chunk}, indent=2, sort_keys=True))
+        out = {"session": session_id, "page_id": args.page_id, **chunk}
+        if args.origin is not None:  # D69: the earlier session read, null when --from names this session
+            out["from"] = {"session": earlier.id, "label": json.loads(f'"{earlier.label}"'),
+                           "date": earlier.date} if earlier else None
+        print(json.dumps(out, indent=2, sort_keys=True))
         return EXIT_OK
     sys.stdout.write(chunk["text"])
     if chunk["text"] and not chunk["text"].endswith("\n"):

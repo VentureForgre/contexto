@@ -86,7 +86,9 @@ The API, for the engine, the launcher, the MCP server and the commands:
 - ``EarlierPages``, ``read_page(pages_dir, page_id)``: the pages of earlier sessions, for a search with
   ``scope: "project"`` and a recall with ``session`` (``SessionStore.search_earlier``,
   ``SessionStore.earlier_session`` and ``SessionStore.earlier_page``). Pages are read as the ledgers
-  are: without a lock, and with nothing created or logged in the session read.
+  are: without a lock, and with nothing created or logged in the session read. A search reads each
+  earlier session's last retained-window snapshot (``retained.json``) the same way, for what was still
+  in view when it ended (``InViewLine``): those lines are on no page, so they cannot be recalled.
 """
 
 from __future__ import annotations
@@ -112,13 +114,14 @@ from contexto.private import NotRegularFileError, open_private, read_regular, re
 from contexto.store.catalog import PageCatalog, load_page
 from contexto.store.ledger import LEDGER_FILE, LedgerCorruptError, _intact, _parse, _problems
 from contexto.store.model import _RECORD_ID, Record
+from contexto.store.render import retained_matches
 from contexto.store.search import rank
 from contexto.store.state import Conflict, State, derive
 
-__all__ = ["MAIN_RECORDS_KEPT", "Carried", "EarlierPages", "EarlierSearch", "EarlierSession", "Listing", "Member",
-           "NotEarlierSessionError", "Project", "SessionHits", "Skipped", "forget", "forget_cache", "main_record_ids",
-           "merged_main_records", "project_id", "project_root", "project_sessions", "read_meta", "read_page",
-           "read_records", "recorded_root", "session_date", "session_project", "shown_label"]
+__all__ = ["MAIN_RECORDS_KEPT", "Carried", "EarlierPages", "EarlierSearch", "EarlierSession", "InViewLine", "Listing",
+           "Member", "NotEarlierSessionError", "Project", "SessionHits", "Skipped", "forget", "forget_cache",
+           "main_record_ids", "merged_main_records", "project_id", "project_root", "project_sessions", "read_meta",
+           "read_page", "read_records", "recorded_root", "session_date", "session_project", "shown_label"]
 
 MAIN_RECORDS_KEPT = 4096  # record ids in a session's main_records; the oldest are dropped past it
 LEDGER_LIMIT = 64 << 20  # bytes of another session's ledger.jsonl read at most: a larger one is skipped unread
@@ -819,11 +822,15 @@ EARLIER_PAGES = 20_000
 # A later search finds the text of the sessions already read held, as far as the search budget goes,
 # and gets further.
 EARLIER_SECONDS = 30.0
-EARLIER_HITS = 3  # pages of one earlier session a search returns, its best
+EARLIER_HITS = 3  # matches of one earlier session a search returns, its best: lines in view when it ended, then pages
 _clock = time.monotonic  # what the deadline reads
 _PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")  # as ``contexto.store.check_page_id``
 # What a page file that is not a page record raises when it is loaded (``contexto.store.catalog.load_page``).
 PAGE_DAMAGE = (ValueError, KeyError, TypeError, AttributeError)
+# An earlier session's last retained-window snapshot (contract PR #125: its engine rewrote it at every main
+# request, ``{stamp, epoch, k, entries}``): the turns still in view when the session ended, which no page holds.
+RETAINED_FILE = "retained.json"
+RETAINED_LIMIT = 16 << 20  # bytes of an earlier session's retained.json read at most: a larger one is skipped unread
 
 
 class NotEarlierSessionError(LookupError):
@@ -847,6 +854,18 @@ class EarlierSession:
 
 
 @dataclass(frozen=True)
+class InViewLine:
+    """A matching line of what was in view when an earlier session ended (its last ``retained.json``). It is
+    on no page, so ``contexto_recall`` cannot read on from it: the line is all there is of it."""
+
+    turn: int  # the snapshot entry's turn: turn starts counted from 1, as the engine's snapshot counts them
+    message_index: int  # the entry's place in that session's history
+    start: int  # the part of the entry's text the line shows: text[start:end]
+    end: int
+    line: str
+
+
+@dataclass(frozen=True)
 class SessionHits:
     """What a project-scope search found in one earlier session."""
 
@@ -854,7 +873,9 @@ class SessionHits:
     label: str  # ``Project.label`` of it, as a reply shows it (``shown_label``)
     date: str  # the UTC date it was created, YYYY-MM-DD
     found: int  # its pages that hold the query and can be read
-    pages: tuple[tuple[str, dict[str, Any]], ...]  # the best of them, best first, at most EARLIER_HITS
+    pages: tuple[tuple[str, dict[str, Any]], ...]  # the best of them, best first
+    in_view: tuple[InViewLine, ...] = ()  # matching lines in view when it ended, newest first; before the pages
+    in_view_found: int = 0  # every matching line in view when it ended; with ``found``, all its matches
 
 
 @dataclass(frozen=True)
@@ -867,6 +888,7 @@ class EarlierSearch:
     skipped: int = 0  # sessions whose pages directory is missing, a symlink, or cannot be listed
     not_searched: int = 0  # older sessions left alone: beyond EARLIER_SESSIONS, EARLIER_PAGES or EARLIER_SECONDS
     pages: int = 0  # page files listed in the sessions searched
+    in_view_skipped: int = 0  # sessions searched whose retained.json could not be read: their pages only
 
 
 def shown_label(label: str) -> str:
@@ -884,6 +906,17 @@ def session_date(created: float) -> str:
 def _no_log(event: dict[str, Any]) -> None:
     """Where a catalog of another session's pages logs: nowhere. Its ``page_unreadable`` events name
     files of a session this process must not write to, and they are not this session's either."""
+
+
+def _parse_retained(data: bytes) -> tuple[dict[str, Any], ...]:
+    """The entries of a retained-window snapshot; ValueError for anything that is not one. Its stamp is
+    not compared with anything: it matters only to the session that wrote it, while that session runs."""
+    from contexto.store import read_retained  # the package imports this module
+
+    snapshot = read_retained(json.loads(data.decode("utf-8")))
+    if snapshot is None:
+        raise ValueError(f"{RETAINED_FILE} is not a retained-window snapshot")
+    return tuple(snapshot[3])
 
 
 def _real_directory(path: Path) -> None:
@@ -928,32 +961,78 @@ class EarlierPages:
     def __init__(self, own: PageCatalog) -> None:
         self._own = own
         self._catalogs: dict[str, PageCatalog] = {}  # by session id, newest session first
+        # session id -> (identity, entries, bytes counted) of its retained.json, for the sessions in _catalogs
+        self._snapshots: dict[str, tuple[Identity, tuple[dict[str, Any], ...], int]] = {}
 
     @property
     def held_bytes(self) -> int:
-        """Bytes of earlier sessions' search text held now."""
-        return sum(catalog.held_bytes for catalog in self._catalogs.values())
+        """Bytes of earlier sessions' search text held now: their pages' and their last snapshots'."""
+        return (sum(catalog.held_bytes for catalog in self._catalogs.values())
+                + sum(size for _, _, size in self._snapshots.values()))
 
     def _room(self, session_id: str) -> int | None:
-        """The budget ``session_id``'s catalog may hold: what the current session and the other earlier
-        sessions leave of the one budget (None: no limit)."""
+        """The budget ``session_id``'s catalog may hold: what the current session, the snapshots held and
+        the other earlier sessions' catalogs leave of the one budget (None: no limit)."""
         total = self._own.text_budget
         if total is None:
             return None
         others = sum(catalog.held_bytes for sid, catalog in self._catalogs.items() if sid != session_id)
-        return max(0, total - self._own.held_bytes - others)
+        snapshots = sum(size for _, _, size in self._snapshots.values())
+        return max(0, total - self._own.held_bytes - others - snapshots)
+
+    def _drop(self, session_id: str) -> None:
+        self._catalogs.pop(session_id, None)
+        self._snapshots.pop(session_id, None)
 
     def trim(self) -> None:
         """Let go of earlier sessions' text until it fits what the current session leaves of the budget,
-        the oldest session's first."""
+        the oldest session's first (a session's snapshot before its pages)."""
         total = self._own.text_budget
         if total is None:
             return
         left = total - self._own.held_bytes
-        for catalog in self._catalogs.values():
+        for sid, catalog in self._catalogs.items():
+            held = self._snapshots.get(sid)
+            if held is not None:
+                if held[2] > left:
+                    del self._snapshots[sid]
+                else:
+                    left -= held[2]
             if catalog.held_bytes > max(0, left):
                 catalog.set_text_budget(max(0, left))
             left -= catalog.held_bytes
+
+    def _snapshot(self, member: Member) -> tuple[dict[str, Any], ...] | None:
+        """The entries of ``member``'s last retained-window snapshot, () when it has none, None when it
+        cannot be used: not a regular file (a symlink, a FIFO: never opened), larger than
+        ``RETAINED_LIMIT`` (never read), unreadable, or not a snapshot. Read as the other files of an
+        earlier session are: no lock, nothing created or logged; held, while the budget leaves room for
+        its bytes, until the file changes."""
+        path = member.dir / RETAINED_FILE
+        try:
+            identity = _identity(path)
+            if identity is None:
+                self._snapshots.pop(member.id, None)
+                return ()
+            if identity[1] > RETAINED_LIMIT:
+                raise FileTooLargeError(f"{RETAINED_FILE} is larger than {RETAINED_LIMIT} bytes")
+            held = self._snapshots.get(member.id)
+            if held is not None and held[0] == identity:
+                return held[1]
+            self._snapshots.pop(member.id, None)
+            data = read_regular(path)
+            if len(data) > RETAINED_LIMIT:  # grew since the stat
+                raise FileTooLargeError(f"{RETAINED_FILE} is larger than {RETAINED_LIMIT} bytes")
+            entries = _parse_retained(data)
+        except (FileNotFoundError, NotADirectoryError):  # gone since the stat: a prune
+            return ()
+        except Exception:  # whatever one session's damage raises, it is that session's alone
+            self._snapshots.pop(member.id, None)
+            return None
+        room = self._room(member.id)
+        if room is None or len(data) <= room - self._catalogs[member.id].held_bytes:
+            self._snapshots[member.id] = (identity, entries, len(data))
+        return entries
 
     def _ranked(self, catalog: PageCatalog, query: str, allowed: int | None) -> tuple[list[str] | None, int]:
         """The session's matching page ids, best first, and how many page files it lists; None for a
@@ -973,21 +1052,27 @@ class EarlierPages:
 
     def search(self, project: Project, query: str) -> EarlierSearch:
         """Search the newest ``EARLIER_SESSIONS`` earlier sessions of ``project``, newest first, and
-        return the best ``EARLIER_HITS`` readable pages of each that has a match.
+        return the best ``EARLIER_HITS`` matches of each that has one: first the newest matching lines of
+        what was in view when it ended (its last ``retained.json``, matched as the current session's
+        window is, ``render.retained_matches``; at most ``EARLIER_HITS - 1`` when a page matches too, so
+        its best page is always shown), then its best readable pages.
 
         Read at most: the page files of those sessions, each once for ranking (not at all while its text
         is held), up to ``EARLIER_PAGES`` files in all and for ``EARLIER_SECONDS`` (then the older
-        sessions are left alone and counted), and for each session with a match its best pages once
-        more to show them. A session whose pages cannot be listed is skipped and counted; a page that
-        is damaged or was removed meanwhile is left out; none of it raises."""
+        sessions are left alone and counted), each searched session's ``retained.json`` (not while it is
+        held), and for each session with a match its best pages once more to show them. A session whose
+        pages cannot be listed is skipped and counted; a snapshot that cannot be used is left out and
+        counted (``in_view_skipped``), its session's pages searched as ever; a page that is damaged or
+        was removed meanwhile is left out; none of it raises."""
         started = _clock()
         members = project.earlier[:EARLIER_SESSIONS]
         not_searched = len(project.earlier) - len(members)
         order = {member.id: n for n, member in enumerate(members)}
         self._catalogs = {sid: catalog for sid, catalog in self._catalogs.items() if sid in order}
+        self._snapshots = {sid: held for sid, held in self._snapshots.items() if sid in order}
         self.trim()
         hits: list[SessionHits] = []
-        searched = skipped = listed = 0
+        searched = skipped = listed = unusable = 0
         for n, member in enumerate(members):
             if searched and _clock() - started > EARLIER_SECONDS:
                 not_searched += len(members) - n  # their held text stays: the next search may reach them
@@ -1001,12 +1086,12 @@ class EarlierPages:
                 catalog.set_text_budget(self._room(member.id))
                 found, count = self._ranked(catalog, query, EARLIER_PAGES - listed if searched else None)
             except OSError:  # gone (a prune), a symlink, or a directory that cannot be listed
-                self._catalogs.pop(member.id, None)
+                self._drop(member.id)
                 skipped += 1
                 continue
             if found is None:  # the page limit: this session and every older one are left alone
                 for older in members[n:]:
-                    self._catalogs.pop(older.id, None)
+                    self._drop(older.id)
                 not_searched += len(members) - n
                 break
             searched += 1
@@ -1024,9 +1109,16 @@ class EarlierPages:
                     gone += 1
                 else:
                     pages.append((page_id, page))
-            if pages:
+            entries = self._snapshot(member)
+            if entries is None:
+                unusable += 1
+            matched = retained_matches(list(entries or ()), query, asked=False)
+            lines = [InViewLine(*m) for m in matched[:EARLIER_HITS - (1 if pages else 0)]]
+            pages = pages[:EARLIER_HITS - len(lines)]
+            if pages or lines:
                 label = shown_label(project.label(member.id))
                 hits.append(SessionHits(member.id, label, session_date(member.created),
-                                        len(found) - gone, tuple(pages)))
+                                        len(found) - gone, tuple(pages), tuple(lines), len(matched)))
         self._catalogs = dict(sorted(self._catalogs.items(), key=lambda item: order[item[0]]))
-        return EarlierSearch(tuple(hits), searched, skipped, not_searched, listed)
+        self._snapshots = {sid: self._snapshots[sid] for sid in self._catalogs if sid in self._snapshots}
+        return EarlierSearch(tuple(hits), searched, skipped, not_searched, listed, unusable)

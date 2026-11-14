@@ -50,6 +50,7 @@ from contexto.store.render import (
     recall_chunk,
     recall_limit,
     render_page,
+    retained_matches,
 )
 from contexto.store.search import SHOWN_IN_DETAIL, Query, text_matches
 
@@ -87,6 +88,9 @@ SCOPES = ("session", "project")
 NO_HIT_SESSION = "No paged-out turn of this session contains every word of that query."
 EARLIER_HEADER = "[earlier sessions of this project, newest first:]"
 EARLIER_NONE = "[No earlier session of this project matches.]"
+# After the earlier part when it shows a line of an earlier session's last window: no page holds that line.
+EARLIER_IN_VIEW_NOTE = ("[A line in view when its session ended is on no page, so it cannot be recalled: the line is "
+                        "all of it.]")
 EARLIER_READ_ON = ('[Read on: contexto_recall {"page_id": ..., "offset": ..., "session": "<label on the page\'s '
                    'session line>"}]')
 NOT_EARLIER_SESSION = ('That "session" is not an earlier session of this project. Use the label on a [session ...] '
@@ -722,7 +726,9 @@ class Server:
         if earlier:
             extra.update(earlier_searched=earlier.found.searched, earlier_skipped=earlier.found.skipped,
                          earlier_matched=len(earlier.found.hits), earlier_not_searched=earlier.found.not_searched,
-                         earlier_hits=earlier.shown if shown else 0)
+                         earlier_hits=earlier.shown - earlier.in_view_shown(earlier.shown) if shown else 0,
+                         earlier_in_view_hits=earlier.in_view_shown(earlier.shown) if shown else 0,
+                         earlier_in_view_skipped=earlier.found.in_view_skipped)
         return ([{"type": "text", "text": text}, {"type": "text", "text": coverage}], None,
                 {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": len(found),
                  "in_view_hits": sum(1 for _, span in lead if span) if shown else 0,
@@ -749,19 +755,9 @@ class Server:
         snapshot = current() if callable(current) else None
         if snapshot is None:
             return None
-        found = []
-        q = Query.parse(query)
-        newest = max((e["turn"] for e in snapshot[3]), default=None)
-        for entry in snapshot[3]:
-            if entry["turn"] == newest and entry["role"] == "user":
-                continue  # the current turn's own question is what is asked, not a statement (B22, PR #143)
-            if q is None or not text_matches(entry["text"], q):  # a message matches as a page does (D34)
-                continue
-            every = entry["text"].count("\n") + 1  # ALL matching lines: the newest are chosen below
-            shown, _ = match_lines(entry["text"], q, context=0, per_page=every)
-            found += [(entry["turn"], entry["message_index"], start, end, text)
-                      for start, end, is_match, text in shown if is_match]
-        found.sort(key=lambda m: (m[0], m[1], m[2]), reverse=True)
+        # The current turn's own question is what is asked, not a statement (B22, PR #143); a message
+        # matches as a page does (D34).
+        found = retained_matches(snapshot[3], query)
         total[0] = len(found)
         if not found:
             return []
@@ -916,58 +912,78 @@ class _EarlierPart:
 
     For each earlier session with a match, newest session first: a line ``[session <label>, <date>:]``
     (the label ``contexto_recall`` takes as ``session``, and the UTC date the session was created), then
-    its best pages, each shown as a hit of the current session is. When the room or the per-call limit
-    cuts it, pages are left out from the end and one line says how many, and why. Then how many older
-    sessions were not searched and how many could not be read, when there are any, and last the line
+    its matching lines of what was in view when it ended (``> in view when it ended (turn N): ...``,
+    newest first, numbered as the current session's in-view lines are; on no page, so with no offset),
+    then its best pages, each shown as a hit of the current session is. When the room or the per-call
+    limit cuts it, matches are left out from the end and one line says how many, and why. Then how many
+    older sessions were not searched and how many could not be read, when there are any; when an
+    in-view line is shown, the line that says it cannot be recalled; and when a page is shown, the line
     that says how to read on. With no match in any earlier session the part is one line saying so."""
 
     def __init__(self, found: EarlierSearch, query: str) -> None:
         self.found = found
-        self.shown = 0  # pages in the reply as it was last built
-        self.sessions: list[tuple[str, list[list[Row]]]] = []  # each session's line, and the rows of each page
+        self.shown = 0  # matches (in-view lines and pages) in the reply as it was last built
+        # Each session's line, the rows of each of its matches (its in-view lines first), and how many
+        # of them are in-view lines.
+        self.sessions: list[tuple[str, list[list[Row]], int]] = []
         for hits in found.hits:
-            best = (f", the best {len(hits.pages)} of {hits.found} matching pages" if hits.found > len(hits.pages)
-                    else "")
-            self.sessions.append((f"[session {hits.label}, {hits.date}{best}:]", _with_context_header(
-                [(_hit_rows(page_id, page, query, hits.label), page)
-                 for page_id, page in _newest_first(list(hits.pages))])))
-        self.pages = sum(len(entries) for _, entries in self.sessions)
+            count, total = len(hits.pages) + len(hits.in_view), hits.found + hits.in_view_found
+            best = "" if total <= count else (f", the best {count} of {total} matches" if hits.in_view_found
+                                              else f", the best {count} of {total} matching pages")
+            in_view = [[(f"> in view when it ended (turn {max(0, line.turn - 1)}): {line.line}",
+                         ("earlier_in_view", line.turn, line.message_index, line.start, line.end))]
+                       for line in hits.in_view]
+            pages = _with_context_header([(_hit_rows(page_id, page, query, hits.label), page)
+                                          for page_id, page in _newest_first(list(hits.pages))])
+            self.sessions.append((f"[session {hits.label}, {hits.date}{best}:]", in_view + pages, len(in_view)))
+        self.pages = sum(len(entries) for _, entries, _ in self.sessions)  # every match that can be shown
 
-    def _taken(self, shown: int) -> list[tuple[str, list[list[Row]], int]]:
-        """Each session's line and the pages of it among the first ``shown``, and how many it has."""
+    def _taken(self, shown: int) -> list[tuple[str, list[list[Row]], int, int]]:
+        """Each session's line, its matches among the first ``shown``, how many it has, and how many of
+        its first matches are in-view lines."""
         out = []
-        for line, entries in self.sessions:
-            out.append((line, entries[:max(0, shown)], len(entries)))
+        for line, entries, lines in self.sessions:
+            out.append((line, entries[:max(0, shown)], len(entries), lines))
             shown -= len(entries)
         return out
 
     def rows(self, shown: int) -> list[Row]:
-        return [row for _, entries, _ in self._taken(shown) for entry in entries for row in entry]
+        return [row for _, entries, _, _ in self._taken(shown) for entry in entries for row in entry]
+
+    def in_view_shown(self, shown: int) -> int:
+        """How many in-view lines are among the first ``shown`` matches."""
+        return sum(min(len(entries), lines) for _, entries, _, lines in self._taken(shown))
 
     def text(self, shown: int, why: str) -> str:
-        """The part with its first ``shown`` pages; ``why`` is why the rest is not shown."""
+        """The part with its first ``shown`` matches; ``why`` is why the rest is not shown."""
         lines = []
+        in_view = self.in_view_shown(shown)
         if not self.sessions:
             lines.append(EARLIER_NONE)
         else:
             taken = self._taken(shown)
             if shown:
                 lines.append(EARLIER_HEADER)
-            for line, entries, _ in taken:
+            for line, entries, _, _ in taken:
                 if entries:
                     lines.append(line)
                     lines += [text for entry in entries for text, _ in entry]
-            left = [total - len(entries) for _, entries, total in taken if len(entries) < total]
+            left = [(total - len(entries), len(entries) < count)
+                    for _, entries, total, count in taken if len(entries) < total]
             if left:
-                lines.append(f"[{_count(sum(left), 'more matching page')} in {_count(len(left), 'earlier session')} "
-                             f"not shown; {why}]")
+                more = sum(n for n, _ in left)
+                noun = (("match" if more == 1 else "matches") if any(cut for _, cut in left)
+                        else ("matching page" if more == 1 else "matching pages"))
+                lines.append(f"[{more} more {noun} in {_count(len(left), 'earlier session')} not shown; {why}]")
         older, unread = self.found.not_searched, self.found.skipped
         if older:
             lines.append(f"[{_count(older, 'older session')} of this project {'was' if older == 1 else 'were'} "
                          "not searched]")
         if unread:
             lines.append(f"[{_count(unread, 'earlier session')} could not be read]")
-        if shown:
+        if in_view:
+            lines.append(EARLIER_IN_VIEW_NOTE)
+        if shown > in_view:
             lines.append(EARLIER_READ_ON)
         return "\n".join(lines)
 
@@ -1010,7 +1026,9 @@ def _spans(rows: list[Row]) -> list[dict[str, Any]]:
     that retained entry's text, with no page id, so they never credit recall (acceptance 3). Spans of an
     earlier session's page (D69) are ``{source: earlier, page_id, start, end}``: the same shape as a
     paged span, under a source of their own, since the page is not this session's (a copied session
-    directory can even hold the same page id) and the session it is in is never logged.
+    directory can even hold the same page id) and the session it is in is never logged. A line an earlier
+    session had in view when it ended is ``{source: earlier_in_view, turn, message_index, start, end}``
+    into that session's snapshot entry, with no page id and no session, so it never credits recall.
     """
     spans: list[dict[str, Any]] = []
     for _, span in rows:
@@ -1019,6 +1037,11 @@ def _spans(rows: list[Row]) -> list[dict[str, Any]]:
         if span[0] == "in_view":
             _, turn, index, start, end = span
             spans.append({"source": "in_view", "turn": turn, "message_index": index, "start": start, "end": end})
+            continue
+        if span[0] == "earlier_in_view":  # a line of an earlier session's last window (D69): no page, no session
+            _, turn, index, start, end = span
+            spans.append({"source": "earlier_in_view", "turn": turn, "message_index": index, "start": start,
+                          "end": end})
             continue
         source, (page_id, start, end) = ("earlier", span[1:]) if span[0] == "earlier" else ("paged", span)
         if (spans and spans[-1]["source"] == source and spans[-1].get("page_id") == page_id

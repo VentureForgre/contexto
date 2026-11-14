@@ -21,7 +21,7 @@ from contexto.commands._common import EXIT_OK, add_session_option, fail, say_ses
 from contexto.paths import contexto_home
 from contexto.store import PageUnreadableError, SessionNotFoundError, SessionStore
 from contexto.store.pages import current_stub, index_line
-from contexto.store.project import EARLIER_HITS, EARLIER_SESSIONS
+from contexto.store.project import EARLIER_HITS, EARLIER_SESSIONS, EarlierSearch, InViewLine
 from contexto.store.render import MATCHES_PER_PAGE, match_lines, matching_line_starts, render_page
 from contexto.store.search import Query, text_matches
 from contexto.store.sessions import select_session
@@ -47,7 +47,11 @@ def register(subparsers) -> None:
                     "line of context; for a long line text is an excerpt and offset is where the excerpt "
                     "starts), "
                     "matching_lines (how many lines match in the whole turn) and "
-                    "first_match_offset (null when only the index line matches).")
+                    "first_match_offset (null when only the index line matches). With --project too, "
+                    "earlier: null when the session has no project view, else searched, skipped, "
+                    "not_searched, in_view_skipped and sessions, each with session (its id), label (what "
+                    "--from takes), date, total (its matches), in_view (lines in view when it ended: turn "
+                    "and text; on no page, so not recallable) and hits (its best pages, as above).")
     parser.add_argument("words", nargs="+", metavar="WORDS", help="words to find, in any order and case")
     add_session_option(parser)
     parser.add_argument("--limit", type=_limit, default=DEFAULT_LIMIT, metavar="N",
@@ -56,9 +60,9 @@ def register(subparsers) -> None:
                         help="print JSON; no match is an empty hits list, and an error is still one line on stderr")
     parser.add_argument("--project", action="store_true",
                         help=f"also search the earlier sessions of the session's project (the newest "
-                             f"{EARLIER_SESSIONS}), read-only: the best {EARLIER_HITS} pages of each, under a "
-                             "line with the session's label and date; `contexto recall PAGE_ID --from LABEL` "
-                             "prints one")
+                             f"{EARLIER_SESSIONS}), read-only: the best {EARLIER_HITS} matches of each, under a "
+                             "line with the session's label and date, lines still in view when it ended first; "
+                             "`contexto recall PAGE_ID --from LABEL` prints a page")
     parser.set_defaults(func=run)
 
 
@@ -77,8 +81,10 @@ def run(args: argparse.Namespace) -> int:
         return fail(f"the pages of session {session_id} cannot be read: {e}")
     if args.json:  # the notes below are `total` and an empty `hits` here
         hits = [hit_json(page_id, page, query) for page_id, page in readable(store, found, args.limit)]
-        print(json.dumps({"session": session_id, "query": query, "total": len(found), "hits": hits},
-                         indent=2, sort_keys=True))
+        out = {"session": session_id, "query": query, "total": len(found), "hits": hits}
+        if args.project:
+            out["earlier"] = earlier_json(store.search_earlier(query), query)
+        print(json.dumps(out, indent=2, sort_keys=True))
         return EXIT_OK
     shown = 0
     for page_id, page in readable(store, found, args.limit):
@@ -126,8 +132,9 @@ def hit_json(page_id: str, page: dict, query: str) -> dict:
 
 def search_earlier(store: SessionStore, query: str, after_hits: bool) -> None:
     """Print what the earlier sessions of the session's project hold of ``query`` (D69): for each with a
-    match, newest first, a line with its label and date as the MCP tool shows them, then its best pages.
-    Those sessions are only read: nothing is locked, logged or created in them."""
+    match, newest first, a line with its label and date as the MCP tool shows them, then its lines still
+    in view when it ended and its best pages. Those sessions are only read: nothing is locked, logged or
+    created in them."""
     session_id = store.session_id
     found = store.search_earlier(query)
     if found is None:
@@ -137,22 +144,52 @@ def search_earlier(store: SessionStore, query: str, after_hits: bool) -> None:
     for hits in found.hits:
         if after_hits:
             print()
-        best = f", the best {len(hits.pages)} of {hits.found} matching pages" if hits.found > len(hits.pages) else ""
+        count, total = len(hits.pages) + len(hits.in_view), hits.found + hits.in_view_found
+        best = "" if total <= count else (f", the best {count} of {total} matches" if hits.in_view_found
+                                          else f", the best {count} of {total} matching pages")
         print(f"[session {hits.label}, {hits.date}{best}:]")
-        print("\n\n".join("\n".join(hit_lines(page_id, page, query, session_id, hits.label))
-                          for page_id, page in hits.pages))
+        for line in hits.in_view:
+            print(f"> in view when it ended (turn {shown_turn(line)}): {line.line}")
+        if hits.pages:
+            if hits.in_view:
+                print()
+            print("\n\n".join("\n".join(hit_lines(page_id, page, query, session_id, hits.label))
+                              for page_id, page in hits.pages))
         after_hits = True
-    if found.hits:
+    if not found.hits:
+        print(f"no earlier session of this project contains every word of {query!r}", file=sys.stderr)
+    if any(hits.in_view for hits in found.hits):
+        print("[a line in view when its session ended is on no page: contexto recall cannot print it]",
+              file=sys.stderr)
+    if any(hits.pages for hits in found.hits):
         print(f"[to print a page of an earlier session: contexto recall PAGE_ID --session {session_id} "
               "--from LABEL --offset N]", file=sys.stderr)
-    else:
-        print(f"no earlier session of this project contains every word of {query!r}", file=sys.stderr)
     if found.not_searched:
         print(f"[{found.not_searched} older session{'' if found.not_searched == 1 else 's'} of this project not "
               "searched]", file=sys.stderr)
     if found.skipped:
         print(f"[{found.skipped} earlier session{'' if found.skipped == 1 else 's'} could not be read]",
               file=sys.stderr)
+
+
+def shown_turn(line: InViewLine) -> int:
+    """The turn of a line in view as search shows it: the page numbering (from 0), as the MCP tool does."""
+    return max(0, line.turn - 1)
+
+
+def earlier_json(found: EarlierSearch | None, query: str) -> dict | None:
+    """The earlier sessions' part for ``--json`` (D69): what ``search_earlier`` prints, as fields; None
+    when the session has no project view. ``label`` is the session's label itself (what ``--from``
+    takes), not its escaped form the text shows."""
+    if found is None:
+        return None
+    return {"searched": found.searched, "skipped": found.skipped, "not_searched": found.not_searched,
+            "in_view_skipped": found.in_view_skipped,
+            "sessions": [{"session": hits.session, "label": json.loads(f'"{hits.label}"'), "date": hits.date,
+                          "total": hits.found + hits.in_view_found,
+                          "in_view": [{"turn": shown_turn(line), "text": line.line} for line in hits.in_view],
+                          "hits": [hit_json(page_id, page, query) for page_id, page in hits.pages]}
+                         for hits in found.hits]}
 
 
 def hit_lines(page_id: str, page: dict, query: str, session_id: str, earlier: str | None = None) -> list[str]:

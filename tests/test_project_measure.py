@@ -271,10 +271,26 @@ def test_two_sessions_one_project_search_reaches_every_paged_fact_and_a_session_
         "tail_facts_reached_project_scope": len(reached(second, "project", TAIL))})
 
 
-@pytest.mark.xfail(strict=True, reason="D69 finding: a project-scope search reads only an earlier session's pages, "
-                   "so what it said in its last retained window (never paged out when it ended) cannot be reached")
 def test_two_sessions_a_fact_said_in_the_last_turns_of_the_first_session_is_reachable(two):
-    assert reached(two.second, "project", TAIL) == [f.key for f in TAIL]
+    """The first session's last turns were never paged out; its last retained-window snapshot holds them,
+    and a project-scope search shows the line under the session, as in view when it ended."""
+    first, second = two.first, two.second
+    assert reached(second, "project", TAIL) == [f.key for f in TAIL]
+    assert reached(second, "session", TAIL) == []
+    turns = fact_turns(first, TAIL)
+    by_key = {c.arguments["query"]: c for c in second.searches("project")}
+    for fact, turn in zip(TAIL, turns):
+        call = by_key[fact.key]
+        lines = call.text.splitlines()
+        line = next(x for x in lines if fact.value in x)
+        assert line == f"> in view when it ended (turn {turn}): {fact.line}"
+        assert lines[lines.index(line) - 1].startswith(f"[session {first.label}, ")
+        assert mcp.EARLIER_IN_VIEW_NOTE in lines and mcp.EARLIER_READ_ON not in lines  # no page to read on
+        assert call.event["earlier_in_view_hits"] == 1 and call.event["earlier_hits"] == 0
+        spans = call.event["returned"]
+        assert [s["source"] for s in spans] == ["earlier_in_view"] and "page_id" not in spans[0]
+    for fact in FACTS:  # a paged fact is on a page, not in the last window
+        assert "in view when it ended" not in by_key[fact.key].text
 
 
 def test_two_sessions_sizes(two):
