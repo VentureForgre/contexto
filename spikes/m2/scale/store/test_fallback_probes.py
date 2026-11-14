@@ -508,6 +508,29 @@ def test_a_page_the_fallback_returns_twice_is_counted_and_keeps_its_first_rank(t
         fallback_bench.summarize(tmp_path)
 
 
+def test_a_page_id_the_fallback_returns_that_is_not_in_the_store_is_counted(small, tmp_path: Path, monkeypatch):
+    home, _, ids = small
+    stranger = "pg_" + "f" * 16
+    assert stranger not in ids
+    monkeypatch.setattr(SessionStore, "search_approximate",
+                        lambda self, query: [Hit(stranger), Hit(ids[0]), Hit(stranger)], raising=False)
+    with (tmp_path / "quality.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fallback_bench.QUALITY_FIELDS)
+        writer.writeheader()
+        fallback_bench.quality(home, SMALL, ids, writer)
+    rows = rows_of(tmp_path)
+    fallback = [r for r in rows if r["source"] == "fallback"]
+    assert fallback and all((r["returned"], r["duplicates"], r["unknown"]) == ("2", "1", "1") for r in fallback)
+    assert all(r["unknown"] == "0" for r in rows if r["source"] != "fallback")
+    summary = fallback_bench.summarize(tmp_path)
+    assert f"- probes the fallback answered with a page id that is not in the store: {len(fallback)} of " \
+           f"{len(fallback)} (0 is right)." in summary
+    assert fallback_bench.measures(tmp_path)["fallback answers with a page id not in the store"] == \
+        f"{len(fallback)} of {len(fallback)}"
+    write_quality(tmp_path, [quality_row(0, "typo", "tune", source="fallback", returned=3)])  # a run from before
+    assert "not in the store: 0 of 1 (0 is right)." in fallback_bench.summarize(tmp_path)
+
+
 def test_score_counts_a_probe_at_k_only_when_every_expected_page_is_in_the_top_k():
     ranked = [f"pg_{i}" for i in range(12)]
     assert fallback_bench.score(["pg_2"], ranked) == {"ranks": "3", "top3": True, "top10": True, "any3": True,
@@ -801,6 +824,11 @@ def test_one_part_run_again_keeps_the_other_parts_record(run, tmp_path: Path, sa
         warning = [line for line in fallback_bench.summarize(out / "before").splitlines()
                    if "were not measured on the same" in line]
         assert len(warning) == 1 and named in warning[0], (change, warning)
+        assert "has no it" not in warning[0]
+    (out / "before" / "env.json").write_text(
+        json.dumps({**env, "latency": {**env["latency"], "search_approximate": True}}), encoding="utf-8")
+    assert "`search_approximate` (the quality part's store does not have it, the latency part's has it)" in \
+        fallback_bench.summarize(out / "before")
     assert not safe_home.exists()
 
 
@@ -823,6 +851,12 @@ def test_compare_refuses_latency_runs_that_timed_different_queries(run, tmp_path
     assert fallback_bench.main(["--compare", str(out / "one"), str(out / "two")]) == 2
     captured = capsys.readouterr()
     assert captured.out == "" and "timed different queries" in captured.err and timed[-1][1] in captured.err
+    assert f"Only in {out / 'two'}: none." in captured.err and "order" not in captured.err  # a subset, not an order
+    env["latency"]["queries"] = {str(SMALL): timed[::-1]}  # the same queries, timed in another order
+    (out / "two" / "env.json").write_text(json.dumps(env), encoding="utf-8")
+    assert fallback_bench.main(["--compare", str(out / "one"), str(out / "two")]) == 2
+    captured = capsys.readouterr()
+    assert "timed the same queries in a different order" in captured.err and "Only in" not in captured.err
     # a run from before the list was recorded: the list is read from its latency.csv
     del env["latency"]["queries"]
     (out / "two" / "env.json").write_text(json.dumps(env), encoding="utf-8")
@@ -860,6 +894,16 @@ def test_the_store_home_may_not_be_the_real_contexto_home(tmp_path: Path, safe_h
     fallback_bench.refuse_live_home(safe_home / ".contexto-bench")  # a sibling is not the live home
     fallback_bench.refuse_live_home(tmp_path / "live-bench")
     assert not out.exists() and not safe_home.exists() and not (tmp_path / "live").exists()  # nothing was written
+
+
+def test_the_store_home_guard_expands_a_tilde_in_contexto_home_as_contexto_does(tmp_path: Path, safe_home, monkeypatch):
+    monkeypatch.setenv("CONTEXTO_HOME", "~/chome")  # Contexto opens $HOME/chome, not ./~/chome
+    out = tmp_path / "results"
+    for under in ("", "x", "sessions/d65"):
+        with pytest.raises(SystemExit, match="CONTEXTO_HOME"):
+            fallback_bench.main(["--sizes", "20", "--out", str(out), "--store-home", str(safe_home / "chome" / under)])
+    fallback_bench.refuse_live_home(safe_home / "chome-bench")
+    assert not out.exists() and not safe_home.exists()
 
 
 def test_sigterm_removes_the_temporary_store(tmp_path: Path, safe_home, monkeypatch):
@@ -909,6 +953,15 @@ def test_the_fixed_timed_probes_are_strict_misses_of_the_6000_page_store():
     rows = {r["id"]: r for r in rows_of(BEFORE)}
     fixed = [i for _, ids in fallback_bench.TIMED_PROBES for i in ids]
     assert [i for i in fixed if rows[i]["source"] != "none"] == []
+
+
+def test_the_checked_in_before_run_is_whole_current_and_comparable_with_itself(capsys):
+    env = json.loads((BEFORE / "env.json").read_text(encoding="utf-8"))
+    timed = env["latency"]["queries"]["6000"]
+    assert len(timed) == 34 and {kind for kind, _ in timed} >= {kind for kind, _ in fallback_bench.TIMED_PROBES}
+    assert (BEFORE / "summary.md").read_text(encoding="utf-8") == fallback_bench.summarize(BEFORE)
+    assert fallback_bench.main(["--compare", str(BEFORE), str(BEFORE)]) == 0
+    assert "| latency, first miss_typo of the process, s |" in capsys.readouterr().out
 
 
 def latency_rows(passes: dict[int, dict[str, float]], miss: dict[int, dict[str, float]]) -> list[dict]:
@@ -997,16 +1050,16 @@ def test_latency_pass_warms_the_cache_and_times_the_first_search_in_both_orders(
     assert "Pass 3 has no pair" in fallback_bench.summarize(tmp_path)
 
 
-class SlowFirstMiss(FakeChild):
-    """A child with a one-time cost: its first strict miss takes ``extra`` seconds more."""
+class SlowFirstOf(FakeChild):
+    """A child with a one-time cost: its first call of ``query`` takes ``extra`` seconds more."""
 
-    def __init__(self, seconds: float, calls: list, extra: float) -> None:
+    def __init__(self, seconds: float, calls: list, extra: float, query: str = "stagng DB port") -> None:
         super().__init__(seconds, calls)
-        self.extra, self.paid = extra, False
+        self.extra, self.query, self.paid = extra, query, False
 
     def call(self, name: str, arguments: dict) -> tuple[float, str]:
         seconds, text = super().call(name, arguments)
-        if arguments["query"] == "stagng DB port" and not self.paid:
+        if arguments["query"] == self.query and not self.paid:
             self.paid = True
             return seconds + self.extra, text
         return seconds, text
@@ -1015,7 +1068,7 @@ class SlowFirstMiss(FakeChild):
 def test_a_one_time_cost_of_the_first_strict_miss_shows_in_the_summary(run, tmp_path: Path):
     _, home = run
     calls: list = []
-    sides = {"tree": lambda h, s: SlowFirstMiss(0.01, calls, 3.0), "baseline": lambda h, s: FakeChild(0.01, calls)}
+    sides = {"tree": lambda h, s: SlowFirstOf(0.01, calls, 3.0), "baseline": lambda h, s: FakeChild(0.01, calls)}
     queries = [("rare", "E4127"), ("miss_typo", "stagng DB port")]
     with (tmp_path / "latency.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fallback_bench.LATENCY_FIELDS)
@@ -1027,6 +1080,62 @@ def test_a_one_time_cost_of_the_first_strict_miss_shows_in_the_summary(run, tmp_
     assert "| first strict miss | stagng DB port | 3.010 | 0.010 | 301.00 | passes 1-2: 301.00 |" in summary
     assert fallback_bench.measures(tmp_path)["latency, first strict miss of the process, s"].startswith(
         "3.010 (baseline 0.010); tree / baseline paired 301.00")
+
+
+def test_a_one_time_cost_on_the_first_typo_of_a_process_shows_in_the_miss_typo_first_call_row(run, tmp_path: Path):
+    """The cost lands on a miss that is not the process's first: only the first-call row of its kind shows it."""
+    _, home = run
+    calls: list = []
+    sides = {"tree": lambda h, s: SlowFirstOf(0.01, calls, 3.0, "stagng DB port"),
+             "baseline": lambda h, s: FakeChild(0.01, calls)}
+    queries = [("rare", "E4127"), ("miss_identifier", "streamChunkedV3"), ("miss_typo", "stagng DB port"),
+               ("miss_typo", "Redis eviction polciy")]
+    with (tmp_path / "latency.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fallback_bench.LATENCY_FIELDS)
+        writer.writeheader()
+        for pass_no in (1, 2, 3, 4):
+            fallback_bench.latency_pass(home, SMALL, pass_no, 5, queries, writer, sides)
+    summary = fallback_bench.summarize(tmp_path)
+    for line in ("| miss_typo | 2 | 0.010 | 0.010 | 1.00 | 1.00 to 1.00 |",  # the steady state hides it
+                 "| miss_identifier | 1 | 0.010 | 0.010 | 1.00 | 1.00 to 1.00 |",
+                 "| first strict miss | streamChunkedV3 | 0.010 | 0.010 | 1.00 | passes 1-2: 1.00; passes 3-4: 1.00 |",
+                 "| first miss_identifier | streamChunkedV3 | 0.010 | 0.010 | 1.00 | "
+                 "passes 1-2: 1.00; passes 3-4: 1.00 |",
+                 "| first miss_typo | stagng DB port | 3.010 | 0.010 | 301.00 | "
+                 "passes 1-2: 301.00; passes 3-4: 301.00 |",
+                 "| pass | went first | miss_identifier | miss_typo |",
+                 "| 1 | tree | 1.00 | 301.00 |", "| 2 | baseline | 1.00 | 301.00 |"):
+        assert line in summary, line
+    assert "| first rare" not in summary  # strict hits have no first-call row
+    measured = fallback_bench.measures(tmp_path)
+    assert measured["latency, first miss_typo of the process, s"] == \
+        "3.010 (baseline 0.010); tree / baseline paired 301.00, pairs 301.00, 301.00"
+    assert measured["latency, first strict miss of the process, s"].startswith("0.010 (baseline 0.010)")
+    assert measured["latency, miss_typo, s"] == "0.010 (baseline in the same passes 0.010)"
+    assert measured["latency, miss_typo, tree / baseline by pass, min to max"] == "1.00 to 1.00"
+
+
+def test_steady_rows_give_the_range_of_the_ratio_by_pass_and_the_section_names_the_order(tmp_path: Path):
+    """A baseline 0.2 s slower in odd passes only: the median ratio looks flat, the range by pass does not."""
+    rows = []
+    for p in (1, 2, 3, 4):
+        names = ["tree", "baseline"] if p % 2 else ["baseline", "tree"]
+        base = {"n": 6000, "pass": p, "load1": "1.00", "rep": 0, "chars": 9, "query": "E4127"}
+        rows += [{**base, "side": side, "kind": kind, "seconds": 1.0} for side, kind in zip(names, fallback_bench.FIRST)]
+        for rep in range(3):
+            rows += [{**base, "rep": rep, "side": side, "kind": "rare",
+                      "seconds": 0.7 if side == "baseline" and p % 2 else 0.5} for side in names]
+    write_latency(tmp_path, rows)
+    summary = fallback_bench.summarize(tmp_path)
+    assert "| kind | queries | tree, s | baseline, s | tree / baseline | tree / baseline by pass, min to max |" in summary
+    assert "| rare | 1 | 0.500 | 0.600 | 0.83 | 0.71 to 1.00 |" in summary
+    assert "4 passes: the tree went first in passes 1 and 3, the baseline in passes 2 and 4." in summary
+    assert "use an even number of passes" not in summary
+    write_latency(tmp_path, [r for r in rows if r["pass"] != 4])
+    summary = fallback_bench.summarize(tmp_path)
+    assert "3 passes: the tree went first in passes 1 and 3, the baseline in pass 2. With an odd number of " \
+           "passes the medians above lean to one order; use an even number of passes." in summary
+    assert "| rare | 1 | 0.500 | 0.700 | 0.71 | 0.71 to 1.00 |" in summary
 
 
 def test_an_mcp_child_that_does_not_answer_fails_the_bench_instead_of_hanging_it(tmp_path: Path, monkeypatch):
