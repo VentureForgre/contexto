@@ -2,7 +2,8 @@
 
 Skipped when ``claude`` is not on PATH (CI has none). Zero spend: Claude Code gets an isolated
 configuration directory, a temp HOME, ``DISABLE_AUTOUPDATER=1``, a fake key from a helper, and a base
-URL on 127.0.0.1; nothing reaches a model API.
+URL on 127.0.0.1; nothing reaches a model API. Every ``claude`` command, ``claude --version``
+included, runs from a temporary directory, never from the checkout (``isolated_version``).
 
 Sizes. The script is ``script.build(3, "v2", bound=4_000, turn_bytes=2_000)`` (20 turns). The run's
 bound is 70,000 tokens: Claude Code 2.1.322's own head is about 25,000 tokens as the stub counts it,
@@ -14,8 +15,11 @@ the test can see where Claude Code compacts. The Contexto arm's usage is reporte
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -24,7 +28,44 @@ from contexto.bench import script as bench_script
 
 BOUND = 70_000
 CLAUDE = shutil.which("claude")
-pytestmark = pytest.mark.skipif(CLAUDE is None, reason="claude is not on PATH")
+needs_claude = pytest.mark.skipif(CLAUDE is None, reason="claude is not on PATH")
+
+
+def isolated_version(claude: str, tmp: Path, upstream: str) -> str:
+    """What ``claude --version`` prints, run as every real-CLI test runs ``claude``: from ``tmp``, not
+    the checkout, with a temp HOME and configuration directory under it, ``DISABLE_AUTOUPDATER=1``, a
+    fake key, a base URL on 127.0.0.1, and no inherited ``ANTHROPIC_``, ``CLAUDE`` or ``CONTEXTO_``
+    variable."""
+    home = tmp / bench_stubs.HOME_NAME
+    home.mkdir(parents=True, exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE", "CONTEXTO_"))}
+    env.update({"HOME": str(home), "CLAUDE_CONFIG_DIR": str(tmp / "claude-config"), "DISABLE_AUTOUPDATER": "1",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "ANTHROPIC_API_KEY": bench_stubs.FAKE_KEY,
+                "ANTHROPIC_BASE_URL": upstream})
+    return subprocess.run([claude, "--version"], cwd=tmp, env=env, capture_output=True, text=True, timeout=120,
+                          stdin=subprocess.DEVNULL).stdout
+
+
+def test_claude_version_runs_isolated_from_the_checkout_and_the_users_home(tmp_path, monkeypatch):
+    """With a stand-in ``claude`` that writes down where and how it was started."""
+    seen = tmp_path / "seen.txt"
+    fake = tmp_path / "bin" / "claude"
+    fake.parent.mkdir()
+    fake.write_text(f"#!{sys.executable}\nimport os, sys\nopen({str(seen)!r}, 'w').write(repr((os.getcwd(), "
+                    "dict(os.environ))))\nprint('2.1.322 (Claude Code)')\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "inherited")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "inherited")
+    work = tmp_path / "work"
+    work.mkdir()
+    assert isolated_version(str(fake), work, "http://127.0.0.1:9").startswith("2.1.322")
+    cwd, env = eval(seen.read_text())  # noqa: S307 - our own repr of a tuple of str and dict
+    assert Path(cwd).resolve() == work.resolve() and Path.cwd().resolve() != work.resolve()
+    assert Path(env["HOME"]).resolve().parent == work.resolve() and env["HOME"] != os.environ.get("HOME")
+    assert Path(env["CLAUDE_CONFIG_DIR"]).resolve().parent == work.resolve()
+    assert env["DISABLE_AUTOUPDATER"] == "1" and env["ANTHROPIC_API_KEY"] == bench_stubs.FAKE_KEY
+    assert env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
+    assert "ANTHROPIC_AUTH_TOKEN" not in env and "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 
 @pytest.fixture(scope="module")
@@ -34,20 +75,24 @@ def script():
 
 @pytest.fixture(scope="module")
 def run(script, tmp_path_factory):
-    version = subprocess.run([CLAUDE, "--version"], capture_output=True, text=True, timeout=120).stdout
-    if "Claude Code" not in version:
-        pytest.skip("the claude on PATH is not Claude Code")
+    if CLAUDE is None:
+        pytest.skip("claude is not on PATH")
     tmp = tmp_path_factory.mktemp("bench-real")
     monkeypatch = pytest.MonkeyPatch()
+    stub = bench_stubs.StubModel([script], key=bench_stubs.FAKE_KEY, usage_scale={"plain": 1.6},
+                                 read_paths="absolute")
     try:
+        upstream = stub.start()
+        version = isolated_version(CLAUDE, tmp_path_factory.mktemp("bench-real-version"), upstream)
+        if "Claude Code" not in version:
+            pytest.skip("the claude on PATH is not Claude Code")
         bench_stubs.bench_environment(monkeypatch, tmp, real_claude=True)
-        stub = bench_stubs.StubModel([script], key=bench_stubs.FAKE_KEY, usage_scale={"plain": 1.6},
-                                     read_paths="absolute")
+        monkeypatch.chdir(tmp)  # the runner's own `claude --version` too runs outside the checkout
         result = bench_stubs.run_bench(monkeypatch, tmp, [script], arms=("contexto", "plain"), bound=BOUND, stub=stub,
-                                       upstream=stub.start(), turn_timeout=300.0)
-        stub.stop()
+                                       upstream=upstream, turn_timeout=300.0)
         result.version = version.split()[0]
     finally:
+        stub.stop()
         monkeypatch.undo()
     return result
 
@@ -101,10 +146,13 @@ def test_the_plain_arm_compacts_at_the_bound_and_the_contexto_arm_does_not(run):
 def split_run(script, tmp_path_factory):
     """The same session, with the stub answering each decision and probe turn in two messages around a
     file-read tool call, and correcting one answer in the second (``StubModel.split``)."""
+    if CLAUDE is None:
+        pytest.skip("claude is not on PATH")
     tmp = tmp_path_factory.mktemp("bench-real-split")
     monkeypatch = pytest.MonkeyPatch()
     try:
         bench_stubs.bench_environment(monkeypatch, tmp, real_claude=True)
+        monkeypatch.chdir(tmp)  # the runner's own `claude --version` too runs outside the checkout
         stub = bench_stubs.StubModel([script], key=bench_stubs.FAKE_KEY, split=True, read_paths="absolute")
         result = bench_stubs.run_bench(monkeypatch, tmp, [script], arms=("contexto", "plain"), bound=BOUND, stub=stub,
                                        upstream=stub.start(), turn_timeout=300.0)
@@ -135,6 +183,7 @@ def _background_run(script, tmp, *, arms, keep_variable):
     monkeypatch = pytest.MonkeyPatch()
     try:
         bench_stubs.bench_environment(monkeypatch, tmp, real_claude=True)
+        monkeypatch.chdir(tmp)  # the runner's own `claude --version` too runs outside the checkout
         if not keep_variable:
             monkeypatch.delitem(cli.ENV, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
         stub = bench_stubs.StubModel([script], key=bench_stubs.FAKE_KEY, background=True, read_paths="absolute")
@@ -146,6 +195,7 @@ def _background_run(script, tmp, *, arms, keep_variable):
     return result
 
 
+@needs_claude
 def test_a_subagent_the_model_starts_runs_in_its_turn_with_the_real_claude(script, tmp_path):
     """With CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 (set for both arms) the subagent runs in the foreground,
     so each turn has one result and every reply is scored against its own turn."""
@@ -162,6 +212,7 @@ def test_a_subagent_the_model_starts_runs_in_its_turn_with_the_real_claude(scrip
         assert len(lines) == len(script.probes)
 
 
+@needs_claude
 def test_a_background_task_with_the_real_claude_stops_the_unit_as_desync(script, tmp_path):
     """Without the variable the subagent runs in the background, its report starts a run with a result
     of its own, and the unit stops instead of being recorded complete with every reply on the wrong turn."""
