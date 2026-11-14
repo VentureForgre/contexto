@@ -447,6 +447,11 @@ that is in neither.
 | `search_cache_invalid` | `CONTEXTO_SEARCH_CACHE_MB` was not a valid value, so the default was used. |
 | `watchdog_unavailable` | The helper that removes a launch's temporary files if the launcher is killed could not start. |
 | `affinity_salt_unavailable` | The key for the cache-affinity header could not be read, so requests went out without the header and a gateway may route them to different caches. |
+| `project_unavailable` | Project memory could not read the project's earlier sessions, so nothing was carried ([project memory](project-memory.md)). |
+| `project_session_skipped` | An earlier session of the project could not be read (damaged, too large or unreadable), so its records were not carried. |
+| `start_text_unavailable` | The records carried from earlier sessions could not be read for a request; the text already sent was kept. |
+| `main_records_unavailable` | A pin the main conversation made could not be recorded as the main conversation's, so a later session may not carry it. |
+| `trusted_conversations_unavailable` | The list of main conversations the proxy trusted could not be written, so a later launch may not trust this one. |
 
 A launch opens its session before it starts the proxy, so `ledger_repaired`, `pruned_while_opening`
 and `affinity_salt_unavailable` are logged just before a run's proxy start. They are counted in
@@ -489,6 +494,12 @@ Events that are **not** counted, because they happen in normal use:
   fault is `carried_over_budget`, logged when they pass their budget.
 - `sizing_not_restored`: the bytes-per-token ratio of the last run was not reused, usually because
   the first request of this run was on another model. The ratio is measured again.
+- `start_text`, `start_text_changed`, `project_memory`: project memory's ordinary records: how many
+  tokens a new session carried, a turn start that sent fewer carried records after one was closed or
+  forgotten, and the counts at launch ([project memory](project-memory.md)).
+- `main_record_unmatched`: a signal for whoever updates Contexto for a new CLI: Contexto's own pin
+  or close call had a reply of a shape it does not read, so that record is not carried. It is not a
+  fault of the session.
 - `proxy_stop_incomplete`: the proxy stopped (Ctrl+C) with requests still in a handler. It is not
   a fault, but those requests may have no request line: `requests.in_flight_at_stop` counts them
   and the `requests` line says so.

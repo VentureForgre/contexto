@@ -64,7 +64,8 @@ def test_state_json_groups_the_pins_and_counts_the_pages(home, capsys):
     assert code == 0 and err == "session s1 (most recent)\n"  # the session line stays on stderr
     data = json.loads(out)
     assert out == json.dumps(data, indent=2, sort_keys=True) + "\n"
-    assert sorted(data) == ["conflicts", "faults", "pages", "pinned", "session", "staleness_checked"]
+    assert sorted(data) == ["carried", "conflicts", "faults", "pages", "pinned", "session", "staleness_checked"]
+    assert data["carried"] == []  # no project: nothing carried (D69)
     assert data["session"] == "s1" and data["pages"] == 2
     assert data["staleness_checked"] is False  # no working directory recorded for this session
     pinned = data["pinned"]
@@ -86,8 +87,8 @@ def test_state_json_on_a_session_with_nothing_pinned_or_paged(home, capsys):
     assert code == 0
     data = json.loads(out)
     assert data.pop("faults")["total"] == 0  # the store fault report (contexto stats --json's), empty here
-    assert data == {"session": "s1", "pages": 0, "conflicts": [], "staleness_checked": False,
-                               "pinned": {"open_obligations": [], "active_decisions": [], "verified_facts": []}}
+    assert data == {"session": "s1", "pages": 0, "conflicts": [], "carried": [], "staleness_checked": False,
+                    "pinned": {"open_obligations": [], "active_decisions": [], "verified_facts": []}}
 
 
 def test_state_json_reports_staleness_when_the_working_directory_is_recorded(home, capsys, tmp_path):

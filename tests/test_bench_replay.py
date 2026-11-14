@@ -768,7 +768,7 @@ def test_the_head_is_synthetic_text_of_a_realistic_size():
     assert 18_641 <= tokens <= 27_925  # the range measured for Claude Code 2.1.314 (launcher.MEASURED_OVERHEADS)
     assert tokens == trace.load_packaged()["expected"]["head_tokens"]  # the measurement is the trace's, never a literal
     text = json.dumps({"system": client.system_blocks(), "context": client.context_block(),
-                       "tools": client.synthetic_tools()})
+                       "tools": [*client.synthetic_tools(), *client.contexto_tools()]})
     for name in ("Claude", "Anthropic", "claude"):
         assert name not in text, name  # none of a real client's prompt or tool text
     assert client.system_blocks()[0]["text"].startswith("This is the synthetic system prompt")
@@ -793,8 +793,10 @@ def test_contextos_own_tools_are_in_the_list_as_claude_code_names_them():
     tools = client.head("s")["tools"]
     ours = [t for t in tools if t["name"].startswith("mcp__contexto__")]
     assert [t["name"] for t in ours] == [f"mcp__contexto__{t['name']}" for t in mcp.TOOLS]
-    assert [(t["description"], t["input_schema"]) for t in ours] == [
-        (t["description"], t["inputSchema"]) for t in mcp.TOOLS]
+    for tool, shipped in zip(ours, mcp.TOOLS, strict=True):
+        assert tool["description"].startswith("Synthetic stand-in for Contexto's ")
+        # The real tool's parameters, so the scripted contexto_search call fits its schema.
+        assert set(tool["input_schema"].get("properties", {})) == set(shipped["inputSchema"].get("properties", {}))
     assert scripted.SEARCH_TOOL in {t["name"] for t in ours} and scripted.READ_TOOL == tools[0]["name"]
     assert len(tools) == 16 + len(mcp.TOOLS) and len({t["name"] for t in tools}) == len(tools)
     request = client.request_body(client.head("s"), [client.user_message("hello", first=True)])
@@ -833,6 +835,29 @@ def test_a_failed_request_names_the_errno(small, monkeypatch, tmp_path):
         replay.send([client.user_message("x", True)])
     assert str(raised.value) == (f"the request to the proxy failed: OSError [Errno {errno.EADDRNOTAVAIL}] "
                                  "Can't assign requested address")
+
+
+def test_the_head_does_not_move_with_tool_wording(monkeypatch):
+    """The replay's head carries fixed synthetic text for Contexto's tools, not the shipped wording: no
+    shipped description is in it, and with every description and parameter description in
+    ``contexto.mcp.TOOLS`` replaced, the head, the first request and the digest the trace pins are the
+    same. A change to a tool's wording moves no pinned value; a change to what the proxy injects does
+    (test_bench_replay_run.test_a_proxy_change_needs_only_the_trace_recorded_again)."""
+    first = [client.user_message("hello", first=True)]
+    before = (client.head("s"), client.request_body(client.head("s"), first), client.synthetic_digest())
+    text = json.dumps(before[:2])
+    for tool in mcp.TOOLS:
+        for description in (tool["description"], *(p.get("description") for p in tool["inputSchema"].get(
+                "properties", {}).values())):
+            if description:
+                assert json.dumps(description)[1:-1] not in text, description
+    reworded = copy.deepcopy(mcp.TOOLS)
+    for n, tool in enumerate(reworded):
+        tool["description"] = f"Reworded description {n}, longer than any shipped one. " * 40
+        for prop in tool["inputSchema"].get("properties", {}).values():
+            prop["description"] = f"Reworded parameter {n}."
+    monkeypatch.setattr(mcp, "TOOLS", reworded)
+    assert (client.head("s"), client.request_body(client.head("s"), first), client.synthetic_digest()) == before
 
 
 def test_the_client_connects_to_loopback_only(small):
