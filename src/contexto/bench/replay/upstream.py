@@ -198,8 +198,8 @@ def _check_messages(body: dict[str, Any]) -> str | None:
         if i == 0 and message["role"] != "user":
             return "messages.0.role: the first message must use the user role"
         if i > 0 and message["role"] == messages[i - 1].get("role"):
-            return f"{where}.role: roles must alternate between user and assistant, and messages {i - 1} and {i} " \
-                   f"are both {message['role']}"
+            return (f"{where}.role: roles must alternate between user and assistant, and messages {i - 1} and {i} "
+                    f"are both {message['role']}")
         content = message.get("content")
         if isinstance(content, str):
             if not content:
@@ -219,7 +219,8 @@ def _check_messages(body: dict[str, Any]) -> str | None:
         # Every tool_result answers a tool_use of the assistant message just before it.
         asked = {b.get("id") for b in _blocks(messages[i - 1].get("content"))
                  if b.get("type") == "tool_use"} if i > 0 and isinstance(messages[i - 1], dict) else set()
-        stray = [b.get("tool_use_id") for b in content if b["type"] == "tool_result" and b.get("tool_use_id") not in asked]
+        stray = [b.get("tool_use_id") for b in content
+                 if b["type"] == "tool_result" and b.get("tool_use_id") not in asked]
         if stray:
             return (f"{where}.content: unexpected `tool_use_id` found in `tool_result` blocks: {stray[0]}. Each "
                     "`tool_result` block must have a corresponding `tool_use` block in the previous message.")
@@ -227,7 +228,8 @@ def _check_messages(body: dict[str, Any]) -> str | None:
         calls = [b.get("id") for b in content if b["type"] == "tool_use"]
         if calls:
             following = messages[i + 1] if i + 1 < len(messages) and isinstance(messages[i + 1], dict) else {}
-            answered = {b.get("tool_use_id") for b in _blocks(following.get("content")) if b.get("type") == "tool_result"}
+            answered = {b.get("tool_use_id") for b in _blocks(following.get("content"))
+                        if b.get("type") == "tool_result"}
             missing = [c for c in calls if c not in answered]
             if missing:
                 return (f"{where}: `tool_use` ids were found without `tool_result` blocks immediately after: "
