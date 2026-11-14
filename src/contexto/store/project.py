@@ -923,10 +923,23 @@ class EarlierSearch:
 
 
 def shown_label(label: str) -> str:
-    """A session's label as a reply shows it: as JSON writes a string, without the quotes. A session id
-    is any directory name, so one with a line break or a quote must not forge a line of a reply; and
-    written inside a JSON string, as a tool argument is, what is shown is the label again."""
-    return json.dumps(label, ensure_ascii=False)[1:-1]
+    """A session's label as a reply shows it: as JSON writes a string, without the quotes, and with every
+    character that does not print (U+2028, U+2029 and U+0085, which ``str.splitlines`` breaks a line at,
+    U+007F to U+009F, a direction override, a lone surrogate) as its ``\\uXXXX`` escape too, which JSON
+    leaves as it is (review A on D69, finding 3). A session id is any directory name, so one with a line
+    break, a control or a quote must not forge a line of a reply; and written inside a JSON string, as a
+    tool argument is, what is shown is the label again."""
+    shown = json.dumps(label, ensure_ascii=False)[1:-1]
+    return shown if shown.isprintable() else "".join(c if c.isprintable() else _json_escape(c) for c in shown)
+
+
+def _json_escape(c: str) -> str:
+    """``c`` as a JSON string escape: ``\\uXXXX``, a UTF-16 surrogate pair beyond the Basic Multilingual Plane."""
+    n = ord(c)
+    if n < 0x10000:
+        return f"\\u{n:04x}"
+    n -= 0x10000
+    return f"\\u{0xD800 + (n >> 10):04x}\\u{0xDC00 + (n & 0x3FF):04x}"
 
 
 def session_date(created: float) -> str:
