@@ -180,8 +180,8 @@ uvx --from contexto-proxy contexto --version
 Before you install from PyPI, open
 [pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/). In the sidebar, under
 "Project links", PyPI puts the links it verified in a group labeled "Data verified by PyPI on",
-followed by the upload date. Install from PyPI only if `github.com/VentureForgre/contexto` is a link in that group
-(point at a link to see its address).
+followed by the upload date. Install from PyPI only if `github.com/VentureForgre/contexto` is a
+link in that group (point at a link to see its address).
 
 Anyone can upload a package whose metadata names this repository, but PyPI marks a GitHub link
 verified only when the files were uploaded by trusted publishing from that repository's workflow.
