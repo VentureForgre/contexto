@@ -11,7 +11,10 @@ It fails unless CHANGELOG.md has a section for that version, headed exactly
 The section must be the newest one (the file is newest first, with an optional "## Unreleased" on
 top) and must hold at least one entry: a line that is not a heading, a placeholder such as
 "Nothing yet." or an HTML comment. The date must be a real date; it is not compared with today.
-A heading inside a fenced code block is an example, not a section.
+A heading inside a fenced code block is an example, not a section. Fences are read as CommonMark
+reads them: a line of three or more backticks or tildes opens a block, unless it is a backtick
+fence whose remainder holds a backtick (that is inline code), and only a fence of the same
+character, at least as long and with nothing after it, closes it.
 
 The file must not contain the line "<!-- version list -->". semantic-release's `changelog`
 command, which the reattach job runs, inserts its own text at that line; without it, the command
@@ -38,20 +41,29 @@ ADD = (
 )
 RENAME = (
     'change its heading to "## {version} (YYYY-MM-DD)" in a docs: pull request and run the release '
-    "again. The version grew because a feat: merged after the section was written."
+    "again. {why}"
+)
+GREW = "The version grew because a feat: merged after the section was written."
+LOWER = (
+    "The computed version, {version}, is lower than the section written, {newest}: the version comes "
+    "from the commits since the last release, not from the changelog."
 )
 
 
 def _lines(text):
-    """The lines of `text`, with HTML comments blanked out and the lines inside code fences marked."""
+    """The lines of `text`, with HTML comments blanked out and the lines inside code fences marked.
+
+    Returns (lines, fenced, unclosed): `unclosed` is the index of the line that opens a code block
+    that is never closed, or None.
+    """
     # Blank a comment without moving the lines after it.
     text = COMMENT.sub(lambda match: re.sub(r"[^\n]", " ", match.group(0)), text)
-    lines, fenced, fence = [], [], None
-    for line in text.splitlines():
+    lines, fenced, fence, opened = [], [], None, None
+    for number, line in enumerate(text.splitlines()):
         line = line.rstrip()
         opening = FENCE.match(line)
-        if fence is None and opening:
-            fence = opening.group(1)
+        if fence is None and opening and not (opening.group(1)[0] == "`" and "`" in line[opening.end():]):
+            fence, opened = opening.group(1), number
             fenced.append(True)
         elif fence is not None:
             fenced.append(True)
@@ -61,7 +73,7 @@ def _lines(text):
         else:
             fenced.append(False)
         lines.append(line)
-    return lines, fenced
+    return lines, fenced, (opened if fence is not None else None)
 
 
 def _headings(lines, fenced):
@@ -87,7 +99,7 @@ def _entries(lines, fenced, start):
 
 def unreleased_entries(text):
     """The entries under "## Unreleased", which a release leaves behind. A "Nothing yet." is not one."""
-    lines, fenced = _lines(text)
+    lines, fenced, _ = _lines(text)
     for number, line in enumerate(lines):
         if line == "## Unreleased" and not fenced[number]:
             return _entries(lines, fenced, number)
@@ -123,10 +135,20 @@ def problem(text, version, last_released=None):
                 "as it is."
             )
 
-    lines, fenced = _lines(text)
+    lines, fenced, unclosed = _lines(text)
     headings = _headings(lines, fenced)
     found = [(number, date) for number, heading, date in headings if heading == version]
 
+    if not found and unclosed is not None:
+        # The heading is there, but a fence above it that is never closed made it code.
+        for number in range(unclosed + 1, len(lines)):
+            match = HEADING.fullmatch(lines[number])
+            if match and match.group(1) == version:
+                return (
+                    f'CHANGELOG.md has the heading "{lines[number]}" on line {number + 1}, but it is inside '
+                    f"the code block opened on line {unclosed + 1}, which is never closed. Close that block, "
+                    "or remove the line that opens it, in a docs: pull request and run the release again."
+                )
     if not found:
         # A heading for this version in another form ("## v1.2.3", "## [1.2.3] - date", "## 1.2.3").
         near_miss = re.compile(rf"#+\s*\[?v?{re.escape(version)}(?![0-9]|\.[0-9])")
@@ -143,7 +165,8 @@ def problem(text, version, last_released=None):
         newest_line, newest, _ = headings[0]
         if last_released and _key(newest) <= _key(last_released):
             return f"CHANGELOG.md has no section for {version}. {add}"
-        rename = RENAME.format(version=version)
+        why = GREW if _key(version) > _key(newest) else LOWER.format(version=version, newest=newest)
+        rename = RENAME.format(version=version, why=why)
         if last_released:
             # The newest section is for a version above the last release: it was never released.
             return (
@@ -207,7 +230,7 @@ def main(argv=None):
     if message:
         print(f"::error::{message}")
         return 1
-    lines, fenced = _lines(text)
+    lines, fenced, _ = _lines(text)
     number = next(number for number, heading, _ in _headings(lines, fenced) if heading == version)
     print(f'{args.file} has the section "{lines[number]}".')
     left = unreleased_entries(text)

@@ -125,4 +125,6 @@ Scale and cost proposals:
   the search rounds in a turn, from an analysis of live run #3.
 - [research/M2-seat-bound.md](research/M2-seat-bound.md): a modeled choice of bound for Claude Code
   with Opus 5.5 when the fixed part of every request is large (82,000 or 92,000 tokens).
+- [research/D70-serve-probes.md](research/D70-serve-probes.md): what Claude Code 2.1.322 sends a
+  gateway and an MCP server, measured against loopback stubs at zero spend.
 - `research/data/`: the CSV files behind the usage and seat-bound notes.
