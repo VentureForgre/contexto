@@ -362,3 +362,28 @@ def test_probe_lines_of_a_unit_the_manifest_does_not_record_are_dropped_on_resum
     probes = again.lines("probes.jsonl")
     assert len(probes) == len(script.probes) == len({p["id"] for p in probes})
     assert len(again.lines("requests.jsonl")) == 16  # both attempts' requests stay: they were billed
+
+
+def test_a_dry_run_on_an_existing_run_prints_what_it_holds_and_changes_nothing(env, tmp_path, script, capsys):
+    from contexto.cli import main
+
+    stub = stub_for(script)
+    stub.fault(400, arm="plain", nth=1)  # the plain unit stops; the full unit completes
+    run = bench_stubs.run_bench(env, tmp_path, [script], arms=("plain", "full"), bound=BOUND, stub=stub)
+    assert [u["status"] for u in run.manifest["units"]] == ["stopped", "complete"]
+    before = {p.relative_to(run.out): p.read_bytes() for p in sorted(run.out.rglob("*")) if p.is_file()}
+    spent = run.manifest["spent_tokens"]
+    common = ["bench", "--dry-run", "--seed", "3", "--bound", str(BOUND), "--turn-kbytes", "2", "--arms",
+              "plain,full", "--out", str(run.out)]
+    capsys.readouterr()
+    for model in (["--model", "claude-haiku-5-5"], []):
+        assert main([*common, *model]) == 0
+        out = capsys.readouterr().out
+        assert "1 units to run" in out
+        assert (f"The output directory already holds a run: 1 of 2 units complete, 1 stopped, {spent:,} tokens "
+                "recorded; the plan below covers the 1 still to run.") in out
+        assert "| plain | 1 |" in out and "| full |" not in out
+    assert main([*common[:5], "40000", *common[6:], "--model", "claude-haiku-5-5"]) == 2
+    assert "different --bound (30000, not 40000)" in capsys.readouterr().err
+    after = {p.relative_to(run.out): p.read_bytes() for p in sorted(run.out.rglob("*")) if p.is_file()}
+    assert after == before  # the dry run read the directory and wrote nothing

@@ -333,7 +333,7 @@ def new_manifest(config: Config, claude_version: str | None) -> dict[str, Any]:
         "cache_ttl": config.cache_ttl if set(config.arms) & set(bench_arms.CLI_ARMS) else None,
         "started": utc_now(), "finished": None,
         "budget_tokens": config.budget, "spent_tokens": 0,
-        "credential_source": config.credentials.source,
+        "credential_source": config.credentials.source if config.credentials is not None else None,  # None: a dry run
         "cli_environment": {**cli.ENV, "CLAUDE_CODE_PROMPT_CACHE_TTL": config.cache_ttl,
                             **{name: os.environ[name] for name in sorted(cli.KEPT_NAMES) if name in os.environ},
                             "settings": {"permissions": {"allow": [cli.READ_TOOL]}}},

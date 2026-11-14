@@ -2,8 +2,9 @@
 
 It prints, per arm and in total, the units, turns, estimated requests and estimated tokens by class,
 for the expected case and the worst case, the model behind the figures (``contexto.bench.plan``), and
-the ``--budget-tokens`` figure the live run needs. With ``--out`` naming a run that was started, the
-plan covers only the units that run still has to do.
+the ``--budget-tokens`` figure the live run needs. With ``--out`` naming a run that was started, it
+says what that run holds (units complete and stopped, tokens recorded) and the plan covers only the
+units still to run. It only reads the directory: nothing in it is written, and its lock is not taken.
 """
 
 from __future__ import annotations
@@ -32,18 +33,20 @@ def run(args: argparse.Namespace) -> int:
     from contexto.bench.arms import plain
 
     config = _live_options.config(args, None)
-    spent, skipped, todo = 0, 0, bench_plan.units(config.seeds, config.repeats, config.arms)
+    spent, todo = 0, bench_plan.units(config.seeds, config.repeats, config.arms)
+    held = None
     try:
         scripts = runner.build_scripts(config)
         if config.out is not None and (old := runner.read_manifest(config.out)) is not None:
             if config.model:
                 runner.merge_manifest(old, config, None)  # refuses a different run, as the live run would
             done = {runner.unit_key(u) for u in old["units"] if u.get("status") == "complete"}
-            skipped = len(done & set(todo))
             todo = [u for u in todo if u not in done]
             from contexto.bench.meter import read_spent
 
             spent = read_spent(config.out / "requests.jsonl")
+            held = {"complete": len(done), "units": len(old["units"]),
+                    "stopped": sum(1 for u in old["units"] if u.get("status") in ("stopped", "running"))}
     except (runner.Refused, ValueError) as exc:
         print(f"contexto bench: error: {exc}", file=sys.stderr)
         return runner.EXIT_USAGE
@@ -59,9 +62,10 @@ def run(args: argparse.Namespace) -> int:
         f"Run: model {config.model or '(none given)'}, bound {config.bound:,} tokens, protocol {config.protocol}, "
         f"{seed_text}{repeat_text}, arms {', '.join(config.arms)}: {plan['units']} units to run.",
     ]
-    if skipped or spent:
-        lines.append(f"The output directory already holds {skipped} complete units and {spent:,} recorded tokens; "
-                     "the plan below covers the rest.")
+    if held is not None:
+        lines.append(f"The output directory already holds a run: {held['complete']} of {held['units']} units complete, "
+                     f"{held['stopped']} stopped, {spent:,} tokens recorded; the plan below covers the {plan['units']} "
+                     "still to run.")
     lines += ["", "Expected case (tokens), a rough size:", *bench_plan.table(plan, "expected"), "",
               "Worst case (tokens), a planning figure and not a ceiling: every input token counted as a cache write "
               f"with a 10% margin, and an output reservation of {bench_plan.OUTPUT_RESERVE:,} tokens on every Claude "
