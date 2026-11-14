@@ -44,7 +44,7 @@ CONFIG = Config(bound=50_000, headroom_floor=6_000, min_turn_room=3_000)
 RATIO = 3.2  # the stub's bytes per token: denser than the estimator's seed of 3.5, so estimates run low
 MARK = "Carried from earlier sessions of this project"  # how the carried section starts
 TOOL_PREFIX = "mcp__contexto__"
-CARRIED_LINE = re.compile(r"^- (\S+) (obligation|decision)\b.*? \(session ([^,]+), (\d{4}-\d{2}-\d{2})\): (\S+?):")
+CARRIED_LINE = re.compile(r"^- (\S+) (obligation|decision)\b.*? \(session ([^,]+), (\d{4}-\d{2}-\d{2})\): (.*)$")
 OMITTED = re.compile(r"^\((\d+) more pinned items omitted; call contexto_state for the full list\)$")
 OUT = os.environ.get("CONTEXTO_MEASURE_OUT")  # where a run records its numbers as JSON, when set
 
@@ -346,12 +346,13 @@ class Session:
 
 
 def carried_lines(text: str) -> list[tuple[str, str, str, str]]:
-    """(record id, kind, session label, name) of each carried line of a carried section."""
+    """(record id, kind, session label, name) of each carried line of a carried section; the name is the
+    body up to its first colon."""
     out = []
     for line in text.splitlines():
         found = CARRIED_LINE.match(line)
         if found:
-            out.append((found.group(1), found.group(2), found.group(3), found.group(5)))
+            out.append((found.group(1), found.group(2), found.group(3), found.group(5).split(":", 1)[0]))
     return out
 
 
