@@ -589,8 +589,7 @@ answer. `False` logs one
 - Anthropic (`_anthropic_session_start_seen`): `True` for a role `system` message with
   `SESSION_START_SIGNATURE` (the `# Environment` first line, D33) or a context block of kind
   `environment`. It reads only the first 4,096 characters (`SESSION_START_SCAN_CHARS`) of each text
-  block; a role
-  `system` message is read in full. It skips items that are not dicts.
+  block; a role `system` message is read in full. It skips items that are not dicts.
 - Responses: `True` when the lead holds a user message made only of context sections
   (`<environment_context>` on the tested versions); `False` when the lead holds a developer or
   system message but no such user message ("a Codex that changed its section tags makes that
@@ -653,17 +652,23 @@ The client version the session-start recognition was measured on. `ClientVersion
   calls to the engine (`ContextoProxy.transform_lock`), and every dialect method runs inside it, some
   of them more than once per item on a request, while every other request waits. Keep each method
   linear in the size of the request, scan text only as far as needed (`SESSION_START_SCAN_CHARS`),
-  use simple regular expressions, and do no file or network I/O. A slow step belongs in
-  `RewriteEngine.prime`, which the proxy calls before taking the lock (it counts PDF pages there,
-  D60). The request reaching a dialect is already parsed with `loads_bounded`, which refuses nesting
-  deeper than `MAX_JSON_DEPTH` (512 levels, rule 18), but a dialect that recurses must still bound its
-  own depth. Raising an exception to skip input the dialect does not understand is not a way out: it
-  is a `transform_error`, which forwards the request unbounded and counts as a failure.
-- **The session log is content-free.** Events a dialect method or the engine returns are written to
-  `log.jsonl`, which SECURITY.md promises holds sizes, counts, hashes, event names and reasons, never
-  prompts, replies, tool input or output, or header values. The proxy reduces events to scalars and
-  caps their size (`_scalar_summary`) but does not filter their content, so an implementation must
-  put no client text in an event. Log an exception by its type name only, as the engine does.
+  use only anchored regular expressions with no nested or overlapping quantifiers, and do no file or
+  network I/O, start no subprocess and never sleep. A slow step belongs in `RewriteEngine.prime`,
+  which the proxy calls before taking the lock (it counts PDF pages there, D60); `prime` reads only
+  the `messages` and `input` fields, so a client whose items live under another field must extend it,
+  or its PDFs are counted under the lock. The request reaching a dialect is already parsed with
+  `loads_bounded`, which refuses nesting deeper than `MAX_JSON_DEPTH` (512 levels, rule 18); a
+  dialect method that recurses must stop at the same depth. Raising an exception to skip input the
+  dialect does not understand is not a way out: it is a `transform_error`, after which the proxy
+  forwards the client's own request without the bound, and acceptance counts it as a failure.
+- **The session log is content-free.** Events the engine returns are written to `log.jsonl`, which
+  SECURITY.md describes as recording "sizes, counts, request paths, status codes, error names, hashes,
+  event names, and the upstream source, never prompts, replies or the upstream URL". This page asks
+  an implementation for the same and a little more: no client text of any kind in an event (no tool
+  input or output, no header value beyond a fixed vocabulary such as the client name and version the
+  `cli_version` event takes from `User-Agent`). The proxy reduces events to scalars and caps their
+  size (`_scalar_summary`) but does not filter their content, so the rule is the implementation's to
+  keep. Log an exception by its type name only, as the engine does.
 - **Credentials never reach a dialect.** The client's auth headers are forwarded upstream unchanged
   and never stored or logged (SECURITY.md). A dialect receives only the request body; engine code
   that reads headers names each header it reads (`claude_code_session`).
@@ -734,16 +739,20 @@ D53).
 - [ ] **MCP server registration.** The client must start the MCP server with the absolute path of
   the interpreter Contexto runs on (`sys.executable`) as `<python> -P -m contexto mcp --session=<id>`,
   with `CONTEXTO_HOME` set (`paths.mcp_env`). `-P` keeps the project directory, where the client
-  starts its servers, off `sys.path`, so a project's own `contexto` package cannot run in its place;
-  `--session=<id>` is one token, so an id starting with `-` is not read as an option. Every value
-  written into the client's config must be quoted for that config's format, and refused when the
-  client would expand it (Claude Code expands `${`: `check_mcp_values`, D55). Where the client runs
-  unattended it must be allowed to call the tools without a prompt, and only Contexto's own tools,
-  each by its exact name, never a client-wide approval mode; the user's own deny and ask rules must
-  still win (`contexto_tool_rules`, D44). Claude Code: `mcp_payload`, `settings_payload` and
-  `claude_argv` in
-  `src/contexto/launcher.py` (D44). Codex: yes (`_mcp_server`, the `[mcp_servers.contexto]` table and
-  `MCP_APPROVAL_MODE` in `src/contexto/codex.py`). The child also gets `CONTEXTO_SESSION` (D57).
+  starts its servers, off `sys.path`, so a project's own `contexto` package cannot run in its place.
+  Pass the session as one argument, `--session=<id>`, as `mcp_payload` does. Every value written into
+  the client's config must be quoted for that config's format, and refused when the client would
+  expand it (Claude Code expands `${`: `check_mcp_values`, D55). Where the client runs unattended it
+  must be allowed to call the tools without a prompt, and no more than that: Contexto's own tools by
+  their exact names where the client has per-tool rules, otherwise an approval scoped to Contexto's
+  own server entry, never a client-wide approval mode. The tools read and write only the session's
+  own store, which is why approving them is safe. Claude Code: one allow rule per tool
+  (`contexto_tool_rules`, D44), and the user's own deny and ask rules still win (measured on 2.1.302);
+  `mcp_payload`, `settings_payload` and `claude_argv` in `src/contexto/launcher.py`. Codex: yes, with
+  an approval for the whole `[mcp_servers.contexto]` entry (`default_tools_approval_mode`,
+  `MCP_APPROVAL_MODE`) and the server started by `_mcp_server` in `src/contexto/codex.py`; whether a
+  user's own Codex rules override that approval was not measured. The child also gets
+  `CONTEXTO_SESSION` (D57).
 - [ ] **The tool check.** `ToolCheck` in `src/contexto/toolcheck.py` reports a main conversation that
   runs without Contexto's tools. It returns nothing for a dialect name outside `DIALECTS`, and
   `_offered` has two branches: the request names the tools (Anthropic), or the MCP server recorded
