@@ -72,7 +72,7 @@ def loads_bounded(data: str | bytes | bytearray, *, parse_constant: Callable[[st
     deeper than ``MAX_JSON_DEPTH``, including when json.loads itself runs out of recursion.
     ``parse_constant`` is json.loads's: by default ``NaN``, ``Infinity`` and ``-Infinity`` are accepted."""
     try:
-        value = json.loads(data, parse_constant=parse_constant)
+        value = json.loads(data) if parse_constant is None else json.loads(data, parse_constant=parse_constant)
     except RecursionError:
         raise JSONTooDeepError(f"nested deeper than {MAX_JSON_DEPTH} levels") from None
     if nesting_exceeds(value):
