@@ -194,6 +194,7 @@ THINKING_OMITTED = "[thinking omitted]"
 CONTEXT_TAG = "<system-reminder>"
 STORE_ERRORS = (OSError, LedgerError, KeyFileError, SessionNotFoundError, PageNotFoundError)  # rule 14 store_error
 STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
+RECORDED_DOCUMENT_COSTS = 64  # D63: the measured PDF costs an epoch (and its record) keeps, newest last
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
 # D69: the reasons a conversation takes main (D50) after which its own history confirms its pins and
@@ -333,8 +334,9 @@ class EpochState:
     room_margin: int = 0
     # D63: (content key, tokens) for each PDF whose pages are not certain once usage has measured it: the
     # real input of the first request that carried it less the estimate of everything else in that request,
-    # never under 0. The estimate counts it at that cost from then on, and stubbing it frees that cost. Per
-    # engine, never recorded: after a restart the next usage measures it again.
+    # never under 0, shared among the request's unmeasured ones by size. The estimate counts it at that
+    # cost from then on, and stubbing it frees that cost. In the epoch record (``document_costs``), written
+    # when usage measures one too; a cost a restarted engine lacks is measured again, as on first sending.
     document_costs: tuple[tuple[Any, int], ...] = ()
     # D63: (the keys of the unmeasured uncertain PDFs the newest request carried, the estimate of everything
     # else in that request). Per-request, never recorded.
@@ -1275,15 +1277,32 @@ def pending_documents(sent_items: list[dict], sent_estimate: int, state: EpochSt
 
 def measured_costs(state: EpochState, real: int) -> tuple[tuple[Any, int], ...]:
     """D63: ``document_costs`` with the PDFs of the request ``real`` measures: the real input less the
-    estimate of everything else in it, never under 0, shared evenly when it carried several."""
+    estimate of everything else in it, never under 0, shared among them in proportion to their size as
+    sent (``document_key``: the length of the base64 data; Reviewer A at 26cba5ad, finding 1: an even
+    share counted a 122,000-token PDF read with a 10,000-token one at 66,018). Only the newest
+    ``RECORDED_DOCUMENT_COSTS`` are kept."""
     if state.pending_documents is None:
         return state.document_costs
     keys, others = state.pending_documents
-    each = max(0, real - others) // len(keys)
+    total = max(0, real - others)
+    whole = sum(max(1, size) for size, _ in keys)  # a PDF sent twice counts twice, each copy at its share
     costs = dict(state.document_costs)
     for key in keys:
-        costs.setdefault(key, each)
-    return tuple(costs.items())
+        costs.setdefault(key, total * max(1, key[0]) // whole)
+    return tuple(costs.items())[-RECORDED_DOCUMENT_COSTS:]
+
+
+def recorded_costs(value: Any) -> tuple[tuple[Any, int], ...]:
+    """D63: the measured document costs of an epoch record's optional ``document_costs`` field (a list of
+    ``[size, digest, tokens]``); a record written before the field has none."""
+    if value is None:
+        return ()
+    if not (isinstance(value, list) and len(value) <= RECORDED_DOCUMENT_COSTS and all(
+            isinstance(x, list) and len(x) == 3 and all(isinstance(n, int) and not isinstance(n, bool)
+                                                       and n >= 0 for n in (x[0], x[2]))
+            and isinstance(x[1], str) for x in value)):
+        raise ValueError("epoch record field document_costs")
+    return tuple(((size, digest), tokens) for size, digest, tokens in value)
 
 
 def window_items(messages: list[dict], start: int = 0) -> list[dict]:
@@ -2343,6 +2362,8 @@ def epoch_record(state: EpochState, request: dict, messages: list[dict], key: st
               "anchor": {"n": len(messages), "hash": anchor_hash(hashes)}, "head_rule": HEAD_RULE}
     if inturn.extent(state.inturn):  # D63: only an epoch with in-turn edits carries the field
         record["in_turn"] = inturn.to_record(state.inturn)
+    if state.document_costs:  # D63: only an epoch that measured a PDF's cost carries the field
+        record["document_costs"] = [[size, digest, tokens] for (size, digest), tokens in state.document_costs]
     return record
 
 
@@ -2386,6 +2407,7 @@ def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dia
                        **{name: record[name] for name in RECORD_INT})
     if record.get("head_rule") != HEAD_RULE:
         state = replace(state, head_tokens=None, window_budget=None)
+    state = replace(state, document_costs=recorded_costs(record.get("document_costs")))
     if "start_text" in record:  # D69: optional, so a record written before it resumes with none
         if not isinstance(record["start_text"], str):
             raise ValueError("epoch record field start_text")
@@ -2927,10 +2949,12 @@ class RewriteEngine:
         count = self._record.get("last_turn_count")
         return isinstance(count, int) and turn_starts > count
 
-    def _write_epoch(self, key: str, request: dict, dialect: Dialect, events: list[dict]) -> None:
+    def _write_epoch(self, key: str, request: dict, dialect: Dialect, events: list[dict],
+                     measured: bool = False) -> None:
         """Rule 16, record: the main conversation, at every turn start and on leaving degraded mode,
-        after the transform and before the send. A degraded engine writes nothing; a failed write logs
-        ``epoch_record_stale`` and never blocks the request or degrades the engine."""
+        after the transform and before the send; with ``measured``, when a response's usage has measured
+        a PDF's cost (D63), from the request it answers. A degraded engine writes nothing; a failed write
+        logs ``epoch_record_stale`` and never blocks the request or degrades the engine."""
         state = self.states[key]
         writer = getattr(self.store, "set_epoch", None)
         if state.degraded or not callable(writer):
@@ -2939,7 +2963,7 @@ class RewriteEngine:
         token = _DIALECT.set(dialect)
         try:
             # D63: an in-turn batch changes what later requests send, so it writes the record too.
-            due = (at_turn_start(messages) or "degraded_leave" in names_of(events)
+            due = (measured or at_turn_start(messages) or "degraded_leave" in names_of(events)
                    or "in_turn_batch" in names_of(events))
             if not (due and key == self._main and self._may_write(self._turn_starts.get(key, 0))):
                 return
@@ -3287,6 +3311,7 @@ class RewriteEngine:
             return []
         events: list[dict] = []
         estimate = None
+        before_costs = state.document_costs
         if identity != state.pending_usage:
             pending = state.pending_usage
             events.append({"event": "usage_unattributed", "epoch": state.epoch, "messages": identity[0],
@@ -3365,4 +3390,8 @@ class RewriteEngine:
             # the next turn start retries it. The event reaches the log with the others, via the proxy.
             state = enter_degraded(state, store_failure(error, calls, state), events)
         self.states[key] = state
+        if state.document_costs != before_costs:
+            # D63 (Reviewer A at 26cba5ad, finding 2): a cost lost on a restart sent the next request over
+            # the bound, so the record keeps it from the usage that measured it.
+            self._write_epoch(key, request, dialect, events, measured=True)
         return events

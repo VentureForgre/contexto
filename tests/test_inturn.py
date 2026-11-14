@@ -27,7 +27,7 @@ from contexto.store.catalog import check_page
 from contexto.store.memory import MemoryStore
 from contexto.store.pages import RESULT_PAGE, ROUNDS_PAGE, build_page, index_line, page_id, render_index
 from contexto.store.render import recall_chunk
-from contexto.tokens import PDF_PAGE_TOKENS, uncertain_documents
+from contexto.tokens import PDF_PAGE_TOKENS, split_media, uncertain_documents
 from inturn_harness import AGENT, MODEL, Cli, Refused, Sent, Upstream, blocks, check_pairing, output, png, tool
 from inturn_harness import BYTES_PER_TOKEN as BYTES
 from test_pdf_pages import simple_pdf
@@ -1584,6 +1584,98 @@ def test_a_large_uncertain_pdf_once_measured_is_stubbed_without_folding_the_loop
     assert batch["rounds_folded"] == 0 and not batch["unseen_results_stubbed"]
     assert pdf_at in {i for i, _, _ in cli.state.inturn.stubs}
     assert abs(sent.estimate - sent.real) <= 0.05 * sent.real
+
+
+class SizedPdfs(Upstream):
+    """An upstream that counts each PDF whose pages the estimator cannot count at one token for every two
+    bytes of its base64 data."""
+
+    def tokens(self, request: dict) -> int:
+        docs = [b for b in split_media(request["messages"])[1] if b.get("type") == "document"]
+        uncertain = [b for b in docs if b["source"]["data"].startswith(_SIZED_MARK)]
+        return super().tokens(request) - sum(PDF_MAX_PAGES * PDF_PAGE_TOKENS - len(b["source"]["data"]) // 2
+                                             for b in uncertain)
+
+
+_SIZED_MARK = base64.b64encode(b"%PDF-1.7\nsz").decode()[:12]
+
+
+def sized_pdf(tokens: int, tag: str = "") -> dict:
+    """An uncertain PDF that ``SizedPdfs`` counts at about ``tokens``."""
+    raw = b"%PDF-1.7\nsz" + tag.encode() + b"x" * (tokens * 2 * 3 // 4)
+    return {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                           "data": base64.b64encode(raw).decode()}}
+
+
+def test_two_uncertain_pdfs_read_together_share_the_measured_cost_by_size():
+    # Reviewer A at 26cba5ad, finding 1: a 10,000-token and a 122,000-token PDF read in one round were each
+    # measured at 66,018; read alone later at bound 200,000, the large one went out at 203,685 against an
+    # estimate of 147,838, over the bound only by usage. The cost is now shared by size.
+    config = Config(bound=200_000)
+    small, large = sized_pdf(10_000, "s"), sized_pdf(122_000, "l")
+    cli = Cli(memory(), config)
+    cli.upstream = SizedPdfs()
+    cli.prompt("read both")
+    cli.send([("Read", {"file_path": "s.pdf"}), ("Read", {"file_path": "l.pdf"})])
+    cli.results([[small], [large]])
+    cli.loop(6, lambda r: output(f"l-{r}", 9_000))
+    costs = dict(cli.state.document_costs)
+    by_size = sorted(costs.values())
+    assert abs(by_size[0] - 10_000) <= 300 and abs(by_size[1] - 122_000) <= 1_500, by_size
+    first = len(cli.sent)
+    cli.send([("Read", {"file_path": "l.pdf"})])
+    cli.results([[large]])
+    cli.loop(3, lambda r: output(f"z-{r}", 3_000))
+    for s in cli.sent[first + 1:]:
+        assert s.real <= config.bound and abs(s.estimate - s.real) <= 0.05 * s.real, (s.estimate, s.real)
+    assert not [e for e in cli.usage_events if e["event"] == "over_bound"]
+
+
+def test_measured_pdf_costs_are_kept_in_the_epoch_record_across_a_restart(tmp_path):
+    # Reviewer A at 26cba5ad, finding 2 (fuzz seed 118): a restart lost the measured cost, so the request
+    # after it counted the read PDF at D60's maximum, freed nothing for it, and went out at 66,160 of 60,000.
+    # The record keeps the costs, written from the usage that measures one.
+    cli = Cli(SessionStore(tmp_path, "s1"), SMALL)
+    cli.upstream = CostedPdfs(24_500)
+    cli.prompt("Read the scan, then work.")
+    cli.send([("Read", {"file_path": "scan.pdf"})])
+    cli.results([[SCAN_55K]])
+    cli.send([("Bash", {"command": "ls"})])  # carries the PDF: its usage measures it
+    costs = cli.state.document_costs
+    assert len(costs) == 1 and abs(costs[0][1] - 24_500) <= 200
+    recorded = cli.store.epoch_record()
+    assert check_epoch(recorded)["document_costs"] == [[*costs[0][0], costs[0][1]]]
+    restarted(cli)
+    cli.results([output("small", 600)])
+    sent = cli.send([("Bash", {"command": "next"})])
+    assert "epoch_resumed" in sent.names and cli.state.document_costs == costs
+    assert abs(sent.estimate - sent.real) <= 0.05 * sent.real
+    assert "over_bound" not in sent.names
+    cli.results([output("next", 600)])
+    cli.loop(12, lambda r: output(f"l-{r}", 3_000))
+    assert_real_bound_held(cli, SMALL.bound)
+
+
+def test_an_epoch_record_without_pdf_costs_resumes_with_the_pdf_on_its_first_sending(tmp_path):
+    # A record written before the field (or after the costs were lost) has none: the PDF is counted at
+    # D60's maximum again and the next usage measures it, as on its first sending.
+    cli = Cli(SessionStore(tmp_path, "s1"), SMALL)
+    cli.upstream = CostedPdfs(24_500)
+    cli.prompt("Read the scan, then work.")
+    cli.send([("Read", {"file_path": "scan.pdf"})])
+    cli.results([[SCAN_55K]])
+    cli.send([("Bash", {"command": "ls"})])
+    costs = cli.state.document_costs
+    record = {k: v for k, v in cli.store.epoch_record().items() if k not in ("document_costs", "version")}
+    cli.store.set_epoch(record)
+    restarted(cli)
+    cli.results([output("small", 600)])
+    sent = cli.send([("Bash", {"command": "next"})])
+    assert "epoch_resumed" in sent.names
+    assert sent.estimate > sent.real + 50_000  # the PDF at D60's maximum
+    ((key, cost),) = cli.state.document_costs  # measured again by this request's usage
+    assert key == costs[0][0] and abs(cost - 24_500) <= 200
+    assert cli.store.epoch_record()["document_costs"] == [[*key, cost]]
 
 
 @pytest.mark.parametrize("bound,head,rounds,usage", [(60_000, 26_000, 60, True), (60_000, 28_000, 120, True),

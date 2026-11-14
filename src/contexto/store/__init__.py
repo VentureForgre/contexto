@@ -264,6 +264,7 @@ def read_retained(data: Any) -> tuple[int, int, int, list[dict[str, Any]]] | Non
 
 EPOCH_VERSION = 1
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+_HEX32 = re.compile(r"[0-9a-f]{32}")
 EPOCH_DIALECTS = ("anthropic", "responses")
 _CONVERSATION = re.compile(r"(?:anthropic|responses):[0-9a-f]{64}")  # rewrite.keyed(dialect, request)
 
@@ -336,11 +337,21 @@ def _in_turn(v: Any) -> bool:
             and _ranges(v["strips"]))
 
 
+def _document_costs(v: Any) -> bool:
+    """D63: the measured costs of PDFs whose pages are not certain: ``[size, digest, tokens]`` each, the
+    digest 32 hex digits, at most 64 (``contexto.rewrite.RECORDED_DOCUMENT_COSTS``)."""
+    return isinstance(v, list) and 0 < len(v) <= 64 and all(
+        isinstance(x, list) and len(x) == 3 and _nat(x[0]) and _nat(x[2]) and isinstance(x[1], str)
+        and bool(_HEX32.fullmatch(x[1])) for x in v)
+
+
 # Fields a record may leave out, so a record written before one was added still reads (D61: head_rule;
 # D63: in_turn, present only when the epoch has in-turn edits; D69: start_text, the carried records sent
-# before the first rotation, written only when there are some).
+# before the first rotation, written only when there are some; D63: document_costs, present only when
+# usage has measured a PDF whose pages are not certain).
 EPOCH_OPTIONAL_FIELDS: dict[str, Callable[[Any], bool]] = {"head_rule": _nat, "in_turn": _in_turn,
                                                            "start_text": lambda v: isinstance(v, str),
+                                                           "document_costs": _document_costs,
                                                            "untrusted": lambda v: v is True}
 
 

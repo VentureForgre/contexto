@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import functools
+import hashlib
 import itertools
 import math
 import re
@@ -381,10 +383,25 @@ def uncertain_documents(value: Any) -> int:
 
 
 def uncertain_document_keys(value: Any) -> tuple:
-    """The content key (``media_keys``) of every document in ``value`` that counts as ``PDF_MAX_PAGES``,
+    """The content key (``document_key``) of every document in ``value`` that counts as ``PDF_MAX_PAGES``,
     in order, a PDF sent twice keyed twice."""
-    return media_keys([block for block in split_media(value)[1]
-                       if _media_kind(block) == "document" and not _document_count(block).counted])
+    return tuple(document_key(block) for block in split_media(value)[1]
+                 if _media_kind(block) == "document" and not _document_count(block).counted)
+
+
+def document_key(block: dict) -> tuple[int, str]:
+    """D63: (size, digest) of a document as sent, the same in every process, so a measured cost can be
+    kept in the epoch record. The size is the length of its base64 data, or for a document by URL or
+    file id the length of its block's canonical JSON; the digest is the first 32 hex digits of the
+    SHA-256 of the same bytes."""
+    data = _base64_payload(block)
+    return _sized_digest(data) if data is not None else _sized_digest(canonical_bytes(block))
+
+
+@functools.lru_cache(maxsize=256)
+def _sized_digest(data: str | bytes) -> tuple[int, str]:
+    raw = data.encode("utf-8", "surrogatepass") if isinstance(data, str) else data
+    return len(data), hashlib.sha256(raw).hexdigest()[:32]
 
 
 def measured_documents(value: Any, costs: Any) -> tuple[int, int]:
