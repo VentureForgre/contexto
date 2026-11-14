@@ -478,6 +478,12 @@ class Meter:
         with self._lock:
             return self._arrived.get(turn, 0)
 
+    def turn_outcomes(self, turn: int | None) -> tuple[int, int]:
+        """For ``turn``: the billed requests the upstream answered with a 2xx (and those in flight), and
+        the failed responses (a non-2xx status, or none)."""
+        with self._lock:
+            return self._counted.get(turn, 0), self._failed.get(turn, 0)
+
     def halt(self, stop: str, reason: str) -> None:
         """End this unit (not the run): every later billed request is refused."""
         with self._lock:

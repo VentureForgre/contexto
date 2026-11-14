@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import plistlib
+import time
 
 import pytest
 
@@ -103,6 +104,32 @@ def test_cli_session_text_is_every_top_level_assistant_text_of_the_turn():
     assert turn.text == "q_a: 1\nq_b: 2" and turn.tool_calls == 3
     assert turn.read_paths == ["/w/cwd/notes/a.md", "notes/a.md"]
     assert cli_arm.files_read(turn.read_paths, ["notes/a.md", "notes/b.md"], cli_arm.Path("/w/cwd")) == 1
+
+
+def test_a_result_with_no_metered_request_after_the_output_ended_waits_without_spinning(monkeypatch):
+    """Claude Code printed a result and exited, and its turn had no request through the meter. The
+    session waits out the grace period for a late request, sleeping between looks instead of polling
+    the meter as fast as it can, and then stops the unit as unmetered."""
+    import queue
+
+    monkeypatch.setattr(cli_arm, "UNMETERED_GRACE_S", 1.0)
+    looks = []
+
+    class Meter:
+        @staticmethod
+        def turn_requests(turn):
+            looks.append(turn)
+            return 0
+
+    session = cli_arm.Session.__new__(cli_arm.Session)
+    session._events = queue.Queue()
+    session._events.put(cli_arm._EOF)
+    session.sent, session.results = 1, 1
+    session.compaction_pre_tokens = []
+    started = time.monotonic()
+    stop = session.unmetered_or_desync(0, type("U", (), {"meter": Meter()})())
+    assert stop.code == "unmetered" and 0.9 < time.monotonic() - started < 3.0
+    assert 3 <= len(looks) <= 30, len(looks)  # it looks again for a late request, a few times a second at most
 
 
 def test_an_answer_over_200_characters_is_scored_whole_then_cut_and_the_cut_is_stated(env, tmp_path, script):
@@ -304,6 +331,26 @@ def test_the_lock_is_released_when_a_run_is_refused_or_fails(env, tmp_path, scri
         fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
     finally:
         os.close(probe)
+
+
+def test_a_lock_on_a_directory_that_was_removed_is_refused_with_a_message(env, tmp_path, script, monkeypatch):
+    """A run refused for its budget removes the --out it created; another run that had already made
+    the directory but not yet opened the lock file is refused in words, not with a traceback."""
+    with pytest.raises(runner.Refused, match="another contexto bench run is writing"):
+        with runner.out_lock(tmp_path / "gone"):
+            pass
+    out = tmp_path / "new"
+    real_mkdir = runner.Path.mkdir
+
+    def mkdir(path, *args, **kwargs):
+        real_mkdir(path, *args, **kwargs)
+        if path == out:
+            path.rmdir()  # the other run removed it again
+
+    monkeypatch.setattr(runner.Path, "mkdir", mkdir)
+    run = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, out=out)
+    assert run.code == 2 and "another contexto bench run is writing" in run.printed, run.printed
+    assert not out.exists()
 
 
 def test_two_runs_into_a_new_output_directory_never_both_run(env, tmp_path, script, monkeypatch):

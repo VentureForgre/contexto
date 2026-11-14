@@ -30,6 +30,9 @@ benchmark session directly or under ``contexto run``:
   (an ``init``, an assistant message and a second ``result``), as Claude Code does when a background
   subagent reports back; with ``<n>:late`` that run comes when the next turn arrives, before it is
   served (or when stdin ends).
+- With ``STUB_CLAUDE_ERROR_RESULT=<n>`` turn n's requests are answered as usual, and then the turn
+  ends with an error result whose subtype is ``success`` (``is_error`` true), as Claude Code prints
+  one when it gives up on a turn for a reason of its own.
 
 What it does not imitate: Claude Code's real system prompt and tool list (its head is a few hundred
 bytes, not tens of thousands of tokens), tool search and deferred tools, thinking, permission prompts
@@ -234,6 +237,7 @@ class Session:
 
     def turn(self, message: dict[str, Any]) -> bool:
         """Serve one user turn. False when the session must end (an error result was printed)."""
+        self.turns = getattr(self, "turns", 0) + 1
         self.messages.append({"role": "user", "content": message.get("content")})
         requests = 0
         while True:
@@ -257,6 +261,10 @@ class Session:
             emit({"type": "assistant", "session_id": self.session,
                   "message": {"role": "assistant", "model": self.model, "content": blocks, "usage": usage}})
             calls = [b for b in blocks if b.get("type") == "tool_use"]
+            if not calls and os.environ.get("STUB_CLAUDE_ERROR_RESULT") == str(self.turns):
+                emit({"type": "result", "subtype": "success", "is_error": True, "num_turns": requests,
+                      "result": "stopped", "session_id": self.session})
+                return False
             if not calls:
                 emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": requests, "usage": usage,
                       "result": "".join(b.get("text", "") for b in blocks if b.get("type") == "text"),

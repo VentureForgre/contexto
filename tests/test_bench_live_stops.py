@@ -142,6 +142,21 @@ def test_the_guard_stops_before_the_budget_is_passed(env, tmp_path, script):
     assert all(child.poll() is not None for child in run.children)
 
 
+@pytest.mark.parametrize(("status", "times"), [(529, 4), (400, 1)])
+def test_claude_code_giving_up_on_failed_responses_is_an_api_error(env, tmp_path, script, status, times):
+    """Turn 2's requests all fail (the stub claude tries a 529 four times, a 400 once) and Claude Code
+    prints an error result: the upstream failed, so the unit stops as api_error, not cli_error."""
+    stub = stub_for(script)
+    stub.fault(status, arm="plain", nth=1, times=times)
+    run = bench_stubs.run_bench(env, tmp_path, [script], arms=("plain", "full"), bound=BOUND, stub=stub)
+    plain = run.unit("plain")
+    assert (plain["status"], plain["stop"], plain["turns_completed"]) == ("stopped", "api_error", 1), plain
+    assert plain["reason"] == (f"the upstream answered none of turn 2's requests ({times} failed "
+                               f"response{'s' if times > 1 else ''}: a 429, 529 or other error status, or none), "
+                               "and Claude Code gave up on the turn")
+    assert run.unit("full")["status"] == "complete"
+
+
 def test_a_request_that_got_no_response_is_counted_per_attempt_and_its_reservation_stays_spent(env, tmp_path,
                                                                                                script):
     """The upstream reads one billed request and closes with no response; the full arm retries it. The
@@ -267,11 +282,13 @@ def test_thrashing_is_its_own_stop_and_the_run_goes_on(env, tmp_path, script):
 
 def test_a_cli_error_a_cli_exit_and_a_silent_turn_each_stop_one_unit(env, tmp_path, script):
     stub = stub_for(script)
-    stub.fault(400, arm="plain", nth=1)
+    env.setenv("STUB_CLAUDE_ERROR_RESULT", "2")  # turn 2's request is answered, then Claude Code gives up
     run = bench_stubs.run_bench(env, tmp_path, [script], arms=("plain", "full"), bound=BOUND, stub=stub)
+    env.delenv("STUB_CLAUDE_ERROR_RESULT")
     plain = run.unit("plain")
     assert (plain["status"], plain["stop"], plain["turns_completed"]) == ("stopped", "cli_error", 1)
-    assert "turn 2" in plain["reason"] and run.unit("full")["status"] == "complete"
+    assert plain["reason"] == "Claude Code reported an error on turn 2"  # no "(success)"
+    assert run.unit("full")["status"] == "complete"
 
     slow = stub_for(script, delay_s={"plain": 30.0})
     started = time.monotonic()
@@ -403,6 +420,9 @@ def test_probe_lines_of_a_unit_the_manifest_does_not_record_are_dropped_on_resum
     # requests.jsonl holds attempt 0's records, so the rerun is attempt 1 though the manifest had lost it.
     unit = again.unit("full")
     assert again.code == 0 and unit["attempt"] == 1 and [a["attempt"] for a in unit["attempts"]] == [1]
+    # The printed attempt is the manifest's number (0-based), as the report's messages give it.
+    assert f"full seed {script.seed} repeat 0, attempt 1: complete" in again.printed
+    assert ", attempt" not in first.printed  # the first attempt is not named
     probes = again.lines("probes.jsonl")
     assert len(probes) == len(script.probes) == len({p["id"] for p in probes})
     assert len(again.lines("requests.jsonl")) == 16  # both attempts' requests stay: they were billed

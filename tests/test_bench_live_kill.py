@@ -66,8 +66,8 @@ def start_runner(tmp: Path, url: str, arms: str, out: Path, *, prefix: list[str]
                 "PATH": str(bench_stubs.install_stub_claude(tmp / "bin")) + os.pathsep + os.environ["PATH"],
                 **extra_env})
     command = [sys.executable, *(prefix or ["-m", "contexto"]), "bench", "--model", "claude-haiku-5-5",
-               "--seed", str(SEED), "--bound", str(BOUND), "--turn-kbytes", str(TURN_KBYTES), "--arms", arms, "--upstream", url,
-               "--out", str(out), "--work", str(tmp / "work"), "--budget-tokens", "2000000000"]
+               "--seed", str(SEED), "--bound", str(BOUND), "--turn-kbytes", str(TURN_KBYTES), "--arms", arms,
+               "--upstream", url, "--out", str(out), "--work", str(tmp / "work"), "--budget-tokens", "2000000000"]
     return subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE)
 

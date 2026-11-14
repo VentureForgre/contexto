@@ -549,7 +549,10 @@ def out_lock(out: Path):
     lock file is checked to be the one at its path once locked: a refused run that had created the
     directory removes it with its lock file (``remove_if_unused``)."""
     path = out / LOCK_NAME
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except FileNotFoundError:  # a refused run that had created the directory removed it again
+        raise Refused(LOCKED) from None
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -784,7 +787,7 @@ def _run_units(config: Config, ready: dict[str, Any], out_stream: TextIO, err_st
                     write_json_atomic(config.out / "manifest.json", manifest)
                 detail = f": {result.reason}" if result.reason else ""
                 budget = f" of {ledger.budget:,}" if ledger.budget is not None else ""
-                tries = f", attempt {attempt + 1}" if attempt else ""
+                tries = f", attempt {attempt}" if attempt else ""  # the manifest's number
                 say(f"unit {position}/{len(todo)} {arm} seed {seed} repeat {repeat}{tries}: {result.status}{detail} "
                     f"({entry['requests']} requests, {entry['tokens']:,} tokens; {ledger.spent:,}{budget} spent)")
                 if interrupted or ledger.stop is not None or result.stop == "managed_settings":

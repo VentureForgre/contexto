@@ -339,8 +339,15 @@ class Session:
                         raise stop
                     if self.thrashing or THRASHING in text:
                         raise Stop("thrashing", f"Claude Code stopped on turn {number}: auto-compaction was thrashing")
+                    answered, failed = unit.meter.turn_outcomes(index)
+                    if failed and not answered:
+                        raise Stop("api_error", f"the upstream answered none of turn {number}'s requests ({failed:,} "
+                                                f"failed response{'s' if failed > 1 else ''}: a 429, 529 or other "
+                                                "error status, or none), and Claude Code gave up on the turn")
                     subtype = event.get("subtype") if isinstance(event.get("subtype"), str) else "error"
-                    raise Stop("cli_error", f"Claude Code reported an error on turn {number} ({subtype[:40]})")
+                    # Claude Code gives an error result the subtype "success" when the turn ran to its end.
+                    detail = "" if subtype == "success" else f" ({subtype[:40]})"
+                    raise Stop("cli_error", f"Claude Code reported an error on turn {number}{detail}")
                 if unit.meter.turn_requests(index) == 0:
                     raise self.unmetered_or_desync(index, unit)
                 turn.text = "\n".join(texts) if texts else text
@@ -356,9 +363,10 @@ class Session:
         elif kind == "result":
             self.results += 1
 
-    def drain(self, until_eof: float | None = None) -> None:
+    def drain(self, until_eof: float | None = None) -> bool:
         """Take the events already read; with ``until_eof``, wait up to that many seconds for the end of
-        the child's output. The end-of-file marker is put back for the turn loop."""
+        the child's output. The end-of-file marker is put back for the turn loop. True when the output
+        has ended."""
         deadline = None if until_eof is None else time.monotonic() + until_eof
         while True:
             try:
@@ -367,24 +375,28 @@ class Session:
                 else:
                     event = self._events.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
-                return
+                return False
             if event is _EOF:
                 self._events.put(_EOF)
-                return
+                return True
             self._note(event)
 
     def unmetered_or_desync(self, index: int, unit: Unit) -> Stop:
         """The stop for a result that came with no request through the meter in its turn. Either Claude
         Code went around the meter, or the result answered no turn: a run of its own, printed before the
         turn's own. In the second case the turn's own request reaches the meter, or its result arrives,
-        within ``UNMETERED_GRACE_S``."""
+        within ``UNMETERED_GRACE_S``. Once Claude Code's output has ended, ``drain`` returns at once,
+        so the wait between looks at the meter grows from 0.05 to 1 second instead."""
         number = index + 1
         deadline = time.monotonic() + UNMETERED_GRACE_S
+        pause = 0.05
         while time.monotonic() < deadline:
             if unit.meter.turn_requests(index) > 0:
                 return self.desync(f"found when turn {number}'s own request followed its result")
             seen = self.results
-            self.drain(until_eof=0.1)
+            if self.drain(until_eof=0.1):  # no event can come now; a late request still can
+                time.sleep(min(pause, max(0.0, deadline - time.monotonic())))
+                pause = min(2 * pause, 1.0)
             if self.results > seen:
                 return self.desync(f"found while turn {number} was in flight")
         return Stop("unmetered", f"turn {number} ended with no request through the benchmark's meter: something "
