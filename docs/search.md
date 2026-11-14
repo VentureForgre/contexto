@@ -94,7 +94,9 @@ pg_fda2a23e71e3ce0e (turn 1)
 A word counts as an identifier when it has `_`, `-` or `.` inside it, or a capital after its first
 letter next to small letters (`refreshToken`, `HTTPTimeout`), and has at least 4 other characters,
 one of them a letter. A separator at the start or the end of a word does not count: `--force` and
-`__init__` are matched as typed, so `--force` does not find `enforce`.
+`__init__` are matched as typed, so `--force` does not find `enforce`. A word typed twice counts as
+an identifier when either spelling does: `refreshtoken refreshToken` and `refreshToken refreshtoken`
+both find `refresh_token`.
 
 A separator between two digits is never dropped, in the query or in the turn, because dropping it
 makes another number. `12` does not find `1.2`, `port-80` does not find `port8.0`, and `sha.256`
@@ -149,9 +151,24 @@ at least 30 percent of the weight of the query.
 When no turn holds every word, the query may ask for two facts that sit on two turns. The first
 fact's turn then comes first, followed by turns that share words with it, and the second fact's
 turn can fall far behind or under the floor. So the third of the 3 turns shown in detail goes to the
-best turn for the words the first turn lacks, if those words are not common ones. In a 6,000-turn
-test session, `staging DB port Redis eviction policy` showed the Redis turn first and the staging
-turn in this place; without it the staging turn was not returned at all.
+best turn for the words the first turn lacks. In a 6,000-turn test session, `staging DB port Redis
+eviction policy` showed the Redis turn first and the staging turn in this place; without it the
+staging turn was not returned at all.
+
+A turn takes this place when it holds an identifier, a number or a path among the lacked words (on
+half the turns or fewer), or when the lacked words it holds weigh at least 30 percent of all the
+lacked words and at least half as much as a word that no turn holds. The second bar keeps out a
+leftover common word. One word passes it when it is on at most `sqrt((n + 1) / 2) - 1/2` of `n`
+turns: 6 of 100 turns, and 54 of 6,000. So a word on more than about 6.6 percent of 100 turns, or
+0.9 percent of 6,000, gets no place. If 12 of 100 turns say `server`, `canary rollout plan server`
+shows no turn for `server`.
+
+Among the turns that pass, the one that holds more of the lacked words wins, then the one that holds
+more of the whole query, then the one with more of the query's words side by side as typed, then
+the newer one. So for `how do I restart the nginx proxy`, a turn that
+says `restart the nginx service` beats a newer turn that says only `restart the laptop`. And when an
+old turn says `prod host is db1` and a newer one `prod host is now db2`, the newer one takes the
+place, even if the old one says it in more places.
 
 ### 4. One typo
 
@@ -230,10 +247,17 @@ case.
   finds `database` but not `databases`. A typo in an identifier (`refresh_tokne`) is not found.
 - Typos are for ASCII letters. A word with an accent is matched as typed.
 - In a session of thousands of turns, a typo is not searched when the halves of the word are very
-  common (search stops after checking 500,000 places and treats the word as not found).
-- Two facts on two turns are both shown. A query with four facts on four turns finds less: each
-  turn holds a quarter of the query, under the floor, and only the second-fact place can add one.
-  Three equally rare facts on three turns are all returned (a third each).
+  common (search stops after checking 500,000 places for the whole query and treats the word as not
+  found).
+- Two facts on two turns are both shown. Four equally rare facts on four turns find nothing: each
+  turn holds a quarter of the query, under the floor, so no turn comes first for the second-fact
+  place to follow. `kestrel osprey harrier condor`, one word per turn, finds nothing. Three equally
+  rare facts on three turns are all returned (a third each).
+- Identifiers that differ only in the separator between two groups of digits do not match:
+  `x86_64` does not find `x86-64`, and `build-2026-11-05` does not find `build_2026_11_05`.
+- The exception for an identifier, a number or a path lets a common one through when it is on half
+  the turns or fewer. If 34 of 100 turns say `200` and no turn holds `staging`, `deploy` or
+  `failed`, then `staging deploy failed 200` returns those 34 turns.
 - When the query has no unknown word, the floor does not look at how common the held words are.
   Three words that are each on 30 of 100 turns, never together, return 90 turns: 3 in detail, 10
   listed, and the rest counted.
@@ -242,8 +266,11 @@ case.
 - Falling back costs one more pass over the session's turns. On 6,000 synthetic turns of about
   32 KB each, a query that finds nothing cost about 2 times what the strict search alone costs when
   no typo is tried, and about 3 times when one is (a one-word query: 0.48 CPU seconds strict, 0.91
-  more for the fallback; a seven-word question with a typo: 0.35 and 0.87 more). A query that
-  matches strictly costs what it did before.
+  more for the fallback; a seven-word question with a typo: 0.35 and 0.87 more). Those turns were
+  read from disk. When every turn is held in memory (a session whose search text fits in the 64 MB
+  budget), a strict miss is cheaper, because it stops at a turn's first missing word, so the ratio
+  is higher: 2.0 to 10.1 times on 1,000 synthetic turns. Those misses took at most 0.13 CPU seconds.
+  A query that matches strictly costs what it did before.
 
 The exact rules are in the design contract,
 [docs/milestones/M2-contexto-proxy.md](milestones/M2-contexto-proxy.md), under `contexto_search`,

@@ -1210,10 +1210,11 @@ unknown page, never read. Tools:
      letter, and no separator between two digits) is compared without `_`, `-` and `.`, on both
      sides: `refresh_token`, `refreshToken`, `refresh-token` and `refresh.token` match each other.
      A separator at the start or the end of a word does not make it an identifier (`--force` does
-     not find `enforce`, nor `__init__` `initialize`). A separator between two digits is not
-     dropped on the page either: `port-80` does not find `port8.0`, and `sha.256` finds `sha_256`,
-     not `sha-2.56`. A plain word, a number, a version and a date are matched as typed, so `12`
-     does not find `1.2`.
+     not find `enforce`, nor `__init__` `initialize`). A word typed twice is an identifier when
+     either spelling is one, so `refreshtoken refreshToken` and `refreshToken refreshtoken` both
+     find `refresh_token`. A separator between two digits is not dropped on the page either:
+     `port-80` does not find `port8.0`, and `sha.256` finds `sha_256`, not `sha-2.56`. A plain
+     word, a number, a version and a date are matched as typed, so `12` does not find `1.2`.
   3. Any word. A page need not hold every word. Each word weighs its inverse document frequency
      over the whole store, and a word that no page holds weighs as a word on no page does
      (`ln(2n + 2)` for `n` pages), the most a word can. A page is returned when it holds at least
@@ -1223,10 +1224,11 @@ unknown page, never read. Tools:
   4. One typo. The longest plain word (6 to 40 small letters once folded, not an identifier) that
      no page holds is looked for with one letter changed, added, left out, or swapped with its
      neighbour, as a whole word on the page. It weighs half when it is found. Only one word per
-     query is tried, and the try is abandoned, deterministically, once more than 500,000 places
-     have been checked. A letter added or left out also joins a word and its form one letter
-     longer (`servers` finds `server`): for this step only, and only for a word no page holds, that
-     narrows D34's ruling against stemming.
+     query is matched this way, and the try is abandoned, deterministically, once more than
+     500,000 places have been checked for the query, counted over every word looked for. A
+     letter added or left out also joins a word and its form one letter longer (`servers` finds
+     `server`): for this step only, and only for a word no page holds, that narrows D34's ruling
+     against stemming.
 
   Order: pages holding every searched word first; then turn pages before context-block pages; then
   the larger share of the weight; then more pairs of words standing one after the other as in the
@@ -1234,9 +1236,16 @@ unknown page, never read. Tools:
   times the recency prior). The newest turn page that holds every searched word takes one of the 3
   detailed places, as in strict search. When no page holds every searched word, that place goes to
   the second fact of a query whose two facts sit on two pages: the best page for the words that the
-  best page lacks, if it holds at least 30 percent of their weight and at least 30 percent of the
-  weight of a word on no page (so a leftover common word gets no place), or a specific word among
-  them. It is shown even when it is under the floor. At most 50 hits are returned by the store.
+  best page lacks. A page qualifies when it holds a specific word among them that is on at most half
+  the pages, or when the lacked words it holds weigh at least 30 percent of all the lacked words and
+  at least half the weight of a word on no page (`SECOND_BAR` 0.5). The second bar keeps out a
+  leftover common word: one word passes it on at most `sqrt((n + 1) / 2) - 1/2` of `n` pages, 6 of
+  100 and 54 of 6,000, so a word on more than about 6.6 percent of 100 pages or 0.9 percent of
+  6,000 gets no place. Among the pages that qualify the best is, in order: a turn page before a
+  context block, the larger weight of the lacked words, the larger weight of the whole query (so a
+  page that also holds the query's other words beats one that holds only the lacked word), more
+  pairs of words side by side, the newer page (so the latest value wins a tie, D28). It is shown
+  even when it is under the floor. At most 50 hits are returned by the store.
 
   The reply opens with `[no paged-out turn holds every word of that query; approximate matches,
   most words matched first, then newest first:]` in place of the best-pages line, then
@@ -1270,7 +1279,8 @@ unknown page, never read. Tools:
   and 0.87, 2.9; a 7-word question with a typo 0.35 and 0.87, 3.5; six unknown words 1.13 and
   1.61, 2.4. So a miss costs about 2 times a strict miss without a typo try and about 3 with one.
   With every page held in memory a strict miss is cheaper still (it stops at the first missing
-  word), and the ratio is higher. A strict hit costs what it did: it runs the same code, and the
+  word), and the ratio is higher: 2.0 to 10.1 times at 1,000 synthetic pages (reviewer B on PR
+  #267), at most 0.13 CPU seconds a miss. A strict hit costs what it did: it runs the same code, and the
   fallback is not called. Limits: no stemming beyond the typo step, no synonyms, no embeddings
   (`database` does not find `DB`); stop words are dropped even where they are code (`for loops`
   searches `loops`); a plain lower-case word does not match a separated form (`retrybudget` does
@@ -1278,9 +1288,14 @@ unknown page, never read. Tools:
   finds `done.Next`); with several styles of one identifier on a page, the matching lines are
   those of the first style found; a typo is found only in a plain word and only as a whole word
   (`databse` finds `database`, not `databases`); a second typo in the same query is not searched;
-  four facts on four pages find less than two (a quarter of the query each); with no unknown word
-  the floor does not look at how common the held words are (three words each on 30 of 100 pages,
-  never together, return 90 pages).
+  four equally rare facts on four pages find nothing (a quarter of the query each, so no page comes
+  first for the second-fact place: `kestrel osprey harrier condor` returns 0 pages); identifiers
+  that differ only in the separator between two digit groups do not match (`x86_64` does not find
+  `x86-64`, nor `build-2026-11-05` `build_2026_11_05`); with no unknown word the floor does not
+  look at how common the held words are (three words each on 30 of 100 pages, never together,
+  return 90 pages); the specific-word exception lets a common identifier or number through (with
+  `200` on 34 of 100 pages and the other words on none, `staging deploy failed 200` returns the 34
+  pages).
 
 The preamble tells the model to pin decisions and obligations as it makes them and to recall
 before relying on a paged-out detail.
