@@ -127,16 +127,22 @@ class ExistingSessions:
             raise SessionUnavailable(f"there is no such session under {self.home / 'sessions'}")
 
     def open(self, session_id: str) -> SessionStore:
-        """The session's store. ``SessionUnavailable`` as ``check``, or when opening fails;
+        """The session's store, opened without creating anything (``SessionStore(create=False)``), so a
+        session removed after ``check``, or pruned while the open waits for its lock, is refused rather
+        than made again. ``SessionUnavailable`` as ``check``, or when opening fails;
         ``LockFileDamagedError`` passes through, since its reply names the file to delete (D59)."""
         from contexto.mcp import SessionUnavailable
-        from contexto.store import LockFileDamagedError, SessionStore
+        from contexto.store import LockFileDamagedError, SessionNotFoundError, SessionRemovedError, SessionStore
 
         self.check(session_id)
         try:
-            store = SessionStore(self.home, session_id)
+            store = SessionStore(self.home, session_id, create=False)
         except LockFileDamagedError:
             raise
+        except SessionRemovedError:
+            raise SessionUnavailable("it was removed while it was being opened") from None
+        except SessionNotFoundError:
+            raise SessionUnavailable(f"there is no such session under {self.home / 'sessions'}") from None
         except (OSError, ValueError) as exc:  # the class only: the text can hold paths and stored values
             raise SessionUnavailable(f"opening it failed with {type(exc).__name__}") from None
         store.set_search_cache(self.search_cache if self.search_cache is not None else env_budget(store))

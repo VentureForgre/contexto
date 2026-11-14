@@ -35,12 +35,14 @@ import secrets
 import socket
 import stat
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from contexto.canonical import loads_bounded
 from contexto.private import open_private, private_dir
+from contexto.upstream import JS_WHITESPACE, TRUTHY
 
 TOKEN_FILE = "serve.token"
 STATE_FILE = "serve.json"
@@ -60,6 +62,13 @@ RESOLVE_UNKNOWN = {"error": UNKNOWN_TOOL_USE}
 # (measured on 2.1.322, docs/research/D70-serve-probes.md section 4; each has its own base-URL variable).
 CLOUD_PROVIDER_VARIABLES = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
                             "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS")
+
+
+def cloud_provider_variables(env: Mapping[str, str]) -> list[str]:
+    """The cloud-provider switches (``CLOUD_PROVIDER_VARIABLES``) that ``env`` turns on, read as Claude
+    Code reads a boolean variable: ``1``, ``true``, ``yes`` or ``on``, any case, with whitespace trimmed.
+    The service and the MCP server both decide by this."""
+    return [name for name in CLOUD_PROVIDER_VARIABLES if env.get(name, "").lower().strip(JS_WHITESPACE) in TRUTHY]
 
 
 class ServeFileError(Exception):

@@ -30,7 +30,7 @@ from typing import IO, Any, Protocol
 
 from contexto import serveclient
 from contexto.canonical import loads_bounded, utf8
-from contexto.servecontract import CLOUD_PROVIDER_VARIABLES, MAX_TOOL_USE_ID_CHARS
+from contexto.servecontract import CLOUD_PROVIDER_VARIABLES, MAX_TOOL_USE_ID_CHARS, cloud_provider_variables
 from contexto.store import LockFileDamagedError, PageUnreadableError
 from contexto.store.ledger import LedgerCorruptError
 from contexto.store.pages import is_context_page
@@ -963,13 +963,12 @@ class _NotRun(Exception):
 
 
 def provider_switch(environ: Mapping[str, str]) -> str | None:
-    """The first of ``PROVIDER_SWITCHES`` that ``environ`` sets to something other than empty, ``0`` or
-    ``false``. Claude Code passes its whole start environment to a stdio MCP server (2.1.322), so the
-    server sees a switch set there; one set only in a settings file's ``env`` block reaches it too."""
-    for name in PROVIDER_SWITCHES:
-        if environ.get(name, "").strip().lower() not in ("", "0", "false"):
-            return name
-    return None
+    """The first of ``PROVIDER_SWITCHES`` that ``environ`` turns on, read as Claude Code and the service
+    read it (``servecontract.cloud_provider_variables``: ``1``, ``true``, ``yes`` or ``on``). Claude
+    Code passes its whole start environment to a stdio MCP server (2.1.322), so the server sees a
+    switch set there; one set only in a settings file's ``env`` block reaches it too."""
+    switches = cloud_provider_variables(environ)
+    return switches[0] if switches else None
 
 
 class ServeServer(Server):

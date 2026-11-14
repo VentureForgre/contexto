@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -442,6 +443,18 @@ def test_a_provider_switch_that_is_off_is_not_named(home, service, clock, value)
     assert "CLAUDE_CODE_USE" not in refused(tool(server, "contexto_state", {}), "ANTHROPIC_BASE_URL")
 
 
+@pytest.mark.parametrize("value", ["off", "no", "OFF", " No ", "2", "enabled"])
+def test_a_provider_switch_claude_code_reads_as_off_is_not_named(home, service, clock, value):
+    server, _ = make_server(home, clock, environ={"CLAUDE_CODE_USE_BEDROCK": value})
+    assert "CLAUDE_CODE_USE" not in refused(tool(server, "contexto_state", {}), "ANTHROPIC_BASE_URL")
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES", " on ", "True\n"])
+def test_a_provider_switch_is_on_for_the_values_the_service_reads_as_on(home, service, clock, value):
+    server, _ = make_server(home, clock, environ={"CLAUDE_CODE_USE_VERTEX": value})
+    refused(tool(server, "contexto_state", {}), "CLAUDE_CODE_USE_VERTEX")
+
+
 def test_serve_server_reads_the_switch_from_the_process_environment_by_default(home, service, clock, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "true")
     server = mcp_command.serve_server(home, None, io.StringIO(), io.StringIO(), clock=clock, sleep=clock.sleep)
@@ -496,6 +509,77 @@ def test_a_session_deleted_while_cached_is_refused_and_not_recreated(home, servi
     shutil.rmtree(doomed.dir)
     refused(tool(server, "contexto_pin", {"kind": "decision", "text": "late"}), "cannot be opened")
     assert list((home / "sessions").iterdir()) == [] and "doomed" not in server.servers
+
+
+def test_a_session_removed_between_its_check_and_its_open_is_refused_and_not_recreated(home, service, served,
+                                                                                       monkeypatch):
+    """The window forced: the session passes ``check``, and is removed before the store is opened."""
+    import shutil
+
+    doomed = SessionStore(home, "doomed")
+    doomed.release()
+    service.known[ID_A] = "doomed"
+    check = mcp_command.ExistingSessions.check
+
+    def check_then_remove(self, session_id):
+        check(self, session_id)
+        shutil.rmtree(home / "sessions" / session_id)
+
+    monkeypatch.setattr(mcp_command.ExistingSessions, "check", check_then_remove)
+    server, _ = served
+    refused(tool(server, "contexto_pin", {"kind": "decision", "text": "late"}), "cannot be opened",
+            "no such session")
+    assert list((home / "sessions").iterdir()) == [] and "doomed" not in server.servers
+
+
+def test_a_session_pruned_while_its_open_waits_for_the_lock_is_refused_and_not_recreated(home, service, served,
+                                                                                         monkeypatch):
+    """The window forced: ``sessions prune`` holds the session's lock and deletes it while the open
+    waits for that lock, as ``hold_live`` sees it."""
+    import fcntl
+    import shutil
+
+    from contexto import store as store_module
+
+    pruned = SessionStore(home, "pruned")
+    pruned.release()
+    service.known[ID_A] = "pruned"
+    flock = fcntl.flock
+    removed = []
+
+    def prune_meanwhile(fd, operation):
+        if operation == fcntl.LOCK_SH and not removed:
+            removed.append(True)
+            shutil.rmtree(home / "sessions" / "pruned")  # what prune does, under its exclusive lock
+        return flock(fd, operation)
+
+    monkeypatch.setattr(store_module.fcntl, "flock", prune_meanwhile)
+    server, _ = served
+    refused(tool(server, "contexto_state", {}), "cannot be opened", "removed while it was being opened")
+    assert removed and list((home / "sessions").iterdir()) == []
+
+
+def test_session_mode_still_opens_a_session_pruned_while_it_opens(home, monkeypatch):
+    """``--session`` mode is unchanged: the store's own open recreates the session and says so."""
+    import fcntl
+    import shutil
+
+    from contexto import store as store_module
+
+    SessionStore(home, "kept").release()
+    flock = fcntl.flock
+    removed = []
+
+    def prune_meanwhile(fd, operation):
+        if operation == fcntl.LOCK_SH and not removed:
+            removed.append(True)
+            shutil.rmtree(home / "sessions" / "kept")
+        return flock(fd, operation)
+
+    monkeypatch.setattr(store_module.fcntl, "flock", prune_meanwhile)
+    store = SessionStore(home, "kept")
+    assert removed and store.dir.is_dir()
+    assert '"pruned_while_opening"' in (store.dir / "log.jsonl").read_text()
 
 
 def test_a_damaged_live_lock_gets_the_reply_session_mode_gives(home, service, served):
@@ -611,6 +695,44 @@ def test_a_service_that_accepts_and_never_answers_times_out(home, service, clock
     assert clock.slept == [] and service.received == []
 
 
+def test_a_service_that_trickles_its_answer_is_cut_off_at_the_calls_deadline(home, service, clock):
+    """One byte every 0.2 s of a 200 answer: a per-read timeout never fires, so only a deadline on the
+    whole call ends it. Unbounded it would take about 30 s here."""
+    trickle = socket.create_server(("127.0.0.1", 0))
+    done = threading.Event()
+    answer = (b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 30\r\n\r\n'
+              b'{"session": "aaaaaaaaaaaaaaa"}')
+
+    def dribble():
+        conn, _ = trickle.accept()
+        with conn:
+            conn.recv(65536)
+            for byte in answer:
+                if done.wait(0.2):
+                    return
+                try:
+                    conn.sendall(bytes([byte]))
+                except OSError:
+                    return
+
+    thread = threading.Thread(target=dribble, daemon=True)
+    thread.start()
+    try:
+        port = trickle.getsockname()[1]
+        write_private(home / servecontract.STATE_FILE, json.dumps({"port": port, "pid": os.getpid()}))
+        started = time.monotonic()
+        with pytest.raises(serveclient.ResolveError) as exc:
+            serveclient.resolve(home, ID_A, clock=clock, sleep=clock.sleep, timeout=1.0)
+        took = time.monotonic() - started
+    finally:
+        done.set()
+        trickle.close()
+        thread.join(5)
+    assert exc.value.kind == serveclient.NOT_RUNNING and exc.value.reason == f"no answer from port {port} within 1 s"
+    assert took < 5, f"{took:.1f} s"
+    assert clock.slept == [] and service.received == []
+
+
 def test_a_service_that_hangs_up_is_reported_as_not_running(home, service, served):
     silent = socket.create_server(("127.0.0.1", 0))
 
@@ -698,5 +820,5 @@ def test_serveclient_imports_only_the_standard_library_and_no_url_opener():
     source = open(serveclient.__file__, encoding="utf-8").read()
     imports = {line.split()[1].split(".")[0] for line in source.splitlines()
                if line.startswith(("import ", "from ")) and not line.startswith("from __future__")}
-    assert imports <= {"http", "json", "os", "re", "time", "collections", "pathlib", "contexto"}
+    assert imports <= {"http", "json", "os", "re", "socket", "threading", "time", "collections", "pathlib", "contexto"}
     assert "urllib" not in source  # urllib.request would honor HTTP_PROXY

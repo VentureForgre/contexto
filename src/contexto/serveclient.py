@@ -22,6 +22,11 @@ before it passes the call on wherever it reads the response as it relays it; the
 responses where it cannot promise that order (``docs/serve.md``, "Endpoints of the service itself").
 Nothing else is retried.
 
+Bounded in time: each try has ``TIMEOUT_S`` in total to connect, send and read the whole answer
+(at that deadline its socket is shut, however the answer was trickling in), and a retry is started
+only while its wait ends inside ``RETRY_WINDOW_S``. So a call ends within ``RETRY_WINDOW_S +
+TIMEOUT_S`` (4 s), with six tries at most.
+
 What is never sent or said: the token goes into the request path and nowhere else, and only to the
 port recorded by a service that holds the lock. ``ResolveError`` holds a kind and a fixed phrase,
 never the token, the request path, a file's content, or the text of an exception that could quote
@@ -30,6 +35,8 @@ one of them.
 
 from __future__ import annotations
 
+import socket
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -47,7 +54,7 @@ from contexto.servecontract import (
     resolve_request,
 )
 
-TIMEOUT_S = 2.0  # connect and each read; the service is on this machine and answers from memory
+TIMEOUT_S = 2.0  # one try, in total: connect, send and read the whole answer (the service answers from memory)
 # Waits between tries after a 404: six tries over 1.9 s when the service answers at once. A wait that
 # would end after RETRY_WINDOW_S, measured on the caller's clock from the first try, is not started.
 RETRY_DELAYS_S = (0.1, 0.2, 0.3, 0.5, 0.8)
@@ -82,11 +89,30 @@ def read_endpoint(home: Path) -> tuple[int, str]:
 
 
 def _ask(port: int, token: str, tool_use_id: str, timeout: float) -> tuple[int, object]:
-    """One request: the status and the answer's JSON (None when the body is not JSON or too long)."""
+    """One request, in at most ``timeout`` seconds in all: the status and the answer's JSON (None when
+    the body is not JSON or too long). The socket timeout bounds each step; a timer shuts the socket at
+    the deadline, which ends a read however slowly the answer arrives."""
     import http.client  # here, not at the top: `contexto mcp --session` imports this module and never asks
 
     body = resolve_request(tool_use_id)
     conn = http.client.HTTPConnection(SERVICE_HOST, port, timeout=timeout)
+    expired = threading.Event()
+    guard = threading.Lock()
+
+    def expire() -> None:
+        with guard:
+            expired.set()
+            sock = conn.sock
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    timer = threading.Timer(timeout, expire)
+    timer.daemon = True
+    timer.start()
+    late = ResolveError(NOT_RUNNING, f"no answer from port {port} within {timeout:g} s")
     try:
         conn.request("POST", local_target(token, RESOLVE_PATH), body=body,
                      headers={"Host": f"{SERVICE_HOST}:{port}", "Content-Type": "application/json",
@@ -97,11 +123,17 @@ def _ask(port: int, token: str, tool_use_id: str, timeout: float) -> tuple[int, 
     except ConnectionRefusedError:
         raise ResolveError(NOT_RUNNING, f"nothing is listening on port {port}") from None
     except TimeoutError:
-        raise ResolveError(NOT_RUNNING, f"no answer from port {port} within {timeout:g} s") from None
+        raise late from None
     except (OSError, http.client.HTTPException) as exc:  # the text can quote the request line: name only
+        if expired.is_set():
+            raise late from None
         raise ResolveError(NOT_RUNNING, f"the request to port {port} failed ({type(exc).__name__})") from None
     finally:
-        conn.close()
+        timer.cancel()
+        with guard:  # the timer does not shut a socket that close() hands back to the system
+            conn.close()
+    if expired.is_set():  # the answer was cut short at the deadline
+        raise late
     if len(raw) > MAX_ANSWER_BYTES:
         return status, None
     try:

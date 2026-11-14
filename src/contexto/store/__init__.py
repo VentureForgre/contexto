@@ -104,9 +104,13 @@ def refuse_symlinked_session(session_path: Path) -> None:
                              "under sessions/", str(path))
 
 
-def hold_live(session_path: Path) -> tuple[int, bool]:
+def hold_live(session_path: Path, *, create: bool = True) -> tuple[int, bool]:
     """Take a shared ``flock`` on ``session_path/live.lock``; return its descriptor and whether a prune
     deleted the session while it was being opened (D37).
+
+    With ``create`` false the session directory is never made: a directory that is missing, or that a
+    prune removes while this waits for the lock, raises ``SessionNotFoundError`` instead of being made
+    again, and the second element is always False.
 
     Creates the session directory if needed. Blocks while ``sessions prune`` holds the exclusive lock.
     Prune deletes the directory under that lock, so after waiting the descriptor can name an unlinked
@@ -123,8 +127,9 @@ def hold_live(session_path: Path) -> tuple[int, bool]:
         if attempt:
             time.sleep(min(0.01 * 2 ** (attempt - 1), 0.25))
         try:
-            private_dir(path.parent)
-            fd = open_private(path, os.O_RDWR | os.O_NOFOLLOW)
+            if create:
+                private_dir(path.parent)
+            fd = open_private(path, os.O_RDWR | os.O_NOFOLLOW)  # in an existing directory, never makes one
         except NotRegularFileError as e:  # a symlink, FIFO or directory in its place (D59)
             raise LockFileDamagedError(path, e) from e
         except FileNotFoundError as e:
@@ -133,6 +138,9 @@ def hold_live(session_path: Path) -> tuple[int, bool]:
                     raise FileNotFoundError(errno.ENOENT, "session directory is a symlink to a missing target",
                                             str(path.parent)) from e
                 raise
+            if not create:
+                raise SessionRemovedError(f"session {path.parent.name!r} was removed while it was being "
+                                          "opened") from None
             pruned = True  # prune removed the directory between the mkdir, the chmod, or the open
             continue
         try:
@@ -146,6 +154,8 @@ def hold_live(session_path: Path) -> tuple[int, bool]:
             os.close(fd)
             raise
         os.close(fd)
+        if not create:
+            raise SessionRemovedError(f"session {path.parent.name!r} was removed while it was being opened")
         pruned = True  # prune unlinked the lock file while this process waited for it
     raise TimeoutError(f"could not open session directory {path.parent}: it was deleted while opening, "
                        f"{LIVE_ATTEMPTS} times")
@@ -453,6 +463,11 @@ class SessionNotFoundError(LookupError):
     """``SessionStore.open_existing`` was asked for a session that does not exist."""
 
 
+class SessionRemovedError(SessionNotFoundError):
+    """A session opened without ``create`` was removed (by ``contexto sessions prune``, say) while it
+    was being opened."""
+
+
 class PageNotFoundError(LookupError):
     """``quarantine_page`` was given a page that is neither stored nor already quarantined."""
 
@@ -499,7 +514,10 @@ def redact(event: Any) -> Any:
 
 
 class SessionStore(LedgerOps):
-    def __init__(self, home: Path, session_id: str) -> None:
+    def __init__(self, home: Path, session_id: str, *, create: bool = True) -> None:
+        """Open session ``session_id`` under ``home``, making it when it does not exist. With ``create``
+        false nothing is made: ``SessionNotFoundError`` when the session directory is missing or is
+        removed while this open waits for its lock (``hold_live``)."""
         self.session_id = session_id
         self.home = Path(home)
         # Side-room publish times and expiry (D40): wall-clock, since the proxy and the MCP server are
@@ -510,12 +528,15 @@ class SessionStore(LedgerOps):
         # CONTEXTO_HOME is created 0700, but an existing one keeps the mode its user gave it (D55); a
         # home that is not a directory is refused before anything is changed. sessions/ and everything
         # under it is Contexto's own and is narrowed even when it exists.
+        if not create and not os.path.isdir(self.dir):  # checked before anything above it is made
+            refuse_symlinked_session(self.dir)
+            raise SessionNotFoundError(f"session {session_id!r} does not exist")
         private_dir(Path(home), narrow=False)
         private_dir(Path(home) / "sessions")
         refuse_symlinked_session(self.dir)
         # Creates the session directory and locks it before anything else is created in it, so prune
         # cannot remove it under us.
-        live, pruned = hold_live(self.dir)
+        live, pruned = hold_live(self.dir, create=create)
         self.release = weakref.finalize(self, os.close, live)  # release(): drop the lock before collection
         private_dir(self.pages_dir)
         removed = remove_stale_temps(self.dir) + remove_stale_temps(self.pages_dir)
