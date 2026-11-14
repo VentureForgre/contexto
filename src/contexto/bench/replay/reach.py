@@ -19,9 +19,10 @@ Queries (``needs`` returns them with the statement each must find):
 - ``paraphrase``, ``toolloop`` and ``concluded``: the question does not contain the key, so the
   query is the question's content words (``contexto.bench.model.words``: runs of letters and digits
   of three or more characters, without the function words and the words of the generator's fixed
-  texts), in the order they appear, without its instruction words (``instruction_words``: the words of the fixed phrases the generator wraps every
-  such question in, such as "earlier in this conversation" and "Answer with the value only"). They
-  are found from the generator's own tables (``ATTRIBUTES``, ``SCENARIOS``): what of the question is
+  texts), in the order they appear, without its instruction words (``instruction_words``: the words
+  of the fixed phrases the generator wraps every such question in, such as "earlier in this
+  conversation" and "Answer with the value only", that ``words`` does not already drop). They are
+  found from the generator's own tables (``ATTRIBUTES``, ``SCENARIOS``): what of the question is
   not the table's text is the wrapper. Contexto's search returns a page only when it holds every word
   of the query, so a question whose words are not all on the plant's page finds nothing, and that is
   what the rule reports. For ``concluded`` the statement to find is the assistant's ``DECISION``

@@ -756,7 +756,8 @@ def test_the_shipped_trace_pins_the_default_session(pinned):
     assert len(shipped["turn_sha256"]) == len(pinned.turns) == 56 and shipped["script_sha256"] == pinned.digest()
     # One request per scripted round: the plan and the measurement agree.
     assert shipped["model"]["rounds"] == scripted.rounds(pinned)
-    assert sum(shipped["model"]["rounds"]) == shipped["expected"]["requests"] == len(shipped["expected"]["request_tokens"])
+    expected = shipped["expected"]
+    assert sum(shipped["model"]["rounds"]) == expected["requests"] == len(expected["request_tokens"])
     assert shipped["model"]["rules"] == scripted.RULES
     assert list(shipped["files"]) == list(pinned.reads)
     estimate = bench_script.estimate(pinned)
