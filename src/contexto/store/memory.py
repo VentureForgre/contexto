@@ -1,4 +1,7 @@
-"""In-memory ``SessionStore`` stand-in with the same methods, for tests (lane A imports this path)."""
+"""In-memory ``SessionStore`` stand-in with the same methods, for tests (lane A imports this path).
+
+It is in no project (D69): ``project()`` is None, ``carried()`` is empty and ``carried_text()`` is ``""``.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +9,7 @@ import json
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,7 @@ from contexto.store import (
 )
 from contexto.store.ledger import MemoryLedger
 from contexto.store.pages import build_page, current_stub, render_index, same_content, search_entry
+from contexto.store.project import merged_main_records
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 from contexto.store.search import Approximate, SearchEntry, rank, rank_approximate
@@ -56,6 +60,29 @@ class MemoryStore(LedgerOps):
 
     def workdir(self) -> Path | None:
         return self._workdir
+
+    def set_project_memory(self, on: bool) -> None:
+        """As ``SessionStore.set_project_memory``; a memory store has no project either way."""
+        if not isinstance(on, bool):
+            raise ValueError(f"project memory is on or off (a bool), not {on!r}")
+        self._project_memory = on
+
+    def add_main_records(self, record_ids: Iterable[str]) -> None:
+        """As ``SessionStore.add_main_records``, kept in memory; a memory store has no project."""
+        merged = merged_main_records(getattr(self, "_main_records", None), list(record_ids))
+        if merged is not None:
+            self._main_records = merged
+
+    def main_records(self) -> list[str]:
+        return list(getattr(self, "_main_records", ()))
+
+    def add_trusted_conversation(self, key: str) -> None:
+        """As ``SessionStore.add_trusted_conversation``, kept in memory."""
+        kept = [x for x in getattr(self, "_trusted_conversations", []) if x != key]
+        self._trusted_conversations = [*kept, key][-64:]
+
+    def trusted_conversations(self) -> list[str]:
+        return list(getattr(self, "_trusted_conversations", ()))
 
     def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None:
         check_window(window_tokens, bytes_per_token)

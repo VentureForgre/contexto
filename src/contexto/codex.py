@@ -643,11 +643,24 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
     upstream) is checked before the session and the proxy exist; a launch that fails after that, before
     Codex starts (no key helper, for example from an untrusted folder, D52), removes the session
     directory it created, so a failed launch leaves no empty session (D54); a resumed ``--session`` is
-    never removed."""
+    never removed.
+
+    Project memory (D69) is the launcher's, the same as for Claude Code: ``--no-project-memory`` or
+    ``CONTEXTO_PROJECT_MEMORY`` is recorded in the session before the proxy starts, and the start line
+    follows the session line, before Codex starts."""
     import uuid
 
     from contexto import cliversions
     from contexto import upstream as upstream_module
+
+    # Always the real ones, whatever ``launcher`` is: they touch only the store and stderr, and their
+    # ``LaunchError`` is the one caught below whenever ``launcher`` is the real module.
+    from contexto.launcher import (
+        engine_pin_budget,
+        project_memory_notice,
+        project_memory_wanted,
+        record_project_memory,
+    )
 
     if launcher is None:
         from contexto import launcher  # builder-1's module; imported lazily
@@ -706,6 +719,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                 return launcher.EXIT_INTERRUPTED
             no_daemon = takes_no_daemon(codex_args, version, listed)
         home = paths.contexto_home()
+        memory = project_memory_wanted(options, stderr)
         session_id = args.session if args.session is not None else uuid.uuid4().hex  # '' is invalid (D57)
         try:
             existed = os.path.lexists(paths.session_dir(home, session_id))
@@ -715,6 +729,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                                        launcher.EXIT_USAGE if isinstance(exc, ValueError) else launcher.EXIT_PROXY
                                        ) from exc
         created = None if existed else paths.session_dir(home, session_id)
+        record_project_memory(store, memory)  # before anything reads the store: the proxy, the MCP server
         config = launcher.engine_config(options)
         proxy, engine_name = launcher.start_proxy(store, target, source, config, args.observe_thinking,
                                                   stderr=stderr)
@@ -742,6 +757,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                    **({"codex_version_error": version_error} if version_error else {})})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {source}, codex auth "
               f"{args.codex_auth}, engine {engine_name})", file=stderr, flush=True)
+        project_memory_notice(store, stderr, engine_pin_budget(config))  # D69: what it carries, or nothing
         if version_error and not no_daemon and _may_take_no_daemon(codex_args):
             # Without the flag Codex may leave its shared server running for the CODEX_HOME it used (this
             # session's in API-key mode, the user's own in ChatGPT mode).

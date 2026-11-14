@@ -9,6 +9,7 @@ from contexto.store import SessionStore
 from contexto.store.ledger import LedgerCorruptError
 from contexto.store.memory import MemoryStore
 from contexto.store.pinned import UNCHECKED_LINE
+from contexto.store.project import project_root
 from contexto.store.recall import DEFAULT_LINES
 
 
@@ -95,7 +96,8 @@ def test_without_a_workdir_staleness_is_marked_unchecked(store):
 def test_workdir_is_stored_privately_in_meta_json(tmp_path):
     store = SessionStore(tmp_path, "s1")
     store.set_workdir(tmp_path)
-    assert json.loads((store.dir / "meta.json").read_text()) == {"workdir": str(tmp_path.resolve())}
+    assert json.loads((store.dir / "meta.json").read_text()) == {
+        "workdir": str(tmp_path.resolve()), "project": str(project_root(tmp_path))}  # D69: the project root too
     assert (store.dir / "meta.json").stat().st_mode & 0o777 == 0o600
     assert SessionStore(tmp_path, "s1").workdir() == tmp_path.resolve()
 

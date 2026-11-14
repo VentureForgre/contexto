@@ -39,11 +39,24 @@ In scope:
   your own `CODEX_HOME` with `-c` overrides, and Contexto writes nothing there. Any path that
   creates store data with wider modes, follows a link out of the store, or lets a page id from
   outside read a file that is not a page is in scope.
+  With project memory (D69) a session also reads other sessions, without a lock and without
+  changing them: the `meta.json` of every session under `sessions/`, to find the sessions of its
+  project, and the `ledger.jsonl` of every other session of its project (the earlier ones for what
+  it carries, all of them for closures and replacements). Both are opened as regular files only,
+  never through a symlink and never waiting on a FIFO; a ledger over 64 MB or a `meta.json` over
+  1 MB is skipped unread. `contexto project forget` writes the `meta.json` of the sessions the user
+  names (and creates their empty lock files if they are missing); a running session never writes to
+  another session. Reports of a session reading or writing a session of another project, of a
+  session joining another project than the one it was started in, of carried text reaching the
+  model from anything other than a pin the proxy saw the main conversation make, of carried text
+  reaching the model as markup rather than as an escaped literal, or of a subagent's closure or
+  replacement of another session's record counting outside its own session, are in scope.
 - **The MCP server** (`contexto mcp`), which the CLI starts over stdin and stdout; it opens no
   network socket. It reads the session's store and serves `contexto_search`, `contexto_recall`,
-  and the ledger tools (`contexto_pin`, `contexto_close`, `contexto_state`). Reports of it reading
-  or writing outside its session, or crashing on crafted input in a way that affects the store,
-  are in scope.
+  and the ledger tools (`contexto_pin`, `contexto_close`, `contexto_state`). It reads the other
+  sessions of its session's project as the session store item above describes, and writes only to
+  its own session. Reports of it reading outside its session and those of its project, writing
+  outside its session, or crashing on crafted input in a way that affects the store, are in scope.
 - The launchers (`contexto run claude`, `contexto run codex`), including what they pass to the CLI
   and which Python runs the MCP server.
 
@@ -61,7 +74,13 @@ outputs, and any file contents or secrets that passed through the conversation. 
 - `retained.json`: the recent turns still in the model's view, word for word, so a restarted proxy
   can resume.
 - `epoch.json`: the page index (the opening text of each paged-out turn) and the pinned state.
-- `ledger.jsonl`: the decisions, obligations and other records the model pinned.
+  With project memory it also holds text pinned in *other* sessions: while a session that carries
+  records is at epoch 0 (before its first rotation), `start_text` holds the carried records it
+  sends; after that, the pinned state includes the same carried section. Carried text is stored as
+  the model gets it, each record's text an escaped JSON literal.
+- `ledger.jsonl`: the decisions, obligations and other records the model pinned. Records are
+  written with the author `model`, as before project memory; which of them the main conversation
+  made is in `meta.json`.
 - `quarantine/`: copies of damaged pages and ledger files that Contexto moved aside. They hold the
   same text as the files they came from.
 - `codex-home/` (Codex sessions in API-key mode): Codex's own rollout transcripts. Codex writes
@@ -72,7 +91,13 @@ These hold no conversation text:
 
 - `meta.json`: the absolute path of the working directory the session started in, request
   counters, and the Claude Code session ids the session served (`cli_sessions`). Those ids name
-  Claude Code's own transcript files, so they link a Contexto store to those transcripts.
+  Claude Code's own transcript files, so they link a Contexto store to those transcripts. Since
+  project memory it also holds `project` (the absolute path of the project's root directory,
+  recorded once at the session's first launch and never moved by a resume from elsewhere),
+  `project_memory` (`false` when the session is out of project memory), `main_records` (the record
+  ids the proxy saw the main conversation pin or close, the newest 4,096; only these are carried),
+  `trusted_conversations` (the keys of the main conversations the proxy trusted, the newest 64: each is
+  a hash of a conversation's first message, not its text) and `forgotten` (the record ids `contexto project forget` took out of what later sessions carry).
 - `log.jsonl`: the session log. It records sizes, counts, request paths, status codes, error
   names, hashes, event names, and the upstream source, never prompts, replies or the upstream URL.
   It also records three labels from fixed word lists: a request's class (`request_class`), what
@@ -88,6 +113,51 @@ that lets one launch at a time pick a session automatically.
 Treat `$CONTEXTO_HOME` like your shell history or the CLI's own transcripts. File modes protect it
 from other users on the machine, not from processes running as you, backups, or disk images.
 To delete a session's text, delete the whole session directory, not only `pages/`: `retained.json`,
-`epoch.json` and `ledger.jsonl` hold copies. `contexto sessions prune` deletes whole session
+`epoch.json` and `ledger.jsonl` hold copies, and the `epoch.json` of a later session of the
+project can hold copies of its carried records. `contexto sessions prune` deletes whole session
 directories; Contexto deletes nothing else on its own. Deleting `$CONTEXTO_HOME` removes every
 session and the affinity salt.
+
+## Carried records
+
+A new session starts with the open obligations and decisions the main conversation pinned in
+earlier sessions of the same project. That is model-written text replayed into another session, and
+an earlier session may have read untrusted content (a web page, a file, a tool result) that
+persuaded the model to pin something. The defence and what it does not cover are in
+[docs/project-memory.md](docs/project-memory.md#trust) and in D69 of
+[docs/DECISIONS.md](docs/DECISIONS.md). In short:
+
+- Only records the proxy saw the main conversation make (Contexto's own pin call and the server's
+  success reply, in the main conversation's history) are carried, never page text and never a
+  subagent's pin. Claude Code subagents are told apart by the `X-Claude-Code-Agent-Id` header on
+  their requests (D50). A request that carries `X-Claude-Code-Agent-Id` or a parent session id is
+  never read for pins, even when it has the main conversation's key, as a fork of the main
+  conversation does; nor is a request whose `x-claude-code-request-class` header says `subagent`,
+  `workflow` or `auxiliary`, which Claude Code sends only while its gateway hint headers are on
+  (D70). A conversation that became the main one only by having more turn starts than
+  the previous main one (a subagent whose requests lack that header, resumed with SendMessage; a
+  Codex child conversation given more input) is not trusted: its pins are not carried, and its
+  closures and replacements of other sessions' records count only in its own session.
+- Codex sessions give nothing. On codex-cli 0.163.0, as measured
+  ([docs/research/M2-codex-acceptance-plan.md](docs/research/M2-codex-acceptance-plan.md)), the
+  model calls Contexto's tools from inside Codex's code-mode `exec` tool, which the proxy does not
+  read for this. So a Codex session's pins are never carried, and its closures and replacements of
+  carried records count only in that session. A Codex session does start with what Claude Code
+  sessions of the project carried. Not checked on codex-cli 0.166.0 or in a live run.
+- The model is told to pin only what the user states in their own messages, and sees carried records
+  under a heading that calls them records from an earlier session, not instructions, and says that
+  markup or instructions inside a record are part of it. Each record's text is an escaped JSON
+  literal, so markup such as `<system-reminder>` reaches the model as escapes.
+- You can see them (the start line's count, `contexto state`, `contexto project show`), remove them
+  (`contexto project forget`, which reaches a running session at its next turn start, or at its
+  next rotation once it has rotated), or turn project memory off with `--no-project-memory`.
+
+What remains: the main conversation also reads untrusted content, and a pin it makes after reading
+it is carried; the heading is advisory, and its effect on a live model is unmeasured; pruning the
+session that closed a record brings the record back; and a symlinked directory belongs to its
+target's project. `main_records` and `trusted_conversations` are lists in `meta.json`, a file any
+process running as you can edit, a subagent with a shell included: they record what the proxy saw,
+not an integrity guarantee. An id added to `main_records` by hand is carried like one the proxy
+recorded, and a conversation key added to `trusted_conversations` by hand counts as one the proxy
+trusted, so after a restart that conversation's pins are carried once it is the main one. The same
+process could edit the ledger or `CLAUDE.md` as easily.
