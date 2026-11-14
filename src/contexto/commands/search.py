@@ -14,7 +14,8 @@ each page's index line a line names the words the page matched and the ones it d
 ``missing``; a strict result's object is as D64 made it.
 
 ``--project`` (D69) also searches the earlier sessions of the session's project, as the tool does with
-``scope: "project"``: the same sessions, under the same labels, read without changing them.
+``scope: "project"``: the same sessions, under the same labels, read without changing them. Earlier
+sessions are matched on every word only, also when this session's own result is approximate.
 """
 
 from __future__ import annotations
@@ -75,7 +76,8 @@ def register(subparsers) -> None:
                         help="print JSON; no match is an empty hits list, and an error is still one line on stderr")
     parser.add_argument("--project", action="store_true",
                         help=f"also search the earlier sessions of the session's project (the newest "
-                             f"{EARLIER_SESSIONS}), read-only: the best {EARLIER_HITS} matches of each, under a "
+                             f"{EARLIER_SESSIONS}), read-only: the best {EARLIER_HITS} matches of each, every word "
+                             "and never approximate, under a "
                              "line with the session's label and date, lines in view at its last request first, "
                              "control characters as escapes; `contexto recall PAGE_ID --from LABEL` prints a page")
     parser.set_defaults(func=run)

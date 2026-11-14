@@ -397,6 +397,85 @@ def test_when_no_earlier_session_matches_the_reply_says_so_in_one_line(three):
         mcp.NO_HIT_SESSION + "\n" + mcp.EARLIER_NONE
 
 
+# D65 against D69: the current session's part falls back as a session-scope reply does; earlier sessions
+# are matched on every word only.
+
+
+@pytest.fixture
+def partial(home, root):
+    """An earlier session holding every word of "deploy key rotation", a later one holding two of them, and a
+    current session holding two of them, so its own search finds no page with every word."""
+    whole, whole_ids = earlier(home, "e1aaaaaa" + "0" * 24, root, 1, "the deploy key rotation is weekly")
+    part, part_ids = earlier(home, "e2bbbbbb" + "0" * 24, root, 2, "the deploy key was moved to the vault")
+    cur = new_session(home, "c3cccccc" + "0" * 24, root, 3)
+    cur_ids = pages(cur, "the deploy key is now cedar-31", "lunch plans", "the weather today", "a note on tests",
+                    "the build is green")
+    return {"whole": whole, "whole_ids": whole_ids, "part": part, "part_ids": part_ids, "cur": cur,
+            "cur_ids": cur_ids}
+
+
+def test_an_approximate_current_part_is_the_session_scope_reply_and_earlier_sessions_stay_strict(partial):
+    cur = partial["cur"]
+    server = serve(cur)
+    own = text_of(call(server, "contexto_search", {"query": "deploy key rotation"}))
+    assert own.startswith(mcp.SEARCH_APPROX_HEADER) and partial["cur_ids"][0] in own  # D65's fallback
+    assert not any(page_id in own for page_id in partial["cur_ids"][1:])
+    session_event = events(cur)[-1]
+    text = text_of(call(server, "contexto_search", {"query": "deploy key rotation", "scope": "project"}))
+    assert text.startswith(own + "\n" + mcp.EARLIER_HEADER + "\n" + mcp.EARLIER_UNTRUSTED + "\n")
+    assert "a match there holds every word" in mcp.EARLIER_HEADER
+    assert session_lines(text) == [f"[session e1aaaaaa, {date(1)}:]"]  # the session holding two words is not shown
+    assert partial["whole_ids"][0] in text and "rotation is weekly" in text
+    assert partial["part_ids"][0] not in text and "vault" not in text
+    event = events(cur)[-1]
+    assert event["approximate"] is True and event["approximate_steps"] == session_event["approximate_steps"]
+    assert (event["total_matches"], event["earlier_matched"], event["earlier_hits"]) == \
+        (session_event["total_matches"], 1, 1)
+    assert {span["source"] for span in event["returned"]} == {"paged", "earlier"}
+
+
+def test_a_strict_current_part_with_only_partial_earlier_matches_says_none_holds_every_word(partial):
+    server = serve(partial["cur"])
+    own = text_of(call(server, "contexto_search", {"query": "deploy cedar-31"}))
+    assert own.startswith(mcp.SEARCH_BEST_HEADER)
+    assert text_of(call(server, "contexto_search", {"query": "deploy cedar-31", "scope": "project"})) == \
+        own + "\n" + mcp.EARLIER_NONE
+    assert mcp.EARLIER_NONE == "[No earlier session of this project holds every word of that query.]"
+
+
+def test_no_current_match_at_all_and_only_partial_earlier_matches(partial):
+    """Nothing in the current session even approximately: the reply is the two lines that say so."""
+    server = serve(partial["cur"])
+    assert text_of(call(server, "contexto_search", {"query": "vault zeppelin quokka"})) == mcp.NO_HIT
+    assert text_of(call(server, "contexto_search", {"query": "vault zeppelin quokka", "scope": "project"})) == \
+        mcp.NO_HIT_SESSION + "\n" + mcp.EARLIER_NONE
+
+
+def test_contexto_search_project_keeps_the_approximate_fallback_for_this_session_only(partial, home, monkeypatch,
+                                                                                      capsys):
+    monkeypatch.setenv("CONTEXTO_HOME", str(home))
+    monkeypatch.delenv("CONTEXTO_SESSION", raising=False)
+    cur = partial["cur"]
+    cur.release()
+    sid = cur.session_id
+    assert cli.main(["search", "deploy", "key", "rotation", "--session", sid]) == 0
+    plain, plain_err = capsys.readouterr()
+    assert "approximate matches" in plain_err and partial["cur_ids"][0] in plain
+    assert cli.main(["search", "--project", "deploy", "key", "rotation", "--session", sid]) == 0
+    out, err = capsys.readouterr()
+    assert out.startswith(plain) and "approximate matches" in err
+    assert session_lines(out) == [f"[session e1aaaaaa, {date(1)}:]"]
+    assert partial["whole_ids"][0] in out and partial["part_ids"][0] not in out
+    assert cli.main(["search", "--project", "--json", "deploy", "key", "rotation", "--session", sid]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["approximate"] is True and [h["page_id"] for h in data["hits"]] == partial["cur_ids"][:1]
+    assert [s["label"] for s in data["earlier"]["sessions"]] == ["e1aaaaaa"]
+    assert [h["page_id"] for h in data["earlier"]["sessions"][0]["hits"]] == partial["whole_ids"]
+    assert all("matched" not in h for h in data["earlier"]["sessions"][0]["hits"])  # a strict hit's fields
+    assert cli.main(["search", "--project", "vault", "zeppelin", "quokka", "--session", sid]) == 0
+    assert "no earlier session of this project contains every word" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("scope", ["all", "", "Project", 5, None, ["project"], {"scope": "project"}, True])
 def test_a_scope_that_is_neither_is_a_tool_error(three, scope):
     message = error_of(call(serve(three["cur"]), "contexto_search", {"query": "deploy", "scope": scope}))
