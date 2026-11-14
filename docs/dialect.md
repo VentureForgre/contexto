@@ -294,8 +294,9 @@ Implementations:
   role is the item's `role`, `"unknown"` when absent.
 - Responses: a `message` gives its text parts (`input_text`, `output_text`, `text`) that are not
   context sections, as `text` blocks; a `function_call` or `custom_tool_call` gives
-  `("assistant", tool_use)` with the call's name and its arguments parsed from JSON (kept as the
-  string when they do not parse); a `function_call_output` or `custom_tool_call_output` gives
+  `("assistant", tool_use)` with the call's name and its arguments (`arguments` for a
+  `function_call`, `input` for a `custom_tool_call`) parsed from JSON (kept as the string when they
+  do not parse); a `function_call_output` or `custom_tool_call_output` gives
   `("user", tool_result)`; other types give nothing. It maps to Messages API blocks "so an in-view
   line reads like a paged one". Because it also reads page files a person may have edited, a part or
   output of the wrong type becomes `{"type": "text", "text": None}`, which `render_page` shows as
@@ -358,8 +359,11 @@ The hash (`message_hash`) is used for:
   `fallback_candidates`);
 - `appends_to`, which decides whether a request only appended to the last measured one (D48).
 
-Anchor hashes and `paged_carried` are written to the epoch record, so a change to a dialect's
-`normalise` makes records written before it fail to resume (`history_diverged`).
+Anchor hashes and `paged_carried` are written to the epoch record. A change to a dialect's
+`normalise` changes the conversation key, which hashes the first item, so a record written before it
+usually fails to resume as `other_conversation`; when the key still matches, the anchor check fails
+as `history_diverged` (`resume_state`). `paged_carried` is not compared on resume: items paged before
+the change are carried again rather than blocking the resume.
 
 - Anthropic (`_anthropic_normalise`): removes every `cache_control` key at any depth, and turns a
   content list of exactly one `{type: "text", text}` block into the plain string. Claude Code moves
@@ -575,7 +579,8 @@ holds the client's injected context but no session start the dialect recognises,
 client that changed its text would send; and `None` when it holds no injected context, so the
 request cannot tell (another client, or an empty history).
 
-Only `ClientVersions.observe` calls it, once per engine. `False` logs one
+Only `ClientVersions.observe` calls it, on each request the dialect judges until one gives an
+answer. `False` logs one
 `session_start_unrecognised` event (`dialect`, `signature_version`, `cli_version`,
 `tested_versions`) to the session log; nothing is printed. `None` leaves the check open for at most
 `MAX_UNJUDGED` (8) such requests. An exception here is caught in `RewriteEngine._call` and logged as
@@ -583,8 +588,9 @@ Only `ClientVersions.observe` calls it, once per engine. `False` logs one
 
 - Anthropic (`_anthropic_session_start_seen`): `True` for a role `system` message with
   `SESSION_START_SIGNATURE` (the `# Environment` first line, D33) or a context block of kind
-  `environment`. It reads only the first 4,096 characters of each block and skips items that are not
-  dicts.
+  `environment`. It reads only the first 4,096 characters (`SESSION_START_SCAN_CHARS`) of each text
+  block; a role
+  `system` message is read in full. It skips items that are not dicts.
 - Responses: `True` when the lead holds a user message made only of context sections
   (`<environment_context>` on the tested versions); `False` when the lead holds a developer or
   system message but no such user message ("a Codex that changed its section tags makes that
@@ -643,10 +649,27 @@ The client version the session-start recognition was measured on. `ClientVersion
   as a failure. In degraded mode `_rewrite` does the same itself and logs `fallback_failed`. In
   `observe_usage` the proxy logs `observe_usage_error` and drops the usage. The two diagnostics
   catch their own (`toolcheck_error`, `cli_version_error`).
-- **The transform runs under a lock.** The proxy serializes calls to the engine
-  (`ContextoProxy.transform_lock`), and every dialect method runs inside it, some of them more than
-  once per item on a request. `RewriteEngine.prime` exists to move one slow step (counting PDF
-  pages) out of the lock.
+- **The transform runs under a lock, so a dialect's work must be bounded.** The proxy serializes
+  calls to the engine (`ContextoProxy.transform_lock`), and every dialect method runs inside it, some
+  of them more than once per item on a request, while every other request waits. Keep each method
+  linear in the size of the request, scan text only as far as needed (`SESSION_START_SCAN_CHARS`),
+  use simple regular expressions, and do no file or network I/O. A slow step belongs in
+  `RewriteEngine.prime`, which the proxy calls before taking the lock (it counts PDF pages there,
+  D60). The request reaching a dialect is already parsed with `loads_bounded`, which refuses nesting
+  deeper than `MAX_JSON_DEPTH` (512 levels, rule 18), but a dialect that recurses must still bound its
+  own depth. Raising an exception to skip input the dialect does not understand is not a way out: it
+  is a `transform_error`, which forwards the request unbounded and counts as a failure.
+- **The session log is content-free.** Events a dialect method or the engine returns are written to
+  `log.jsonl`, which SECURITY.md promises holds sizes, counts, hashes, event names and reasons, never
+  prompts, replies, tool input or output, or header values. The proxy reduces events to scalars and
+  caps their size (`_scalar_summary`) but does not filter their content, so an implementation must
+  put no client text in an event. Log an exception by its type name only, as the engine does.
+- **Credentials never reach a dialect.** The client's auth headers are forwarded upstream unchanged
+  and never stored or logged (SECURITY.md). A dialect receives only the request body; engine code
+  that reads headers names each header it reads (`claude_code_session`).
+- **Tool-call ids come from the client and the upstream.** They are compared as opaque strings,
+  never logged, stored in a file name or used in a path, and the proxy keeps at most 256 per response
+  (`UsageReader._take_call_id`).
 
 ## 4. What else a new client needs
 
@@ -699,17 +722,26 @@ D53).
   `options_from_args`, `check_options`, `open_session`, `engine_config`, `start_proxy`,
   `check_cli_version`, `start_warning`, `run_child` and `report_missing_tools` from
   `src/contexto/launcher.py`. `start_proxy` builds the `RewriteEngine`, passes its `observe_usage` to
-  the proxy and clears the previous launch's MCP record. Codex: yes (`run_codex`, `plan_codex`,
-  `add_arguments` in `src/contexto/codex.py`). In v0.5.24 the launchers are the only way the engine
-  is wired in (`contexto serve`, D70, adds a standing service for Claude Code clients); `contexto proxy` (`src/contexto/commands/proxy.py`) starts the proxy alone with the
-  identity transform, so no dialect runs under it.
+  the proxy and clears the previous launch's MCP record. Files a launcher writes for the client
+  follow SECURITY.md: mode 0600 from the first byte, in a private directory, removed on exit
+  (`write_private_json`, `Watchdog`). Codex: yes (`run_codex`, `plan_codex`,
+  `add_arguments` in `src/contexto/codex.py`). `contexto proxy` (`src/contexto/commands/proxy.py`)
+  starts the proxy alone with the identity transform, so no dialect runs under it.
 - [ ] **Upstream and credentials.** Where the client's requests go and how it authenticates, without
   Contexto storing a credential. Codex: yes (`codex_upstream_with_source`, the key helper run through
   `/bin/sh -c`, D22, D52, D54). `VENDOR_HOSTS` in `src/contexto/proxy.py` lists the vendor API hosts
   that get no affinity header (D36).
-- [ ] **MCP server registration.** The client must start `python -P -m contexto mcp --session <id>`
-  with `CONTEXTO_HOME` set (`paths.mcp_env`), and must be allowed to call its tools without a prompt
-  where it runs unattended. Claude Code: `mcp_payload`, `settings_payload` and `claude_argv` in
+- [ ] **MCP server registration.** The client must start the MCP server with the absolute path of
+  the interpreter Contexto runs on (`sys.executable`) as `<python> -P -m contexto mcp --session=<id>`,
+  with `CONTEXTO_HOME` set (`paths.mcp_env`). `-P` keeps the project directory, where the client
+  starts its servers, off `sys.path`, so a project's own `contexto` package cannot run in its place;
+  `--session=<id>` is one token, so an id starting with `-` is not read as an option. Every value
+  written into the client's config must be quoted for that config's format, and refused when the
+  client would expand it (Claude Code expands `${`: `check_mcp_values`, D55). Where the client runs
+  unattended it must be allowed to call the tools without a prompt, and only Contexto's own tools,
+  each by its exact name, never a client-wide approval mode; the user's own deny and ask rules must
+  still win (`contexto_tool_rules`, D44). Claude Code: `mcp_payload`, `settings_payload` and
+  `claude_argv` in
   `src/contexto/launcher.py` (D44). Codex: yes (`_mcp_server`, the `[mcp_servers.contexto]` table and
   `MCP_APPROVAL_MODE` in `src/contexto/codex.py`). The child also gets `CONTEXTO_SESSION` (D57).
 - [ ] **The tool check.** `ToolCheck` in `src/contexto/toolcheck.py` reports a main conversation that
@@ -753,7 +785,8 @@ D53).
     `reasoning`, `call`, `output`, `history`, and the tests from
     `test_turn_starts_lead_and_system_like_items` to
     `test_engine_dispatches_responses_paths_with_separate_state`, plus
-    `test_retained_snapshot_on_the_responses_dialect`).
+    `test_retained_snapshot_on_the_responses_dialect` and
+    `test_tag_leading_user_prompts_stay_turn_starts`, the turn-start boundary case).
   - Launcher: the rest of `tests/test_codex.py`.
   - Proxy: the Responses cases in `tests/test_proxy_server.py`, `tests/test_stream_hold.py` and
     `tests/test_subagent_room.py`.
