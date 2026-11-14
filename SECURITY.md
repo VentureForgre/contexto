@@ -7,11 +7,11 @@ Report vulnerabilities privately through GitHub: open the repository's **Securit
 advisory visible only to you and the maintainers). Do not open a public issue or pull request for a
 security problem.
 
-Include the Contexto version (`contexto --version`; for an install from a checkout, which reports
-`0.0.0+checkout`, the commit from `git rev-parse --short HEAD`), the operating system and Python
-version, the CLI and its version (Claude Code or Codex), and the steps that show the problem. Leave
-real session data, API keys, and conversation text out of the report; a synthetic reproduction is
-enough.
+Include the Contexto version (`contexto --version`; if it reports `0.0.0+checkout` with no commit
+after it, the commit from `git rev-parse --short HEAD` in the checkout), the operating system and
+Python version, the CLI and its version (Claude Code or Codex), and the steps that show the
+problem. Leave real session data, API keys, and conversation text out of the report; a synthetic
+reproduction is enough.
 
 Fixes ship as a new release; the advisory names the first fixed version. Only the latest release
 gets fixes.
