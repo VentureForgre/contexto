@@ -138,6 +138,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from contexto.canonical import has_lone_surrogate
 from contexto.cliversions import launch_check
 from contexto.hints import HINT_HEADERS_KEY, HINT_MARKER_KEY, HINT_STATES, OFF, STRIPPED, hint_headers_state
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
@@ -303,16 +304,21 @@ def check_misplaced_options(cli: str, cli_args: list[str]) -> None:
 
 def check_upstream(upstream: Upstream) -> None:
     """A malformed upstream URL is a usage error naming where it came from, before any session is opened
-    (``http://[::1`` raised ValueError from ``urlsplit`` with a traceback and left an empty session)."""
+    (``http://[::1`` raised ValueError from ``urlsplit`` with a traceback and left an empty session).
+    A URL with a lone surrogate, which a settings file can hold, cannot go into a request either. The
+    message names the source and the problem, never the URL."""
     try:
         parts = urlsplit(upstream.url)
         _ = parts.port  # parsed on access; raises for a bad one
         ok = parts.scheme in ("http", "https") and bool(parts.hostname)
         problem = "upstream must be an http(s) base URL"
+        if ok and has_lone_surrogate(upstream.url):
+            ok, problem = False, "upstream holds a lone surrogate"
     except ValueError as exc:
         ok, problem = False, str(exc)
     if not ok:
-        raise LaunchError(f"invalid upstream {upstream.url!r} (from {upstream.source}): {problem}", EXIT_USAGE)
+        # Never the URL: it can hold a password or a secret path segment, and this lands in logs.
+        raise LaunchError(f"invalid upstream (from {upstream.source}): {problem}", EXIT_USAGE)
 
 
 def check_not_service(upstream: Upstream, home: Path, command: str) -> None:
@@ -1336,7 +1342,7 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
                               upstream_source=upstream_source, affinity_key=key,
                               strip_hint_headers=strip_hint_headers)
     except ValueError as exc:
-        raise LaunchError(f"invalid upstream: {exc}", EXIT_USAGE) from exc
+        raise LaunchError(f"invalid upstream (from {upstream_source}): {exc}", EXIT_USAGE) from exc
     try:
         proxy.start(0)
     except OSError as exc:

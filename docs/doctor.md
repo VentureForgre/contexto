@@ -147,10 +147,15 @@ A file that is there and cannot be used is a warning that names it and says what
 
 - it is not a regular file (a named pipe, a socket or a device, which is never opened for reading);
 - it is larger than 4 MiB, or it cannot be read;
-- it is not valid JSON: a syntax error, neither UTF-8 nor UTF-16LE with its byte order mark, nested
-  too deep, or holding `NaN` or `Infinity`, which Claude Code 2.1.322 rejects;
+- it is not valid JSON: a syntax error, a wide encoding Claude Code does not load (UTF-16BE,
+  UTF-16LE without its byte order mark, UTF-32), nested too deep, or holding `NaN` or `Infinity`,
+  which Claude Code 2.1.322 rejects;
 - it has an `env` that is not a JSON object: Claude Code 2.1.322 loads nothing from such a file, not
   even its `apiKeyHelper`.
+
+A UTF-8 file with a byte that is not UTF-8 is read with that byte as U+FFFD, and a UTF-16LE file
+with its byte order mark is read even when it holds a lone surrogate or ends in one odd byte, as
+Claude Code 2.1.322 reads them (D70).
 
 Contexto takes nothing from such a file, so without this line a broken file that sets your upstream
 would show only as "nothing sets ANTHROPIC_BASE_URL". It can also stop the launch: `contexto run
@@ -182,6 +187,10 @@ pass `--codex-upstream`. Doctor does not check `--codex-auth chatgpt`, which use
 backend and Codex's own login.
 
 The base URL is not read from organization-managed Claude Code settings, here or by `contexto run`.
+
+`claude-upstream` fails when the URL is not one `contexto run claude` can use: not http(s), malformed,
+or holding a lone surrogate, which a settings file can give it (a `\ud800` escape, or a malformed
+UTF-16LE file). The line names where it came from and does not repeat the URL.
 
 `claude-upstream` fails when Claude Code's upstream is this Contexto home's `contexto serve`, the base
 URL [serve.md](serve.md) has a client put in its settings: `contexto run claude` refuses it, because

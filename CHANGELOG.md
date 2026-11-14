@@ -180,6 +180,11 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   [docs/in-turn-paging.md](docs/in-turn-paging.md).
 - Codex tool loops are sent as before.
 - `contexto run --no-in-turn-paging` or `CONTEXTO_IN_TURN_PAGING=0` turns it off.
+- A Claude Code settings file in UTF-16LE with its byte order mark is now read even when it holds a
+  lone surrogate or ends in one odd byte, and a UTF-8 file with a byte that is not UTF-8 is read
+  with that byte as U+FFFD, as Claude Code 2.1.322 reads both. Before, `contexto run claude` called
+  such a file unreadable, and missed a base URL set there. A base URL with a lone surrogate is now
+  a usage error (exit 2) that names the file, in `contexto run` and `contexto serve` (D70).
 
 ## 0.5.24 (2026-11-06)
 

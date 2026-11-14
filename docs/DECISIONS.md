@@ -3252,8 +3252,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   and shutdown, the MCP binding (`contexto mcp --serve`), and how the service uses the first slice's
   hint headers, guard and settings reader. Measured at zero spend on Claude
   Code 2.1.322, macOS, against loopback stubs with temporary config directories and a fake key
-  (`docs/research/D70-serve-probes.md`: 34 runs, 177 requests; 36 more runs for this slice and 23
-  more after its review, `spikes/m2/serve/q10_truthy.sh`).
+  (`docs/research/D70-serve-probes.md`: 34 runs, 177 requests; 36 more runs for this slice, 23
+  more after its review, `spikes/m2/serve/q10_truthy.sh`, and 50 more on how settings files are
+  decoded after its fourth review round, `spikes/m2/serve/q11_decoding.py`).
   - **Gateway hint headers: the problem.** The engine decides what a request is from signatures that
     each Claude Code release can change: a tool list for "the main conversation or a subagent, not a
     side request" (D38, D50), the summary's first line for "Claude Code compacted main" (D50; D59
@@ -3402,26 +3403,52 @@ the owner's delegation. Open decisions are listed at the end with the options an
     off (measured: Claude Code would let the file win); a refusal for a switch in a file Claude
     Code ignores (one it rejects, or a project file's under
     `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` in `-p` mode); and a refusal when a settings file is there
-    and Contexto could not read it (not a regular file, over 4 MiB, not valid JSON for Python),
+    and Contexto could not read it (not a regular file, over 4 MiB, not valid JSON),
     because such a file is not evidence that a switch is off. The hint decision reads the same
-    files the same way, so a project file Claude Code ignores (one holding `NaN`, say) that turns
-    the hints on makes a launch `forwarded`; a repository gains nothing by it that a valid file
+    files the same way, so a project file Claude Code ignores (one with a schema error, say) that
+    turns the hints on makes a launch `forwarded`; a repository gains nothing by it that a valid file
     would not give it. A settings file that does not parse (a comment, a trailing comma) refuses
     only when its bytes could name a switch (they contain `CLAUDE_CODE_USE_`, a `\u` escape, or a
     NUL byte, which a wide encoding has): Claude Code does not load such a file (measured on
     2.1.322), so otherwise it turns nothing on. Claude Code does load UTF-16LE that starts with its
     byte order mark (measured; a switch on there sent every request to Bedrock), so Contexto reads
-    that encoding too; UTF-16BE, UTF-16LE without the mark and UTF-32 it does not load.
-    One more change to the base URL's resolution than the byte order mark and the size bound: a
-    settings file nested deeper than 512 levels is unreadable for the bounded loader, so a base URL
-    in it is not used and the next file's is; Claude Code would read it. No real settings file nests
-    that deep. A file that does not exist, or that
+    that encoding too; UTF-16BE, UTF-16LE without the mark and UTF-32 it does not load. It also
+    loads such a UTF-16LE file when it holds a lone surrogate (in a value or a key) or ends in one
+    odd byte, and UTF-8 with a byte that is not UTF-8 (measured, research note, round 4), so
+    Contexto decodes them as Claude Code does: the odd byte dropped, the lone surrogate kept, the
+    bad byte read as U+FFFD. A wide file that still does not parse after that is caught by the NUL
+    rule; that rule also refuses a UTF-16LE file with the mark and a comment, which Claude Code
+    does not load (an accepted cost, as is a refusal on a file holding `NaN` whose text names a
+    switch). A settings file Claude Code does not load (one holding `NaN`, `Infinity` or
+    `-Infinity`, or whose `env` is not an object, PR #258) is not read for any setting: not the
+    base URL, the hint setting or `apiKeyHelper`.
+    A base URL with a lone surrogate (a `\ud800` escape, or a malformed UTF-16LE file) is a usage
+    error naming its source in `contexto run claude`, `contexto run codex` and `contexto serve`,
+    before a session is opened, and a failed check in `contexto doctor`; `contexto proxy` exits 1
+    with "cannot start", as for any upstream it cannot use. This departs from Claude Code, which
+    was measured to send such a URL with the surrogate as U+FFFD (`/a%EF%BF%BD/v1/messages`):
+    Contexto would have to guess at that rewrite for the request line and the session's affinity
+    key, and a URL that holds one is a mistake in the file, so it stops and names the file.
+    Any other path character that is not ASCII (`é`, or U+FFFD from a UTF-8 file with a bad byte)
+    is percent-encoded as UTF-8, as Claude Code sends it (`/file/caf%EF%BF%BD/v1/messages`, measured);
+    before, every request with such a base URL failed with a 502 (review A of #294).
+    How base URL resolution differs from before this slice, apart from the size bound: a UTF-8
+    byte order mark, a UTF-16LE file with its mark (malformed ones included) and a UTF-8 file with
+    a byte that is not UTF-8 are read, and their base URL is used, as Claude Code uses it
+    (measured); a settings file Claude Code does not load is not read for any setting, as above;
+    and a settings file nested deeper than 512 levels is unreadable for the bounded loader, so a
+    base URL in it is not used and the next file's is, where Claude Code would read it. No real
+    settings file nests that deep. A file that does not exist, or that
     this user cannot open, passes: Claude Code cannot read it either. The message names what to
     unset or fix.
   - **Settings files are read once, with a bound.** One reader for every Claude Code settings
     file Contexto reads (the base URL, `apiKeyHelper`, the provider switches, the hint setting): a
-    regular file only, at most 4 MiB, a UTF-8 byte order mark accepted as Claude Code accepts one,
-    parsed with the bounded JSON loader. `contexto run claude` reads each file once per launch for
+    regular file only, at most 4 MiB, read exactly when Claude Code 2.1.322 reads it: UTF-8 with or
+    without a byte order mark (a bad byte as U+FFFD), or UTF-16LE after its mark (an odd final byte
+    dropped, lone surrogates kept), parsed with the bounded JSON loader with `NaN`, `Infinity` and
+    `-Infinity` refused and an integer past Python's digit limit read as JavaScript reads it
+    (PR #258). The proxy's own JSON parsing is not changed: `loads_bounded` passes those hooks to
+    `json.loads` only when given them. `contexto run claude` reads each file once per launch for
     all of them.
   - **Rejected for the guard:** a warning (the session line
     still says "bound 150,000" and the user reads no further); forcing the switch to `0` in
@@ -3441,8 +3468,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
     dialog was not measured (D52 measured it for the base URL); the guard refuses either way.
     Vertex, Foundry, Mantle and Claude Platform on AWS were measured with `1`, `true` and `0`
     only, and the value shapes with Bedrock in the user file only (the review measured `1.0`,
-    `1e0`, `["1"]` and a byte order mark in a project file too). How Claude Code reads a settings
-    file whose JSON Python rejects was not measured; the guard refuses on such a file. A
+    `1e0`, `["1"]` and a byte order mark in a project file too). Of the settings files Claude Code
+    does not load, only those named above were measured (a comment, a trailing comma, a syntax
+    error, `NaN` and `Infinity`, an `env` that is not an object, the wide encodings); the guard
+    refuses on any other one that does not parse and could name a switch. Whether Python's U+FFFD
+    for an invalid UTF-8 sequence always matches Claude Code's was measured for a Latin-1 byte and
+    an overlong `1` only; a mismatch could change only the text inside a string. A
     pending-call compaction whose key a side request used first was built in a test, not provoked
     with a real client. 2.1.322 is not in
     `TESTED_VERSIONS`: the routine of `docs/cli-updates.md` was not run on it here.

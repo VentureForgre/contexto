@@ -421,3 +421,106 @@ Claude Code 2.1.322, macOS arm64, API-key mode against stub upstreams on 127.0.0
   try, so the MCP server's retry was not needed. Three runs, the same numbers.
 - With `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, 2.1.322 sends no `HEAD /api/hello`.
 - Each `claude -p` run took about a second against the local stub.
+
+## D70 review round 4: which settings files Claude Code loads
+
+Script: `spikes/m2/serve/q11_decoding.py`. Each run writes one settings file, the config
+directory's `settings.json` ("user") or the working directory's `.claude/settings.json`
+("project"). Then it runs one `claude -p` under the localhost-only sandbox profile of
+`http_probe.py`, with this setup:
+
+- a fresh `HOME`, `CLAUDE_CONFIG_DIR`, `CONTEXTO_HOME` and working directory, all outside any
+  checkout;
+- the key `stub-key` and fake AWS values;
+- three loopback stubs: **env** (`ANTHROPIC_BASE_URL` in the process environment, and the
+  launcher's `--upstream`), **file** (a base URL that only the settings file names) and
+  **Bedrock** (`ANTHROPIC_BEDROCK_BASE_URL`).
+
+Zero spend. 25 runs of `claude` 2.1.322 alone and 25 of `contexto run --upstream <env stub> claude
+-p` with the real `claude`, on 2026-11-14, from the branch that made the reader match. The first
+22 cases gave the same counts as the same cases did on the round-4 review branch the day before.
+"UTF-16LE" below always starts with its byte order mark `FF FE`.
+
+### 1. Claude Code alone (25 cases)
+
+| Case | Env | File | Bedrock | Hint class sent | Reading |
+|---|---|---|---|---|---|
+| UTF-16LE, switch `"1"`, a lone high surrogate in another value | 0 | 0 | 5 | | loaded |
+| the same with a lone low surrogate | 0 | 0 | 5 | | loaded |
+| UTF-16LE, switch `"1"`, a lone surrogate as a key | 0 | 0 | 5 | | loaded |
+| UTF-16LE, switch `"1"`, one odd byte at the end | 0 | 0 | 5 | | loaded |
+| UTF-16LE, both, project file | 0 | 0 | 5 | | loaded |
+| UTF-16LE, both, switch `"0"` | 2 | 0 | 0 | | loaded |
+| UTF-16LE, both, switch `"0"`, environment `1` | 2 | 0 | 0 | | loaded: its `"0"` wins |
+| UTF-16LE, both, base URL | 0 | 2 | 0 | | loaded: its base URL is used |
+| UTF-16LE, both, hint variable `"1"` | 2 | 0 | 0 | `main` | loaded |
+| UTF-16LE with a `//` comment, base URL | 2 | 0 | 0 | | not loaded |
+| base URL beside `"x": NaN` | 2 | 0 | 0 | | not loaded |
+| the same with `Infinity` | 2 | 0 | 0 | | not loaded |
+| the same with `[-Infinity]` | 2 | 0 | 0 | | not loaded |
+| base URL beside `NaN`, project file | 2 | 0 | 0 | | not loaded |
+| switch `"1"` beside `NaN` | 2 | 0 | 0 | | not loaded |
+| switch `"0"` beside `NaN`, environment `1` | 0 | 0 | 5 | | not loaded |
+| hint variable `"1"` beside `NaN` | 2 | 0 | 0 | none | not loaded |
+| base URL beside the string `"NaN"` | 0 | 2 | 0 | | loaded |
+| base URL, plain UTF-8 (control) | 0 | 2 | 0 | | loaded |
+| UTF-8 with a Latin-1 `é` byte in another value, switch `"1"` | 0 | 0 | 5 | | loaded |
+| the same, switch `"0"`, environment `1` | 2 | 0 | 0 | | loaded: its `"0"` wins |
+| the same with a base URL | 0 | 2 | 0 | | loaded |
+| switch set to the overlong bytes `C0 B1` (an overlong `1`) | 2 | 0 | 0 | | off |
+| base URL ending `/a\ud800` (a JSON escape, UTF-8 file) | 0 | 2 | 0 | | loaded |
+| the same base URL, the surrogate raw in a UTF-16LE file | 0 | 2 | 0 | | loaded |
+
+Readings:
+
+- Claude Code loads UTF-16LE with the mark even with a lone surrogate (in a value or a key) or an
+  odd final byte.
+- It does not load a file holding the bare constants `NaN`, `Infinity` or `-Infinity`. The string
+  `"NaN"` is ordinary text.
+- It loads UTF-8 with a byte that is not UTF-8, which it reads as U+FFFD.
+- It uses a base URL with a lone surrogate, sending the surrogate as U+FFFD: both runs requested
+  `/file/a%EF%BF%BD/api/hello` and `/file/a%EF%BF%BD/v1/messages?beta=true`. Contexto refuses
+  such a URL with a usage error naming its source instead (D70).
+
+### 2. `contexto run claude` with the real `claude` (25 runs)
+
+| Case | Exit | Requests | Hint state | Stderr |
+|---|---|---|---|---|
+| UTF-16LE, lone high, low or key surrogate, or odd byte, switch `"1"` (4 runs) | 2 | 0 | | names `CLAUDE_CODE_USE_BEDROCK` and the user settings file |
+| UTF-16LE, both, switch `"1"`, project file | 2 | 0 | | names the switch and `.claude/settings.json` |
+| UTF-16LE, both, switch `"0"` | 0 | 2 at env | `stripped` | the session line |
+| UTF-16LE, both, switch `"0"`, environment `1` | 2 | 0 | | names the switch in the process environment |
+| UTF-16LE, both, base URL | 0 | 2 at env | `stripped` | the session line |
+| UTF-16LE, both, hint variable `"1"` | 0 | 2 at env, 1 with the class header | `forwarded` | the session line |
+| UTF-16LE with a `//` comment | 2 | 0 | | could not read the user settings file (not valid JSON) |
+| switch `"1"` beside `NaN` | 2 | 0 | | could not read the user settings file |
+| switch `"0"` beside `NaN`, environment `1` | 2 | 0 | | names the switch in the process environment |
+| hint variable `"1"` beside `NaN` | 0 | 2 at env, none with the class header | `stripped` | the session line |
+| base URL beside `NaN`, `Infinity`, `[-Infinity]`, user and project (4 runs) | 0 | 2 at env each | `stripped` | the session line |
+| base URL beside the string `"NaN"` | 0 | 2 at env | `stripped` | the session line |
+| Latin-1 byte, switch `"1"` | 2 | 0 | | names the switch and the user settings file |
+| Latin-1 byte, switch `"0"`, environment `1` | 2 | 0 | | names the switch in the process environment |
+| Latin-1 byte, base URL | 0 | 2 at env | `stripped` | the session line |
+| overlong `1` | 0 | 2 at env | `stripped` | the session line |
+| plain UTF-8 base URL (control) | 0 | 2 at env | `stripped` | the session line |
+| base URL with a lone surrogate, escape or UTF-16LE (2 runs) | 0 | 2 at env each | `stripped` | the session line (`--upstream` given) |
+
+No refused run created `CONTEXTO_HOME` or sent a request to any stub. A run that launched sent its
+requests through the proxy to `--upstream`. A refusal with the environment at `1` and a file
+Claude Code applies saying `"0"` is the guard's accepted cost (it fails closed).
+
+The base URL each file gives was also checked with `contexto.launcher.claude_launch_settings`, with
+no `--upstream` and the environment's base URL set, against where `claude` alone sent its requests
+in section 1. It was the file's for the control, the malformed UTF-16LE, the string `"NaN"` and the
+Latin-1 files, and the environment's for the files with a constant, user and project. Two cases
+refuse instead of following Claude Code, both accepted costs of failing closed: the UTF-16LE file
+with a comment (the NUL rule) and the file holding `NaN` beside a switch `"1"` (its text names a
+switch). Without `--upstream`, a base URL with a lone surrogate stops `contexto run claude` with
+exit 2 (`invalid upstream ... (from settings:user): upstream holds a lone surrogate`) and creates
+no session.
+
+### Not confirmed
+
+- Python's U+FFFD replacement was compared with Claude Code's for a Latin-1 byte and an overlong
+  `1` only.
+- Linux, and any other Claude Code version.

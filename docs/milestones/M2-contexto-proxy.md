@@ -306,16 +306,29 @@ user settings file; a project file was measured with `"1"`, `"0"`, `1.0`, `1e0` 
 other four switches with `1`, `true` and `0` (D70).
 
 Settings files are read once per launch, through one reader with a bound: a regular file only, at
-most 4 MiB, with a UTF-8 byte order mark accepted as Claude Code accepts one. It parses as Claude
-Code 2.1.322 does (measured for D64, `spikes/m2/providers/README.md`): an integer past Python's
-4,300-digit limit is read (as
-JavaScript's Infinity), and a file holding `NaN` or `Infinity` is not valid JSON. A file that does
-not exist, or that this user cannot open, counts as absent: Claude Code cannot read it either. A
-file that is there and that Contexto could not read (not a regular file, larger than the bound, not
-valid JSON) is not evidence that a switch is off, so the launch is refused with a message naming
-that file, unless it was read whole and its text cannot name a switch. A file whose `env` is not an
-object sets nothing (Claude Code loads nothing from it, `apiKeyHelper` included, measured in the same
-place) and refuses nothing.
+most 4 MiB. A file is read exactly when Claude Code 2.1.322 reads it (measured, D64 and D70,
+`spikes/m2/providers/README.md`), for
+every setting taken from it (the provider switches, the base URL, the hint setting, `apiKeyHelper`):
+
+- UTF-8, with or without a byte order mark; a byte that is not UTF-8 reads as U+FFFD, as in
+  Claude Code.
+- UTF-16LE that starts with its byte order mark, also when it holds a lone surrogate or ends in
+  one odd byte: the odd byte is dropped and the lone surrogate kept, as in Claude Code.
+- Not UTF-16BE, UTF-16LE without the mark, or UTF-32, which Claude Code does not load either.
+- An integer past Python's 4,300-digit limit is read, as JavaScript's Infinity.
+- A settings file Claude Code does not load (one holding `NaN`, `Infinity` or `-Infinity`, a
+  comment, a trailing comma, another syntax error) is not read for any setting.
+
+A file that does not exist, or that this user cannot open, counts as absent: Claude Code cannot
+read it either. A file that is there and that Contexto did not read (not a regular file, larger
+than the bound, or not valid JSON) refuses the launch with a message naming that file, unless it
+was read whole, is not valid JSON, and could not name a switch: its bytes hold neither
+`CLAUDE_CODE_USE_`, nor a `\u` escape that could spell it, nor a NUL byte (a wide encoding, in
+which the name is not those bytes). The NUL rule also refuses a UTF-16LE file with the mark that
+does not parse, such as one with a comment, which Claude Code does not load. A file whose `env` is
+not an object sets nothing (Claude Code loads nothing from it, `apiKeyHelper` included) and
+refuses nothing. A base URL with a lone surrogate is a usage error naming its source (D70; Claude
+Code itself sends it with the surrogate as U+FFFD).
 
 `claude --version` and `--help` alone are not checked. Not covered: managed settings that are not
 in that file, and `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` (not measured).

@@ -1359,6 +1359,24 @@ def test_usage_errors_exit_2_before_anything_is_written(home, args, message):
     assert not (home / serve.STATE_FILE).exists() and not (home / serve.LOG_FILE).exists()
 
 
+@pytest.mark.parametrize("content", [
+    b'{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9/a\\ud800"}}',
+    b"\xff\xfe" + '{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9/a\ud800"}}'.encode("utf-16-le", "surrogatepass"),
+], ids=["escape", "utf-16-le"])
+def test_a_settings_base_url_with_a_lone_surrogate_is_a_usage_error(home, tmp_path, content):
+    """D70 round 4: a lone surrogate can reach the base URL from a settings file (a ``\\ud800`` escape,
+    or a malformed UTF-16LE file Claude Code loads). No request line can carry it, so the command stops
+    with a usage error that names the source and does not quote the URL."""
+    user_home = tmp_path / "user-home"
+    (user_home / ".claude").mkdir(parents=True)
+    (user_home / ".claude" / "settings.json").write_bytes(content)
+    refused = run_cli(home, "--port", "0")
+    assert refused.returncode == 2 and "Traceback" not in refused.stderr, refused.stderr
+    assert refused.stderr.strip() == ("contexto serve: invalid upstream (from settings:user): "
+                                      "upstream holds a lone surrogate")
+    assert not (home / serve.STATE_FILE).exists() and not (home / serve.LOG_FILE).exists()
+
+
 def test_a_wide_token_file_stops_the_command(home, upstream):
     serve.ensure_token(home)
     (home / serve.TOKEN_FILE).chmod(0o644)

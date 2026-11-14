@@ -492,6 +492,19 @@ def test_an_upstream_contexto_run_would_refuse_fails_without_echoing_it(both, ca
     assert "ANTHROPIC_BASE_URL in the environment" in line
 
 
+def test_a_settings_upstream_with_a_lone_surrogate_fails_without_a_traceback(both, capsys, fast_mcp):
+    """D70 round 4: a settings file can give the base URL a lone surrogate (here a ``\\ud800`` escape),
+    which no request line can carry; ``contexto run claude`` refuses it, so doctor reports it."""
+    write_settings(both.home / ".claude" / "settings.json", {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9/a\ud800"}})
+    code, out, _ = run(capsys)
+    line = line_of(out, "Claude Code upstream")
+    assert code == 1 and line.startswith("[FAIL]") and "is not a usable http(s) base URL" in line
+    assert "~/.claude/settings.json" in line
+    # Review B of #294: Codex derives its upstream from it, and `contexto run codex` refuses it too.
+    codex = line_of(out, "Codex upstream")
+    assert codex.startswith("[FAIL]") and "is not a usable http(s) URL" in codex
+
+
 def test_codex_has_no_upstream_when_claude_code_s_is_anthropic(both, capsys, fast_mcp):
     code, found = checks(capsys)
     codex = found["codex-upstream"]

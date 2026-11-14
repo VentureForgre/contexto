@@ -9,6 +9,7 @@ its own home, working directory and managed settings path; none reads this machi
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -286,9 +287,9 @@ def test_a_file_over_the_cap_is_not_read_and_refuses(tree):
                                      b'\xff\xfe{"env": {"CLAUDE_CODE_USE_FOUNDRY": "1"}}',
                                      b"[" * 100_000 + b'"CLAUDE_CODE_USE_BEDROCK"'])
 def test_a_file_contexto_cannot_parse_refuses(tree, content):
-    """Not JSON for Python, not UTF-8, or nested deeper than the bounded loader allows, and its text
-    could name a switch: Claude Code's reading of such a file is not known, so the guard does not take
-    it for "off"."""
+    """Not JSON (a syntax error, or UTF-8 text after a UTF-16LE byte order mark, which decodes to text
+    that is not JSON), or nested deeper than the bounded loader allows, and its text could name a
+    switch: the guard does not take such a file for "off"."""
     write(tree["home"] / USER, content)
     found = guard(tree)
     assert found is not None and found.unread == (("settings:user", "is not valid JSON"),)
@@ -441,3 +442,173 @@ def test_claude_platform_on_google_cloud_refuses_the_launch(tree, where):
 
 def test_claude_platform_on_google_cloud_off_does_not_refuse(tree):
     assert guard(tree, {GOOGLE_CLOUD: "0"}) is None
+
+
+# Read exactly when Claude Code reads (D70, review round 4) ----------------------------------------------
+
+
+def utf16le_settings(*, value: str = '"1"', extra: str = "", odd: bool = False) -> bytes:
+    """A UTF-16LE settings file with its byte order mark, the switch at ``value``, and ``extra`` (JSON
+    text, which may hold a lone surrogate) as another member; ``odd`` adds one stray byte at the end."""
+    text = '{"env": {"' + BEDROCK + '": ' + value + "}" + extra + "}"
+    return b"\xff\xfe" + text.encode("utf-16-le", "surrogatepass") + (b"\x20" if odd else b"")
+
+
+MALFORMED_UTF16LE = {
+    "a lone high surrogate": {"extra": ', "note": "a\ud800b"'},
+    "a lone low surrogate": {"extra": ', "note": "\udc00"'},
+    "an odd trailing byte": {"odd": True},
+    "both": {"extra": ', "note": "\ud83d"', "odd": True},
+}
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED_UTF16LE))
+@pytest.mark.parametrize("where", ["user", "project", "local"])
+def test_a_malformed_utf16le_file_claude_code_loads_is_read_and_its_switch_refuses(tree, where, case):
+    """Reviewers A and B, round 4 (measured on 2.1.322): Claude Code loads a UTF-16LE file with the byte
+    order mark even when it holds a lone surrogate or ends in one odd byte, and with the switch on it
+    went to Bedrock. Contexto decodes it as Claude Code does, so the refusal names the switch and the
+    file rather than calling the file unreadable."""
+    base = tree["home"] if where == "user" else tree["cwd"]
+    write(base / (LOCAL if where == "local" else USER), utf16le_settings(**MALFORMED_UTF16LE[case]))
+    found = guard(tree)
+    assert found is not None and places(found) == {BEDROCK: (f"settings:{where}",)} and found.unread == ()
+    with pytest.raises(LaunchError) as raised:
+        check_cloud_provider(tree["cwd"], {}, home=tree["home"], managed=tree["managed"])
+    message = str(raised.value)
+    assert f"{BEDROCK} is set in" in message and "could not read" not in message
+    assert ("your Claude Code user settings" if where == "user" else
+            ".claude/settings.local.json" if where == "local" else ".claude/settings.json") in message
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED_UTF16LE))
+def test_a_malformed_utf16le_file_with_the_switch_off_launches_and_gives_its_values(tree, case):
+    """The same files with the switch at ``"0"``: nothing to refuse, and the file's own values are read
+    as Claude Code reads them, lone surrogate included."""
+    extra = MALFORMED_UTF16LE[case].get("extra", "") + ', "x": 1'
+    path = write(tree["cwd"] / PROJECT, utf16le_settings(value='"0"', extra=extra,
+                                                         odd=MALFORMED_UTF16LE[case].get("odd", False)))
+    read = upstream.read_settings_file(path)
+    assert read.problem is None and read.data is not None and read.data["env"] == {BEDROCK: "0"}
+    if "extra" in MALFORMED_UTF16LE[case]:
+        assert any(0xD800 <= ord(c) <= 0xDFFF for c in read.data["note"])
+        assert upstream.js_string(read.data["note"]) == read.data["note"]
+    assert guard(tree) is None
+    check_cloud_provider(tree["cwd"], {}, home=tree["home"], managed=tree["managed"])  # no error
+
+
+def test_a_malformed_utf16le_file_s_base_url_and_hint_setting_are_used(tree):
+    """Measured (Reviewer A, round 4): Claude Code sent its requests to the base URL of a UTF-16LE user
+    file with an odd trailing byte, as it does for a well-formed one."""
+    from contexto.launcher import claude_launch_settings
+
+    text = ('{"env": {"ANTHROPIC_BASE_URL": "http://wide.invalid", "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"},'
+            ' "note": "\ud800"}')
+    write(tree["home"] / USER, b"\xff\xfe" + text.encode("utf-16-le", "surrogatepass") + b"\x0a")
+    found, hints = claude_launch_settings(None, tree["cwd"], {"ANTHROPIC_BASE_URL": "http://env.invalid"},
+                                          home=tree["home"], managed=tree["managed"])
+    assert (found.url, found.source, hints) == ("http://wide.invalid", "settings:user", "forwarded")
+
+
+@pytest.mark.parametrize("content", [
+    b"\xff\xfe" + '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}} // on'.encode("utf-16-le"),
+    b"\xff\xfe" + '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1",}}'.encode("utf-16-le") + b"\x20",
+    '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}'.encode("utf-16-le"),
+], ids=["utf-16-le-mark-comment", "utf-16-le-mark-trailing-comma-odd", "utf-16-le-no-mark"])
+def test_a_wide_file_that_still_does_not_parse_refuses_through_its_nul_bytes(tree, content):
+    """The NUL rule is the backstop: these files hold the switch's name only as UTF-16LE, never as the
+    UTF-8 bytes the parse rule looks for, and no ``\\u`` escape, so the NUL bytes alone mark them."""
+    assert upstream.PROVIDER_PREFIX.encode() not in content and b"\\u" not in content and b"\x00" in content
+    write(tree["cwd"] / PROJECT, content)
+    found = guard(tree)
+    assert found is not None and found.on == () and found.unread == (("settings:project", "is not valid JSON"),)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_a_settings_file_claude_code_does_not_load_is_not_read_for_any_setting(tree, constant):
+    """Measured (Reviewer B, 2.1.322): Claude Code does not load a settings file holding ``NaN`` or
+    ``Infinity``, which Python's parser accepts. Contexto reads no setting from such a file: not the
+    base URL, the hint setting or ``apiKeyHelper``."""
+    from contexto.launcher import claude_launch_settings
+
+    text = ('{"env": {"ANTHROPIC_BASE_URL": "http://file.invalid", "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"},'
+            ' "apiKeyHelper": "echo key", "x": ' + constant + "}")
+    path = write(tree["home"] / USER, text)
+    assert upstream.read_settings_file(path) == upstream.SettingsFile(None, "is not valid JSON", False)
+    env = {"ANTHROPIC_BASE_URL": "http://env.invalid"}
+    found, hints = claude_launch_settings(None, tree["cwd"], env, home=tree["home"], managed=tree["managed"])
+    path.unlink()
+    absent, absent_hints = claude_launch_settings(None, tree["cwd"], env, home=tree["home"], managed=tree["managed"])
+    assert (found, hints) == (absent, absent_hints) and (found.url, found.source) == ("http://env.invalid", "env")
+    write(tree["home"] / USER, text)
+    assert upstream.claude_key_helper(tree["cwd"], tree["home"], {}).value is None
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_a_file_holding_nan_that_names_a_switch_still_refuses(tree, constant):
+    """Not read, and its text names a switch, so the guard refuses on it as on any file that does not
+    parse, even with the switch at ``"0"`` there."""
+    write(tree["cwd"] / PROJECT, '{"env": {"CLAUDE_CODE_USE_BEDROCK": "0"}, "x": [' + constant + "]}")
+    found = guard(tree)
+    assert found is not None and found.unread == (("settings:project", "is not valid JSON"),)
+
+
+def test_the_constants_are_refused_only_in_settings_files(tree):
+    """``NaN`` inside a string is ordinary text, an overflowing number is not a constant, and the loader
+    the proxy uses for request bodies still accepts the bare constants as before."""
+    from contexto.canonical import loads_bounded
+
+    assert math.isnan(loads_bounded('{"x": NaN}')["x"]) and loads_bounded("[-Infinity]") == [float("-inf")]
+    path = write(tree["home"] / USER, '{"env": {"ANTHROPIC_BASE_URL": "http://x.invalid/NaN"}, "n": [1e400]}')
+    assert upstream.read_settings_file(path) == upstream.SettingsFile(
+        {"env": {"ANTHROPIC_BASE_URL": "http://x.invalid/NaN"}, "n": [float("inf")]}, None)
+
+
+@pytest.mark.parametrize("form", ["utf-16-le", "escape"])
+@pytest.mark.parametrize("url", ["http://127.0.0.1:9/a\ud800", "http://\udc00.invalid"])
+def test_a_base_url_with_a_lone_surrogate_is_a_usage_error_not_a_crash(tree, url, form):
+    """A lone surrogate can reach a settings value (a ``\\ud800`` escape, or a malformed UTF-16LE file).
+    Such a URL cannot go into a request line, so the launch stops with a usage error naming the source."""
+    from contexto.launcher import check_upstream, claude_launch_settings
+    from contexto.proxy import ContextoProxy
+    from contexto.store.memory import MemoryStore
+
+    document = {"env": {"ANTHROPIC_BASE_URL": url}}
+    write(tree["home"] / USER, json.dumps(document).encode() if form == "escape" else
+          b"\xff\xfe" + json.dumps(document, ensure_ascii=False).encode("utf-16-le", "surrogatepass"))
+    found, _ = claude_launch_settings(None, tree["cwd"], {}, home=tree["home"], managed=tree["managed"])
+    assert (found.url, found.source) == (url, "settings:user")
+    with pytest.raises(LaunchError) as raised:
+        check_upstream(found)
+    assert raised.value.code == EXIT_USAGE and "settings:user" in str(raised.value)
+    str(raised.value).encode("utf-8")  # printable
+    with pytest.raises(ValueError):
+        ContextoProxy(url, MemoryStore())
+
+
+def test_a_utf8_file_with_an_invalid_byte_is_read_as_claude_code_reads_it(tree):
+    """Measured on 2.1.322: Claude Code loads a UTF-8 settings file with a byte that is not UTF-8 (a
+    Latin-1 ``é`` in another value), reading the byte as U+FFFD. Its base URL was used, its switch at
+    ``"1"`` went to Bedrock, and its ``"0"`` overrode the environment's ``1``."""
+    path = write(tree["home"] / USER, b'{"env": {"ANTHROPIC_BASE_URL": "http://file.invalid"}, "x": "caf\xe9"}')
+    assert upstream.read_settings_file(path) == upstream.SettingsFile(
+        {"env": {"ANTHROPIC_BASE_URL": "http://file.invalid"}, "x": "caf�"}, None)
+    found = resolve_upstream(env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tree["cwd"], home=tree["home"])
+    assert (found.url, found.source) == ("http://file.invalid", "settings:user")
+    write(tree["cwd"] / PROJECT, b'{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}, "x": "caf\xe9"}')
+    found = guard(tree)
+    assert places(found) == {BEDROCK: ("settings:project",)} and found.unread == ()
+    write(tree["cwd"] / PROJECT, b'{"env": {"CLAUDE_CODE_USE_BEDROCK": "\xc0\xb1"}}')  # an overlong 1: off, measured
+    assert guard(tree) is None
+
+
+def test_a_derived_upstream_with_a_lone_surrogate_names_its_source(tmp_path):
+    """``contexto run codex`` derives its upstream from Claude Code's and starts the proxy with it; the
+    proxy refuses a lone surrogate, and the usage error names where the URL came from."""
+    from contexto.launcher import start_proxy
+    from contexto.store.memory import MemoryStore
+
+    with pytest.raises(LaunchError) as raised:
+        start_proxy(MemoryStore(), "http://127.0.0.1:9/a\ud800/v1", "claude-settings:user+/v1", {}, False)
+    assert raised.value.code == EXIT_USAGE
+    assert str(raised.value) == "invalid upstream (from claude-settings:user+/v1): upstream holds a lone surrogate"
