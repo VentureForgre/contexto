@@ -2984,14 +2984,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
     they got before. By pass, that is 2.2 to 3.7 times; paraphrase is the costliest at 3.4 to 3.7.
 
   The brief asked to keep latency in the audit's range: 0.13 to 0.25 s, and 0.9 s for a first
-  search. Strict hits and misses are both above it here, but the audit ran on a small store, so
-  its seconds cannot be compared with these. At 6,000 pages,
-  D41 measured strict queries at 0.22 to 0.37 s and a first search at 1.49 s on an idle machine.
-  Against those, strict hits here are 1.12 to 1.17 times idle (the before run: 1.15 to 1.23). A
-  miss now does work: up to about 1.4 s at this load, still under the first search of a process.
-  The misses are the part that moved: 2.2 to 3.7 times what they cost before. That is outside the
-  "same range" the brief asked for. It is accepted because the cost lands only on queries that used
-  to return nothing.
+  search. Strict hits and misses are both above it here, but the audit ran on a small store, so its
+  seconds cannot be compared with these. At 6,000 pages, D41 measured strict queries at 0.22 to
+  0.37 s and a first search at 1.49 s on an idle machine. Against those, strict hits here are 1.12 to
+  1.17 times idle (the before run: 1.15 to 1.23). A miss now does work: up to about 1.4 s at this
+  load, still under the first search of a process. The misses are the part that moved: 2.2 to 3.7
+  times what they cost before. That is outside the "same range" the brief asked for. It is accepted
+  because the cost lands only on queries that used to return nothing.
 
   Options considered:
   - **Falling back on "too few" hits:** rejected, for the reason above.

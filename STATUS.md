@@ -733,8 +733,8 @@ Needs the owner:
   `/*` or `tools` leave the echo searchable.
 - Search has no synonyms, and no stemming beyond D65's one-letter typo step (D34, D65): `database`
   does not find `DB`. The fallback runs only when no turn holds every word, so when another turn
-  holds every word of the query, search returns that turn and never looks further: 8 of 192 probes at 6,000 pages, 6 paraphrases
-  and 2 with an extra word. Limits are listed in `docs/search.md`.
+  holds every word of the query, search returns those turns and never looks further: 8 of 192 probes
+  at 6,000 pages, 6 paraphrases and 2 with an extra word. Limits are listed in `docs/search.md`.
 - Main conversation (D50, D59): main follows Claude Code's session id, measured on 2.1.302 to
   2.1.318. Without a session id (another client) only the turn-start rule applies. A headless
   `/clear` right after an SDK `interrupt()`, or after a late end of an older request that may hold a

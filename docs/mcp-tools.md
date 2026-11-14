@@ -21,9 +21,10 @@ not start it by hand.
 order. Words match as substrings, so identifiers and paths work. When no turn holds every word, the
 reply gives approximate matches and says so: stop words dropped, identifier styles folded, turns
 holding enough of the query (rarer words count more), one typo ([search.md](search.md)). There is no
-stemming beyond that one-letter typo step, and no embedding search. A query with no words finds nothing. Contexto's own search, recall and
-state calls (a turn's earlier search replies, for example) are kept for recall but not searched,
-since they copy older pages and would outrank the turns they quote.
+stemming beyond that one-letter typo step, and no embedding search. A query with no words finds
+nothing. Contexto's own search, recall and state calls (a turn's earlier search replies, for
+example) are kept for recall but not searched, since they copy older pages and would outrank the
+turns they quote.
 
 - Turns holding the whole query rank first, then by relevance (BM25), with newer turns preferred
   among similar ones. A word counts once per text of a turn (a reply, a tool input, a tool output),
