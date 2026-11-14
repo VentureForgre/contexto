@@ -14,20 +14,38 @@ each (18 new probes, 72 in all), whose questions contain none of their plant's s
     Six facts are planted as ``cfg <service>.<attribute>=<value>`` lines in one more pasted-log turn.
     The question names the service in plain words (``billing-core`` becomes "the billing core
     service") and describes the attribute in other words, from the fixed table ``ATTRIBUTES``.
+    The service is named, so the attribute is what has to be matched: every service a
+    ``paraphrase`` or ``toolloop`` probe asks about has ``DECOYS`` (3) more ``cfg`` lines for other
+    attributes, each with its own value, so a search for the service finds at least four lines and
+    only the paraphrase picks the right one. Exactly one line answers each question. The decoy
+    values are the probe's ``older`` values, so an answer that picked a decoy is counted stale.
+    Decoys come from other attribute ``FAMILIES`` than the asked attribute and than each other, so
+    no question fits two attributes planted for its service; and no planted attribute's identifier
+    shares a word with its service's name or with the question (``leaks``).
 ``concluded``
     Six short ``decision`` turns each give three candidates with a number each and a rule (take the
-    lowest, or the highest) and ask for a reply of exactly ``DECISION <label>: <name>``. The fact
-    exists in the conversation only as the assistant's reply. The question describes what was
-    decided in other words (``SCENARIOS``) and contains neither the label nor a candidate.
-    ``decision_reply_ok`` tells whether a reply made the right decision, so a reader can tell a
-    wrong conclusion from a failed recall. Scoring is against the generator's value either way.
+    lowest, or the highest) and ask for a reply of exactly ``DECISION <label>: <name>``. The pick is
+    stated only in the assistant's reply; the user turn holds the candidates and the rule, so the
+    pick can also be worked out again from it. The question describes what was decided in other
+    words (``SCENARIOS``), asks for the name, and contains neither the label nor a candidate. The
+    two candidates that lost are the probe's ``older`` values. ``decision_reply_ok`` tells whether
+    a reply made the right decision, so a reader can tell a wrong conclusion from a failed recall.
+    Scoring is against the generator's value either way.
 ``toolloop``
     One turn asks the assistant to read ``TOOLLOOP_FILES`` (10) generated files, one at a time, with
     its file-read tool and then reply OK. The files hold log filler and sum to about twice the
     content turn size (10 files of about 8,000 bytes, 80,000 bytes in all, at the default 40,000
-    byte turn). Six of them carry one ``cfg`` fact each, asked about as in ``paraphrase``. The
-    script carries the files (``Script.files``) and the order the turn lists them in
-    (``Script.reads``).
+    byte turn). Six of them carry one asked ``cfg`` fact each, asked about as in ``paraphrase``.
+    The script carries the files (``Script.files``) and the order the turn lists them in
+    (``Script.reads``). Naming the service is not what makes this class hard: the fact arrives as a
+    tool result inside one long turn of tool calls.
+
+Where the ``cfg`` lines go. A ``paraphrase`` service's asked line and two decoys are in the log
+turn and its third decoy in a file. A ``toolloop`` service's asked line is in its own file, two
+decoys in two other files and one decoy in the log turn. So each service's lines sit in at least two
+places, and within the source its question names (the logs, or the files) there are still at
+least three lines for the service. The self-check ``service_alone`` fails when a search for a
+service's name, hyphenated or as separate words, finds only the plant line.
 
 Placement. The eight new content turns go in one block straight after the first ``d27`` turn, in an
 order shuffled by the new plants' random stream, so every ``d27`` content turn but the first comes
@@ -56,6 +74,7 @@ from contexto.bench import d27
 from contexto.bench.d27 import DEFAULT_SEED, REPLY_TOKENS, normalize, parse_answers, turn_tokens
 from contexto.bench.model import (
     D27_CLASSES,
+    FILE_DIR,
     NEW_CLASSES,
     PROTOCOLS,
     Decision,
@@ -67,9 +86,10 @@ from contexto.bench.model import (
 from contexto.bench.stats import wilson
 
 __all__ = [
-    "ATTRIBUTES", "D27_CLASSES", "DEFAULT_SEED", "NEW_CLASSES", "PROTOCOLS", "SCENARIOS", "Decision", "Probe",
-    "Script", "build", "checks", "decision_reply_ok", "estimate", "key_free", "later_tokens", "lexical_overlap",
-    "load_bytes", "overlap_by_class", "placement", "plant_turns", "restatements", "score", "unplanted", "words",
+    "ATTRIBUTES", "D27_CLASSES", "DEFAULT_SEED", "FAMILIES", "NEW_CLASSES", "PROTOCOLS", "SCENARIOS", "Decision",
+    "Probe", "Script", "build", "checks", "decision_reply_ok", "estimate", "key_free", "later_tokens", "leaks",
+    "lexical_overlap", "load_bytes", "overlap_by_class", "placement", "plant_turns", "restatements", "score",
+    "service_alone", "service_lines", "unplanted", "words",
 ]
 
 PER_CLASS = 6  # probes in each new class
@@ -77,7 +97,7 @@ NEW_PROBES_PER_TURN = 9
 TOOLLOOP_FILES = 10
 TOOLLOOP_TURNS_WORTH = 2  # the files sum to this many content turns' bytes
 MAX_FILE_BYTES = 20_000  # more files, not larger ones, above this: a file-read tool caps what one read returns
-FILE_DIR = "bench-files"
+DECOYS = 3  # more cfg lines for each paraphrase and toolloop service, one per other attribute
 
 # The synonym table: an attribute identifier and a clause that asks for it without any of its words.
 # ``{svc}`` is the service in plain words. tests/test_bench_script.py checks that no clause shares a
@@ -85,12 +105,12 @@ FILE_DIR = "bench-files"
 ATTRIBUTES: tuple[tuple[str, str], ...] = (
     ("failover_target", "where does the {svc} service send its traffic when its primary goes down?"),
     ("image_tag", "which container build label is the {svc} service running?"),
-    ("oncall_alias", "what is the paging name of whoever is on duty for the {svc} service?"),
+    ("oncall_alias", "what is the paging handle of whoever is on duty for the {svc} service?"),
     ("backup_bucket", "where are the nightly copies of the {svc} service's data stored?"),
     ("signing_secret", "what does the {svc} service use to prove that its requests are authentic?"),
     ("queue_name", "from which work line does the {svc} service pull its jobs?"),
-    ("cert_serial", "what number identifies the TLS certificate of the {svc} service?"),
-    ("dns_zone", "under which domain are the host names of the {svc} service registered?"),
+    ("cert_serial", "what number identifies the TLS credential that the {svc} service presents?"),
+    ("dns_zone", "under which domain are the hosts of the {svc} service registered?"),
     ("cache_namespace", "what prefix does the {svc} service put in front of its stored lookups?"),
     ("log_stream", "where does the {svc} service write its diagnostic output?"),
     ("release_channel", "which update track is the {svc} service subscribed to?"),
@@ -100,6 +120,18 @@ ATTRIBUTES: tuple[tuple[str, str], ...] = (
     ("standby_pool", "which group of spare machines backs up the {svc} service?"),
     ("alert_route", "where are warnings about the {svc} service delivered?"),
 )
+
+# Attributes whose clauses could be read as asking for one another share a family. Two attributes of
+# one family are never planted for the same service, so no question fits two of its service's lines.
+# The grouping errs towards wide: backups and spare machines, warnings and diagnostic output, and the
+# four kinds of version or switch are each one family.
+FAMILIES: dict[str, str] = {
+    "failover_target": "redundancy", "standby_pool": "redundancy", "backup_bucket": "redundancy",
+    "oncall_alias": "signals", "alert_route": "signals", "log_stream": "signals",
+    "signing_secret": "credentials", "cert_serial": "credentials",
+    "image_tag": "versions", "release_channel": "versions", "schema_revision": "versions", "feature_set": "versions",
+    "queue_name": "queues", "throttle_tier": "limits", "dns_zone": "naming", "cache_namespace": "caching",
+}
 
 # The decision scenarios: an id, the rule ("min" or "max"), the sentence that introduces the
 # candidates, and the question that describes the decision in other words.
@@ -131,7 +163,18 @@ SCENARIOS: tuple[tuple[str, str, str, str], ...] = (
      "with your pick. What did you pick?"),
 )
 _RULE_WORD = {"min": "lowest", "max": "highest"}
-_DECISION_LINE = re.compile(r"^\W*DECISION\s+([A-Za-z0-9-]+)\s*:\s*(.*?)\s*$")
+# The fixed texts of the turns protocol v2 adds. model.GENERATOR_WORDS holds their words.
+TOOLLOOP_HEAD = (
+    "Next, {n} files instead of a pasted log. Read each file below with your file-read tool, one file at a time, "
+    "in the order listed, each one to its end. Do not search them and do not skip any. The paths are relative to "
+    "the current working directory. When you have read all {n}, reply with exactly: OK")
+DECISION_HEAD = "Decision point: this message has no log."
+DECISION_RULE = "Rule: take the one with the {rule} number."
+DECISION_ASK = ("Reply with exactly one line and nothing else, in this form:", "DECISION {label}: <name>")
+_TOKEN = re.compile(r"[a-z0-9]+")
+_CFG_LINE = re.compile(r"^cfg ([^=\s]+)=\S*$")
+CFG_CLASSES = ("paraphrase", "toolloop")  # the new classes planted as cfg lines
+_HYPHENS = str.maketrans({c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2212\ufe63\uff0d"})
 
 
 def build(seed: int = DEFAULT_SEED, protocol: str = "v2", bound: int = 150_000, turn_bytes: int = 40_000,
@@ -161,6 +204,21 @@ def _plain(service: str) -> str:
     return service.replace("-", " ")
 
 
+def leaks(identifier: str, text: str) -> bool:
+    """Whether an attribute identifier shares a word with ``text``: a token of the identifier equals a
+    token of ``text``, or one of the two (3 or more characters) contains the other. Tokens are runs of
+    ASCII letters and digits after case folding. ``router`` leaks ``alert_route`` and ``catalog``
+    leaks ``log_stream``; a search matches substrings, so containment counts."""
+    mine = set(_TOKEN.findall(identifier.casefold()))
+    theirs = {w for w in _TOKEN.findall(text.casefold()) if len(w) >= 3}
+    return any(a == b or (len(a) >= 3 and (a in b or b in a)) for a in mine for b in theirs)
+
+
+def _question(service: str, clause: str, source: str) -> str:
+    return (f"From the {source} earlier in this conversation: {clause.format(svc=_plain(service))} "
+            "Answer with the value only.")
+
+
 def _extend(base: Script, pools: d27.Pools, rng: random.Random) -> Script:
     """``base`` (a d27 script) with the v2 turns, probes, decisions and files added."""
     size = base.turn_size
@@ -173,47 +231,79 @@ def _extend(base: Script, pools: d27.Pools, rng: random.Random) -> Script:
                 return v
 
     def probe(pid: str, cls: str, tier: str, question: str, answer: str, subjects: tuple[str, ...],
-              statements: tuple[str, ...]) -> Probe:
-        return Probe(pid, "b", cls, tier, question, answer, "value", (), subjects, statements, cls=cls,
+              statements: tuple[str, ...], older: tuple[str, ...]) -> Probe:
+        return Probe(pid, "b", cls, tier, question, answer, "value", older, subjects, statements, cls=cls,
                      overlap=lexical_overlap(question, statements))
 
-    def fact(pid: str, cls: str, tier: str, service: str, attribute: tuple[str, str], source: str) -> Probe:
-        name, clause = attribute
-        key, answer = f"{service}.{name}", value()
-        question = (f"From the {source} earlier in this conversation: {clause.format(svc=_plain(service))} "
-                    "Answer with the value only.")
-        return probe(pid, cls, tier, question, answer, (key, service, name), (f"cfg {key}={answer}",))
+    # The twelve services d27 left unused: six for paraphrase, six for toolloop. Each gets one asked
+    # attribute (twelve different ones) and DECOYS more, all from different families, none sharing a
+    # word with the question.
+    services = rng.sample(sorted(pools.services), 2 * PER_CLASS)
+    sources = ["logs"] * PER_CLASS + ["files you read"] * PER_CLASS
+    clauses = dict(ATTRIBUTES)
+    asked: list[str] = []
+    planted: list[list[str]] = []  # per service: the asked attribute, then its decoys
+    for service, source in zip(services, sources):
+        options = [name for name, clause in ATTRIBUTES if name not in asked
+                   and not leaks(name, _question(service, clause, source))]
+        name = rng.choice(options)
+        asked.append(name)
+        question = _question(service, clauses[name], source)
+        families = {FAMILIES[name]}
+        chosen = [name]
+        for other in rng.sample([n for n, _ in ATTRIBUTES], len(ATTRIBUTES)):
+            if len(chosen) > DECOYS:
+                break
+            if FAMILIES[other] not in families and not leaks(other, question):
+                families.add(FAMILIES[other])
+                chosen.append(other)
+        if len(chosen) <= DECOYS:  # cannot happen with the table above; tests/test_bench_script.py checks seeds
+            raise RuntimeError(f"too few attribute families left for {service}")
+        planted.append(chosen)
 
-    services = rng.sample(sorted(pools.services), 2 * PER_CLASS)  # the services d27 left unused
-    attributes = rng.sample(ATTRIBUTES, 2 * PER_CLASS)
+    facts: list[Probe] = []
+    lines: list[list[str]] = []  # per service: the asked line, then the decoy lines
+    for k, (service, source, names) in enumerate(zip(services, sources, planted)):
+        cls, tier, pid = (("paraphrase", "cfg-line", f"q_r_{k + 1:02d}") if k < PER_CLASS
+                          else ("toolloop", "file-line", f"q_t_{k - PER_CLASS + 1:02d}"))
+        values = [value() for _ in names]
+        mine = [f"cfg {service}.{n}={v}" for n, v in zip(names, values)]
+        lines.append(mine)
+        key = f"{service}.{names[0]}"
+        facts.append(probe(pid, cls, tier,
+                           _question(service, clauses[names[0]], source), values[0], (key, service, names[0]),
+                           (mine[0],), tuple(values[1:])))
+    paraphrase, toolloop = facts[:PER_CLASS], facts[PER_CLASS:]
 
-    # paraphrase: one more pasted-log turn.
-    paraphrase = [fact(f"q_r_{i + 1:02d}", "paraphrase", "cfg-line", services[i], attributes[i], "logs")
-                  for i in range(PER_CLASS)]
-    new_turns: list[tuple[str, str, Any]] = [
-        ("log", d27.log_turn(rng, [p.statements[0] for p in paraphrase], size, "p0"), None)]
-
-    # toolloop: files of log filler, six of them with one fact each.
-    toolloop = [fact(f"q_t_{i + 1:02d}", "toolloop", "file-line", services[PER_CLASS + i],
-                     attributes[PER_CLASS + i], "files you read")
-                for i in range(PER_CLASS)]
+    # Where each line goes: the log turn, or one of the files.
     n_files = max(TOOLLOOP_FILES, math.ceil(TOOLLOOP_TURNS_WORTH * size / MAX_FILE_BYTES))
     holders = rng.sample(range(n_files), PER_CLASS)
+    in_log: list[str] = []
+    in_file: list[list[str]] = [[] for _ in range(n_files)]
+    for mine in lines[:PER_CLASS]:
+        in_log += mine[:3]
+        in_file[rng.randrange(n_files)].append(mine[3])
+    for holder, mine in zip(holders, lines[PER_CLASS:]):
+        in_file[holder].append(mine[0])
+        for k, line in zip(rng.sample([k for k in range(n_files) if k != holder], 2), mine[1:3]):
+            in_file[k].append(line)
+        in_log.append(mine[3])
+    rng.shuffle(in_log)
+
+    # paraphrase: one more pasted-log turn.
+    new_turns: list[tuple[str, str, Any]] = [("log", d27.log_turn(rng, in_log, size, "p0"), None)]
+
+    # toolloop: files of log filler with the cfg lines spread through them.
     files: dict[str, str] = {}
     for k in range(n_files):
-        planted = [toolloop[i].statements[0] for i in range(PER_CLASS) if holders[i] == k]
-        used = sum(len(x.encode("utf-8")) + 1 for x in planted)
-        lines = max(1, int((TOOLLOOP_TURNS_WORTH * size / n_files - used) / d27.filler_line_bytes()))
-        log = d27.filler_text(rng, lines, f"f{k + 1:02d}").split("\n")
-        for item in planted:
+        used = sum(len(x.encode("utf-8")) + 1 for x in in_file[k])
+        count = max(1, int((TOOLLOOP_TURNS_WORTH * size / n_files - used) / d27.filler_line_bytes()))
+        log = d27.filler_text(rng, count, f"f{k + 1:02d}").split("\n")
+        for item in in_file[k]:
             log.insert(rng.randrange(0, len(log) + 1), item)
         files[f"{FILE_DIR}/log-{k + 1:02d}.txt"] = "\n".join(log) + "\n"
     reads = tuple(files)
-    new_turns.append(("toolloop", "\n".join([
-        f"Next, {n_files} files instead of a pasted log. Read each file below with your file-read tool, one file "
-        "at a time, in the order listed, each one to its end. Do not search them and do not skip any. The paths "
-        f"are relative to the current working directory. When you have read all {n_files}, reply with exactly: OK",
-        *reads]), None))
+    new_turns.append(("toolloop", "\n".join([TOOLLOOP_HEAD.format(n=n_files), *reads]), None))
 
     # concluded: six decision turns, one per scenario.
     concluded: list[Probe] = []
@@ -227,16 +317,13 @@ def _extend(base: Script, pools: d27.Pools, rng: random.Random) -> Script:
         numbers = rng.sample(range(110, 990, 40), 3)  # distinct, at least 40 apart
         pick = names[numbers.index(min(numbers) if rule == "min" else max(numbers))]
         text = "\n".join([
-            "Decision point: this message has no log.", intro,
-            *[f"{name} = {number}" for name, number in zip(names, numbers)],
-            f"Rule: take the one with the {_RULE_WORD[rule]} number.",
-            "Reply with exactly one line and nothing else, in this form:",
-            f"DECISION {label}: <name>",
+            DECISION_HEAD, intro, *[f"{name} = {number}" for name, number in zip(names, numbers)],
+            DECISION_RULE.format(rule=_RULE_WORD[rule]), DECISION_ASK[0], DECISION_ASK[1].format(label=label),
         ])
         reply = f"DECISION {label}: {pick}"
         pid = f"q_c_{i + 1:02d}"
-        concluded.append(probe(pid, "concluded", rule, f"{question} Answer with the value only.", pick,
-                               (label, *names), (text, reply)))
+        concluded.append(probe(pid, "concluded", rule, f"{question} Answer with the name only.", pick,
+                               (label, *names), (text, reply), tuple(n for n in names if n != pick)))
         new_turns.append(("decision", text, (pid, label, pick, reply)))
 
     rng.shuffle(new_turns)
@@ -267,19 +354,34 @@ def decision_reply_ok(script: Script, turn_index: int, reply_text: str) -> bool:
     """Whether ``reply_text``, the assistant's reply to the ``decision`` turn at ``turn_index``, made
     the right decision.
 
-    True when the reply's last ``DECISION <label>: <name>`` line for the turn's label gives the name
-    the rule selects, compared after the scoring's normalization; markup around the line (``**``,
-    backticks, a list dash) is ignored. Raises ``ValueError`` if that turn is not a decision turn.
+    The reply's last line that holds ``DECISION <label>:`` for the turn's label counts, anywhere in
+    the line and in any case, after markup (``*``, ``_``, backticks) is dropped and any Unicode
+    hyphen or dash is read as ``-``. It is right when the text after the colon names the candidate
+    the rule selects and neither of the other two (each candidate matched as a whole name, case
+    folded). So ``1. **DECISION** DX-1: nickel-1771 (lowest, 110)`` is right, and ``DECISION DX-1:
+    nickel-1771 or onyx-2203`` is not. A reply with no such line for this label is not. Raises
+    ``ValueError`` if that turn is not a decision turn.
     """
     decision = next((d for d in script.decisions if d.turn == turn_index), None)
     if decision is None:
         raise ValueError(f"turn {turn_index} is not a decision turn")
+    probe = next((p for p in script.probes if p.id == decision.probe), None)
+    candidates = list(probe.subjects[1:]) if probe is not None else [decision.value]
+    label = re.escape(decision.label.casefold())
+    line_rule = re.compile(r"(?<![a-z0-9])decision\s+" + label + r"(?![a-z0-9])\s*:(.*)$")
     given = None
-    for line in reply_text.splitlines():
-        match = _DECISION_LINE.match(line)
-        if match and match.group(1) == decision.label:
-            given = match.group(2)
-    return given is not None and normalize(given.strip("*_ ")) == normalize(decision.value)
+    for line in reply_text.translate(_HYPHENS).splitlines():
+        match = line_rule.search(re.sub(r"[*_`]", "", line).casefold())
+        if match:
+            given = match.group(1)
+    if given is None:
+        return False
+
+    def names(candidate: str) -> bool:
+        return re.search(r"(?<![a-z0-9-])" + re.escape(candidate.casefold()) + r"(?![a-z0-9-])", given) is not None
+
+    named = [c for c in candidates if names(c)]
+    return named == [decision.value] or (len(named) == 1 and normalize(named[0]) == normalize(decision.value))
 
 
 # Sizes
@@ -370,11 +472,19 @@ def placement(script: Script) -> list[str]:
     return problems
 
 
+def _cfg_key(line: str) -> str | None:
+    match = _CFG_LINE.match(line)
+    return match.group(1) if match else None
+
+
 def restatements(script: Script) -> list[str]:
     """Plant subjects that appear outside their own statements, in any turn or file.
 
     A d27 probe's own question may name its subject, as in the spike. A new-class probe's question
-    may not: it is not excused here, so a subject in it is reported.
+    may not: it is not excused here, so a subject in it is reported. For a ``paraphrase`` or
+    ``toolloop`` probe a ``cfg`` line with another key is not a restatement: its service's decoys
+    share the service, and another service's line may use the same attribute. Its own key may
+    appear in no line but its plant, so exactly one line answers its question.
     """
     texts = [(f"turn {i + 1}", text, i >= script.n_content) for i, text in enumerate(script.turns)]
     texts += [(f"file {path}", text, False) for path, text in script.files.items()]
@@ -386,6 +496,9 @@ def restatements(script: Script) -> list[str]:
             residue = text
             for statement in p.statements:
                 residue = residue.replace(statement, "")
+            if p.cls in CFG_CLASSES:
+                residue = "\n".join(line for line in residue.split("\n")
+                                     if _cfg_key(line) in (None, p.subjects[0]))
             if is_probe_turn and p.cls not in NEW_CLASSES:
                 residue = residue.replace(p.question, "")
             for subject in p.subjects:
@@ -395,8 +508,33 @@ def restatements(script: Script) -> list[str]:
 
 
 def key_free(script: Script) -> list[Probe]:
-    """The new-class probes whose question contains one of their subject strings."""
+    """The new-class probes whose question contains one of their subject strings (for a ``cfg``
+    probe: the key, the hyphenated service or the attribute identifier). A ``paraphrase`` or
+    ``toolloop`` question names its service in plain words by design; ``service_alone`` checks
+    that this does not single out the plant."""
     return [p for p in script.probes if p.cls in NEW_CLASSES and any(s in p.question for s in p.subjects)]
+
+
+def service_lines(script: Script, service: str) -> list[str]:
+    """The lines of the content turns and files that a search for ``service`` alone finds: lines
+    that hold it hyphenated, or hold each of its separate words (as substrings, case folded, the way
+    Contexto's search matches a query's words)."""
+    parts = service.casefold().split("-")
+    found = []
+    for text in [*script.content_turns, *script.files.values()]:
+        for line in text.split("\n"):
+            folded = line.casefold()
+            if service.casefold() in folded or all(part in folded for part in parts):
+                found.append(line)
+    return found
+
+
+def service_alone(script: Script) -> list[Probe]:
+    """The ``paraphrase`` and ``toolloop`` probes whose service name, hyphenated or as its separate
+    words, finds no line but the probe's own plant (``service_lines``): for them the question is
+    answered by the service name and the paraphrase decides nothing."""
+    return [p for p in script.probes if p.cls in CFG_CLASSES
+            and set(service_lines(script, p.subjects[1])) <= set(p.statements)]
 
 
 def checks(script: Script) -> dict[str, list[str]]:
@@ -404,6 +542,8 @@ def checks(script: Script) -> dict[str, list[str]]:
     return {
         "restatements": restatements(script),
         "key_free": [f"{p.id}: the question contains a subject string" for p in key_free(script)],
+        "service_alone": [f"{p.id}: a search for {p.subjects[1]!r} alone finds only the plant line"
+                          for p in service_alone(script)],
         "placement": placement(script),
         "unplanted": unplanted(script),
     }
@@ -420,7 +560,10 @@ def _norm_set(text: str | None) -> str:
 def score(probes: Sequence[Probe], answers_text: str) -> dict[str, Any]:
     """Score an answers text (``q_id: answer`` lines) against the probes. No model judge.
 
-    The rules are the acceptance runs' (``spikes/m0/fidelity/l2f.py::score``), unchanged: a ``value``
+    The rules are the acceptance runs' (``spikes/m0/fidelity/l2f.py::score``) with one deliberate
+    difference: a probe with no answer line, or an empty answer, is never correct. The spike reads a
+    missing answer to a ``set`` probe as the empty set, so a ``set`` probe whose expected answer is
+    ``none`` scored correct when the arm said nothing at all. Otherwise unchanged: a ``value``
     answer is right when it equals the expected answer after normalization, a ``set`` answer when
     its ids are the expected ids in any order, and a wrong ``value`` answer that equals one of the
     probe's older values is also counted stale. Returns the totals, the Wilson 95% interval, the
@@ -432,7 +575,12 @@ def score(probes: Sequence[Probe], answers_text: str) -> dict[str, Any]:
     correct = 0
     for p in probes:
         given = answers.get(p.id)
-        ok = (_norm_set(given) == _norm_set(p.answer)) if p.kind == "set" else (normalize(given) == normalize(p.answer))
+        if not normalize(given):
+            ok = False  # no answer is never right, also where the expected set is "none"
+        elif p.kind == "set":
+            ok = _norm_set(given) == _norm_set(p.answer)
+        else:
+            ok = normalize(given) == normalize(p.answer)
         stale = (not ok) and p.kind == "value" and normalize(given) in {normalize(v) for v in p.older}
         for key in (p.type, f"{p.type}/{p.tier}"):
             c = cells.setdefault(key, {"correct": 0, "total": 0, "stale": 0})
