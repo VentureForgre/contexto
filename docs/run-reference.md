@@ -35,7 +35,7 @@ For Claude Code, the launcher:
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets only
    `env.ANTHROPIC_BASE_URL` to the proxy and allows Contexto's five MCP tools by name
    (`permissions.allow`; see [Troubleshooting](troubleshooting.md)), and an `--mcp-config` file that
-   starts Contexto's MCP server (`python -P -m contexto mcp --session <id>` with the same Python, and
+   starts Contexto's MCP server (`python -P -m contexto mcp --session=<id>` with the same Python, and
    `CONTEXTO_HOME`, plus `CONTEXTO_SEARCH_CACHE_MB` when set, in its environment; `-P` keeps your
    project directory off the import path);
 4. runs `claude --settings=<file> --mcp-config=<file> [your args]` in your terminal, with
