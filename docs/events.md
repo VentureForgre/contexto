@@ -88,6 +88,7 @@ is never a line of its own: look for it inside a `request` line.
 | [`cli_version_untested`](#cli_version_untested) | engine | `transform_events` | notice |
 | [`session_start_unrecognised`](#session_start_unrecognised) | engine | `transform_events` | notice |
 | [`cli_version_error`](#cli_version_error) | engine | `transform_events` | problem |
+| [`hint_mismatch`](#hint_mismatch) | engine | `transform_events` | notice |
 | [`launch`](#launch) | launcher (Claude), launcher (Codex) | own line | normal |
 | [`cli_version_check`](#cli_version_check) | launcher (Claude), launcher (Codex) | own line | normal |
 | [`window_budget_warning`](#window_budget_warning) | launcher (Claude), launcher (Codex) | own line | notice |
@@ -550,12 +551,18 @@ The proxy is listening.
   `env` or `default` for Claude Code; `codex-flag`, `codex-env`, `chatgpt-default` or
   `claude-<source>+/v1` for Codex.
 - `observe_thinking`: whether `--observe-thinking` is on.
+- `pages`: the page files in the session's store when the proxy started. Absent when the pages
+  directory could not be listed. `contexto stats` takes a run's pages added from it and the `pages`
+  of the run's `proxy_stop`.
 
 ### `proxy_stop`
 
 Writer: proxy. Where: own line. Kind: normal.
 
-The proxy stopped accepting requests and finished waiting for those in flight. No fields.
+The proxy stopped accepting requests and finished waiting for those in flight.
+
+- `pages`: the page files in the session's store when the proxy stopped. Absent when the pages
+  directory could not be listed.
 
 ### `proxy_stop_incomplete`
 
@@ -727,6 +734,17 @@ A `count_tokens` request has a [`count_tokens`](#count_tokens) event in its plac
   [`fallback_failed`](#fallback_failed)).
 - `main`: whether this request belongs to the main conversation.
 - `conversations`: how many conversations the engine is tracking in this session.
+- `cli_session`: Messages requests only: whether the request carried a Claude Code session id with
+  its entrypoint. `contexto stats` says "Claude Code did not compact" only for a log in which every
+  such request did.
+- `request_class`: the request's `x-claude-code-request-class` hint header (D70), when it carried
+  one Contexto knows: `main`, `compaction`, `subagent`, `workflow` or one of the side classes.
+  Absent otherwise.
+- `context_compacted`: the hint that Claude Code compacted this conversation: `auto`, `manual`,
+  `reactive`, or `other` for a value Contexto does not know. Absent when the request carried no
+  such hint.
+- `compaction`: the same vocabulary, for the summarization request itself: the trigger its
+  compaction hint header named. Absent when the request carried no such hint.
 
 ### `count_tokens`
 
@@ -1027,6 +1045,8 @@ The session store could not be read or written. The conversation on the line ent
 - `epoch`: the current epoch.
 - `operation`: the store operation that failed, for example `page_out` or `set_turn_room`.
 - `error`: the exception's class name.
+- `errno`: the error's name when it has an operating-system error number, for example `ENOSPC` (a
+  full disk) or `EACCES` (a permission problem); never its message. Absent otherwise.
 - `degraded`: true when the conversation was already in degraded mode.
 
 ### `page_conflict`
@@ -1300,6 +1320,21 @@ The version check behind the three events above raised. The request is unaffecte
 
 - `error`: the exception's class name.
 
+### `hint_mismatch`
+
+Writer: engine. Where: `transform_events`. Kind: notice.
+
+A request's hint header disagrees with what the engine sees in the request itself (D70). Logged
+once per run for each distinct header, value and signature. The engine follows the header; this says
+that a Claude Code update may have changed what a class of request looks like.
+
+- `header`: `request_class` or `context_compacted`.
+- `value`: the header's value, from its fixed vocabulary.
+- `signature`: what disagreed: `agent_id` (a main-conversation class with an agent id), `no_tool_list`
+  (a main-conversation class with no tool list), `no_agent_id` (a subagent class with no agent id and
+  no parent session), `tool_list` (an auxiliary request with a tool list), or `compaction_summary` (a
+  compaction hint with no compaction summary in the messages).
+
 ## Launcher events
 
 `contexto run claude` and `contexto run codex` write these as their own lines.
@@ -1320,6 +1355,9 @@ The proxy is up and the CLI is about to start.
 - `observe_thinking`: whether `--observe-thinking` is on.
 - `user_arg_count`: how many arguments were passed through to the CLI. The arguments are not logged.
 - `affinity_header`: whether the proxy adds a session-affinity header to requests.
+- `hint_headers`: Claude Code only: what the launch does with Claude Code's hint headers (D70):
+  `stripped` (turned on for the engine and removed before forwarding), `forwarded` (you had them on,
+  so they are sent upstream), or `off` (you turned them off).
 - `codex_auth`: Codex only: the `--codex-auth` mode.
 - `no_daemon`: Codex only: whether Codex was started with `--no-daemon`, so it leaves no background
   server running.
@@ -1455,6 +1493,10 @@ room was open for the call, that is when `turn_budget` is not `unbudgeted`:
 - `in_view_hits`: how many matching lines of the conversation in view the reply showed.
 - `in_view_more`: how many more matched in view and were not shown.
 - `in_view_checked`: whether the conversation in view could be checked.
+- `approximate`: whether the reply showed approximate matches (D65): no page held every word.
+- `approximate_steps`: with `approximate`: which steps of the fallback the pages shown in detail
+  needed, in this order: `stop_words`, `long_query`, `fold`, `typo`, `any_word`; `punctuation` alone
+  when only the punctuation at the words' ends was dropped. Never the words.
 
 `contexto_pin` and `contexto_close` (`chars` is then the length of the pinned text or the note):
 

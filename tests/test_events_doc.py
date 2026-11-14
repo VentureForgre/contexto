@@ -220,8 +220,10 @@ HELPER_FIELDS: dict[tuple[str, str], frozenset[str]] = {
     # _within_room returns the budget fields, which each budgeted tool unpacks into its own
     ("mcp_call", "src/contexto/mcp.py"): frozenset({
         "turn_budget", "charged_tokens", "room_left", "limited_by", "side_rooms", "limiting_age_s"}),
+    # RewriteEngine._call: events[-1].update(hints._asdict() ...), the GatewayHints fields that are set (D70)
+    ("request", "src/contexto/rewrite.py"): frozenset({"request_class", "context_compacted", "compaction"}),
     # store_failure() stores these on one variable that holds both names
-    ("store_error", "src/contexto/rewrite.py"): frozenset({"degraded"}),
+    ("store_error", "src/contexto/rewrite.py"): frozenset({"degraded", "errno"}),
     ("page_conflict", "src/contexto/rewrite.py"): frozenset({"degraded", "page_id"}),
 }
 
@@ -1395,7 +1397,10 @@ def unwritten_fields(modules: list[Module], written: dict[str, list[Site]], doc:
     for entry in doc.entries:
         paths = entry_files(doc, entry, written, tables)
         for key, line in entry.fields.items():
-            if paths and not any(key in vocabulary[path] for path in paths):
+            # A field HELPER_FIELDS names for the event and file reaches it by a route the scan cannot read, so its
+            # name need not be in that file (GatewayHints' fields arrive through ``_asdict()``).
+            if paths and not any(key in vocabulary[path] or key in tables.helper_fields.get((entry.name, path), ())
+                                 for path in paths):
                 problems.append(
                     f"{DOC_NAME}:{line} lists the field `{key}` under `{entry.name}`, but `{key}` does not appear in "
                     f"{', '.join(paths)}, which {'writes' if len(paths) == 1 else 'write'} that event; remove the "
