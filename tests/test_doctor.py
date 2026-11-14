@@ -1159,21 +1159,26 @@ def test_doctor_connects_to_nothing_resolves_no_name_and_never_contacts_the_upst
 @pytest.mark.parametrize("mode", [0o000, 0o100, 0o200, 0o300, 0o400, 0o600])
 def test_a_sessions_directory_that_cannot_be_read_and_entered_fails_as_the_launcher_does(both, capsys, fast_mcp,
                                                                                          mode):
-    """Reviewer B's re-review: the store sets ``sessions`` to 0700 only after it has opened it, so of the
-    modes that are not writable only 0500 launches. Doctor passed 000, 100, 200, 400 and 600 with the
-    "sets it to mode 0700" note, and 300 without it, where both launchers exit 1."""
+    """Reviewer B's re-review: doctor passed modes where both launchers exit 1. Round 3 (Reviewer A): which
+    modes launch depends on the Python (from 3.14 a missing search permission no longer stops the launch),
+    so the test holds doctor to what a real launch does on this Python, mode by mode."""
     sessions = both.store / "sessions"
     sessions.mkdir(parents=True)
     sessions.chmod(mode)
     try:
         code, found = checks(capsys)
         store = found["store"]
-        assert code == 1 and store["status"] == "fail", store
-        assert "sessions directory cannot be read and entered" in store["summary"]
-        assert store["action"] == f"Run: chmod u+rwx {shlex.quote(str(sessions))}"
         assert stat.S_IMODE(sessions.stat().st_mode) == mode  # doctor changes no mode
         started = launch(both, "claude", "-p", "hi")
-        assert started.returncode == 1 and "Permission denied" in started.stderr, started.stderr
+        launches = started.returncode == 0
+        if launches:
+            assert store["status"] != "fail" and "sets it to mode 0700" in store["summary"], (store, started.stderr)
+        else:
+            assert code == 1 and store["status"] == "fail", (store, started.stderr)
+            assert "sessions directory cannot be read and entered" in store["summary"]
+            assert store["action"] == f"Run: chmod u+rwx {shlex.quote(str(sessions))}"
+        if mode in (0o000, 0o100, 0o200, 0o300):  # no read permission: no Python launches
+            assert not launches
     finally:
         sessions.chmod(0o700)
 
@@ -1275,3 +1280,14 @@ def test_a_signal_while_a_version_command_starts_leaves_no_process(both, monkeyp
         doctor.read_version(str(hang), {})
     monkeypatch.setattr(subprocess, "Popen", real_popen)
     assert started and started[0].poll() is not None  # killed and reaped, not left running
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_a_settings_file_with_a_non_json_number_is_named_as_unusable(both, capsys, fast_mcp, literal):
+    """Reviewer A, round 3: no test covered the settings line's rule for these, which Python accepts and
+    Claude Code rejects."""
+    path = both.cwd / ".claude" / "settings.json"
+    path.parent.mkdir()
+    path.write_text(f'{{"cleanupPeriodDays": {literal}}}')
+    _, found = checks(capsys)
+    assert found["settings"]["status"] == "warn" and "cannot be read as JSON" in found["settings"]["summary"]

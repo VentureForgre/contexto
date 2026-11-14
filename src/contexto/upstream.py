@@ -292,11 +292,23 @@ def read_settings(path: Path) -> Any:
     something writes to it, and Claude Code 2.1.322 skips one and runs (PR #258's re-review). A UTF-8
     byte order mark is skipped and a very long integer read (``json_int``), as Claude Code does."""
     try:
-        if not stat.S_ISREG(os.stat(path).st_mode):
+        # O_NONBLOCK: opening a named pipe does not wait for a writer, and the file is checked after it is
+        # open, so one swapped in between a check and the open cannot block the read (PR #258's review).
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
-        return json.loads(path.read_text(encoding="utf-8-sig"), parse_int=json_int, parse_constant=json_constant)
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            text = handle.read().decode("utf-8-sig")
+        return json.loads(text, parse_int=json_int, parse_constant=json_constant)
     except (OSError, ValueError, RecursionError):  # unreadable or not JSON: as if the file were absent
         return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _settings_string(path: Path, pick: Callable[[dict], object]) -> str | None:

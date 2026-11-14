@@ -49,7 +49,7 @@ and in `--json`. It does hold things you may not want public, so look it over fi
 | Code | Meaning |
 |---|---|
 | 0 | No check failed. There may be warnings. |
-| 1 | At least one check failed. |
+| 1 | At least one check failed, or the reader of doctor's output left before the end (`contexto doctor \| head -1`). |
 | 130 | Ctrl+C. |
 | 143, 129 | SIGTERM, SIGHUP (128 plus the signal's number). |
 

@@ -708,12 +708,14 @@ def check_store(env: Mapping[str, str], *, claude: bool = True) -> Check:
         if sessions.stat().st_uid != os.geteuid() and os.geteuid() != 0:
             return failed("cannot be used: its sessions directory belongs to another user, so `contexto run` cannot "
                           "set its mode")
-        if not os.access(sessions, os.R_OK | os.X_OK):
-            # The store opens the directory before it sets the mode, so of the modes that are not
-            # writable only r-x (0500) launches; without read or search permission both launchers exit 1.
+        if not os.access(sessions, os.R_OK) or not _launcher_can_look_in(sessions):
+            # The store sets the mode only after it has looked in the directory. Without read permission
+            # every launch fails there. Without search permission it depends on the Python: before 3.14
+            # the launcher's first look (``Path.exists`` on a session inside) raises, and from 3.14 it
+            # returns False and the launch goes on (PR #258's round-3 review). Doctor asks this Python.
             return failed("cannot be used: its sessions directory cannot be read and entered, and `contexto run` "
                           "fails there before it can set the mode", f"Run: chmod u+rwx {shlex.quote(str(sessions))}")
-        if os.access(sessions, os.W_OK):
+        if os.access(sessions, os.W_OK | os.X_OK):  # else the store sets the mode before it writes
             problem = write_problem(sessions)
             if problem:
                 return failed(f"cannot be written in its sessions directory ({problem})")
@@ -727,6 +729,16 @@ def check_store(env: Mapping[str, str], *, claude: bool = True) -> Check:
                      "Make the home writable to you: Contexto keeps a lock file and a salt file there, and goes "
                      "without them when it cannot create them", details)
     return Check("store", PASS, f"Store home {home} is writable{note}", details=details)
+
+
+def _launcher_can_look_in(sessions: Path) -> bool:
+    """Whether ``contexto run``'s first look in the store, ``session_dir(...).exists()`` in
+    ``launcher.pick_session``, gets an answer on this Python, for a session that is not there."""
+    try:
+        (sessions / MCP_SESSION).exists()
+    except OSError:
+        return False
+    return True
 
 
 # The MCP server ---------------------------------------------------------------------------------------
