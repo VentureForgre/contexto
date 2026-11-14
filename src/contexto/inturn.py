@@ -79,6 +79,11 @@ STUB_MIN_RATIO = 2  # and at least this many times its stub
 # session's ratio would count it lower: the density measured for log-heavy tool output (contract rule 3).
 FRESH_BYTES_PER_TOKEN = 1.8
 OUTPUT_ALLOWANCE_SHARE = 4  # the response's output allowance: min_turn_room over this
+# How deep a batch pages: to this share of the way from what cannot be paged up to the line (D63, the
+# cost measurement). Under a cache that keeps a prefix only at a breakpoint, a rewrite re-sends what
+# follows the head, so a deeper batch costs less per rotation and runs fewer of them: in the replay
+# harness 0.25 re-sends 38% to 63% less than 0.5, with one or two fewer in-loop thinking strips.
+BATCH_FRACTION = 0.25
 HEADWAY_ROOMS = 2  # a batch leaves this many min_turn_room of growth before the line when it can
 LOCATOR_CHARS = 200  # characters of a path, command or input a stub shows; a longer one loses its middle
 NOTE_NAMES = 12  # tool names a fold note counts
@@ -293,10 +298,10 @@ class MessagesInTurn:
             rounds.append(Round(tuple(current), foldable))
         return rounds
 
-    def note_facts(self, items: list[dict]) -> tuple[int, list[str], list[str]]:
-        """(rounds, tool names, calls) of folded messages, in order: a call is its tool name and locator
-        (``describe``), what the model needs to run it again."""
-        rounds, tools, calls = 0, [], []
+    def note_facts(self, items: list[dict]) -> tuple[int, list[str], list[str], list[str]]:
+        """(rounds, tool names, calls, call ids) of folded messages, in order: a call is its tool name and
+        locator (``describe``), what the model needs to run it again."""
+        rounds, tools, calls, ids = 0, [], [], []
         for item in items:
             if item.get("role") != "assistant":
                 continue
@@ -307,7 +312,9 @@ class MessagesInTurn:
                 name, locator, _ = self.describe(b, NOTE_CALL_CHARS)
                 tools.append(name)
                 calls.append(f"{name} {locator}")
-        return rounds, tools, calls
+                if isinstance(b.get("id"), str) and b["id"]:
+                    ids.append(_CONTROL.sub(" ", b["id"]).replace(" ", ""))
+        return rounds, tools, calls, ids
 
 
 MESSAGES = MessagesInTurn()
@@ -385,6 +392,17 @@ def is_own_stub(content: Any) -> bool:
     return isinstance(content, str) and content.startswith("[Contexto dropped this result of its own tool ")
 
 
+_NOTE_IDS = re.compile(r"\ncall ids: ([^\n]*)\n")
+
+
+def note_calls(text: Any) -> tuple[str, ...]:
+    """The call ids a fold note lists (every call it folded), or () when ``text`` is not one."""
+    if note_page(text) is None:
+        return ()
+    found = _NOTE_IDS.search(text)
+    return tuple(i for i in found.group(1).split(" ") if i and i != "none") if found else ()
+
+
 def note_page(text: Any) -> str | None:
     """The page id a fold note names, or None when ``text`` is not one (``fold_note``'s form)."""
     if not isinstance(text, str) or not text.startswith("[Contexto folded "):
@@ -434,12 +452,13 @@ def fold_note(hooks: Any, removed: list[dict], page_id: str) -> str:
         if note is not None:
             _NOTES.move_to_end(key)
             return note
-    rounds, tools, calls = hooks.note_facts(removed)
+    rounds, tools, calls, ids = hooks.note_facts(removed)
     size = sum(len(canonical_bytes(m)) for m in removed)
     note = (f"[Contexto folded {rounds:,} earlier tool round{'s' if rounds != 1 else ''} of this turn into page "
             f"{page_id} to keep the request under its bound. They are stored in page {page_id}.\n"
             f"tools: {_counted(tools)}\n"
             f"calls: {_calls(calls)}\n"
+            f"call ids: {' '.join(ids) or 'none'}\n"
             f"was: {size:,} bytes\n"
             f'If you have the contexto_recall tool, call it with page_id "{page_id}" to read them (pass the next '
             "offset to continue; the page is long); contexto_search finds lines in them. Without it, run the "
@@ -734,7 +753,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
                 + sum(c.saving for c in seen if c.i not in in_rounds and (c.i >= start or not may_page_turns)))
     pressure = estimate + margin
     floor = pressure - freeable
-    halfway = floor + math.ceil(config.window_fraction * max(0, line - floor))
+    halfway = floor + math.ceil(BATCH_FRACTION * max(0, line - floor))
     # Down to halfway between what cannot be paged and the line, and far enough under the line that the
     # next rounds do not need another batch; never under what cannot be paged.
     headway = line - HEADWAY_ROOMS * config.min_turn_room
@@ -850,7 +869,12 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             left -= sum(counted(i, rw.strip_thinking(sent[i])) for i in r.removed)
         if folded:
             removed = [i for r in folded for i in r.removed]
-            page_id = store.page_parts([[sent[i] for i in removed]], _turn_of(messages, state, dialect, start),
+            # The page holds the rounds as sent, a stubbed result as its stub (its original is in its own
+            # result page), except one of Contexto's own results, stubbed with no page: the page holds
+            # that one whole, since once folded no stub in the request names it.
+            kept = state.inturn._replace(stubs=tuple(s for s in state.inturn.stubs if s[2]))
+            stored = view(messages, replace(state, inturn=kept), dialect)
+            page_id = store.page_parts([[stored[i] for i in removed]], _turn_of(messages, state, dialect, start),
                                        ROUNDS_PAGE)[0]
             edits = state.inturn
             state = replace(state, inturn=edits._replace(

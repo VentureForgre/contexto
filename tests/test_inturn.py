@@ -406,7 +406,14 @@ def test_results_that_cannot_fit_together_are_stubbed_largest_first_on_arrival()
 def test_a_large_result_that_fits_is_read_whole_and_stubbed_only_once_seen():
     # The model reads every result at least once unless it cannot fit: a 31,000-token result arrives when
     # the request has room for it with everything older paged, so it is sent whole; a later batch stubs it.
-    cli = Cli(memory())
+    class Rooms(MemoryStore):
+        published: list[int] = []
+
+        def set_turn_room(self, turn_id, room_tokens):
+            self.published.append(room_tokens)
+            super().set_turn_room(turn_id, room_tokens)
+
+    cli = Cli(Rooms(key=b"k" * 32))
     cli.prompt("Read the notes, then the big file.")
     for r in range(3):
         cli.send([("Read", {"file_path": f"note{r}.md"})])
@@ -416,6 +423,12 @@ def test_a_large_result_that_fits_is_read_whole_and_stubbed_only_once_seen():
     at = len(cli.history) - 1
     sent = cli.send([("Read", {"file_path": "after.md"})])
     assert sent.messages[at] == cli.history[at] and not any(e["unseen_results_stubbed"] for e in batches(cli))
+    # The request-time room counts the result at its fresh margin, as paging does: a dense result the
+    # ratio has not measured yet never makes the room look larger than it is.
+    margin = cli.state.room_margin  # the result's (with Claude Code's cache_control mark on it)
+    assert abs(margin - inturn.fresh_margin(sent.messages[at:], cli.engine.estimator, ANTHROPIC)) < 50
+    at_request = cli.store.published[-2]  # the request-time publish; the last is the response's
+    assert margin > 10_000 and at_request == BOUND - Config().headroom_floor - sent.estimate - margin
     cli.results([output("after", RESULT)])
     cli.loop(30, lambda r: output(f"later-{r}", RESULT))
     assert_bound_held(cli)
@@ -1031,6 +1044,9 @@ def test_stub_and_note_wording_is_true_without_contextos_tools():
     assert "calls: Grep pattern: marker (in src/0); Bash command: make check-1; " in note and "check-29" in note
     assert "If you have the contexto_recall tool" in note and "Without it, run the calls again." in note
     assert inturn.note_page(note) == "pg_fedcba9876543210"
+    # It names every call it folded, so a reader of the request alone can tell which results it stands for.
+    assert inturn.note_calls(note) == tuple(f"t{i}" for i in range(30))
+    assert inturn.note_calls("[Contexto folded nothing]") == ()
     # The list of calls is capped; what is left out is counted.
     many = rounds * 20
     for i, message in enumerate(many):
@@ -1038,7 +1054,9 @@ def test_stub_and_note_wording_is_true_without_contextos_tools():
             message = {**message, "content": [{**message["content"][0], "input": {"command": f"run-{i:05d}"}}]}
             many[i] = message
     long_note = inturn.fold_note(inturn.MESSAGES, many, "pg_0000000000000001")
-    assert len(long_note) < 2_600 and " more calls" in long_note
+    calls_part = long_note[:long_note.index("\ncall ids: ")] + long_note[long_note.index("\nwas: "):]
+    assert len(calls_part) < 2_600 and " more calls" in long_note
+    assert len(inturn.note_calls(long_note)) == 600  # every call id, uncapped
 
 
 def test_codex_has_no_in_turn_paging_yet():

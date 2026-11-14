@@ -6,6 +6,12 @@ own batch figures and the proof that paging off changes nothing.
 
     uv run python spikes/m2/inturn/d63_measure.py            # one JSON line per scenario, paging off and on
     uv run python spikes/m2/inturn/d63_measure.py --digest   # a hash of every forwarded body, paging off
+    uv run python spikes/m2/inturn/d63_measure.py --replay   # the PR table, from the replay harness (#268)
+
+``--replay`` runs the replay harness's seven Claude Code scenarios (``small`` at 1,500 rounds) through the
+real engine and prints one JSON line each with the numbers D63's table gives, two of which the harness
+does not report: the largest cost of one rewrite, and the requests sent with any thinking of the running
+turn missing (the harness counts only those whose newest response lost its thinking).
 
 ``--digest`` runs on any checkout from v0.5.24 on (it never names the new setting when the engine has
 none), so the same command with ``PYTHONPATH`` at a v0.5.24 ``src`` and at this one shows whether paging
@@ -34,8 +40,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tests"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from contexto.canonical import canonical_bytes  # noqa: E402
-from contexto.rewrite import Config, RewriteEngine  # noqa: E402
+from contexto.rewrite import ANTHROPIC, COUNT_TOKENS, Config, RewriteEngine  # noqa: E402
 from contexto.store import SessionStore  # noqa: E402
 from inturn_harness import AGENT, Cli, output, png  # noqa: E402
 
@@ -143,12 +151,112 @@ def digest(name: str) -> str:
         return h.hexdigest()
 
 
+THINKING = ("thinking", "redacted_thinking")
+
+
+def _signatures(messages: list) -> set[str]:
+    """The signature (or redacted data) of every thinking block in ``messages``."""
+    out = set()
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get("type") in THINKING:
+                out.add(str(block.get("signature") if block["type"] == "thinking" else block.get("data")))
+    return out
+
+
+class _Recording:
+    """The real engine, keeping for each forwarded request whether any thinking block of the CLI's
+    running turn was left out of it (``harness.run``'s ``engine`` hook; count_tokens is not counted)."""
+
+    def __init__(self, store, config: Config) -> None:
+        from inturn import upstream
+
+        self.engine = RewriteEngine(store, config=config)
+        self.missing: list[bool] = []
+        self.heads: list[int] = []  # the forwarded head (system and tools) in the upstream's tokens
+        self._upstream = upstream.FakeUpstream()
+
+    def __getattr__(self, name):
+        return getattr(self.engine, name)
+
+    def __call__(self, request, headers, endpoint):
+        forwarded, out_headers, events = self.engine(request, headers, endpoint)
+        if endpoint is not COUNT_TOKENS:
+            messages = request.get("messages") or []
+            starts = [i for i, m in enumerate(messages) if ANTHROPIC.is_turn_start(m)]
+            turn = messages[starts[-1]:] if starts else messages
+            self.missing.append(bool(_signatures(turn) - _signatures(forwarded.get("messages") or [])))
+            self.heads.append(self._upstream.head_tokens("/v1/messages", forwarded))
+        return forwarded, out_headers, events
+
+
+def replay(name: str) -> dict:
+    """One Claude Code scenario of the replay harness, full size, with the numbers of D63's table."""
+    from inturn import harness, scripts, targets
+
+    holder: list[_Recording] = []
+
+    def factory(store, config):
+        holder.append(_Recording(store, config))
+        return holder[0]
+
+    started = time.time()
+    run = harness.run(scripts.build(name, full=True), "claude", engine=factory)
+    m = run.metrics()
+    config = run.config
+    loop_rewrites = [s for s in run.sent if s.rewrite and s.in_loop]
+    rewrites = [s for s in run.sent if s.rewrite]
+    allowed = {f"{c} turn {t + 1}": round(2 + sent[-1].loop_tokens / (config.bound / targets.REWRITE_BATCH), 1)
+               for (c, t), sent in run.loops().items() if any(s.rewrite and s.in_loop for s in sent)}
+    loop = [s for s in run.sent if s.in_loop]
+    at_request = [s.room_at_request for s in loop if s.room_at_request is not None]
+    at_response = [s.room for s in loop if s.room is not None]
+    missing, heads = holder[0].missing, holder[0].heads
+    assert len(missing) == len(run.sent) == len(heads)
+    # The breakpoint cache model (the harness's next round): a real Messages cache stores a prefix only at
+    # a cache_control mark, so after an in-loop rewrite only the head is read back and the rest is sent
+    # again. Per loop, that must be at most max(the loop's own tokens, bound).
+    breakpoint: dict[str, dict[str, int]] = {}
+    index = {id(s): i for i, s in enumerate(run.sent)}
+    for (c, t), sent in run.loops().items():
+        cost = sum(s.tokens - heads[index[id(s)]] for s in sent if s.rewrite and s.in_loop)
+        if cost:
+            breakpoint[f"{c} turn {t + 1}"] = {"resent": cost, "ceiling": max(sent[-1].loop_tokens, config.bound)}
+    # Truthful rooms (the same round): the request-time room at most bound - headroom_floor - 0.9 x real.
+    untruthful = sum(1 for s in run.sent if s.room_at_request is not None
+                     and s.room_at_request > config.bound - config.headroom_floor - 0.9 * s.tokens)
+    return {
+        "scenario": name, "requests": len(run.sent),
+        "over_bound": m["over_bound"], "largest": m["largest"]["tokens"], "largest_estimate": m["largest"]["estimate"],
+        "rewrites": len(rewrites), "rewrites_in_loop": len(loop_rewrites), "allowed_per_loop": allowed,
+        "invalidated_mean": round(sum(s.invalidated for s in rewrites) / len(rewrites)) if rewrites else 0,
+        "invalidated_largest": max((s.invalidated for s in rewrites), default=0),
+        "resent_mean": m["rewrites"]["mean_resent"], "resent_largest": max((s.resent for s in rewrites), default=0),
+        "resent_share": m["rewrites"]["resent_share"], "input_tokens": m["input_tokens"],
+        "newest_thinking_missing": m["thinking"]["newest_missing"],
+        "any_turn_thinking_missing": sum(missing),
+        "room_min_at_request": min(at_request, default=None), "room_min_at_response": min(at_response, default=None),
+        "breakpoint_resent": breakpoint, "rooms_over_truthful": untruthful,
+        "probes": m["probes"], "violations": m["violations"], "unmet": targets.unmet(run),
+        "seconds": round(time.time() - started, 1),
+    }
+
+
+REPLAY = ("loop120", "large", "small", "subagent", "images", "multiturn", "mixed")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--digest", action="store_true", help="hash what is forwarded with in-turn paging off")
-    parser.add_argument("scenarios", nargs="*", default=list(SCENARIOS))
+    parser.add_argument("--replay", action="store_true", help="the replay harness's Claude Code scenarios, full size")
+    parser.add_argument("scenarios", nargs="*")
     args = parser.parse_args()
-    for name in args.scenarios:
+    if args.replay:
+        for name in args.scenarios or REPLAY:
+            print(json.dumps(replay(name)), flush=True)
+        return 0
+    for name in args.scenarios or list(SCENARIOS):
         if args.digest:
             print(json.dumps({"scenario": name, "sha256": digest(name)}), flush=True)
         else:

@@ -44,16 +44,20 @@ def find_stubs(dialect: str, request: dict) -> list[StubRef]:
     D63, Messages: a ``tool_result`` whose content is ``contexto.inturn.stub_text``'s string names the
     result page that holds its call and result. A stub of one of Contexto's own search, recall or state
     results names no page (``page_id`` None): the result was a copy of stored pages, and the stub gives
-    the call's arguments. A fold note (``contexto.inturn.fold_note``) is not reported: it names no call,
-    and the folded rounds are whole in their rounds page, where the harness's storage check finds them
-    (a result that was already a stub there is followed through ``find_stubs`` on that page). Codex has
-    no in-turn paging yet, so no stubs."""
+    the call's arguments. A fold note in a user message (``contexto.inturn.fold_note``) names the
+    rounds page and every call it folded (its ``call ids:`` line); a result that was already a stub
+    when its round was folded is a stub in that page too, which the harness follows. Codex has no
+    in-turn paging yet, so no stubs."""
     if dialect != "claude":
         return []
     found = []
     for message in request.get("messages") or []:
         content = message.get("content") if isinstance(message, dict) else None
         for block in content if isinstance(content, list) else []:
+            if (isinstance(block, dict) and block.get("type") == "text" and message.get("role") == "user"
+                    and inturn.note_page(block.get("text")) is not None):
+                found.append(StubRef(inturn.note_page(block["text"]), inturn.note_calls(block["text"])))
+                continue
             if not (isinstance(block, dict) and block.get("type") == "tool_result"
                     and isinstance(block.get("tool_use_id"), str)):
                 continue

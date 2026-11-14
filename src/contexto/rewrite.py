@@ -295,6 +295,10 @@ class EpochState:
     pending_usage: tuple[int, str] | None = None
     # D63 (rule 5): the epoch's in-turn edits: stubbed results, folded rounds and the thinking they cost.
     inturn: inturn.InTurn = inturn.EMPTY
+    # D63: what the newest request's tool results that arrived with it may add to its estimate (counted at
+    # inturn.FRESH_BYTES_PER_TOKEN); the request-time room counts it, so a room is never published from an
+    # estimate a dense result has not yet corrected. Per-request, never recorded.
+    room_margin: int = 0
 
 
 # Message classification -------------------------------------------------------------------------
@@ -1735,7 +1739,11 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     if state.inturn.batches:  # D63: a batch changes what is sent without a new epoch or window
         scope = (*scope, state.inturn.batches)
     hashes = tuple(message_hash(m) for m in messages)
-    state = replace(state, hashes=hashes, last_sent_bytes=sent,
+    room_margin = 0
+    if in_tool_loop and n > previous_n and config.in_turn_paging and _dialect().in_turn is not None:
+        room_margin = inturn.fresh_margin(inturn.view(messages, state, _dialect())[previous_n:], estimator,
+                                          _dialect())
+    state = replace(state, hashes=hashes, last_sent_bytes=sent, room_margin=room_margin,
                     last_sent_media=sent_media(sent_items), last_estimate=sent_estimate,
                     last_sent_media_keys=media_keys(split_media(sent_items)[1]),
                     last_sent_appends=appends_to(state.last_measured, scope, hashes), last_sent_scope=scope,
@@ -2409,8 +2417,9 @@ class RewriteEngine:
                 # Contract PR #125: the snapshot first, so the store's request sequence stamps it and
                 # both of this request's room publishes alike.
                 self._publish_retained(state, messages, dialect, failures)
-                self.states[key] = self._publish_room(state, turn_id(messages, dialect), state.last_estimate,
-                                                      failures)
+                # D63: a fresh tool result counts at its margin, as in-turn paging counts it.
+                self.states[key] = self._publish_room(state, turn_id(messages, dialect),
+                                                      state.last_estimate + state.room_margin, failures)
                 events[-1:-1] = failures  # the engine's request event stays last
         self._write_epoch(key, request, dialect, events)
         return upstream, headers, [restore, *events] if restore else events
