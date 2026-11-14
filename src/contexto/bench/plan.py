@@ -363,8 +363,9 @@ def calibration(model: str | None) -> str:
     if recorded:
         return (f"Calibration: the tool rounds are fitted on {CALIBRATED_ON}; {model} has a recorded run of the same "
                 f"session ({recorded[1]}: {recorded[0]:,} tokens on the Contexto arm against {CALIBRATION_TOKENS:,} "
-                f"for {CALIBRATED_ON} in run #4), so the expected tokens of the contexto and plain arms are scaled by "
-                f"{model_factor(model):.3f}. The full arm and the worst case are not scaled.")
+                f"for {CALIBRATED_ON} in run #4), so the expected tokens of the contexto arm are scaled by "
+                f"{model_factor(model):.3f}, and the plain arm's by the same factor [assumed: no run of the plain arm "
+                "has been recorded on either model]. The full arm and the worst case are not scaled.")
     name = model or "the model"
     if model == CALIBRATED_ON:
         return f"Calibration: the tool rounds are fitted on recorded runs of {CALIBRATED_ON}, the model given."

@@ -25,7 +25,9 @@ things, and nothing else:
   host, where Claude Code sends them without being asked.
 
 Request headers are forwarded as received, a repeated header as often as it came; a response with
-no body (a 204 or 304, or the answer to ``HEAD``) is relayed with none.
+no body (a 204 or 304, or the answer to ``HEAD``) is relayed with none. A response that ends before
+the length its ``Content-Length`` declared is relayed as far as it came and the client's connection
+is then closed, so the client sees it cut short at once.
 
 To a vendor's host Claude Code also adds ``x-cc-context-compacted`` and ``x-cc-compaction-request``
 on its own (it gates them on the base URL being the vendor's, read in the 2.1.322 bundle). Through
@@ -697,7 +699,7 @@ class _Handler(BaseHTTPRequestHandler):
                        or 100 <= response.status < 200)
             chunked = length is None and not no_body
             encoded = (response.getheader("Content-Encoding") or "identity").strip().lower() != "identity"
-            tail, held, whole = b"", b"", False
+            tail, held, whole, relayed = b"", b"", False, 0
             try:
                 self.send_response_only(response.status, response.reason)
                 for name, value in response.getheaders():
@@ -709,6 +711,7 @@ class _Handler(BaseHTTPRequestHandler):
                     self.send_header("Content-Length", length)
                 self.end_headers()
                 while not no_body and (chunk := response.read1(65536)):
+                    relayed += len(chunk)
                     if reader is not None:
                         reader.feed(chunk)
                     if chunked:
@@ -719,6 +722,12 @@ class _Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 tail = b"0\r\n\r\n" if chunked else held
                 whole = True
+                if not chunked and not no_body and length is not None and relayed < _declared(length):
+                    # The upstream closed before the length it declared: read1 says so only by returning
+                    # nothing. The client gets what came, then the connection is closed, so it is not left
+                    # waiting for the rest until its own timeout.
+                    whole = False
+                    self.close_connection = True
             except (OSError, http.client.HTTPException):
                 # The upstream ended early or the client left: the client gets no terminator, and the
                 # record keeps whatever usage had arrived.
@@ -734,6 +743,12 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             watch.close()
             conn.close()
+
+
+def _declared(length: str) -> int:
+    """A response's Content-Length, or 0 when it is not a whole number."""
+    text = length.strip()
+    return int(text) if text.isascii() and text.isdecimal() else 0
 
 
 def _shape(body: bytes, encoding: str | None) -> dict[str, Any]:

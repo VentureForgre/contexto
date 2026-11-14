@@ -70,8 +70,8 @@ def run(args: argparse.Namespace) -> int:
               "Worst case (tokens), a planning figure and not a ceiling: every input token counted as a cache write "
               f"with a 10% margin, and an output reservation of {bench_plan.OUTPUT_RESERVE:,} tokens on every Claude "
               f"Code request and {bench_plan.FULL_MAX_TOKENS:,} on every full-arm request. Claude Code itself asks for "
-              "up to 128,000 output tokens a request on claude-haiku-5-5, so a run could pass this figure; the "
-              "ceiling is --budget-tokens.", *bench_plan.table(plan, "worst"), ""]
+              "up to 128,000 output tokens a request (the output limit of the current Claude models), "
+              "so a run could pass this figure; the ceiling is --budget-tokens.", *bench_plan.table(plan, "worst"), ""]
     script = scripts[first]
     for arm in config.arms:
         est = bench_plan.unit_estimate(arm, script, config.bound, model=config.model or None)

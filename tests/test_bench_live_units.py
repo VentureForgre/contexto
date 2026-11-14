@@ -110,8 +110,8 @@ class Upstream(BaseHTTPRequestHandler):
         if answer.get("no_body"):  # a 204: headers only
             self.end_headers()
             return
-        if answer.get("length"):
-            self.send_header("content-length", str(sum(len(c) for c in chunks)))
+        if answer.get("length"):  # "declared": a Content-Length larger than what is sent
+            self.send_header("content-length", str(answer.get("declared") or sum(len(c) for c in chunks)))
         else:
             self.send_header("transfer-encoding", "chunked")
         self.end_headers()
@@ -420,6 +420,21 @@ def test_a_response_with_its_whole_usage_is_not_marked_unreadable(upstream, tmp_
     assert [r.get("usage_unreadable") for r in meter.records] == [None, None] and ledger.spent == 1_019
 
 
+def test_a_response_cut_short_of_its_length_ends_the_clients_connection_at_once(upstream, tmp_path):
+    """The upstream declares 5,000 bytes, sends 40 and closes: the client is told at once (its read
+    fails) instead of waiting out its own timeout for bytes that will not come."""
+    meter, ledger = metered(upstream, tmp_path)
+    Upstream.answer = {"chunks": [b'{"usage": {"input_tokens": 1, "output_tok'], "length": True, "declared": 5_000,
+                       "cut": True, "headers": {"content-type": "application/json"}}
+    started = time.monotonic()
+    with pytest.raises(http.client.IncompleteRead):
+        post(meter, "/v1/messages", b"{}")  # the client's timeout is 10 seconds
+    assert time.monotonic() - started < 5
+    meter.stop()
+    (record,) = meter.records
+    assert record["usage_unreadable"] is True and ledger.spent == record["reserved_tokens"]
+
+
 def test_compaction_requests_count_in_the_largest_input_and_over_the_bound(upstream, tmp_path):
     meter, _ = metered(upstream, tmp_path)  # bound 500; each answer reports 1,007 input tokens
     big = sse({"type": "message_start", "message": {"usage": {"input_tokens": 3, "cache_creation_input_tokens": 0,
@@ -657,6 +672,9 @@ def test_dry_run_says_what_its_figures_are_and_calibrates_on_a_recorded_model(ca
     assert main(["bench", "--dry-run", "--model", "claude-opus-5-5", "--seeds", "2"]) == 0
     opus = capsys.readouterr().out
     assert "4,726,388 tokens on the Contexto arm against 3,422,988" in opus and "scaled by 1.381" in opus
+    assert "[assumed: no run of the plain arm has been recorded on either model]" in opus
+    worst = next(line for line in opus.splitlines() if line.startswith("Worst case"))
+    assert "up to 128,000 output tokens" in worst and "claude-haiku-5-5" not in worst
     assert main(["bench", "--dry-run", "--model", "claude-sonnet-5-5", "--seeds", "2"]) == 0
     assert "the plan is calibrated on claude-haiku-5-5; no run of claude-sonnet-5-5" in capsys.readouterr().out
 
