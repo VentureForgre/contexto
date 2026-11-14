@@ -109,6 +109,7 @@ class Measured:
     problems: list[str] = field(default_factory=list)  # anything that did not go as scripted
     notices: list[str] = field(default_factory=list)  # what the launcher would have printed on stderr
     environment: dict[str, Any] = field(default_factory=dict)  # what pinned_environment held, for the manifest
+    private_files_removed: list[str] = field(default_factory=list)  # remove_private_files, with --out
 
     @property
     def max_input(self) -> int:
@@ -278,6 +279,23 @@ def _replay(script: Script, home: Path) -> Measured:
         seconds=round(time.monotonic() - started, 1), problems=problems,
         notices=[line for line in notices.getvalue().splitlines() if line.strip()],
     )
+
+
+# Made for the replay's own store, random, and of no use outside it: the HMAC key of its page ids
+# (``page.key``) and the salt of its upstream affinity key (``affinity.salt``). They are removed from a
+# store kept with --out, which is meant to be published, so that no file in it looks like a secret.
+PRIVATE_FILES = ("affinity.salt", "sessions/*/page.key")
+
+
+def remove_private_files(home: Path) -> list[str]:
+    """Remove ``PRIVATE_FILES`` from the store under ``home``; return their paths relative to it. The
+    store stays readable: a store opened to read pages does not need its key."""
+    removed = []
+    for pattern in PRIVATE_FILES:
+        for path in sorted(home.glob(pattern)):
+            path.unlink()
+            removed.append(path.relative_to(home).as_posix())
+    return removed
 
 
 def measure_reach(script: Script, store: Any, view: str) -> list[dict[str, Any]]:

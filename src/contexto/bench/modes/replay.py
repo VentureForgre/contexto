@@ -8,15 +8,23 @@ With the default options it replays the pinned trace and exits 0 when the bound 
 has no failure event, and every measurement equals the trace's expectations; 1 otherwise, with each
 difference listed. With another ``--seed``, ``--bound``, ``--protocol``, ``--turn-kbytes`` or
 ``--replay-turns`` it still runs, says that it is not the pinned trace, and checks nothing against
-recorded hashes or expectations.
+recorded hashes or expectations. A bound outside 25,001 to 170,000 tokens is refused (exit 2): those
+are the limits the proxy starts with when no ``contexto run`` option widens them.
 
 ``--out DIR`` writes ``manifest.json``, ``scripts/seed-<seed>.json``, ``requests.jsonl``,
 ``reach.jsonl``, ``results.json`` and ``results.md`` and keeps the session's store in ``DIR/store``;
-without it the store is a temporary directory and only the summary is printed.
+without it the store is a temporary directory and only the summary is printed. A directory that
+already holds any file the replay or the live run writes is refused (exit 2), so a replay never
+overwrites the results of a run.
 
 ``--replay --dump-trace DIR`` writes the regenerated session (every turn's text, the files, the
 scripted replies, the synthetic head) and does not replay. ``--replay --record-trace FILE`` is for
-maintainers: it replays and writes the trace file, which is never edited by hand.
+maintainers: it replays and writes the trace file, which is never edited by hand. It refuses an
+existing FILE unless ``--force`` is given, and writes nothing when the run it would record failed.
+
+Ctrl+C, SIGTERM, SIGHUP and the launcher's other terminating signals stop the replay with one line
+on stderr and exit 128 + the signal's number (130 for Ctrl+C); the proxy and the fake upstream are
+stopped and a temporary store is removed on the way.
 """
 
 from __future__ import annotations
@@ -26,8 +34,17 @@ import sys
 import tempfile
 from pathlib import Path
 
+from contexto.bench import modes
+
 FLAG = "--replay"
 MIN_TURNS = 4  # the generator's own minimum of d27 content turns
+# Everything a replay or a live run writes into --out (the shared output schema): a directory that holds
+# any of them already holds results, which a replay must not overwrite.
+OUTPUT_NAMES = ("manifest.json", "requests.jsonl", "probes.jsonl", "reach.jsonl", "results.json", "results.md",
+                "scripts", "charts", "store")
+SHOWN_DIFFERENCES = 5  # the differences a failed pinned replay lists before giving their count
+RECORD_COMMAND = "contexto bench --replay --record-trace src/contexto/bench/data/{name} --force"
+EXIT_FAILED, EXIT_USAGE = 1, 2
 
 
 def _turns(text: str) -> int:
@@ -51,21 +68,70 @@ def add_arguments(parser) -> None:
     parser.add_argument("--record-trace", type=Path, default=None, metavar="FILE",
                         help="with --replay, for maintainers: replay and write the trace file (hashes and expected "
                              "measurements) to FILE. The shipped trace is written this way, never by hand")
+    modes.add_option(parser, "--force", action="store_true",
+                     help="with --replay --record-trace: replace FILE when it exists")
 
 
 def _error(message: str) -> None:
     print(f"contexto bench: error: {message}", file=sys.stderr)
 
 
+def _usage(args: argparse.Namespace, bound_limits: tuple[int, int]) -> str | None:
+    """Why these options cannot be replayed, or None."""
+    low, high = bound_limits
+    if args.seeds != 1 or args.repeats != 1:
+        return "--replay replays one session, so --seeds and --repeats do not apply"
+    if args.dump_trace is not None and args.record_trace is not None:
+        return "give one of --dump-trace and --record-trace: one writes the session without replaying it, the other " \
+               "replays it to record its trace"
+    if args.force and args.record_trace is None:
+        return "--force only applies to --record-trace"
+    if not low <= args.bound <= high:
+        return (f"--bound {args.bound:,} cannot be replayed: a replay takes a bound from {low:,} to {high:,} tokens, "
+                "the limits the proxy starts with by default")
+    if args.record_trace is not None and args.record_trace.exists() and not args.force:
+        return f"{args.record_trace} exists: --record-trace replaces a file only when --force is given"
+    if args.out is not None:
+        held = [name for name in OUTPUT_NAMES if (args.out / name).exists()]
+        if held:
+            return (f"{args.out} already holds {', '.join(held)}: a replay never overwrites results and starts from an "
+                    "empty store, so give a new --out directory or remove those")
+    return None
+
+
+def _mismatch(differences: list[str], seed: int) -> str:
+    """What a maintainer reads when the pinned replay measured something else: the differences, the
+    command that records the trace again, and what to check in the trace's diff before committing it."""
+    from contexto.bench.replay import trace
+
+    shown = differences[:SHOWN_DIFFERENCES]
+    more = len(differences) - len(shown)
+    return "\n".join([
+        f"The measurements differ from the pinned trace in {len(differences)} "
+        + ("place:" if len(differences) == 1 else "places:"),
+        *[f"  {line}" for line in shown],
+        *([f"  and {more} more (all of them are in results.json, replay.differences, with --out)"] if more else []),
+        "If the proxy's behaviour was changed on purpose, record the trace again, from a checkout:",
+        "  " + RECORD_COMMAND.format(name=trace.file_name(seed)),
+        "and check three things in the trace's diff before committing it:",
+        "  1. request sizes grew or shrank only where the change was meant to act (expected.request_tokens);",
+        "  2. the bound still holds: over_bound and over_bound_proxy are 0, failure_events and compaction_markers "
+        "empty;",
+        "  3. reach did not fall (expected.reach, overall and by class), unless the change was to search.",
+    ])
+
+
 def run(args: argparse.Namespace) -> int:
-    from contexto import __version__
+    import signal
+
+    from contexto import __version__, launcher
     from contexto.bench import script as bench_script
     from contexto.bench.replay import output, session, trace
-    from contexto.launcher import LaunchError
 
-    if args.seeds != 1 or args.repeats != 1:
-        _error("--replay replays one session, so --seeds and --repeats do not apply")
-        return 2
+    problem = _usage(args, (launcher.DEFAULT_HEADROOM_FLOOR + 1, launcher.BOUND_GUARD))
+    if problem:
+        _error(problem)
+        return EXIT_USAGE
     turns = args.replay_turns if args.replay_turns is not None else trace.PINNED["turns"]
     params = {"seed": args.seed, "protocol": args.protocol, "bound": args.bound,
               "turn_bytes": args.turn_kbytes * 1_000, "turns": turns}
@@ -75,7 +141,7 @@ def run(args: argparse.Namespace) -> int:
         script = bench_script.build(args.seed, args.protocol, args.bound, args.turn_kbytes * 1_000, turns)
     except ValueError as exc:
         _error(f"seed {args.seed}: {exc} (--replay-turns N makes the session longer)")
-        return 2
+        return EXIT_USAGE
     pinned_trace = None
     if pinned:
         try:
@@ -83,36 +149,44 @@ def run(args: argparse.Namespace) -> int:
             trace.check(pinned_trace, script, turns)
         except trace.TraceError as exc:
             _error(str(exc))
-            return 1
+            return EXIT_FAILED
 
     if args.dump_trace is not None:
         try:
             written = trace.dump(args.dump_trace, script, session.session_name(script))
         except (OSError, trace.TraceError) as exc:
             _error(f"cannot write the session to {args.dump_trace}: {exc}")
-            return 1
+            return EXIT_FAILED
         print(f"wrote the regenerated session to {args.dump_trace}: {len(script.turns)} turns, "
               f"{len(script.files)} files, {len(written)} files in all; nothing was replayed"
               + (" (checked against the pinned trace's hashes)" if pinned else " (not the pinned trace)"))
         return 0
 
-    if args.out is not None and (args.out / "store").exists():
-        _error(f"{args.out / 'store'} already exists: a replay starts from an empty store, so give a new --out "
-               "directory or remove that one")
-        return 2
     started = output.utc_now()
     try:
-        if args.out is not None:
-            measured = session.replay(script, args.out / "store")
-        else:
-            with tempfile.TemporaryDirectory(prefix="contexto-bench-replay-") as scratch:
-                measured = session.replay(script, Path(scratch))
-    except LaunchError as exc:  # the launcher's own check of the bound, in the words `contexto run` uses
+        with launcher.LaunchSignals() as signals:  # SIGTERM, SIGHUP and the rest unwind like Ctrl+C
+            try:
+                if args.out is not None:
+                    measured = session.replay(script, args.out / "store")
+                    measured.private_files_removed = session.remove_private_files(args.out / "store")
+                else:
+                    with tempfile.TemporaryDirectory(prefix="contexto-bench-replay-") as scratch:
+                        measured = session.replay(script, Path(scratch))
+            finally:
+                signals.disarm()
+    except (KeyboardInterrupt, launcher.Terminated) as exc:
+        signum = exc.signum if isinstance(exc, launcher.Terminated) else signal.SIGINT
+        name = "Ctrl+C" if signum == signal.SIGINT else signal.Signals(signum).name
+        kept = f"; what was replayed so far is in {args.out / 'store'}" if args.out is not None else \
+            "; its temporary store was removed"
+        print(f"contexto bench: the replay was stopped by {name}{kept}.", file=sys.stderr)
+        return 128 + int(signum)
+    except launcher.LaunchError as exc:  # check_options: refused before anything started
         _error(f"the proxy does not start with this bound: {exc}")
         return exc.code
     except (session.ReplayError, OSError) as exc:
         _error(f"the replay stopped: {exc}")
-        return 1
+        return EXIT_FAILED
     finished = output.utc_now()
 
     differences = trace.differences(pinned_trace["expected"], trace.expected(measured)) if pinned_trace else []
@@ -126,16 +200,17 @@ def run(args: argparse.Namespace) -> int:
             written = output.write(args.out, script, manifest, rows, measured.reach, data)
             print(f"Written to {args.out}: " + ", ".join(str(p.relative_to(args.out)) for p in written)
                   + f"; the session's store is in store/ (session {measured.session_id}).")
+        if recording and failed:
+            _error(f"the run failed, so no trace was written to {args.record_trace}: a trace records a passing run")
+            return EXIT_FAILED
         if recording:
             trace.record(args.record_trace, script, turns, measured, __version__)
-            print(f"Trace written to {args.record_trace}: {len(measured.requests)} requests, largest "
-                  f"{measured.max_input:,}, {measured.rotations} rotations. It records what this run measured; "
-                  "review the difference before committing it.")
+            print(f"Trace written to {args.record_trace}: {len(measured.requests)} requests, the largest "
+                  f"{measured.max_input:,} estimated tokens, {measured.rotations} rotations. It records what this run "
+                  "measured; review the difference before committing it.")
     except OSError as exc:
         _error(f"cannot write the output: {exc}")
-        return 1
+        return EXIT_FAILED
     if differences:
-        print("The measurements differ from the pinned trace. If the proxy's behaviour was changed on purpose, a "
-              "maintainer records the trace again (contexto bench --replay --record-trace FILE) and reviews the "
-              "difference.", file=sys.stderr)
-    return 1 if failed else 0
+        print(_mismatch(differences, script.seed), file=sys.stderr)
+    return EXIT_FAILED if failed else 0
