@@ -228,10 +228,11 @@ LAST_EVENTS: dict[tuple[str, str], str] = {
 # reads. Kept by hand: when the source gains such a field, document it and add it here; when the source drops
 # one, remove its bullet and its name here. A key stored on a variable that holds more than one event name
 # fails ``test_a_key_stored_on_a_variable_with_several_events_is_named_here`` until it is here.
-# Fields whose name is not in the file that writes the event, because it comes from another file: (event,
+# Fields whose name need not be in the file that writes the event, because it comes from another file: (event,
 # writing file) -> {field: the file whose source holds the name}. The documented-but-unwritten check then looks
-# for the name in that file instead, so renaming it there still fails the test. Each such field is also in
-# HELPER_FIELDS. Only for names that are truly elsewhere: a name the writing file holds needs no entry here.
+# for the name in that file instead. That file can hold the word for another reason (Reviewer A, PR #261:
+# "compaction" is also a request class in hints.py), so a rename is caught by a test of its own:
+# ``test_the_hint_fields_are_gateway_hints_fields``. Each such field is also in HELPER_FIELDS.
 FIELDS_FROM: dict[tuple[str, str], dict[str, str]] = {
     # RewriteEngine._call: events[-1].update(hints._asdict() ...), the field names of GatewayHints (D70)
     ("request", "src/contexto/rewrite.py"): {"request_class": "src/contexto/hints.py",
@@ -2519,3 +2520,14 @@ class Handler:
         log(entry)
 '''
     assert set(written_fields([scan_source(carried, "line.py")], CARRIED)[("shared", "line.py")]) == {"size"}
+
+
+def test_the_hint_fields_are_gateway_hints_fields():
+    """The three fields FIELDS_FROM and HELPER_FIELDS name for the engine's ``request`` event arrive through
+    ``GatewayHints._asdict()``, so they are exactly that class's fields: a rename or a new field fails here, which
+    the word search over hints.py cannot promise (Reviewer A, PR #261)."""
+    from contexto.hints import GatewayHints
+
+    key = ("request", "src/contexto/rewrite.py")
+    assert set(FIELDS_FROM[key]) == set(GatewayHints._fields)
+    assert set(GatewayHints._fields) <= HELPER_FIELDS[key]
