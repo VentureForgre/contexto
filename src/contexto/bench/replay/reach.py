@@ -58,7 +58,6 @@ its next hop when the hop's statement is either.
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -96,6 +95,16 @@ def _word_cut(text: str, keep: int, from_end: bool = False) -> int:
     return len(text) - cut if from_end else cut
 
 
+def _shared_start(texts: list[str]) -> int:
+    """The length of the start all of ``texts`` share (``os.path.commonprefix`` is deprecated from
+    Python 3.15)."""
+    shortest = min(texts, key=len)
+    for i, char in enumerate(shortest):
+        if any(text[i] != char for text in texts):
+            return i
+    return len(shortest)
+
+
 def scenario_frame() -> tuple[str, str]:
     """The fixed head and tail every ``SCENARIOS`` question shares, cut between words: the frame of a
     ``concluded`` question, which is not the question's own text."""
@@ -103,8 +112,8 @@ def scenario_frame() -> tuple[str, str]:
 
     questions = [scenario[3] for scenario in bench_script.SCENARIOS]
     first = questions[0]
-    head = len(os.path.commonprefix(questions))
-    tail = len(os.path.commonprefix([q[::-1] for q in questions]))
+    head = _shared_start(questions)
+    tail = _shared_start([q[::-1] for q in questions])
     head = _word_cut(first, head)
     tail = _word_cut(first, tail, from_end=True)
     return first[:head], first[len(first) - tail:] if tail else ""
