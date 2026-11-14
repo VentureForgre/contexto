@@ -1394,7 +1394,9 @@ def test_a_store_made_after_the_service_started_is_found_and_unchanged_stores_ar
     made.record_cli_session("claude", B, 500.0)
     made.release()
     turn(service, B)
-    assert served(home)[B] == "made-meanwhile" and read == ["made-meanwhile"]
+    # The store made meanwhile is read, and so is A's (the service changed its meta.json); no old one is.
+    assert served(home)[B] == "made-meanwhile" and "made-meanwhile" in read
+    assert sorted(read) == sorted(["made-meanwhile", served(home)[A]])
     turn(service, "00000000-0000-4000-8000-000000000003")
     assert [e["event"] for e in session_log(home, "old-3") if e["event"] in ("serve_open", "request")] \
         == ["serve_open", "request"]
@@ -1498,7 +1500,8 @@ def test_a_request_at_the_cap_waits_for_a_session_to_finish_and_is_then_bounded(
         waiter.join(30)
     settle(service)
     assert done == [200] and set(served(home)) == {A, B} and service.health()["sessions"] == 1
-    assert serve_log(home, "unrouted") == [] and stderr.getvalue() == ""
+    # Nothing was forwarded unbounded; the only warning is the missing-tools one A's close prints.
+    assert serve_log(home, "unrouted") == [] and "forwarded unchanged" not in stderr.getvalue()
     assert [e["reason"] for e in session_log(home, served(home)[A]) if e["event"] == "serve_close"] == ["cap"]
 
 
@@ -1775,7 +1778,8 @@ def test_every_answer_before_the_checks_is_the_same_403(make_service, home):
     # Nothing of http.server's own: no HTML, no library or Python version, no echo of the request.
     assert b"Server:" not in expected and b"Python" not in expected and b"<" not in expected
     # Expect: 100-continue gets no interim answer unless the request passes the checks.
-    expecting = b"POST /nope/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nExpect: 100-continue\r\nContent-Length: 0\r\n\r\n"
+    expecting = (b"POST /nope/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nExpect: 100-continue\r\n"
+                 b"Content-Length: 0\r\n\r\n")
     assert raw(service.port, expecting) == expected
     data = body(A)
     passing = (b"POST /%s/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Claude-Code-Session-Id: %s\r\n"
@@ -1872,6 +1876,25 @@ def test_a_connection_that_has_not_passed_the_check_ends_at_its_deadline(make_se
     assert {e["reason"] for e in serve_log(home, "request_refused")} <= {"token", "deadline", "malformed", "host"}
 
 
+def one_response(sock: socket.socket) -> bytes:
+    """One whole response with a ``Content-Length`` from a connection kept open: its head, then exactly
+    the body it declares, however the bytes were split on the way."""
+    got = bytearray()
+    while b"\r\n\r\n" not in got:
+        chunk = sock.recv(65536)
+        assert chunk, f"the connection closed after {bytes(got)!r}"
+        got += chunk
+    head, _, rest = bytes(got).partition(b"\r\n\r\n")
+    length = next(int(line.split(b":", 1)[1]) for line in head.split(b"\r\n")
+                  if line.lower().startswith(b"content-length:"))
+    while len(rest) < length:
+        chunk = sock.recv(65536)
+        assert chunk, "the connection closed inside the body"
+        rest += chunk
+    assert len(rest) == length, "more bytes than one response"
+    return head + b"\r\n\r\n" + rest
+
+
 def test_a_connection_that_passed_the_check_has_no_deadline(make_service, home, tool_upstream):
     service = make_service(upstream=tool_upstream, unchecked_deadline_s=0.3)
     token = service.token.encode()
@@ -1879,7 +1902,7 @@ def test_a_connection_that_passed_the_check_has_no_deadline(make_service, home, 
     kept = socket.create_connection(("127.0.0.1", service.port), timeout=30)
     health = b"GET /%s/contexto/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" % token
     kept.sendall(health)
-    assert kept.recv(65536).startswith(b"HTTP/1.1 200 ")
+    assert one_response(kept).startswith(b"HTTP/1.1 200 ")
     stream = socket.create_connection(("127.0.0.1", service.port), timeout=30)
     data = body(A, stream=True)
     stream.sendall(b"POST /%s/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Claude-Code-Session-Id: %s\r\n"
@@ -1890,7 +1913,7 @@ def test_a_connection_that_passed_the_check_has_no_deadline(make_service, home, 
         with socket.create_connection(("127.0.0.1", service.port)) as silent:
             assert closed_within(silent) == b""
     kept.sendall(health)
-    assert kept.recv(65536).startswith(b"HTTP/1.1 200 ")
+    assert one_response(kept).startswith(b"HTTP/1.1 200 ")
     ToolUpstream.gate.set()
     answer = closed_within(stream)
     assert answer.startswith(b"HTTP/1.1 200 ") and b"message_stop" in answer and answer.endswith(b"0\r\n\r\n")

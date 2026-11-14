@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from contexto import cli, mcp, serveclient
+from contexto import cli, mcp, serveclient, servecontract
 from contexto.commands import mcp as mcp_command
 from contexto.store import SessionStore
 
@@ -51,9 +51,17 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
+def write_private(path: Path, data: str | bytes) -> None:
+    """Write ``data`` to ``path`` at mode 0600, as the service writes its files."""
+    (path.write_bytes if isinstance(data, bytes) else path.write_text)(data)
+    path.chmod(0o600)
+
+
 class FakeService:
     """The resolve contract: 200 ``{"session": ID}``, 404 ``{"error": "unknown_tool_use"}``, 400 for a
-    malformed body, 403 for a bad token. ``script`` holds answers given before the contract applies."""
+    malformed body, 403 for a bad token. ``script`` holds answers given before the contract applies.
+    Like the service it holds ``serve.lock`` while it runs (``servecontract.hold_lock``) and writes
+    ``serve.json`` and ``serve.token`` at 0600."""
 
     def __init__(self, home: Path, token: str = TOKEN) -> None:
         self.token = token
@@ -64,19 +72,25 @@ class FakeService:
         self.httpd.service = self  # type: ignore[attr-defined]
         self.port = self.httpd.server_address[1]
         threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+        self.lock = servecontract.hold_lock(home)
+        assert self.lock is not None
         self.announce(home)
 
     def announce(self, home: Path, token: str | None = None) -> None:
         home.mkdir(parents=True, exist_ok=True)
-        (home / serveclient.SERVE_FILE).write_text(json.dumps({"port": self.port, "pid": os.getpid()}))
-        path = home / serveclient.TOKEN_FILE
-        path.write_text((self.token if token is None else token) + "\n")
-        path.chmod(0o600)
+        write_private(home / servecontract.STATE_FILE, json.dumps({"port": self.port, "pid": os.getpid()}))
+        write_private(home / servecontract.TOKEN_FILE, (self.token if token is None else token) + "\n")
+
+    def release_lock(self) -> None:
+        """As a service that ended: its files stay where they are, and nothing holds the lock."""
+        if self.lock is not None:
+            os.close(self.lock)
+            self.lock = None
 
     def answer(self, path: str, raw: bytes) -> tuple[int, object]:
         if self.script:
             return self.script.pop(0)
-        if path != f"/{self.token}{serveclient.RESOLVE_PATH}":
+        if path != f"/{self.token}{servecontract.RESOLVE_PATH}":
             return 403, {"error": "forbidden"}
         try:
             tool_use_id = json.loads(raw)["tool_use_id"]
@@ -86,9 +100,13 @@ class FakeService:
             return 200, {"session": self.known[tool_use_id]}
         return 404, {"error": "unknown_tool_use"}
 
-    def stop(self) -> None:
+    def stop(self, *, keep_lock: bool = False) -> None:
+        """Stop answering; ``keep_lock`` keeps the lock held, as a service that stopped listening but
+        has not exited."""
         self.httpd.shutdown()
         self.httpd.server_close()
+        if not keep_lock:
+            self.release_lock()
 
 
 class Clock:
@@ -253,7 +271,7 @@ def test_the_cli_lists_tools_and_answers_a_call_with_no_service_running(tmp_path
     assert sorted(by_id, key=str) == [1, 2, 3, "server-discover-probe-1"]
     assert [t["name"] for t in by_id[2]["result"]["tools"]] == [t["name"] for t in mcp.TOOLS]
     refused(by_id[3]["result"], "contexto serve", "not running")
-    assert "serve.json is missing" in proc.stderr and not home.exists()
+    assert "serve.lock is not held" in proc.stderr and not home.exists()
 
 
 # Resolution
@@ -357,28 +375,50 @@ def test_a_call_without_a_tool_use_id_is_refused_and_the_service_is_not_asked(ho
 
 def test_no_service_files_means_start_contexto_serve(home, bystander, served):
     result = unchanged_after(home, lambda: tool(served[0], "contexto_state", {}))
-    refused(result, "not running", "contexto serve", "serve.json is missing")
+    refused(result, "not running", "contexto serve", "serve.lock is not held")
     assert "bystander" not in text(result)
 
 
 def test_a_service_that_is_gone_is_reported_as_not_running(home, service, bystander, served):
-    service.stop()  # serve.json and serve.token remain, and nothing listens on the port
+    service.stop()  # serve.json and serve.token remain, and nothing holds the lock
     result = unchanged_after(home, lambda: tool(served[0], "contexto_state", {}))
-    refused(result, "not running", "contexto serve", f"port {service.port}")
+    refused(result, "not running", "contexto serve", "serve.lock is not held")
 
 
-def test_a_recorded_service_process_that_is_not_running_is_not_asked(home, service, served):
-    gone = subprocess.Popen([sys.executable, "-c", "pass"])
-    gone.wait()
-    (home / serveclient.SERVE_FILE).write_text(json.dumps({"port": service.port, "pid": gone.pid}))
-    refused(tool(served[0], "contexto_state", {}), "not running", "contexto serve")
+def test_a_service_that_holds_the_lock_and_does_not_listen_is_reported_as_not_running(home, service, served):
+    service.stop(keep_lock=True)
+    try:
+        refused(tool(served[0], "contexto_state", {}), "not running", "contexto serve", f"port {service.port}")
+    finally:
+        service.release_lock()
+
+
+def test_a_stale_record_naming_a_live_process_and_a_listening_port_gets_no_request(home, service, served):
+    """A killed service's serve.json, its pid now another process that runs and its port a server that
+    records what it receives: with nothing holding the lock, no request is sent, so the token is not."""
+    service.release_lock()
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        write_private(home / servecontract.STATE_FILE, json.dumps({"port": service.port, "pid": other.pid}))
+        refused(tool(served[0], "contexto_state", {}), "not running", "contexto serve", "serve.lock is not held")
+        with pytest.raises(serveclient.ResolveError):
+            serveclient.resolve(home, ID_A)
+    finally:
+        other.kill()
+        other.wait()
     assert service.received == []  # the token is not sent to whatever holds the port now
+
+
+def test_a_serve_json_another_user_could_have_written_is_not_believed(home, service, served):
+    (home / servecontract.STATE_FILE).chmod(0o644)
+    refused(tool(served[0], "contexto_state", {}), "contexto serve", "serve.json has mode 0644")
+    assert service.received == []
 
 
 @pytest.mark.parametrize("content", ["", "{", "[]", '{"port": "80"}', '{"port": 0}', '{"port": 70000}',
                                      '{"port": true}', '{"pid": 1}', "x" * 100_000])
 def test_a_serve_json_that_names_no_port_is_reported_without_its_content(home, service, served, content):
-    (home / serveclient.SERVE_FILE).write_text(content)
+    write_private(home / servecontract.STATE_FILE, content)
     message = refused(tool(served[0], "contexto_state", {}), "contexto serve", "serve.json")
     assert service.received == [] and (not content or content[:20] not in message)
 
@@ -409,7 +449,7 @@ def test_serve_server_reads_the_switch_from_the_process_environment_by_default(h
 
 
 def test_a_refused_token_is_its_own_error_and_is_not_retried(home, service, bystander, served, clock):
-    service.announce(home, token="stale-token-from-an-earlier-run")
+    service.announce(home, token="stale-token-from-an-earlier-run-0123456789")
     result = unchanged_after(home, lambda: tool(served[0], "contexto_state", {}))
     message = refused(result, "refused", "token", "contexto serve")
     assert "stale-token" not in message and len(service.received) == 1 and clock.slept == []
@@ -478,8 +518,8 @@ def test_a_damaged_live_lock_gets_the_reply_session_mode_gives(home, service, se
 def test_a_symlinked_token_file_is_not_read(home, service, bystander, served, tmp_path):
     real = tmp_path / "real.token"
     real.write_text(TOKEN + "\n")
-    (home / serveclient.TOKEN_FILE).unlink()
-    (home / serveclient.TOKEN_FILE).symlink_to(real)
+    (home / servecontract.TOKEN_FILE).unlink()
+    (home / servecontract.TOKEN_FILE).symlink_to(real)
     result = unchanged_after(home, lambda: tool(served[0], "contexto_state", {}))
     refused(result, "contexto serve", "serve.token")
     assert service.received == []
@@ -488,24 +528,24 @@ def test_a_symlinked_token_file_is_not_read(home, service, bystander, served, tm
 def test_a_symlinked_serve_json_is_not_read(home, service, served, tmp_path):
     real = tmp_path / "real.json"
     real.write_text(json.dumps({"port": service.port, "pid": os.getpid()}))
-    (home / serveclient.SERVE_FILE).unlink()
-    (home / serveclient.SERVE_FILE).symlink_to(real)
+    (home / servecontract.STATE_FILE).unlink()
+    (home / servecontract.STATE_FILE).symlink_to(real)
     refused(tool(served[0], "contexto_state", {}), "contexto serve", "serve.json")
     assert service.received == []
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 file")
 def test_an_unreadable_token_file_means_the_service_cannot_be_asked(home, service, served):
-    (home / serveclient.TOKEN_FILE).chmod(0o000)
+    (home / servecontract.TOKEN_FILE).chmod(0o000)
     try:
         refused(tool(served[0], "contexto_state", {}), "contexto serve", "serve.token cannot be read")
     finally:
-        (home / serveclient.TOKEN_FILE).chmod(0o600)
+        (home / servecontract.TOKEN_FILE).chmod(0o600)
     assert service.received == []
 
 
 def test_a_missing_token_file_means_the_service_cannot_be_asked(home, service, served):
-    (home / serveclient.TOKEN_FILE).unlink()
+    (home / servecontract.TOKEN_FILE).unlink()
     refused(tool(served[0], "contexto_state", {}), "contexto serve", "serve.token is missing")
     assert service.received == []
 
@@ -513,7 +553,7 @@ def test_a_missing_token_file_means_the_service_cannot_be_asked(home, service, s
 @pytest.mark.parametrize("content", [b"", b"\n", b"two\nlines\n", b"with space\n", b"a/b\n", b"tok\xc3\xa9n\n",
                                      b"q?x=1\n", b"t" * 5_000, b"tok\r\nHost: evil\r\n"])
 def test_a_token_file_that_is_not_one_ascii_line_is_never_sent(home, service, served, content):
-    (home / serveclient.TOKEN_FILE).write_bytes(content)
+    write_private(home / servecontract.TOKEN_FILE, content)
     message = refused(tool(served[0], "contexto_state", {}), "contexto serve", "serve.token")
     assert service.received == [] and "evil" not in message and "lines" not in message
 
@@ -562,7 +602,7 @@ def test_a_service_that_accepts_and_never_answers_times_out(home, service, clock
     silent = socket.create_server(("127.0.0.1", 0))
     try:
         port = silent.getsockname()[1]
-        (home / serveclient.SERVE_FILE).write_text(json.dumps({"port": port, "pid": os.getpid()}))
+        write_private(home / servecontract.STATE_FILE, json.dumps({"port": port, "pid": os.getpid()}))
         with pytest.raises(serveclient.ResolveError) as exc:
             serveclient.resolve(home, ID_A, clock=clock, sleep=clock.sleep, timeout=0.2)
     finally:
@@ -582,7 +622,8 @@ def test_a_service_that_hangs_up_is_reported_as_not_running(home, service, serve
     thread = threading.Thread(target=hang_up, daemon=True)
     thread.start()
     try:
-        (home / serveclient.SERVE_FILE).write_text(json.dumps({"port": silent.getsockname()[1], "pid": os.getpid()}))
+        record = {"port": silent.getsockname()[1], "pid": os.getpid()}
+        write_private(home / servecontract.STATE_FILE, json.dumps(record))
         message = refused(tool(served[0], "contexto_state", {}), "not running", "the request to port")
         # the close arrives as an end of stream or, when unread request bytes remain, as a reset
         assert "(RemoteDisconnected)" in message or "(ConnectionResetError)" in message
