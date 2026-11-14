@@ -369,11 +369,13 @@ the check is outside both limits for the rest of its life, so a long streamed re
   what was paged out or pinned before it stays in the earlier store (`contexto search --session
   <id>`, `contexto state --session <id>`), where under `contexto run` the launch's one store keeps
   serving. `/compact` and `--resume <id>` keep the id.
-- A session the service makes records no working directory: the service does not run in the
-  client's directory. Pinned file sources of such a session are not checked for staleness, and
-  `contexto run claude --continue` does not find it by directory. `contexto run claude --resume
-  <id>` does find it. It is in no project either, so project memory ([project-memory.md](project-memory.md))
-  carries nothing into it and nothing it pins into a later session.
+- A session the service makes records no working directory when the service makes it: the service
+  does not run in the client's directory. Pinned file sources of such a session are not checked for
+  staleness, and `contexto run claude --continue` does not find it by directory. It is in no project
+  either, so project memory ([project-memory.md](project-memory.md)) carries nothing into it and
+  nothing it pins into a later session. `contexto run claude --resume <id>` does find it, and
+  records the directory it runs in: from then on the session belongs to that directory's project,
+  under `contexto run` and under the service alike.
 - `contexto mcp --serve` relies on `_meta["claudecode/toolUseId"]`, measured on Claude Code 2.1.322
   and not documented as a stable interface. A client that does not send it gets the "no tool-use
   id" error on every call. Codex does not send it.

@@ -428,8 +428,9 @@ in a repository (reviewing a stranger's pull request, reading unknown code), sta
 - Records pinned by a release before project memory are never carried, so project memory starts
   empty for an existing project. Sessions from earlier releases join their project by the working
   directory they recorded, and they are counted and listed, but nothing of theirs is carried. A
-  session that recorded no working directory is in no project, and neither is any session that
-  `contexto serve` makes ([serve.md](serve.md)).
+  session that recorded no working directory is in no project. That includes a session that
+  `contexto serve` made, until `contexto run claude --resume <id>` opens it and records a directory
+  ([serve.md](serve.md)).
 - A main-conversation pin is confirmed when its reply reaches the main conversation's next request.
   A pin made by Codex's code mode (`exec` calling the tool) is not recognised and is not carried;
   on codex-cli 0.163.0 that is how the model calls Contexto's tools, so Codex sessions give nothing.
