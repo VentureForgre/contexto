@@ -228,6 +228,17 @@ LAST_EVENTS: dict[tuple[str, str], str] = {
 # reads. Kept by hand: when the source gains such a field, document it and add it here; when the source drops
 # one, remove its bullet and its name here. A key stored on a variable that holds more than one event name
 # fails ``test_a_key_stored_on_a_variable_with_several_events_is_named_here`` until it is here.
+# Fields whose name is not in the file that writes the event, because it comes from another file: (event,
+# writing file) -> {field: the file whose source holds the name}. The documented-but-unwritten check then looks
+# for the name in that file instead, so renaming it there still fails the test. Each such field is also in
+# HELPER_FIELDS. Only for names that are truly elsewhere: a name the writing file holds needs no entry here.
+FIELDS_FROM: dict[tuple[str, str], dict[str, str]] = {
+    # RewriteEngine._call: events[-1].update(hints._asdict() ...), the field names of GatewayHints (D70)
+    ("request", "src/contexto/rewrite.py"): {"request_class": "src/contexto/hints.py",
+                                             "context_compacted": "src/contexto/hints.py",
+                                             "compaction": "src/contexto/hints.py"},
+}
+
 HELPER_FIELDS: dict[tuple[str, str], frozenset[str]] = {
     # UsageReader.end_fields() returns what _keep() stored, merged with entry.update(...)
     ("request", "src/contexto/proxy.py"): frozenset({
@@ -265,10 +276,11 @@ class Tables:
     helper_fields: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict)
     returned_fields: dict[tuple[str, str], tuple[tuple[str, int | None], ...]] = field(default_factory=dict)
     last_events: dict[tuple[str, str], str] = field(default_factory=dict)
+    fields_from: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
 
 
 TABLES = Tables(DYNAMIC_SITES, NOT_SESSION_LOG, CARRIED_EVENTS, SHARED_NAMES, HELPER_FIELDS, RETURNED_FIELDS,
-                LAST_EVENTS)
+                LAST_EVENTS, FIELDS_FROM)
 
 
 @dataclass(frozen=True)
@@ -1413,9 +1425,11 @@ def unwritten_fields(modules: list[Module], written: dict[str, list[Site]], doc:
     for entry in doc.entries:
         paths = entry_files(doc, entry, written, tables)
         for key, line in entry.fields.items():
-            # A field HELPER_FIELDS names for the event and file reaches it by a route the scan cannot read, so its
-            # name need not be in that file (GatewayHints' fields arrive through ``_asdict()``).
-            if paths and not any(key in vocabulary[path] or key in tables.helper_fields.get((entry.name, path), ())
+            # A field FIELDS_FROM names for the event and file is looked for in the file it comes from
+            # (GatewayHints' fields arrive through ``_asdict()``); every other field must be in the writing file.
+            if paths and not any(key in vocabulary[path]
+                                 or key in vocabulary.get(tables.fields_from.get((entry.name, path), {}).get(key, ""),
+                                                          ())
                                  for path in paths):
                 problems.append(
                     f"{DOC_NAME}:{line} lists the field `{key}` under `{entry.name}`, but `{key}` does not appear in "
@@ -2294,6 +2308,15 @@ def test_a_documented_field_no_writing_module_mentions_is_reported():
     other = _sample(SAMPLE_DOC.replace("- `budget`: a budget.", "- `budget`: a budget.\n- `status`: x"))
     assert _only(other, "words").startswith("docs/events.md:31 lists the field `status` under `shared`, but `status` "
                                             "does not appear in inner.py, which writes that event")
+    # Naming it in HELPER_FIELDS does not excuse it (Reviewer A, PR #261: that let a dropped field's bullet stay);
+    # FIELDS_FROM, naming the file the name comes from, does, and only while that file holds the name.
+    doc = SAMPLE_DOC.replace("- `budget`: a budget.", "- `budget`: a budget.\n- `status`: x")
+    helper = dataclasses.replace(SAMPLE, helper_fields={("shared", "inner.py"): frozenset({"status"})})
+    assert _sample(doc, helper)["words"], "a HELPER_FIELDS name must still be in the writing file"
+    moved = dataclasses.replace(SAMPLE, fields_from={("shared", "inner.py"): {"status": "line.py"}})
+    assert _sample(doc, moved)["words"] == []
+    wrong = dataclasses.replace(SAMPLE, fields_from={("shared", "inner.py"): {"status": "inner.py"}})
+    assert _sample(doc, wrong)["words"]
 
 
 def test_a_new_writer_place_or_kind_is_added_in_the_test_and_in_the_document():

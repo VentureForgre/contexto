@@ -294,7 +294,7 @@ The model reads a paged turn back:
 - **Tool loop**: the requests of a turn after its turn start. The model called a tool, and the CLI
   sends the result back with the turn so far. For Claude Code the engine pages inside a tool loop
   too ([in-turn paging](in-turn-paging.md), D63; see [`in_turn_batch`](#in_turn_batch)). A Codex
-  tool loop, and any tool loop with `--no-in-turn-paging`, is sent whole. A turn that grows there
+  tool loop, and any tool loop with `--no-in-turn-paging` (or `CONTEXTO_IN_TURN_PAGING=0`), is sent whole. A turn that grows there
   can pass the bound.
 - **Epoch**: the stretch between two rotations of one conversation. Within an epoch the prompt
   prefix does not change, so the prompt cache can be read. `epoch` counts from 0.
@@ -330,7 +330,8 @@ these and the rules the entries cite.
 
 `epoch`, `k`, `turns_paged`, `first_turn` and degraded mode (the nested `request` event's
 `degraded`) belong to one conversation in one run. The engine keeps a separate state for each
-conversation, and each run starts a new engine. So:
+conversation, and each run starts a new engine. Under `contexto serve`, each opening of a session
+(a [`serve_open`](#serve_open) line) starts a new engine and counts as a run here. So:
 
 - Every conversation starts at epoch 0. A line with `epoch` 3 can be followed by another
   conversation's line with `epoch` 0.
@@ -786,7 +787,7 @@ A `count_tokens` request has a [`count_tokens`](#count_tokens) event in its plac
   its entrypoint. `contexto stats` says "Claude Code did not compact" only for a log in which every
   such request did.
 - `request_class`: the request's `x-claude-code-request-class` hint header (D70), when it carried
-  one Contexto knows: `main`, `compaction`, `subagent`, `workflow` or one of the side classes.
+  one Contexto knows: `main`, `compaction`, `subagent`, `workflow` or `auxiliary`.
   Absent otherwise.
 - `context_compacted`: the hint that Claude Code compacted this conversation: `auto`, `manual`,
   `reactive`, or `other` for a value Contexto does not know. Absent when the request carried no
@@ -1051,7 +1052,7 @@ the `transform_events` of the same `request` line.
 
 | The event | Kind | What it means |
 | --- | --- | --- |
-| `estimate` with `in_tool_loop: true` and no `degraded` | notice | The allowed case (contract rule 5). The turn grew past the bound inside a tool loop, and in-turn paging could not bring it back under or did not run (Codex, or `--no-in-turn-paging`). The next turn start rotates. |
+| `estimate` with `in_tool_loop: true` and no `degraded` | notice | The allowed case (contract rule 5). The turn grew past the bound inside a tool loop, and in-turn paging could not bring it back under or did not run (Codex, or `--no-in-turn-paging` or `CONTEXTO_IN_TURN_PAGING=0`). The next turn start rotates. |
 | `estimate` with `degraded: true` | problem | A consequence of degraded mode, in which the conversation pages nothing. The fault to look at is the [`store_error`](#store_error) or [`page_conflict`](#page_conflict) that started it. |
 | `estimate` with `in_tool_loop: false` and no `degraded` | problem | Over the bound at a turn start. A [`bound_too_small`](#bound_too_small) or [`pdf_allowance`](#pdf_allowance) on the same line says why. With neither, the rotation's sizing did not hold. |
 | `real`, with an `estimate` event on the same line | that event's kind | The real input confirms the estimate. |
@@ -1389,7 +1390,8 @@ The version check behind the three events above raised. The request is unaffecte
 Writer: engine. Where: `transform_events`. Kind: notice.
 
 A request's hint header disagrees with what the engine sees in the request itself (D70). Logged
-once per run for each distinct header, value and signature. The engine follows the header; this says
+once per engine for each distinct header, value and signature: once per run under `contexto run`,
+and once per session opening under `contexto serve`, which starts a new engine each time. The engine follows the header; this says
 that a Claude Code update may have changed what a class of request looks like.
 
 - `header`: `request_class` or `context_compacted`.
@@ -1659,7 +1661,11 @@ normally; only a killed launcher would leave Claude Code running and its tempora
 ## Service events
 
 `contexto serve` ([serve.md](serve.md)) writes these two in the log of each session it serves, as
-their own lines. Everything else it logs goes to its own `serve.log`, not to a session's log.
+their own lines. Its engine's events go into the session's log as under `contexto run`, and so do
+[`affinity_salt_unavailable`](#affinity_salt_unavailable) and the exit-time
+[`mcp_tools_missing`](#mcp_tools_missing). The service's other events (its start and stop, the
+sessions it opens and closes, requests it refuses or cannot route) go to its own `serve.log`, not
+to a session's log.
 
 ### `serve_open`
 
