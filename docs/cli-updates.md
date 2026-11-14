@@ -1,5 +1,7 @@
 # When Claude Code or Codex updates
 
+[Contexto](../README.md) / [Documentation](README.md)
+
 Contexto recognises parts of each CLI's requests by text the CLI writes. A CLI update can change that
 text without any error: the message falls into another class and may be paged when it should be
 carried, or carried when it could be paged. This page lists what Contexto depends on, what warns, and

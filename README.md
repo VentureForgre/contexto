@@ -1,86 +1,45 @@
 # Contexto
 
-When a Claude Code or Codex conversation grows too large for the model's context window, the CLI
-compacts it: it replaces the history with a summary, and details are lost. Contexto stops that from
-happening. It runs a small proxy on your machine between the CLI and the model API, keeps every
-request under a fixed size, moves the oldest turns out of the prompt into a store on disk word for
-word, and gives the model tools to search and read them back. A session can then go on for as long
-as you like without compacting, and the model can still find what was said hours ago.
+[![CI](https://github.com/VentureForgre/contexto/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/VentureForgre/contexto/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE) ![Python 3.12 to 3.15](https://img.shields.io/badge/python-3.12%20to%203.15-blue)
 
-## How it works
+Contexto is a local proxy that keeps Claude Code and Codex requests under a fixed token bound by
+moving the oldest turns to disk, word for word, and giving the model tools to search them back.
 
-`contexto run claude` starts the proxy on `127.0.0.1` and points Claude Code at it. Every model
-request passes through the proxy, which keeps the prompt sent upstream under the **bound**: the most
-tokens Contexto lets a request's prompt reach, 150,000 by default.
-
-The proxy keeps some **headroom** free below the bound for the conversation to grow into: 25,000
-tokens by default, raised after large turns, up to a quarter of the bound. When a request gets
-within the headroom of the bound, the proxy **rotates**: it moves the oldest turns out of the prompt
-and writes them, word for word, to a local store under `~/.contexto`. Those turns are now **paged
-out**. In their place the model sees a short index of the paged-out turns and the **pinned state**:
-the decisions, obligations and facts the model recorded with the `contexto_pin` tool.
-
-The room left for conversation turns is the **window budget**: the bound, minus the headroom floor,
-minus the fixed overhead of every request (the CLI's system prompt and tool definitions).
-
-The model reads paged-out turns back with MCP tools: `contexto_search` finds turns by the words they
-contain, and `contexto_recall` returns one in full. The bound stays below the point where Claude Code
-would compact the conversation itself, so nothing is summarized away.
-
-Contexto makes no model calls of its own. It reads and rewrites the requests your CLI already makes.
-
-What it includes:
-
-- Claude Code and Codex (API-key mode) through `contexto run`.
-- Upstreams: the vendor's API with your own key, or a CLIProxyAPI instance
-  ([Upstreams and CLIProxyAPI](docs/run-reference.md#upstreams-and-cliproxyapi)).
-- Word search over paged-out turns ([MCP tools](docs/mcp-tools.md)).
-- A separate recall budget for each subagent, so subagents cannot use up the main conversation's
-  room.
-- `contexto sessions list`, `show` and `prune` to see sessions and delete old ones, and
-  `contexto search`, `recall` and `state` to read what a session stored.
-- Resuming a Claude Code conversation (`--resume`, `--continue`) through the Contexto session that
-  served it, so its pages and pins carry over.
-- A per-session `X-Session-Affinity` header for proxies that spread requests over several accounts,
-  so a session's prompt cache stays on one ([Troubleshooting](docs/troubleshooting.md)).
-- A warning when Claude Code or Codex is a version Contexto was not tested with. New CLI versions
-  come out every week, so expect to see it; it does not stop the launch.
-
-## Results
-
-Each acceptance run is a scripted session whose history grows well past the bound. Its
-probe turns ask 54 questions about details spread through that history. The same questions then go
-to the same model with the whole history in its context (the baseline).
-
-| Run | Result | Record |
-|---|---|---|
-| Claude Code 2.1.318, claude-haiku-5-5, bound 150,000 | 52 of 54 answered correctly, against 47 for the baseline. No compaction. Largest request 110,465 tokens. Cache reused on 38 of 38 eligible requests. Claude Code's defaults, tool search on, so Contexto's tools load through it. | [M2-acceptance-run4.md](docs/research/M2-acceptance-run4.md) |
-| Claude Code 2.1.301, claude-haiku-5-5, bound 150,000 | 51 of 54 answered correctly, against 48 for the baseline. No compaction. Largest request 109,868 tokens. Prompt cache reused on 36 of 37 eligible requests. | [M2-acceptance-run3.md](docs/research/M2-acceptance-run3.md) |
-| Claude Code 2.1.302, claude-opus-5-5, bound 150,000 | 53 of 54, against 54 for the baseline. No compaction. Cache reused on 54 of 55 eligible requests. The run added the permission rule that `contexto run` now sets itself. | [M2-acceptance-opus.md](docs/research/M2-acceptance-opus.md) |
-| Codex 0.163.0, gpt-6-astra, bound 150,000 | History of about 233,000 tokens (about 1.56 times the bound; 375,922 as the test harness prices them) with no compaction. Largest request 108,565 tokens. All 61 requests succeeded. No baseline was run. | [M2-codex-acceptance-150k.md](docs/research/M2-codex-acceptance-150k.md) |
-
-In the claude-haiku-5-5 run, Contexto used 46.6% fewer input tokens than plain Claude Code would have
-for the same session, and cost 49.7% less. The plain Claude Code figures are modeled from measured
-requests, not run end to end ([M2-usage-savings-run3.md](docs/research/M2-usage-savings-run3.md)).
+- **A fixed bound.** Each turn starts with the request under the bound, 150,000 tokens by default,
+  however long the session runs. The turns removed to make room stay on disk word for word, not as
+  a summary. A request can still pass it, for example inside one very long tool loop (the
+  requests the CLI sends while the model calls tools, before it answers you) or with an oversized
+  prompt ([limitations](#known-limitations)).
+- **Recall no worse than full context on a scripted recall test.** In a scripted synthetic
+  session (acceptance run 4) on claude-haiku-5-5, Contexto answered 52 of 54 recall questions. The
+  same model given the whole history of about 426,000 tokens answered 47. That is one session and
+  one seed, and the gap is inside noise (p = 0.18). In a separate run on claude-opus-5-5, Contexto
+  answered 53 of 54 and full context 54, one question behind and inside the test's pass rule:
+  within 2 questions overall and no question category more than 1 question below
+  ([results](docs/results.md)).
+- **Fewer input tokens, not always less money.** In an earlier scripted session (acceptance run 3),
+  Contexto sent 46.6% fewer input tokens than plain Claude Code would have; the plain figures are
+  modeled from measured requests. At Haiku 5.5's prices, which are 5 times higher on a prompt over
+  100,000 tokens, Contexto cost 49.7% less. At flat prices such as Opus 5.5's, Contexto would cost
+  66% more if plain Claude Code read its prompt cache on every request, and less given the two cache
+  misses the measured plain requests had ([results](docs/results.md#tokens-and-cost)).
 
 ## Install
 
-Contexto needs Python 3.12 or later, macOS or Linux, and has no runtime dependencies. Install the
-wheel from the latest release, [v0.5.24](https://github.com/VentureForgre/contexto/releases/tag/v0.5.24).
-It is not on PyPI: the PyPI package named `contexto` is an unrelated project, so
-`pip install contexto` installs the wrong thing. Use the release URL or the downloaded wheel.
-
-Straight from the release URL, with no GitHub login:
+On macOS or Linux, Contexto needs Python 3.12 or later, pipx, `claude` (Claude Code) or `codex` on
+`PATH`, and either an Anthropic API key or a [CLIProxyAPI](docs/cliproxyapi.md) upstream (a
+separate local or hosted proxy in front of the vendor APIs). A claude.ai Pro or Max login is not a
+supported setup, Contexto does not detect one, and the risk to the account is yours
+([who it is not for](#who-it-is-for)).
 
 ```sh
-pipx install https://github.com/VentureForgre/contexto/releases/download/v0.5.24/contexto-0.5.24-py3-none-any.whl
-contexto --version                                    # contexto 0.5.24
+pipx install \
+  https://github.com/VentureForgre/contexto/releases/download/v0.5.24/contexto-0.5.24-py3-none-any.whl
 ```
 
-You also need `claude` (Claude Code) or `codex` (Codex CLI) on `PATH`.
-
-Checking the download before you install, other ways to install, installing from a checkout,
-uninstalling, and the supported platforms: [docs/install.md](docs/install.md).
+Contexto is not on PyPI yet: `pip install contexto` installs an unrelated project, and the name
+it will be published under, `contexto-proxy`, has no release there. Checking the
+download before you install, other ways to install, and uninstalling: [docs/install.md](docs/install.md).
 
 ## Quickstart
 
@@ -89,97 +48,215 @@ contexto run claude
 contexto run --bound 120000 claude --model claude-haiku-5-5
 ```
 
+<img src="docs/assets/demo.svg" width="800" alt="Terminal recording of a synthetic session. contexto run starts a stub CLI with a bound of 60,000 tokens. Over turns 0 to 7 the history the CLI sends grows from 13,240 to 99,451 tokens, while the request that reaches the fake upstream never exceeds 38,458. contexto sessions show then lists 6 paged-out turns and 0 over-bound turns. Turn 8 asks for a release codename stated in turn 1, and a contexto_search call returns that line, amber-kestrel-17, from the paged-out turn.">
+
+A synthetic session: a stub CLI and a fake upstream on `127.0.0.1`, no model, with one token counted
+per 3.5 bytes. `contexto`, its proxy, store and search are the real code ([transcript](docs/assets/demo.txt)).
+The small bound, `--headroom-floor` (the least room kept free under the bound), `--upstream` (the
+fake upstream) and `--no-version-check` (skip the check of the stub's version) are there only for
+the stand-ins. The request shrinks at a history of about 50,000 tokens because Contexto moves old
+turns out before the next request could reach the bound.
+
 Contexto options go before `claude`. Everything after `claude` is passed to Claude Code unchanged.
-Your own Claude Code settings, hooks and MCP servers still load, and nothing in your Claude
-configuration is edited. Ctrl+C reaches Claude Code as usual. What the launcher does is under
-[`contexto run`](docs/run-reference.md#contexto-run).
+Your Claude Code settings, hooks and MCP servers still load, and nothing in your Claude
+configuration is edited. Every option: [docs/run-reference.md](docs/run-reference.md). Resuming,
+`/clear` and `/compact`: [docs/claude-code.md](docs/claude-code.md). Codex runs through
+`contexto run codex` in API-key mode and needs a key helper, a command that prints your API key
+([docs/codex.md](docs/codex.md)).
 
-Resuming a conversation, and `/clear`, `/resume` and `/compact`:
-[docs/claude-code.md](docs/claude-code.md). Every option of `contexto run`:
-[docs/run-reference.md](docs/run-reference.md).
+## Who it is for
 
-Codex runs through `contexto run codex` in API-key mode. It needs a key helper command and, with an
-OpenAI key, `--codex-upstream https://api.openai.com/v1`: [docs/codex.md](docs/codex.md).
+It is for you if either holds:
 
-## Is it working?
+- Your Claude Code or Codex sessions pass the CLI's own compaction point (about 967,000 tokens on a
+  1M-window model), and you want the old turns kept word for word, not summarized.
+- You want every request kept small, for example under Haiku 5.5's price step at 100,000 tokens.
 
-At start, Contexto prints a session line on stderr, and in Claude Code `/mcp` lists the `contexto`
-server as connected. Nothing else is visible until the prompt nears the bound. What to check after
-that: [docs/sessions.md](docs/sessions.md#is-it-working).
+Your upstream must be the vendor's API with an API key, or a CLIProxyAPI instance
+([docs/cliproxyapi.md](docs/cliproxyapi.md)). It is not for:
+
+- **A claude.ai Pro or Max login.** That is not a supported setup, and Contexto does not detect it.
+  `/status` in Claude Code shows which account it uses. If it is a subscription, `contexto run
+  claude` sends that subscription's traffic through a third-party local proxy that rewrites
+  requests. The [FAQ](docs/faq.md) describes logging a subscription in to CLIProxyAPI instead.
+  Whether your plan allows either route is for you to check against its terms, and the risk to the
+  account is yours.
+- **Claude Code set to a cloud provider** (Amazon Bedrock, Google Vertex AI, Microsoft Foundry or
+  Claude Platform on AWS). Claude Code then sends its requests to that provider, not through
+  Contexto, so nothing is bounded. The v0.5.24 release installed above does not check for this and
+  starts a session anyway; a build from the unreleased code on `main` refuses to
+  start the session.
+- **Sessions that end before the compaction point, when a large request is fine for you.** They do
+  not compact, with or without Contexto. The exception: by default Claude Code compacts a
+  conversation of 200,000 tokens or more after it sits idle for about an hour on the one-hour
+  prompt cache ([comparison](#why-not-compaction-a-1m-window-or-the-memory-tool)).
+- **Work that needs every old detail in view at once.** The model sees a paged-out turn only when
+  it runs a search for it.
+- **Windows.** It is not supported.
+
+## How it works
+
+`contexto run claude` starts a proxy on `127.0.0.1` and points Claude Code at it. Every model
+request passes through the proxy, which keeps the prompt sent upstream under the **bound**: the most
+tokens Contexto lets a request's prompt reach, 150,000 by default.
+
+```mermaid
+flowchart TB
+    CLI["Claude Code or Codex"] <-->|requests and replies| P["Contexto proxy, 127.0.0.1"]
+    P <-->|prompt under the bound| API["Model API"]
+    P -->|old turns| S[("Store, ~/.contexto")]
+    S -->|index, pins| P
+    CLI -->|runs the model's tool calls| T["MCP tools: search, recall, pin"]
+    T <--> S
+```
+
+The proxy keeps some **headroom** free below the bound for the conversation to grow into: at least
+the headroom floor, 25,000 tokens by default, raised after large turns, up to a quarter of the
+bound. When a request gets
+within the headroom of the bound, the proxy **rotates**: it moves the oldest turns out of the prompt
+and writes them, word for word, to a local store under `~/.contexto`. Those turns are now **paged
+out**. In their place the model sees the **page index**, which holds the opening of each paged-out
+turn, and the **pinned state**: the decisions, obligations and facts the model recorded with the
+`contexto_pin` tool. The room left for conversation turns is the **window budget**: the bound, minus
+the headroom (at least the floor), minus the fixed overhead of every request (the CLI's system prompt and tool
+definitions, the turns Contexto carries forward, the page index and the pinned state).
+
+The model reads paged-out turns back with MCP tools: `contexto_search` finds turns by the words they
+contain, and `contexto_recall` returns one word for word, in parts if it is long. The proxy rotates
+only at the start of a turn, never inside a tool loop. It makes no model calls of its own.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/request-size-dark.svg">
+  <img src="docs/assets/request-size-light.svg" alt="Line chart of the largest request in each of 24 turns. The Contexto line stays under the bound of 150,000 tokens and peaks at 109,868. The line for the full history without Contexto grows to 438,406." width="720">
+</picture>
+
+Largest request in each turn of acceptance run 3 (Claude Code 2.1.301, claude-haiku-5-5, bound
+150,000), one scripted session. Contexto's request sizes are measured. The full-history line is
+modeled from the byte sizes of Claude Code's requests for turns 1 to 18 and measured for the six
+question turns ([record](docs/research/M2-usage-savings-run3.md)). Haiku 5.5 has a 1M-token window,
+so plain Claude Code would not have compacted at 438,406.
+
+## Why not compaction, a 1M window or the memory tool?
+
+Often one of them is enough. The facts about Claude Code below are from its docs on 2026-11-12:
+[models](https://code.claude.com/docs/en/model-config), [context window](https://code.claude.com/docs/en/context-window), [idle compaction](https://code.claude.com/docs/en/settings-reference#idlecompaction) and [memory](https://code.claude.com/docs/en/memory).
+
+**A 1M window.** Fable models, Sonnet 5 and later, Haiku 5.5, and Opus 4.7 and later run with a
+1M-token window by default and auto-compact at about 967,000 tokens. On the Anthropic API the 1M
+window has no premium beyond 200K, except on Haiku 5.5, which costs more on prompts over 100K. So a
+session that ends before about 967,000 tokens does not compact, with or without Contexto, and the
+426,000-token history of the recall test (acceptance run 4) would not have. One exception: by default Claude Code compacts a
+conversation of 200,000 tokens or more that sits idle for about an hour on the one-hour prompt
+cache. If your sessions fit, you do not need Contexto. What Contexto changes is the size of each
+request, which stays under the bound where a 1M window carries the whole history every time. That
+is worth it in the cases under [Who it is for](#who-it-is-for).
+
+**Compaction** "replaces the conversation with a structured summary". After it, most startup
+content reloads (the system prompt, the project-root CLAUDE.md, unscoped rules, auto memory,
+skills) and up to five recently modified files are re-read. Path-scoped rules and nested CLAUDE.md
+files are summarized away with the conversation until they load again. `/compact focus on ...`
+steers the summary, and `/autocompact 500k` sets the point, from 100K to 1M. If a summary of the old turns is enough, compaction needs no searches and no proxy.
+Contexto keeps the removed turns word for word, and pays for it: the model sees them only through
+a search it must choose to run, each search is another request, and each rotation rewrites the
+prompt cache.
+
+**Memory.** Claude Code's memory is CLAUDE.md files, which hold instructions you write, and auto
+memory, notes Claude writes for itself from your corrections and preferences. Both load at the start
+of every session. The API's [memory tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool)
+lets the model write files under `/memories` that your application stores and that later
+conversations read back. All three hold what someone chose to save, across sessions. Contexto holds
+every paged-out turn of one session word for word, and nothing across sessions. It edits none of
+those files.
+
+## What you see
+
+**When it is working.** At start Contexto prints one line on stderr that begins `contexto: session`
+and names the bound, and `/mcp` in Claude Code lists the `contexto` server as connected. Nothing
+else shows until the prompt nears the bound, from about 113,000 to 125,000 tokens with the
+defaults. After the first rotation, `contexto sessions list` shows a PAGES count above 0, and
+`contexto sessions show <id>` should count 0 over-bound turns ([Is it working?](docs/sessions.md#is-it-working)).
+
+**What it adds.** The proxy adds time to each request, more as the history grows:
+
+| History | Per turn start | Per tool-loop request |
+|---|---|---|
+| 0.5 million tokens | 0.056 s | 0.014 s |
+| 2 million tokens | 0.099 s | 0.044 s |
+| 30 million tokens | 0.86 s | 0.58 s |
+
+Medians of 3 runs of synthetic sessions against a local fake upstream, measured on v0.2.7 code on
+2026-10-17 ([record](docs/research/M2-scale-30m.md)). Recall adds model round trips, since each
+search is one more request: in acceptance run 3 the six question turns took 26 requests, against 6
+without.
+
+**When it fails.** Warnings raised while Claude Code runs are printed after it exits.
+
+- Upstream unreachable: the proxy answers 502 `contexto proxy: upstream unreachable (...)` and the
+  CLI's own retry takes over.
+- Store unreadable or unwritable: Contexto stops paging. Requests grow past the bound and are logged
+  `over_bound` until the store is healthy again at a later turn start.
+- No Contexto tools in the model's tool list: a `warning:` line says so. The model then cannot get
+  paged-out turns back.
+- The proxy runs inside `contexto run` and stops only when it does. SIGTERM, SIGHUP and SIGQUIT go
+  on to Claude Code; after a SIGKILL a watchdog ends Claude Code (within 2 s when measured). The
+  store stays, and `contexto run claude --resume <id>` continues the conversation.
+
+## Privacy
+
+- The proxy listens on `127.0.0.1` only and answers only the local CLI. It forwards requests to the
+  upstream you configured. No telemetry, no update check, no model calls of its own, and no runtime
+  dependencies.
+- The store under `~/.contexto` holds raw conversation text, including any secrets that passed
+  through the conversation. Directories are mode 0700 and files 0600. Auth headers and keys are
+  never stored. Contexto deletes nothing on its own ([What is stored](docs/sessions.md#what-is-stored-and-where)).
+- Besides paging the prompt, the one thing Contexto adds to requests by default is an `X-Session-Affinity`
+  header, and only for upstreams that are not a vendor API ([FAQ](docs/faq.md)).
+
+## Known limitations
+
+The full list, with sources, is in [docs/limitations.md](docs/limitations.md).
+
+- **Tool loops.** Contexto never rotates inside a tool loop, so a very long one can pass the bound
+  (logged `over_bound`); the next turn start rotates. A turn start can also pass it: a prompt too
+  large for the bound (`bound_too_small`), a failing store, or a low estimate before the first count.
+- **Tested scope.** Recall was measured with one synthetic session script, on two models, at one
+  bound, on Claude Code 2.1.301, 2.1.302 and 2.1.318. Codex passed the long-session checks on one
+  model; its accuracy against a full-context baseline was not measured.
+- **Standing rules** survive paging only if they open their message or the model pinned them. That
+  was measured on one model and 8 rules ([Rules you give once](docs/standing-rules.md)).
+- **Images and PDFs.** A paged-out image comes back from recall as `[image omitted]`. PDFs are
+  counted high, 4,568 tokens a page, so a large PDF can page out the earlier conversation.
+- **New CLI versions** come out every week and can change the text Contexto recognises in their
+  requests. Until a version is tested, the launch warns ([CLI updates](docs/cli-updates.md)).
+- **Search** matches words, not meaning, with no synonyms and no stemming. It lists the turns that
+  hold every word of the query; when none does, the unreleased code on `main` (not v0.5.24) falls
+  back to approximate matches ([Search](docs/search.md), [MCP tools](docs/mcp-tools.md)).
+
+## How it is built
+
+Contexto has one maintainer, who directs AI coding agents. Builder agents write each change, and two
+reviewer agents check every pull request before it merges; the "Reviewer A verdict" comments on pull
+requests come from that process ([docs/maintainer-process.md](docs/maintainer-process.md)).
 
 ## Documentation
 
-The index of everything under `docs/` is [docs/README.md](docs/README.md). The guides:
-
-- [Install](docs/install.md): checking the download, other ways to install, uninstalling, platforms.
-- [Claude Code](docs/claude-code.md): resuming a conversation, and `/clear`, `/resume` and `/compact`.
-- [Codex](docs/codex.md): API-key mode, the key helper, and the Codex upstream.
-- [`contexto run` reference](docs/run-reference.md): the options, what the launcher does,
-  `contexto proxy`, environment variables, and upstreams.
-- [CLIProxyAPI](docs/cliproxyapi.md): running Contexto with a CLIProxyAPI instance as the upstream.
-- [Sessions](docs/sessions.md): how to tell it is working, what is stored and where, and the
-  commands that inspect and remove sessions.
-- [Rules you give once](docs/standing-rules.md): how a standing rule stays in view after paging.
-- [MCP tools](docs/mcp-tools.md): the tools the model gets, how search ranks, and the recall budget.
-- [Search](docs/search.md): what a query matches, and the approximate matches it falls back to.
-- [FAQ](docs/faq.md): subscriptions, API keys, cost, what is sent where, and continuing a session.
-- [Troubleshooting](docs/troubleshooting.md): the warnings and errors you are most likely to see,
-  each with its cause and what to do.
-- [Exit codes](docs/exit-codes.md): the exit code of every command.
-- [CLI updates](docs/cli-updates.md): how a new Claude Code or Codex version is tested.
+[docs/README.md](docs/README.md) indexes everything under `docs/`. Setup: [Install](docs/install.md),
+[Claude Code](docs/claude-code.md), [Codex](docs/codex.md), [CLIProxyAPI](docs/cliproxyapi.md),
+[`contexto run`](docs/run-reference.md). Use: [Sessions](docs/sessions.md), [MCP tools](docs/mcp-tools.md),
+[Search](docs/search.md), [Rules you give once](docs/standing-rules.md), [FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
+Evidence: [Results](docs/results.md), [Limitations](docs/limitations.md), [CLI updates](docs/cli-updates.md),
+[changelog](CHANGELOG.md).
 
 ## Troubleshooting
 
 The warnings and errors you are most likely to see, each with its cause and what to do, are in
-[docs/troubleshooting.md](docs/troubleshooting.md). A message that points here for `contexto run`
+[docs/troubleshooting.md](docs/troubleshooting.md). A message that says "see README, 'contexto run'"
 means [docs/run-reference.md](docs/run-reference.md#contexto-run).
-
-## Known limitations
-
-- **Tested scope.** Claude Code acceptance ran on two models (claude-haiku-5-5 and
-  claude-opus-5-5), one bound and one upstream, on Claude Code 2.1.301, 2.1.302 and 2.1.318 (tool
-  search on by default). On 2.1.310 only a short live recall check ran; 2.1.314 passed the zero-spend
-  checks only. Codex passed the long-run and recall criteria on one model at bound 64,000 and at the
-  default 150,000, on codex-cli 0.163.0; 0.166.0 passed the zero-spend checks only. Its answer
-  accuracy against a full-context baseline was not measured.
-- **Standing rules** survive paging only if they open their message or the model pinned them. The
-  model is told to pin them when stated, but that was measured on one model and 8 rules
-  ([Rules you give once](docs/standing-rules.md)).
-- **Tool search** (Claude Code's default) defers Contexto's tools. When the model first loads one,
-  the fixed part of the prompt changes and Contexto rotates once, so that request writes a new prompt
-  cache (2 of the 6 rotations in acceptance run #4).
-- **Images** are estimated from their pixel size. A screenshot in a turn that has been paged out is
-  not recallable as an image: `contexto_recall` shows it as `[image omitted]`, and the model sees only
-  the turn's text.
-- **PDFs** are never estimated low, at the cost of running high: 4,568 tokens a page, about 2.9 times
-  a typical page, and 600 pages for a PDF whose pages cannot be counted for certain. A large PDF can
-  page the earlier conversation on the turn it is pasted on; a dense page (small-font code, tables)
-  can still cost more than 4,568.
-- **Damaged lock files.** A symlink, FIFO or directory at a session's `meta.lock` or `live.lock`
-  stops `contexto run` from opening that session until you delete the file
-  ([Troubleshooting](docs/troubleshooting.md)).
-- **New CLI versions** can change the text Contexto recognises in their requests. Until a version is
-  tested, the launch warns ([Troubleshooting](docs/troubleshooting.md)).
-- **Cache efficiency** depends on the upstream route. A proxy that spreads one session over several
-  accounts loses the cache unless it routes on the session ([Troubleshooting](docs/troubleshooting.md)).
-- **Search** counts a word once per text of a turn, so a reply that discusses a key at length weighs
-  as one passing mention, and an old turn that names a key in several texts can outrank a newer
-  one-line reply that states its value.
-- **Search cost.** The first search of each MCP process reads every page once (1.6 s at 6,000
-  synthetic pages). Each query word scans the search text once, so a long query with matches costs
-  more, and the up to 53 pages one search shows are read in full with no size cap.
-- **Before the first token count.** Until the API reports a request's real input count, Contexto
-  estimates it, and a very dense start of the conversation (JSON, code, non-English text) is
-  estimated low. If the upstream never reports counts, tool-loop requests can go over the bound
-  without a log entry.
-- **Codex ChatGPT login mode** is tested only with synthetic credentials.
-- **Windows** is not supported.
 
 ## Contributing and security
 
 Development, tests and releases: [CONTRIBUTING.md](CONTRIBUTING.md). Reporting a vulnerability:
-[SECURITY.md](SECURITY.md). Bugs and new CLI versions:
-[issues](https://github.com/VentureForgre/contexto/issues).
+[SECURITY.md](SECURITY.md). Bugs and new CLI versions: [issues](https://github.com/VentureForgre/contexto/issues).
 
 ## License
 
