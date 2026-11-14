@@ -169,23 +169,33 @@ def test_a_managed_file_that_says_off_does_not_hide_the_user_s_switch(tree):
     assert places(guard(tree)) == {BEDROCK: ("settings:user",)}
 
 
-def test_the_managed_settings_path_is_the_platform_s_file_unless_the_variable_names_another(monkeypatch, tmp_path):
-    monkeypatch.delenv(upstream.MANAGED_SETTINGS_KEY, raising=False)
+def test_the_managed_settings_path_is_the_platform_s_file_and_no_variable_moves_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(upstream, "MANAGED_SETTINGS_FILES",
+                        {"darwin": "/Library/Application Support/ClaudeCode/managed-settings.json",
+                         "linux": "/etc/claude-code/managed-settings.json"})
+    monkeypatch.setenv("CONTEXTO_CLAUDE_MANAGED_SETTINGS", str(tmp_path / "m.json"))  # the old override
     monkeypatch.setattr(upstream.sys, "platform", "darwin")
     assert upstream.managed_settings_path() == Path("/Library/Application Support/ClaudeCode/managed-settings.json")
     monkeypatch.setattr(upstream.sys, "platform", "linux")
     assert upstream.managed_settings_path() == Path("/etc/claude-code/managed-settings.json")
     monkeypatch.setattr(upstream.sys, "platform", "win32")
     assert upstream.managed_settings_path() is None
-    monkeypatch.setenv(upstream.MANAGED_SETTINGS_KEY, str(tmp_path / "m.json"))
-    assert upstream.managed_settings_path() == tmp_path / "m.json"
 
 
 def test_the_suite_never_reads_this_machine_s_managed_settings():
-    """conftest points the variable at a temporary path for every test and every launcher it starts."""
+    """conftest points the table of managed settings paths at a temporary directory for this process."""
     path = upstream.managed_settings_path()
     assert path is not None and not path.exists()
     assert not str(path).startswith(("/Library", "/etc"))
+
+
+def test_a_number_past_the_largest_double_reads_as_infinity_and_is_off(tree):
+    """Reviewer B, round 2: a JSON integer of 309 or more digits raised OverflowError and the launch
+    ended with a traceback. Claude Code reads such a number as Infinity, which is off."""
+    huge = "9" * 400
+    assert upstream.js_string(int(huge)) == "Infinity" and upstream.js_string(-int(huge)) == "-Infinity"
+    write(tree["home"] / USER, env_block(huge))
+    assert guard(tree) is None
 
 
 # The reader ---------------------------------------------------------------------------------------------

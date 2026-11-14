@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import signal
 import threading
 from http.server import ThreadingHTTPServer
@@ -30,21 +29,19 @@ def sigint_default():
 
 @pytest.fixture(autouse=True, scope="session")
 def no_managed_settings(tmp_path_factory):
-    """Keep the suite off this machine's Claude Code managed settings file.
+    """Keep the tests that read settings in this process off this machine's Claude Code managed
+    settings file. ``contexto run claude`` reads it from a fixed system path (D70) that no variable
+    moves, so the table of paths is pointed at a temporary directory where no file exists. A launcher a
+    test starts as a subprocess reads the real path; the tests that do so with the real ``claude``
+    skip when that file exists. A test that needs a managed file passes its own path."""
+    from contexto import upstream
 
-    ``contexto run claude`` reads that file from a fixed system path (D70). The variable below names
-    another path for it, here one in a temporary directory where no file exists, for the tests that
-    call the reader in this process and, through the inherited environment, for every launcher a test
-    starts. A test that needs a managed file passes its own path."""
-    from contexto.upstream import MANAGED_SETTINGS_KEY
-
-    previous = os.environ.get(MANAGED_SETTINGS_KEY)
-    os.environ[MANAGED_SETTINGS_KEY] = str(tmp_path_factory.mktemp("managed") / "managed-settings.json")
+    saved = dict(upstream.MANAGED_SETTINGS_FILES)
+    empty = str(tmp_path_factory.mktemp("managed") / "managed-settings.json")
+    upstream.MANAGED_SETTINGS_FILES.update({platform: empty for platform in saved})
     yield
-    if previous is None:
-        os.environ.pop(MANAGED_SETTINGS_KEY, None)
-    else:
-        os.environ[MANAGED_SETTINGS_KEY] = previous
+    upstream.MANAGED_SETTINGS_FILES.clear()
+    upstream.MANAGED_SETTINGS_FILES.update(saved)
 
 
 # The stub upstream and proxy factory of test_proxy_server, shared with test_upstream_affinity.

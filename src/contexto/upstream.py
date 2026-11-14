@@ -63,12 +63,11 @@ PROJECT_KINDS = frozenset({"main-checkout-local", "local", "project"})  # files 
 KIND_FILES = {"main-checkout-local": "the main checkout's .claude/settings.local.json",
               "local": ".claude/settings.local.json", "project": ".claude/settings.json"}
 MANAGED_KIND = "managed"
-# Claude Code's file-based managed settings, by ``sys.platform``.
+# Claude Code's file-based managed settings, by ``sys.platform``. Always this path: no variable moves
+# it, since a variable could be inherited from a project's settings ``env`` block through a session
+# and hide the real file from a nested launch. The test suite patches this table in its own process.
 MANAGED_SETTINGS_FILES = {"darwin": "/Library/Application Support/ClaudeCode/managed-settings.json",
                           "linux": "/etc/claude-code/managed-settings.json"}
-# Names another path for the managed settings file. The test suite sets it, so that no test reads the
-# file of the machine it runs on.
-MANAGED_SETTINGS_KEY = "CONTEXTO_CLAUDE_MANAGED_SETTINGS"
 SETTINGS_FILE_LIMIT = 4 * 1024 * 1024  # bytes read from one settings file; real ones are a few kilobytes
 
 
@@ -374,12 +373,8 @@ class SettingsFiles:
 
 
 def managed_settings_path() -> Path | None:
-    """Claude Code's managed settings file on this platform (``MANAGED_SETTINGS_FILES``), or the path
-    ``CONTEXTO_CLAUDE_MANAGED_SETTINGS`` names in Contexto's own environment; None on a platform with
-    no known location. File-based managed settings only."""
-    named = os.environ.get(MANAGED_SETTINGS_KEY, "").strip()
-    if named:
-        return Path(named)
+    """Claude Code's managed settings file on this platform (``MANAGED_SETTINGS_FILES``); None on a
+    platform with no known location. File-based managed settings only."""
     known = MANAGED_SETTINGS_FILES.get(sys.platform)
     return Path(known) if known else None
 
@@ -439,7 +434,12 @@ def _js_number(value: int | float) -> str:
         if value.is_integer() and abs(value) < 2 ** 53:
             return str(int(value))
         return repr(value)
-    return str(value) if abs(value) < 2 ** 53 else repr(float(value))
+    if abs(value) < 2 ** 53:
+        return str(value)
+    try:
+        return repr(float(value))
+    except OverflowError:  # past the largest double: JavaScript reads the number as Infinity
+        return "Infinity" if value > 0 else "-Infinity"
 
 
 def js_string(value: object) -> str:

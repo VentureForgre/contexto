@@ -25,10 +25,15 @@ import pytest
 
 from contexto.hints import GATED_HINT_HEADERS, HINT_HEADERS_KEY, HINT_MARKER_KEY, REQUEST_CLASS_HEADER, REQUEST_CLASSES
 from contexto.launcher import settings_payload
-from contexto.upstream import MANAGED_SETTINGS_KEY
+from contexto.upstream import managed_settings_path
 
 CLAUDE = shutil.which("claude")
-pytestmark = pytest.mark.skipif(CLAUDE is None, reason="claude CLI not installed")
+# Read at import, before conftest points the table at a temporary directory: the launcher these tests
+# start as a subprocess reads this machine's real managed settings file (D70).
+_MACHINE_MANAGED = managed_settings_path()
+pytestmark = [pytest.mark.skipif(CLAUDE is None, reason="claude CLI not installed"),
+              pytest.mark.skipif(_MACHINE_MANAGED is not None and _MACHINE_MANAGED.exists(),
+                                 reason="this machine has a Claude Code managed settings file")]
 
 
 def sse(event: str, data: dict) -> bytes:
@@ -160,8 +165,6 @@ def run_claude_through_contexto(tmp_path: Path, extra_env: dict[str, str],
             (tmp_path / name).mkdir()
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("OPENRIG_", "RIGGED_", "CLAUDE", "ANTHROPIC_", "CONTEXTO_", "AWS_"))}
-        # No file exists at this path, so the launcher never reads this machine's managed settings.
-        env[MANAGED_SETTINGS_KEY] = str(tmp_path / "managed-settings.json")
         env.update({"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
                     "CONTEXTO_HOME": str(tmp_path / "contexto"), "ANTHROPIC_API_KEY": "sk-ant-fake-for-stub",
                     "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1",

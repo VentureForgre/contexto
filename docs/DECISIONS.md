@@ -2848,14 +2848,20 @@ the owner's delegation. Open decisions are listed at the end with the options an
     the files of the base URL resolution (the main checkout's and the folder's project files and
     the user file) and the managed settings file (`/Library/Application
     Support/ClaudeCode/managed-settings.json` on macOS, `/etc/claude-code/managed-settings.json` on
-    Linux; managed settings delivered another way are not seen). A project file can only cause a
-    refusal. A file value is on when `String()` of it, as above, is one of the four words.
+    Linux; managed settings delivered another way are not seen). No variable moves that path: one
+    could reach a nested launch from a project's settings `env` block, which Claude Code applies to
+    every process a session starts, and hide the real file. A project file can only cause a
+    refusal. A file value is on when `String()` of it, as above, is one of the four words; a number
+    past the largest double reads as `Infinity`, as in JavaScript, which is off.
     Accepted costs: a refusal when the environment says on and a file Claude Code does apply says
     off (measured: Claude Code would let the file win); a refusal for a switch in a file Claude
     Code ignores (one it rejects, or a project file's under
     `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` in `-p` mode); and a refusal when a settings file is there
     and Contexto could not read it (not a regular file, over 4 MiB, not valid JSON for Python),
-    because such a file is not evidence that a switch is off. A file that does not exist, or that
+    because such a file is not evidence that a switch is off. The hint decision reads the same
+    files the same way, so a project file Claude Code ignores (one holding `NaN`, say) that turns
+    the hints on makes a launch `forwarded`; a repository gains nothing by it that a valid file
+    would not give it. A file that does not exist, or that
     this user cannot open, passes: Claude Code cannot read it either. The message names what to
     unset or fix.
   - **Settings files are read once, with a bound.** One reader for every Claude Code settings
