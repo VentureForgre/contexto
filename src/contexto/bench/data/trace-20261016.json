@@ -234,7 +234,7 @@
    10
   ],
   "steps": 138,
-  "steps_sha256": "2e6015fa3b99aa52c26644a62dcb2634b0a08ef3adb4346712ee41cf62175257"
+  "steps_sha256": "e3c39df7b7c9a123e4d1bb40ebccefff098de799f7356a7f09e0c220fa322f05"
  },
  "client": {
   "synthetic_sha256": "4ac7b9346d7fc02d82b08854473714267cfeda2fc317c24b4782688492da195d"
@@ -370,24 +370,24 @@
    84282,
    84956,
    85148,
-   85341,
-   85536,
-   85730,
-   85932,
-   86134,
-   86336,
-   86531,
-   86727,
-   87390,
-   87589,
-   87785,
-   87982,
-   88177,
-   88368,
-   88562,
-   88757,
-   88955,
-   89158
+   85343,
+   85538,
+   85732,
+   85924,
+   86116,
+   86309,
+   86504,
+   86700,
+   87363,
+   87552,
+   87748,
+   87935,
+   88131,
+   88321,
+   88516,
+   88710,
+   88908,
+   89103
   ],
   "max_input_estimated": 116278,
   "over_bound": 0,
@@ -403,9 +403,9 @@
    "shown": 48,
    "covered": 54,
    "neither": 18,
-   "best_query": 61,
+   "best_query": 60,
    "rule_returned_nothing": 18,
-   "neither_by_any_query": 5,
+   "neither_by_any_query": 6,
    "by_class": {
     "paged_only": {
      "probes": 4,
@@ -480,9 +480,9 @@
      "shown": 0,
      "covered": 0,
      "neither": 6,
-     "best_query": 1,
+     "best_query": 0,
      "rule_returned_nothing": 6,
-     "neither_by_any_query": 5
+     "neither_by_any_query": 6
     },
     "toolloop": {
      "probes": 6,
@@ -497,11 +497,11 @@
     }
    }
   },
-  "reach_sha256": "ff9f8c54c46cd0aff54295fb73863e13bc7c6e74676de2f3e754697643b02509"
+  "reach_sha256": "ad256bdf61922d902875122dca945b2861c8bd1cc69d41e47f0ca1fe7f91531a"
  },
  "recorded_with": {
   "contexto": "0.0.0+checkout",
-  "commit": "20aac1b3f46ef3d12c34fafdd9c70af76efcf8b3",
+  "commit": "cf89d0733ac0e1d63e78fe796f0ae857e093b52f",
   "python": "3.13.14"
  }
 }
