@@ -798,3 +798,15 @@ def test_the_option_defaults_repeat_the_runners_caps():
     assert (_live_options.TURN_REQUEST_CAP, _live_options.TURN_FAILURE_CAP) == (
         runner.TURN_REQUEST_CAP, runner.TURN_FAILURE_CAP)
     assert _live_options.ARMS == ARMS
+
+
+def test_contexto_run_forwards_the_hint_headers_the_bench_asks_for():
+    """Both arms run with CLAUDE_CODE_GATEWAY_HINT_HEADERS=1, so a contexto unit's launch finds the hints
+    on and forwards them (D70): the meter sees each request's class, as the arm_differences line says."""
+    from contexto.bench.arms import cli
+    from contexto.hints import hint_headers_state
+
+    env = {"PATH": os.environ.get("PATH", ""), **cli.ENV}
+    assert hint_headers_state(env=env, cwd=Path("/nonexistent"), home=Path("/nonexistent"),
+                              managed=Path("/nonexistent/managed-settings.json")) == "forwarded"
+    assert any("CONTEXTO_HINT_HEADERS=forwarded" in line for line in runner.ARM_DIFFERENCES)

@@ -98,9 +98,11 @@ ARM_DIFFERENCES = (
     "--verbose, --model), a fresh isolated configuration directory with the same settings file, the same "
     "environment, the same turn texts and the same files.",
     "contexto only: Claude Code is started by 'contexto run', which adds a --settings file (the base URL of "
-    "Contexto's proxy and permission rules for Contexto's five tools) and an --mcp-config file (Contexto's MCP "
-    "server), so its requests carry Contexto's tool definitions and server instructions, and which runs "
-    "'claude --version' once before the session. Its environment also has CONTEXTO_HOME and CONTEXTO_SESSION.",
+    "Contexto's proxy, permission rules for Contexto's five tools, and CLAUDE_CODE_GATEWAY_HINT_HEADERS=1, which "
+    "both arms already have, with Contexto's marker CONTEXTO_HINT_HEADERS=forwarded, so its proxy passes the hint "
+    "headers on to the meter) and an --mcp-config file (Contexto's MCP server), so its requests carry Contexto's "
+    "tool definitions and server instructions, and which runs 'claude --version' once before the session. Its "
+    "environment also has CONTEXTO_HOME and CONTEXTO_SESSION.",
     "plain only: CLAUDE_CODE_AUTO_COMPACT_WINDOW is set (see plain_compaction) and ANTHROPIC_BASE_URL is the meter. "
     "The contexto arm leaves auto-compaction at Claude Code's default for the model.",
     "Both Claude Code arms have a base URL on 127.0.0.1 (Contexto's proxy, or the meter). Claude Code behaves "
