@@ -47,7 +47,9 @@ from contexto.rewrite import MESSAGES, Config, EpochState, RewriteEngine
 from test_rewrite import FILL, assistant, request, system, user
 
 # What a session runs under: the bound and headroom of test_project_start_bound, the default 6,000-token
-# pin budget. A turn of the script is about 1,900 tokens, so 40 turns rotate several times.
+# pin budget. A turn of the script is about 1,900 tokens. On the Messages API the engine pages a turn's
+# tool results inside the turn (D63), so a rotation comes about every 18 turns: 40 turns rotate twice,
+# 70 turns three times.
 CONFIG = Config(bound=50_000, headroom_floor=6_000, min_turn_room=3_000)
 RATIO = 3.2  # the stub's bytes per token: denser than the estimator's seed of 3.5, so estimates run low
 MARK = "Carried from earlier sessions of this project"  # how the carried section starts

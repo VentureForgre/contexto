@@ -155,6 +155,9 @@ DECISIONS = (Decision("DECISION01Q", "the release codename is Obsidian"),
 CLOSED = ("RULE01Q", "RULE04Q")
 FACTS = facts("A", 12)
 TAIL = facts("T", 2)  # said in the first session's last turns, which are never paged out
+# The first session's length: enough turns to rotate three times on the Messages API, where tool
+# results are paged inside a turn (D63) and a rotation comes about every 18 turns.
+FIRST_TURNS = 70
 # The role a line in view names, by where the fact was said (review B on D69, finding 1).
 ROLE_OF = {"prompt": "user", "tool": "tool result", "answer": "assistant"}
 
@@ -172,7 +175,7 @@ def two(tmp_path_factory, clean_env):
     base = tmp_path_factory.mktemp("two")
     home, root = base / "contexto-home", repo(base)
     first = Session(home, session_id("two", 1), root).run(
-        Plan(rules=RULES, decisions=DECISIONS, facts=FACTS, closes=CLOSED, turns=50, tail=TAIL))
+        Plan(rules=RULES, decisions=DECISIONS, facts=FACTS, closes=CLOSED, turns=FIRST_TURNS, tail=TAIL))
     first.end()
     keys = tuple(f.key for f in FACTS + TAIL)
     second = Session(home, session_id("two", 2), root).run(Plan(searches=keys, turns=40))
@@ -339,7 +342,7 @@ def two_codex(tmp_path_factory, clean_env):
     base = tmp_path_factory.mktemp("two-codex")
     home, root = base / "contexto-home", repo(base)
     first = Session(home, session_id("codex", 1), root, dialect=RESPONSES).run(
-        Plan(rules=RULES, decisions=DECISIONS, facts=FACTS, closes=CLOSED, turns=50, tail=TAIL))
+        Plan(rules=RULES, decisions=DECISIONS, facts=FACTS, closes=CLOSED, turns=FIRST_TURNS, tail=TAIL))
     first.end()
     keys = tuple(f.key for f in FACTS + TAIL)
     second = Session(home, session_id("codex", 2), root, dialect=RESPONSES).run(Plan(searches=keys, turns=40))

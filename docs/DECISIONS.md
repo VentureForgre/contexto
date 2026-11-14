@@ -3344,22 +3344,24 @@ the owner's delegation. Open decisions are listed at the end with the options an
     searched` (`it` for one earlier session) before the hint. `--no-project-memory`'s help says the
     session `cannot search them`, and `contexto project forget --session` says later sessions `will
     carry nothing from them or search them`.
-  - **Measured** (`tests/test_project_measure.py` on this branch, 2026-11-14, load average 2.46, 2.70
-    and 2.65 before the run and 2.70, 2.74 and 2.67 after, on 18 CPUs; synthetic sessions through the
-    real engine and MCP server, stub usage). Two sessions: one project-scope search reached all 12 of
-    the first session's facts (4 said in prompts, 4 in answers, 4 in tool output), a session-scope
-    search none, and the 2 facts said in the first session's last turns, on no page, were found in its
-    last window; the same on Codex's Responses API. Five sessions: each earlier session's facts were
-    reached, 4 of 4. Bound 50,000: no request over it in either script (largest real 41,401 in the
-    two-session script, 41,571 on Codex's API, 41,448 in the five-session one), and every search was
-    charged by the one rule (6,940 tokens over the second session's 28 searches, 14 of them uncharged
-    control replies). Fifty earlier sessions of 20 records and 40 pages each (8.9 MB of pages), with
-    150 sessions of other projects in the home, medians of 5 runs in process: project memory added
-    26.9 ms to a session's start cold and 8.7 ms warm (125 of the 1,000 records fit the pin budget,
-    5,926 tokens); a session-scope search took 2.57 ms cold and 1.07 ms warm, against 2.26 and 0.93 ms
-    in a home holding only this session, and read nothing outside its own session; a project-scope
-    search took 122.8 ms cold and 39.6 ms warm, and 148.0 and 51.6 ms with each last window 227,696
-    bytes. The test asserts ceilings of 2 s for session scope and 30 s cold (15 s warm) for project
+  - **Measured** (`tests/test_project_measure.py` on this branch rebased onto 65f33e4f, so with D63's
+    in-turn paging, 2026-11-14, load average 2.46, 2.86 and 2.63 before the run and 2.42, 2.85 and
+    2.62 after, on 18 CPUs; synthetic sessions through the real engine and MCP server, stub usage).
+    Two sessions: the first runs 70 turns (50 before D63, which pages tool results inside a turn on the
+    Messages API, so the same turns rotate less often; 70 rotate three times) and pages 56 of them; one
+    project-scope search reached all 12 of its facts (4 said in prompts, 4 in answers, 4 in tool
+    output), a session-scope search none, and the 2 facts said in the first session's last turns, on
+    no page, were found in its last window; the same on Codex's Responses API. Five sessions: each
+    earlier session's facts were reached, 4 of 4. Bound 50,000: no request over it in either script
+    (largest real 40,851 in the two-session script, 41,537 on Codex's API, 40,756 in the five-session
+    one), and every search was charged by the one rule (6,940 tokens over the second session's 28
+    searches, 14 of them uncharged control replies). Fifty earlier sessions of 20 records and 40 pages
+    each (8.9 MB of pages), with 150 sessions of other projects in the home, medians of 5 runs in
+    process: project memory added 27.9 ms to a session's start cold and 8.6 ms warm (125 of the 1,000
+    records fit the pin budget, 5,926 tokens); a session-scope search took 2.59 ms cold and 1.09 ms
+    warm, against 2.20 and 0.94 ms in a home holding only this session, and read nothing outside its
+    own session; a project-scope search took 106.5 ms cold and 37.1 ms warm, and 123.9 and 46.7 ms
+    with each last window 227,696 bytes. The test asserts ceilings of 2 s for session scope and 30 s cold (15 s warm) for project
     scope.
   - **Not confirmed live.** No live model call was made for this work. Whether a model follows,
     questions or closes carried records as the heading asks is unmeasured, so is the new pin guidance's

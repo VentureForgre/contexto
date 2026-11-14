@@ -776,7 +776,9 @@ zero-spend measurements, is pull request #287 (branch `claude/d69-search-pr2`, o
 both reviewers approved, and B2's round-2 notes are fixed on the branch (an earlier session's stub
 row escapes `\n`, a search lets go of each session's page records once their rows are made, an
 earlier page's recall opens with a block that says whose page it is, and the docs state what
-"created before" rests on). Not merged.
+"created before" rests on). After the rebase onto D63 (#274) the tool-list golden is main's at
+65f33e4f, the replies fixture is re-recorded with the pages-held path, and the measurement's first
+session runs 70 turns so it still rotates three times; D69's measured numbers are re-run. Not merged.
 
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
