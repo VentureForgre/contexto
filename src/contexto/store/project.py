@@ -117,7 +117,7 @@ from contexto.store.catalog import PageCatalog, load_page
 from contexto.store.ledger import LEDGER_FILE, LedgerCorruptError, _intact, _parse, _problems
 from contexto.store.model import _RECORD_ID, Record
 from contexto.store.render import retained_matches
-from contexto.store.search import rank
+from contexto.store.search import Query, rank
 from contexto.store.state import Conflict, State, derive
 
 __all__ = ["MAIN_RECORDS_KEPT", "Carried", "EarlierPages", "EarlierSearch", "EarlierSession", "InViewLine", "Listing",
@@ -887,6 +887,13 @@ class InViewLine:
     start: int  # the part of the entry's text the line shows: text[start:end]
     end: int
     line: str
+    role: str  # the entry's role: user, assistant or tool_result (``contexto.store.RETAINED_ROLES``)
+
+    @property
+    def shown_role(self) -> str:
+        """The role as a reply names it (``tool result``): an earlier session's tool output must never
+        read like its user's words (review B on D69, finding 1)."""
+        return self.role.replace("_", " ")
 
 
 @dataclass(frozen=True)
@@ -941,6 +948,17 @@ def _parse_retained(data: bytes) -> tuple[dict[str, Any], ...]:
     if snapshot is None:
         raise ValueError(f"{RETAINED_FILE} is not a retained-window snapshot")
     return tuple(snapshot[3])
+
+
+def _window_matches(entries: Sequence[dict[str, Any]], query: str) -> list[tuple[int, int, int, int, str, str]]:
+    """``render.retained_matches`` of an earlier session's snapshot (no question is being asked in it:
+    ``asked=False``), each match with its entry's role after it, in the same order."""
+    q = Query.parse(query)
+    if q is None:
+        return []
+    found = [(*match, entry["role"]) for entry in entries for match in retained_matches([entry], q, asked=False)]
+    found.sort(key=lambda m: (m[0], m[1], m[2]), reverse=True)  # stable, as retained_matches sorts
+    return found
 
 
 def _real_directory(path: Path) -> None:
@@ -1136,7 +1154,7 @@ class EarlierPages:
             entries = self._snapshot(member)
             if entries is None:
                 unusable += 1
-            matched = retained_matches(list(entries or ()), query, asked=False)
+            matched = _window_matches(entries or (), query)
             lines = [InViewLine(*m) for m in matched[:EARLIER_HITS - (1 if pages else 0)]]
             pages = pages[:EARLIER_HITS - len(lines)]
             if pages or lines:
