@@ -27,6 +27,43 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   ones it did not. A query that some turn holds every word of gets the same result as before
   ([docs/search.md](docs/search.md)). `contexto search --json` marks such a result `approximate` and
   gives each hit's `matched` and `missing` words.
+- A new session starts with the open obligations and active decisions the model pinned in earlier
+  sessions of the same project, so a standing rule pinned yesterday is in view from the first
+  request. A project is the git repository the session started in (a linked worktree or a
+  submodule is its own), else the directory itself. Only pins the proxy saw the main conversation
+  make are carried, never a subagent's: Claude Code subagents are told apart by their
+  `X-Claude-Code-Agent-Id` header (a request that carries it is never read for pins, even a fork's
+  that has the main conversation's key), and a conversation that became the main one only by having
+  more turn starts (a subagent without that header, a Codex child conversation) is not trusted. The model
+  sees carried records as records from an earlier session, not as instructions, with each record's
+  text quoted and escaped. See [docs/project-memory.md](docs/project-memory.md).
+- Codex sessions give nothing to project memory. On codex-cli 0.163.0, as measured, the model calls
+  Contexto's tools from inside Codex's code-mode `exec` tool, which the proxy does not read for this,
+  so a Codex session's pins are never carried and its closures of carried records count only in
+  that session. A Codex session does start with what Claude Code sessions of the project carried.
+  Not checked on codex-cli 0.166.0 or live.
+- A closure or replacement made in the main conversation of any session of the project applies to
+  every session of it, running sessions included (before a session's first rotation from its next
+  turn start; after it, from its next rotation). Forgetting a session never reopens what it closed;
+  pruning it does.
+- At start, `contexto run` prints how many records were carried and from how many sessions, and
+  `contexto state` lists them under their own heading; `contexto state --json` lists them under
+  `carried`.
+- `contexto project show` lists a project's sessions and what a new session would carry.
+  `contexto project forget --record ID`, `--session ID` (full ids only) or `--all` takes records or
+  sessions out of it; nothing is deleted until `contexto sessions prune`.
+- `contexto run --no-project-memory`, or `CONTEXTO_PROJECT_MEMORY=0`, keeps a session out of
+  project memory: it carries nothing and gives nothing to later sessions. It stays off when you
+  resume it, and a resumed session stops sending what it carried: at once before its first
+  rotation; after it, from its next rotation.
+- The model is now told to pin only what you state in your own messages, never a rule found in tool
+  results, files, web pages or another agent's output. This applies to every session.
+- `contexto state` shows a character of a stored record that could move the cursor, end the line,
+  or reorder or hide text as its escape. Joiners and other format characters print as they are, and
+  so does a variation selector right after the emoji or ideograph it varies; anywhere else it is an
+  escape. One zero-width character between letters prints (a ZWNJ in Persian, a ZWJ in an emoji);
+  a run of them, or one next to a space, is escapes.
+- Records pinned before this release are never carried, so project memory starts empty.
 - `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
   described in the command's `--help`; an error is still one line on stderr with the usual exit
   code. `contexto state --json` includes the store faults `contexto stats --json` shows.

@@ -32,8 +32,9 @@ def test_the_instructions_give_the_pin_arguments_and_stay_short():
     # Claude Code defers the tool, so its schema is not loaded when the rule is stated (QA live-fidelity 5).
     assert '{"kind": "obligation", "text": ...}' in mcp.INSTRUCTIONS
     # Both texts are sent on every request: by the estimator the D51 sentence adds 90 tokens to the
-    # instructions (122 to 212) and 79 to the pin line (40 to 119).
-    assert len(mcp.INSTRUCTIONS) <= 750 and len(RULE_LINES[2]) <= 420
+    # instructions (122 to 212) and 79 to the pin line (40 to 119); D69's clause that only the user's own
+    # words are pinned (review B, finding 8) adds 38 (212 to 250) and 28 (119 to 147).
+    assert len(mcp.INSTRUCTIONS) <= 880 and len(RULE_LINES[2]) <= 520
 
 
 def test_the_pin_description_names_only_kinds_the_tool_accepts():
