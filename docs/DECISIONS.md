@@ -3321,7 +3321,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     upstream. Decided: the launcher writes its state beside the variable as
     `CONTEXTO_HINT_HEADERS`, and a launch that finds `stripped` there does not count the process
     environment's value (with `forwarded` the user really had the hints on, so the nested launch
-    forwards too; a settings file's value counts either way). Tested with the fake `claude` and
+    forwards too; a settings file's value counts either way, unless that file carries the marker
+    `stripped` too, which is what `contexto serve --print-settings` prints; see "Hint headers under
+    `serve`"). Tested with the fake `claude` and
     with the real 2.1.322 run with the inherited environment. Limit, not fixable in the proxy: a
     nested plain `claude` pointed at another base URL inherits the `1` and sends the hints there,
     with no Contexto proxy in its path. A user whose gateway rejects them sets the variable to `0`
@@ -3591,10 +3593,23 @@ the owner's delegation. Open decisions are listed at the end with the options an
       launcher's three states are not used: the service cannot see a client's settings, and a
       client that leaves the variable out sends none. The round-3 review found the printed settings
       turned the hints on while the service still forwarded them. Rejected: leaving the variable
-      out of the printed settings, which would leave `serve` on the signatures alone. Limit: merged
-      into the user settings file, the variable reaches every Claude Code the user starts, and a
-      `contexto run claude` then reads it as the user's own and forwards the hints to its upstream
-      (`forwarded`); `docs/serve.md` advises a separate `--settings` file.
+      out of the printed settings, which would leave `serve` on the signatures alone. The review of
+      #272 found the printed settings carried no marker, so a `contexto run claude` that inherited
+      them (started inside a session given the printed file as `--settings`) or read them from the
+      user settings file they were merged into took the `1` for the user's own and forwarded the
+      hints to its upstream. Decided: the printed `env` block carries
+      `CONTEXTO_HINT_HEADERS=stripped` beside the variable, as the launcher's own `--settings` file
+      does, whatever `--forward-hint-headers` says (that is the service's choice, not the user's
+      settings). The launcher discounts the process environment's value under that marker as before,
+      and now also a settings file whose `env` block sets the variable on beside `stripped`: such a
+      file is read as not setting the variable, and the next file or the environment decides
+      (`contexto.hints.contexto_set_hints_on`). An off value is never discounted. Tested with the
+      fake `claude`: both ways, the upstream got no gated header and the launch logged `stripped`.
+      Limit: merged into the user settings file, the printed block replaces a hint setting the user
+      had there, so a user who had turned the hints on in that file for their own gateway gets
+      `stripped` from `contexto run claude` until they turn them on elsewhere (the environment, a
+      project file, or the file without the marker); `docs/serve.md` advises a separate `--settings`
+      file.
     - **The MCP server for the service's clients: `contexto mcp --serve`.** A client `contexto serve`
       serves is not launched by Contexto, so its MCP server is registered once in the user's Claude
       Code configuration and shared by every conversation: it cannot be started with `--session S`.

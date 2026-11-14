@@ -218,9 +218,17 @@ upstream gets none of them, no prompt id included, just as without the setting.
 `--forward-hint-headers` passes them on, for an upstream gateway that reads them. Leave the
 variable out of the settings and the engine reads its signatures alone.
 
+Beside the hint setting, `--print-settings` writes `CONTEXTO_HINT_HEADERS=stripped`, the marker
+`contexto run claude` writes in its own settings file: it says the `1` is Contexto's, not yours. A
+`contexto run claude` started inside a session that uses the printed file inherits both and strips
+the hints, and so does one that finds both in a settings file the printed settings were merged into.
+To have `contexto run claude` forward the hints to your own gateway, turn them on in your
+environment or in a settings file without the marker.
+
 Keep these settings in their own file passed with `--settings`, as above, where you can. Merged into
-Claude Code's user settings, they reach every Claude Code you start, and a `contexto run claude`
-then counts the hint setting as your own and forwards the hints to its upstream.
+Claude Code's user settings, they reach every Claude Code you start, and they replace a hint
+setting you had there: if you had turned the hints on in that file for your gateway,
+`contexto run claude` strips them from then on, until you turn them on in one of the other places.
 
 Session directories accumulate: every new conversation, every `claude -p` and every `/clear` adds
 one under `$CONTEXTO_HOME/sessions/`. The service never deletes one. Remove old ones with
@@ -477,9 +485,10 @@ sets `ANTHROPIC_BASE_URL`, so nothing competes with the settings file.
 
 From then on every Claude Code that reads these files goes through the service, the terminal's
 `claude` included, and fails to connect while the service is down. `contexto run claude` then needs
-`--upstream URL` (see [Upstream](#upstream)). To undo it, remove the `ANTHROPIC_BASE_URL` and
-`CLAUDE_CODE_GATEWAY_HINT_HEADERS` entries and the five `mcp__contexto__` allow rules from the
-settings file, and run `claude mcp remove --scope user contexto`.
+`--upstream URL` (see [Upstream](#upstream)). To undo it, remove the `ANTHROPIC_BASE_URL`,
+`CLAUDE_CODE_GATEWAY_HINT_HEADERS` and `CONTEXTO_HINT_HEADERS` entries and the five
+`mcp__contexto__` allow rules from the settings file, and run
+`claude mcp remove --scope user contexto`.
 
 Not tested in VS Code. The test runs the commands above and then the real `claude -p` with nothing
 but the user's files (no `--settings`, no `--mcp-config`), and checks that its requests and its pin
