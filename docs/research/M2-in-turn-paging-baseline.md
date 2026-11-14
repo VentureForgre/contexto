@@ -203,7 +203,8 @@ request of the same conversation at a position both have. Two numbers describe i
 - **re-sent tokens**: what the rewrite cost, the request's uncached tokens less the tokens of the
   items the CLI added since its previous request (an added item counts as it was forwarded, when that
   is smaller; a new prompt the engine merged into another message counts in full). The re-sent share
-  is their share of all input tokens sent.
+  is their share of all input tokens sent, and "re-sent share, any prefix" the same share of the
+  any-prefix figure (0.0% in every row here; `replay.py` prints both).
 
 On Messages "cache read" and "re-sent" use the breakpoint model below: the headline figures. "Any
 prefix" is what a cache that kept every prefix sent would give: on Messages an upper bound on the read
@@ -214,23 +215,23 @@ over the scenario's loops, the CLI's items since each turn's prompt at the turn'
 without its thinking. "Thinking kept around a strip" counts requests that hold thinking both before
 and after thinking that is missing (on Codex, reasoning items).
 
-| scenario | dialect | input tokens sent | cache read | cache read, any prefix | rewrites | in a loop | cache invalidated | re-sent | mean re-sent | largest re-sent | re-sent, any prefix | loops' own tokens | re-sent share | newest thinking missing | thinking kept around a strip |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| loop120 | claude | 52,567,369 | 98.5% | 98.5% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 797,200 | 0.0% | 0 | 0 |
-| loop120 | codex | 52,440,285 | 98.5% | 98.5% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 798,626 | 0.0% | 0 | 0 |
-| large | claude | 3,317,868 | 87.8% | 87.8% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 391,296 | 0.0% | 0 | 0 |
-| large | codex | 3,290,830 | 87.7% | 87.7% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 391,148 | 0.0% | 0 | 0 |
-| small (1,500) | claude | 682,821,272 | 99.9% | 99.9% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 876,274 | 0.0% | 0 | 0 |
-| small (260) | claude | 24,495,254 | 99.3% | 99.3% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 153,749 | 0.0% | 0 | 0 |
-| small (1,500) | codex | 679,264,448 | 99.9% | 99.9% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 875,037 | 0.0% | 0 | 0 |
-| small (260) | codex | 23,971,580 | 99.3% | 99.3% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 153,292 | 0.0% | 0 | 0 |
-| subagent | claude | 66,738,251 | 98.7% | 98.7% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 868,541 | 0.0% | 0 | 0 |
-| images | claude | 22,642,903 | 98.2% | 98.2% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 386,521 | 0.0% | 0 | 0 |
-| images | codex | 22,470,669 | 98.2% | 98.2% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 386,726 | 0.0% | 0 | 0 |
-| multiturn | claude | 31,253,082 | 98.2% | 98.2% | 1 | 0 | 536,573 | 1,507 | 1,507 | 1,507 | 1,507 | 542,999 | 0.0% | 0 | 0 |
-| multiturn | codex | 31,126,696 | 98.2% | 98.2% | 1 | 0 | 537,948 | 1,102 | 1,102 | 1,102 | 1,102 | 544,418 | 0.0% | 0 | 0 |
-| mixed | claude | 7,173,132 | 96.4% | 96.4% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 244,042 | 0.0% | 0 | 0 |
-| mixed | codex | 7,084,054 | 96.4% | 96.4% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 243,947 | 0.0% | 0 | 0 |
+| scenario | dialect | input tokens sent | cache read | cache read, any prefix | rewrites | in a loop | cache invalidated | re-sent | mean re-sent | largest re-sent | re-sent, any prefix | loops' own tokens | re-sent share | re-sent share, any prefix | newest thinking missing | thinking kept around a strip |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| loop120 | claude | 52,567,369 | 98.5% | 98.5% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 797,200 | 0.0% | 0.0% | 0 | 0 |
+| loop120 | codex | 52,440,285 | 98.5% | 98.5% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 798,626 | 0.0% | 0.0% | 0 | 0 |
+| large | claude | 3,317,868 | 87.8% | 87.8% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 391,296 | 0.0% | 0.0% | 0 | 0 |
+| large | codex | 3,290,830 | 87.7% | 87.7% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 391,148 | 0.0% | 0.0% | 0 | 0 |
+| small (1,500) | claude | 682,821,272 | 99.9% | 99.9% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 876,274 | 0.0% | 0.0% | 0 | 0 |
+| small (260) | claude | 24,495,254 | 99.3% | 99.3% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 153,749 | 0.0% | 0.0% | 0 | 0 |
+| small (1,500) | codex | 679,264,448 | 99.9% | 99.9% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 875,037 | 0.0% | 0.0% | 0 | 0 |
+| small (260) | codex | 23,971,580 | 99.3% | 99.3% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 153,292 | 0.0% | 0.0% | 0 | 0 |
+| subagent | claude | 66,738,251 | 98.7% | 98.7% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 868,541 | 0.0% | 0.0% | 0 | 0 |
+| images | claude | 22,642,903 | 98.2% | 98.2% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 386,521 | 0.0% | 0.0% | 0 | 0 |
+| images | codex | 22,470,669 | 98.2% | 98.2% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 386,726 | 0.0% | 0.0% | 0 | 0 |
+| multiturn | claude | 31,253,082 | 98.2% | 98.2% | 1 | 0 | 536,573 | 1,507 | 1,507 | 1,507 | 1,507 | 542,999 | 0.0% | 0.0% | 0 | 0 |
+| multiturn | codex | 31,126,696 | 98.2% | 98.2% | 1 | 0 | 537,948 | 1,102 | 1,102 | 1,102 | 1,102 | 544,418 | 0.0% | 0.0% | 0 | 0 |
+| mixed | claude | 7,173,132 | 96.4% | 96.4% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 244,042 | 0.0% | 0.0% | 0 | 0 |
+| mixed | codex | 7,084,054 | 96.4% | 96.4% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 243,947 | 0.0% | 0.0% | 0 | 0 |
 
 Today every loop request is an append, so nothing is invalidated or re-sent and no thinking is
 removed in flight, and the two cache models agree: each request's newest breakpoint is a few blocks
@@ -516,7 +517,8 @@ min_turn_room`, 113,000 at the defaults.
      text does not name, the whole turn left (no 40-character run of its prompt or of any of its
      answers that is found in no other turn's text, with whitespace, Unicode format characters and
      combining marks removed, is anywhere in that text, plain-text documents included; a text shorter
-     than 40 characters counts only as a whole text part), and the
+     than 40 characters is set aside only when another turn has that same whole text, and counts
+     only as a whole text part), and the
      result is stored byte for byte in some page. An index past its budget lists only the newest pages,
      so a correct long session needs the second way (v0.5.24 with a 40-token index fails 6 requests
      without it). A missing prompt alone is not evidence that a turn was paged: an engine that trims,
@@ -529,12 +531,15 @@ min_turn_room`, 113,000 at the defaults.
      every form: a turn cut to fewer than 40 characters of each prompt and answer, with the omission
      line, passes, as does the open case itself (`omit_turns`, tested as passing); so does a short turn
      kept only inside a longer text block (`"yes\n\nDone."` merged into one block), and a turn whose
-     every text is repeated in other turns: a short text exactly as another turn's, a longer one quoted
-     in full inside another turn's text, whether or not that turn is in the request (its texts cannot
-     be told apart from the other turn's). A correct engine
+     every text is repeated in other turns: a short text exactly as another turn's, a longer one whose
+     every 40-character run is found in other turns' text, quoted in full or in overlapping parts,
+     whether or not those turns are in the request (its texts cannot be told apart from theirs). A
+     correct engine
      whose turns share text (every prompt "continue", "yes" or "ok", a common template or answer
      opener, a final answer "Done.", a later prompt quoting an earlier one) is not failed: a turn's
-     runs found in another turn's text are not counted, and a short text counts only whole. What remains open: an engine that
+     40-character runs found in another turn's text are not counted, and a short text is set aside
+     only when another turn has that same whole text, and counts only as a whole text part. What
+     remains open: an engine that
      drops an earlier turn whole, prompt included, and writes an omission line the store bears out
      passes rule 3 for that turn; that is what a turn-start rotation past the index budget does, and
      the results stay stored and searchable. `system` (Codex `instructions`) is not read for page ids:

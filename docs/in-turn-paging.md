@@ -93,7 +93,11 @@ such PDFs, the cost is shared among them by their size as sent (a PDF by URL or 
 size of its reference, so its share can be low; read again alone later, such a PDF can take a request
 over the bound, which the log records as `over_bound` from usage. Claude Code sends PDFs inline, so
 its sessions do not reach this). The costs are kept with the session's state, so a
-proxy restart keeps them; one a restart still lost is measured again, as on the PDF's first sending. Tool search results (`tool_reference`) are never stubbed.
+proxy restart keeps them; one a restart still lost is measured again, as on the PDF's first sending.
+The same holds when `contexto serve` closes a session (idle for `--idle-minutes`, or the least
+recently used when `--max-sessions` are open) and reopens it at its next request, which builds the
+session's engine again from its state on disk, as a restart does. Tool search results
+(`tool_reference`) are never stubbed.
 
 The wording is the same in every conversation. A subagent given only some tools, or a session where
 tool search has deferred Contexto's tools, may not have `contexto_recall`; the stub then tells the
@@ -257,7 +261,7 @@ that enforces preserved thinking may refuse. Switch it off between turns when yo
   paged. The older release sends the loop's raw history, whose thinking was produced under stubs it
   does not send, and an account that enforces preserved thinking refuses it with a 400 ("bound to a
   different conversation"). Downgrade between turns.
-- After a proxy restart a subagent's in-turn state is not restored: its next request over the
+- After a proxy restart (or a `contexto serve` reopen) a subagent's in-turn state is not restored: its next request over the
   trigger pages again and loses the loop's thinking once more. The main conversation resumes
   exactly.
 - An in-turn page written by this release is read by v0.5.24 and earlier as an ordinary page:
