@@ -2875,8 +2875,18 @@ the owner's delegation. Open decisions are listed at the end with the options an
       earlier conversation can be: a subagent carries its parent's id). Before review B round 5 (N13)
       the first conversation to reach a restarted proxy was trusted whatever it was, so a subagent
       without its agent id, or a Codex child, sent while the user's conversation waited on it, had its
-      pins confirmed. The cost of the rule: a first main that is none of these carries nothing until
-      it takes main by a trusted rule. The new-session case relies on the launcher's list of the
+      pins confirmed. A conversation an earlier engine on the store trusted as main is trusted again
+      (`meta.json` `trusted_conversations`, the newest 64 conversation keys, written when a key is
+      first trusted): without that list a later `--continue` of the user's own conversation that the
+      record did not name (one started with `--session ID`, or after a `/clear` that never wrote the
+      record) was never trusted, and then wrote `untrusted` into the record, so every later continue
+      carried nothing too (review A round 6, finding 1). A conversation's key is the hash of its
+      first message, which for a subagent is its task, so the list never names one the user did not
+      start. A record whose store holds no served session ids (a store from before D55, an
+      unreadable `meta.json`) counts no session id as new (finding 3). The cost of the rule: a first
+      main that is none of these carries nothing until it takes main by a trusted rule; in Codex
+      that is a new conversation in a reused session, which a Codex child cannot be told apart
+      from (finding 2). The new-session case relies on the launcher's list of the
       Claude Code sessions a store served (`cli_sessions`), which is kept on a best-effort basis: a
       failed write, the 64-id limit, or a session whose earlier engines ran without the launcher can
       leave the user's own session id out of it, and a first request in that id is then trusted

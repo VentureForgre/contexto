@@ -95,8 +95,9 @@ These hold no conversation text:
   project memory it also holds `project` (the absolute path of the project's root directory,
   recorded once at the session's first launch and never moved by a resume from elsewhere),
   `project_memory` (`false` when the session is out of project memory), `main_records` (the record
-  ids the proxy saw the main conversation pin or close, the newest 4,096; only these are carried)
-  and `forgotten` (the record ids `contexto project forget` took out of what later sessions carry).
+  ids the proxy saw the main conversation pin or close, the newest 4,096; only these are carried),
+  `trusted_conversations` (the keys of the main conversations the proxy trusted, the newest 64: each is
+  a hash of a conversation's first message, not its text) and `forgotten` (the record ids `contexto project forget` took out of what later sessions carry).
 - `log.jsonl`: the session log. It records sizes, counts, request paths, status codes, error
   names, hashes, event names, and the upstream source, never prompts, replies or the upstream URL.
   It also records three labels from fixed word lists: a request's class (`request_class`), what

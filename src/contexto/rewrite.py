@@ -2356,9 +2356,19 @@ class RewriteEngine:
         # earlier conversation can be: it carries its parent's id (review B round 5, N13).
         served = getattr(self.store, "cli_sessions", None)
         try:
-            self._served_before: frozenset[str] = frozenset(served("claude")) if callable(served) else frozenset()
+            self._served_before: frozenset[str] | None = (frozenset(served("claude")) if callable(served)
+                                                          else frozenset())
         except Exception:  # a store that cannot say: no session counts as new
-            self._served_before = frozenset()
+            self._served_before = None
+        # D69: the conversations an earlier engine on this store trusted as main (review A round 6, finding 1),
+        # read now for the same reason; a later continue or resume of one is trusted though the epoch record
+        # names another. A conversation's key is the hash of its first message, which for a subagent is its
+        # task, not the user's prompt, so this never trusts a subagent that the record does not name.
+        known = getattr(self.store, "trusted_conversations", None)
+        try:
+            self._trusted_before: frozenset[str] = frozenset(known()) if callable(known) else frozenset()
+        except Exception:
+            self._trusted_before = frozenset()
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -2565,20 +2575,40 @@ class RewriteEngine:
         return hints, judged, events
     def _first_trusted(self, key: str) -> bool:
         """D69: whether the engine's first main conversation is trusted. Only when the engine has no record
-        of an earlier main (a new session), when the record names this conversation and does not say
-        ``untrusted``, or when this is a Claude Code request in a session id the store had not served before
-        this engine started, with no agent id and no parent (a new CLI session). Otherwise a restart would
+        of an earlier main (a new session), when an earlier engine on this store trusted this conversation
+        (``trusted_conversations``), when the record names it and does not say ``untrusted``, or when this
+        is a Claude Code request in a session id the store had not served before this engine started,
+        with no agent id and no parent (a new CLI session; a store with no served ids counts none as
+        new). Otherwise a restart would
         trust whichever conversation reached it first, such as a subagent without its agent id or a Codex
         child, while the user's conversation waits on it (review B round 5, N13); such a first main is not
         trusted until it takes main by a trusted rule, which costs a carry and never gains one."""
         record = self._record
-        if record is None:
+        if record is None or key in self._trusted_before:
             return True
         if record.get("conversation") == key:
             return record.get("untrusted") is not True
+        # A record with no served session ids (a store from before D55, an unreadable meta.json) cannot say
+        # which session ids are new, so none is (review A round 6, finding 3).
+        if not self._served_before:
+            return False
         session = self._cli_sessions.get(key)
         return bool(session and session.id and not session.agent and not session.parent
                     and not self._agent_header.get(key) and session.id not in self._served_before)
+
+    def _trust(self, key: str) -> None:
+        """D69: trust ``key`` as the main conversation and record it for later engines on this store. A
+        failed write is not fatal: that conversation is then trusted again only by the other rules."""
+        self._trusted.add(key)
+        if key in self._trusted_before:
+            return
+        writer = getattr(self.store, "add_trusted_conversation", None)
+        try:
+            if callable(writer):
+                writer(key)
+        except Exception:
+            pass
+        self._trusted_before = self._trusted_before | {key}
 
     def _confirm_main_records(self, key: str, messages: list, events: list[dict]) -> None:
         """D69: record in the store the ids of the records the main conversation's own history shows it
@@ -2727,8 +2757,8 @@ class RewriteEngine:
         # engine's first main, so it is trusted (review A round 3, finding 1: publishes() sees it main
         # already and would otherwise never trust it, so a resumed session's pins were never carried),
         # unless the record says the previous engine did not trust it (review B round 4, N9).
-        if self._record.get("untrusted") is not True:
-            self._trusted.add(key)
+        if self._record.get("untrusted") is not True or key in self._trusted_before:
+            self._trust(key)
         self._resumed = True
         events = [{"event": "epoch_resumed", "epoch": state.epoch, "k": state.k}]
         if reclassified:
@@ -2814,7 +2844,7 @@ class RewriteEngine:
         self._set_main(main)
         if (previous is None and self._first_trusted(main)) or (
                 previous != main and self._main_reason in TRUSTED_MAIN_REASONS):
-            self._trusted.add(main)  # D69: its pins and closures are confirmed (_confirm_main_records)
+            self._trust(main)  # D69: its pins and closures are confirmed (_confirm_main_records)
         session = self._cli_sessions.get(main)
         if previous is not None and previous != main:
             lost = self._cli_sessions.get(previous)

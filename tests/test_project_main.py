@@ -522,3 +522,53 @@ def test_after_a_restart_a_new_cli_session_seen_first_is_trusted(home, tmp_path)
     first, rid, root = _restart_with_first(home, tmp_path, [user("a new conversation", context=True)], NEW,
                                            served=[OLD])
     assert first.main_records() == [rid]
+
+
+def test_a_later_launch_continuing_the_users_own_conversation_is_trusted(home, tmp_path):
+    """Review A round 6, finding 1: launch 1 records conversation A; launch 2 starts a new conversation B
+    (trusted: a new session id); launch 3 continues B, which the epoch record does not name. B was
+    trusted before, so it is trusted again and its pins are carried."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    first.record_cli_session("claude", OLD)
+    send(RewriteEngine(first, config=ROOMY), MESSAGES, main_request(conversation("conversation A", 6), OLD))
+    b = conversation("conversation B", 2)
+    two = RewriteEngine(first, config=ROOMY)  # built before the launcher records the launch's session id
+    first.record_cli_session("claude", NEW)
+    send(two, MESSAGES, main_request(b, NEW), session=NEW)
+    assert first.epoch_record()["conversation"] != first.trusted_conversations()[-1]  # the record names A
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="pinned when B is continued")
+    three = RewriteEngine(first, config=ROOMY)
+    send(three, MESSAGES, main_request([*b, *pin_pair("c1", reply), user("next")], NEW), session=NEW)
+    assert first.main_records() == [rid]
+    assert carried_ids(new_session(home, "s2", root, 2)) == [rid]
+
+
+@pytest.mark.parametrize("variant", ["agent", "parent"])
+def test_after_a_restart_a_request_with_an_agent_id_or_a_parent_seen_first_is_not_trusted(variant, home, tmp_path):
+    """Review A round 6, nit 6: the agent-id and parent clauses of the new-session case."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    first.record_cli_session("claude", OLD)
+    send(RewriteEngine(first, config=ROOMY), MESSAGES, main_request(conversation("the user's prompt", 1), OLD))
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="pinned after the restart")
+    two = RewriteEngine(first, config=ROOMY)
+    messages = [*conversation("SUB-TASK in a new session id", 2), *pin_pair("c1", reply), user("next")]
+    if variant == "agent":
+        two(main_request(messages, NEW), headers(NEW, agent=True), MESSAGES)
+    else:
+        two(request(messages, metadata=metadata(NEW, parent=OLD)), headers(NEW), MESSAGES)
+    assert first.main_records() == []
+
+
+def test_a_store_with_a_record_and_no_served_sessions_counts_no_session_as_new(home, tmp_path):
+    """Review A round 6, finding 3: with no served session ids recorded (a store from before D55), a first
+    request in a session id the record does not name is not trusted as a new session."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    send(RewriteEngine(first, config=ROOMY), MESSAGES, main_request(conversation("the user's prompt", 1), OLD))
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="pinned by a headerless subagent")
+    two = RewriteEngine(first, config=ROOMY)
+    two(main_request([*conversation("SUB-TASK do it", 2), *pin_pair("c1", reply), user("next")], OLD),
+        headers(OLD), MESSAGES)
+    assert first.main_records() == []

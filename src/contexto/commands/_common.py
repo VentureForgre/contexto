@@ -50,6 +50,9 @@ _BLANK_SYMBOLS = frozenset({0x2800, 0xFFFC})
 # Zero-width characters: one prints (a ZWNJ in Persian, a ZWJ in an emoji sequence); two or more in a row
 # carry text in their pattern, so a run is shown as escapes (N14).
 _ZERO_WIDTH = frozenset({0x180E, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF})
+# Characters drawn as nothing or as a blank cell, which count with the zero-width ones for that rule, so a
+# run cannot be hidden by placing one of them between each pair (review A round 6, finding 4).
+_BLANKS = frozenset({0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0, *range(0x180B, 0x1810)})
 
 
 def _ideograph(c: str) -> bool:
@@ -73,7 +76,8 @@ def _shown(c: str, before: str, after: str) -> bool:
     n = ord(c)
     if n in _INVISIBLE:
         return False
-    if n in _ZERO_WIDTH and ((before and ord(before) in _ZERO_WIDTH) or (after and ord(after) in _ZERO_WIDTH)):
+    if n in _ZERO_WIDTH and ((before and ord(before) in _ZERO_WIDTH | _BLANKS)
+                             or (after and ord(after) in _ZERO_WIDTH | _BLANKS)):
         return False
     if n in _SELECTORS or n in _IDEOGRAPHIC_SELECTORS:
         return _selector_shown(n, before, after)
@@ -89,7 +93,7 @@ def safe_text(text: str) -> str:
     variation selector after an emoji, a symbol or an ideograph or in a keycap, other format characters and
     spaces that text in many scripts and emoji need."""
     if text.isprintable() and not any(ord(c) in _SELECTORS or ord(c) in _IDEOGRAPHIC_SELECTORS
-                                      or ord(c) in _INVISIBLE or ord(c) in _ZERO_WIDTH for c in text):
+                                      or ord(c) in _INVISIBLE for c in text):
         return text
 
     def escape(c: str) -> str:

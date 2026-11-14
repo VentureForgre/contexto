@@ -95,6 +95,7 @@ def check_page_id(page_id: Any) -> str:
 KEY_BYTES = 32
 
 LIVE_LOCK = "live.lock"
+TRUSTED_CONVERSATIONS_KEPT = 64  # add_trusted_conversation: main conversations an engine trusted (D69)
 CLI_SESSIONS_KEPT = 64  # record_cli_session: CLI conversation ids kept per CLI (a /clear or a fork adds one)
 LIVE_ATTEMPTS = 8  # hold_live: tries before giving up on a session that keeps being deleted
 
@@ -591,6 +592,31 @@ class SessionStore(LedgerOps):
     def main_records(self) -> list[str]:
         """The record ids ``add_main_records`` kept, oldest first."""
         kept = self._meta().get("main_records")
+        return [x for x in kept if isinstance(x, str)] if isinstance(kept, list) else []
+
+    def add_trusted_conversation(self, key: str) -> None:
+        """Record that an engine trusted the conversation ``key`` as the main one (D69): its own first
+        main, or one that took main by a trusted rule. A later engine on this store trusts that
+        conversation again when it is the first it sees (``RewriteEngine._first_trusted``), so a
+        ``--continue`` of the user's conversation carries pins though the epoch record names another
+        one. Kept in ``meta.json`` as ``trusted_conversations``, once each, the newest
+        ``TRUSTED_CONVERSATIONS_KEPT``."""
+        if not isinstance(key, str) or not key:
+            return
+
+        def change(meta: dict[str, Any]) -> dict[str, Any] | None:
+            kept = meta.get("trusted_conversations")
+            kept = [x for x in kept if isinstance(x, str)] if isinstance(kept, list) else []
+            if kept and kept[-1] == key:
+                return None
+            kept = [x for x in kept if x != key] + [key]
+            return {"trusted_conversations": kept[-TRUSTED_CONVERSATIONS_KEPT:]}
+
+        self._modify_meta(change)
+
+    def trusted_conversations(self) -> list[str]:
+        """The conversation keys ``add_trusted_conversation`` kept, oldest first."""
+        kept = self._meta().get("trusted_conversations")
         return [x for x in kept if isinstance(x, str)] if isinstance(kept, list) else []
 
     def project(self) -> Project | None:

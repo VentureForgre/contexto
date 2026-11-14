@@ -76,6 +76,14 @@ class MemoryStore(LedgerOps):
     def main_records(self) -> list[str]:
         return list(getattr(self, "_main_records", ()))
 
+    def add_trusted_conversation(self, key: str) -> None:
+        """As ``SessionStore.add_trusted_conversation``, kept in memory."""
+        kept = [x for x in getattr(self, "_trusted_conversations", []) if x != key]
+        self._trusted_conversations = [*kept, key][-64:]
+
+    def trusted_conversations(self) -> list[str]:
+        return list(getattr(self, "_trusted_conversations", ()))
+
     def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None:
         check_window(window_tokens, bytes_per_token)
         self._window_model = check_model(model)

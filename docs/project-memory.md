@@ -77,8 +77,11 @@ Which conversation is the main one is the proxy's choice (D50 in [DECISIONS.md](
 history is trusted when it has been the main conversation since its first request (or was resumed as
 the main conversation by a restarted proxy or `contexto run --resume`, unless the proxy before the
 restart did not trust it either). After a restart, another conversation that reaches the proxy
-first is trusted only when it is a new Claude Code session; until then a restarted proxy may carry
-less, never more. A conversation also becomes trusted when it became the main
+first is trusted only when a proxy on this session trusted it before (a `--continue` or `--resume`
+of your own conversation) or it is a new Claude Code session; otherwise a restarted proxy may carry
+less, never more. In Codex, a new conversation in a reused session (`contexto run --session ID
+codex` with a new prompt) is never trusted, because a Codex child conversation cannot be told apart
+from it; a new Codex session is. A conversation also becomes trusted when it became the main
 one after `/clear`, `/resume`, a compaction, or a side request that came first. Claude Code subagents
 are told apart by the `X-Claude-Code-Agent-Id` header Claude Code sends with their requests, and never
 take over as the main conversation. A request that carries `X-Claude-Code-Agent-Id` or a parent session id
@@ -236,8 +239,9 @@ format characters print as they are, so Persian and Devanagari read normally. A 
 prints as it is only right after a character it varies (an emoji or another non-ASCII symbol, an
 ideograph, or a keycap such as 1️⃣); anywhere else, and after a blank symbol such as U+2800, it and
 the invisible operators U+2061 to U+2064 are escapes, and so is every character of a run of two or
-more zero-width characters. One selector after a symbol or an ideograph can still carry a few bits
-that a terminal does not show; the model gets every carried record as ASCII escapes, so this affects
+more zero-width characters, counting blank characters such as U+034F, U+3164 and U+2800 among them.
+One selector after a symbol or an ideograph, or one zero-width character between two letters, can
+still carry a few bits that a terminal does not show; the model gets every carried record as ASCII escapes, so this affects
 only what you see. `contexto state --raw` prints the text the model gets, with the heading above and the
 JSON literals, except that those characters in your session's own records are shown as escapes; the
 model gets them as they were pinned. The carried records hold none, since their literals are ASCII.

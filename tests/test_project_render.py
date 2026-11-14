@@ -502,3 +502,11 @@ def test_a_run_of_zero_width_characters_is_shown_as_escapes():
     shown = safe_text("Use ISO dates." + hidden)
     assert not any(c in "\u200b\u2060" for c in shown) and shown.startswith("Use ISO dates.\\u")
     assert safe_text(PERSIAN) == PERSIAN and safe_text(FAMILY) == FAMILY
+
+
+def test_a_zero_width_run_interleaved_with_blanks_is_still_escapes():
+    """Review A round 6, finding 4: a blank printable character between the zero-width ones (U+034F,
+    U+3164) no longer hides the run."""
+    for blank in ("\u034f", "\u3164", "\u2800"):
+        hidden = blank.join("\u200b" if bit == "1" else "\u2060" for bit in "01101000")
+        assert not any(c in "\u200b\u2060" for c in safe_text("dates" + blank + hidden))
