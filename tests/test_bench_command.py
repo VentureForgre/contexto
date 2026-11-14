@@ -38,9 +38,9 @@ def test_bench_without_a_mode_says_which_modes_this_build_has(capsys):
     assert cli.main(["bench"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    listed = captured.err.strip().removeprefix("contexto bench: error: this build has no live run; the modes it has "
-                                               "are ")
-    assert listed != captured.err.strip() and "--script-only" in listed.split(", ")  # other builders add modes
+    # The list is every mode installed, so it grows as modes are added; --script-only is always one.
+    assert captured.err.startswith("contexto bench: error: this build has no live run; the modes it has are ")
+    assert "--script-only" in captured.err.strip().split("the modes it has are ")[1].split(", ")
 
 
 def test_bench_is_listed_and_documents_its_options(capsys):
@@ -228,15 +228,17 @@ def test_a_mode_is_added_by_adding_a_module(tmp_path, monkeypatch, capsys):
     _mode(tmp_path, monkeypatch, "t_hello", FLAG_MODE)
     (tmp_path / "_private.py").write_text("raise RuntimeError('never imported')\n", encoding="utf-8")
     (tmp_path / "t_notes.py").write_text("NOT_A_MODE = True\n", encoding="utf-8")  # no FLAG: skipped
-    found = [bench.mode_name(m) for m in bench.discover()]
-    assert found == sorted(found) and {"script-only", "t-hello"} <= set(found) and "t-notes" not in found
+    names = [bench.mode_name(m) for m in bench.discover()]
+    assert "script-only" in names and "t-hello" in names and names == sorted(names)
+    assert "t-notes" not in names and not any("private" in name for name in names)
     assert cli.main(["bench", "--t-hello", "you", "--seed", "5"]) == 7
     assert capsys.readouterr().out == "hello you 5 v2\n"
     with pytest.raises(SystemExit):
         cli.main(["bench", "--help"])
     assert "t-hello mode" in capsys.readouterr().out
     assert cli.main(["bench"]) == 2
-    assert "--script-only, --t-hello" in capsys.readouterr().err
+    listed = capsys.readouterr().err.strip().split("the modes it has are ")[1].split(", ")
+    assert "--script-only" in listed and "--t-hello" in listed
 
 
 def test_the_default_mode_runs_when_no_mode_flag_is_given(tmp_path, monkeypatch, capsys):
