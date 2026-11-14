@@ -2138,3 +2138,87 @@ def test_ctrl_c_during_the_stop_drain_ends_the_wait_quietly(make_proxy):
         proxy._in_flight = 0
     assert [e["event"] for e in log.events][-2:] == ["proxy_stop_incomplete", "proxy_stop"]
     assert log.events[-2]["in_flight"] == 1
+
+
+# A JSON body's leading whitespace (review of PR #272, Reviewer A round 3, nit 1)
+
+
+class LeadingWhitespace(BaseHTTPRequestHandler):
+    """A gateway that keeps a slow non-streaming request alive with whitespace: two one-byte parts, then
+    a wait for ``gate``, then the JSON body and a newline, chunked or with a Content-Length."""
+
+    protocol_version = "HTTP/1.1"
+    framing = "chunked"
+    gate = threading.Event()
+    answer = json.dumps({"id": "msg_ws", "type": "message", "role": "assistant", "model": "m",
+                         "content": [{"type": "tool_use", "id": "toolu_01ws", "name": "Read", "input": {}}],
+                         "stop_reason": "tool_use",
+                         "usage": {"input_tokens": 10, "output_tokens": 2}}).encode()
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        cls = type(self)
+        parts = [b" ", b"\n", cls.answer, b"\n"]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        if cls.framing == "length":
+            self.send_header("Content-Length", str(sum(len(part) for part in parts)))
+        else:
+            self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for index, part in enumerate(parts):
+            self.wfile.write(part if cls.framing == "length" else b"%x\r\n%s\r\n" % (len(part), part))
+            self.wfile.flush()
+            if index == 1:
+                cls.gate.wait(20)
+        if cls.framing != "length":
+            self.wfile.write(b"0\r\n\r\n")
+
+
+@pytest.mark.parametrize("framing", ["chunked", "length"])
+def test_a_json_bodys_leading_whitespace_reaches_the_client_at_once(make_proxy, framing):
+    """The proxy holds what completes a JSON body until its tool-call ids are handed on (D70), but
+    whitespace before the body completes nothing: a gateway's keep-alive bytes reach the client while
+    the request still runs, as they did before that hold."""
+    from http.server import ThreadingHTTPServer
+
+    LeadingWhitespace.framing, LeadingWhitespace.gate = framing, threading.Event()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LeadingWhitespace)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    announced: list[tuple[str, ...]] = []
+    try:
+        proxy, _ = make_proxy(upstream=f"http://127.0.0.1:{server.server_address[1]}",
+                              on_tool_calls=announced.append)
+        data = json.dumps({"model": "m", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]}).encode()
+        client = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
+        client.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: application/json\r\n"
+                       b"Content-Length: %d\r\n\r\n%s" % (proxy.port, len(data), data))
+        seen = b""
+        keep_alive = b"1\r\n \r\n1\r\n\n\r\n" if framing == "chunked" else b" \n"
+        deadline = time.monotonic() + 5
+        while not (b"\r\n\r\n" in seen and seen.split(b"\r\n\r\n", 1)[1].startswith(keep_alive)):
+            assert time.monotonic() < deadline, f"the leading whitespace was held: {seen!r}"
+            client.settimeout(max(0.01, deadline - time.monotonic()))
+            try:
+                more = client.recv(65536)
+            except TimeoutError:
+                continue
+            assert more, seen
+            seen += more
+        assert announced == []  # the body has not arrived yet
+        LeadingWhitespace.gate.set()
+        client.settimeout(10)
+        while not (seen.endswith(b"0\r\n\r\n") if framing == "chunked" else LeadingWhitespace.answer + b"\n" in seen):
+            more = client.recv(65536)
+            assert more, seen
+            seen += more
+        client.close()
+        assert announced == [("toolu_01ws",)]
+    finally:
+        LeadingWhitespace.gate.set()
+        server.shutdown()
+        server.server_close()

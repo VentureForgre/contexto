@@ -1406,12 +1406,22 @@ class _Handler(BaseHTTPRequestHandler):
             except (OSError, http.client.HTTPException) as exc:  # IncompleteRead is not an OSError
                 raise _UpstreamReadError from exc
 
+        json_started = False  # an identity JSON body has sent a byte that is not JSON whitespace
+
         def hold_json(held: bytes, chunk: bytes) -> tuple[bytes, bytes]:
             """(bytes to write now, bytes to hold) for one more chunk of a JSON body. The last chunk is
             held; for an identity body, so is every chunk after the last one with a byte that is not
             JSON whitespace, so the client never has the body's closing bracket before the end. A body
-            past the reader's limit registers nothing, and is relayed as a Content-Length body is."""
-            if identity and held and not chunk.strip(b" \t\r\n") and not reader.overflowed:
+            past the reader's limit registers nothing, and is relayed as a Content-Length body is.
+            Whitespace before an identity body's first value completes nothing and goes at once: a
+            gateway that keeps a slow request alive with it reaches the client as before the hold."""
+            nonlocal json_started
+            blank = not chunk.strip(b" \t\r\n")
+            if identity and not json_started:
+                if blank:
+                    return held + chunk, b""
+                json_started = True
+            if identity and held and blank and not reader.overflowed:
                 return b"", held + chunk
             return held, chunk
 
