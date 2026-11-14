@@ -44,7 +44,9 @@ REMOVED = "[result removed]"
 CLEARED = "[cleared]"
 LYING_ROOM = 100_000
 INFLATED = 999_999
-OLDER = ("silent_older", "drop_older_stubs", "drop_older_rounds", "noted_older_rounds")  # Claude Code only
+OLDER = ("silent_older", "drop_older_stubs", "drop_older_rounds", "noted_older_rounds", "trim_older_prompts",
+         "split_older_prompts", "drop_older_turns")  # Claude Code only
+ROUNDS_GONE = ("drop_older_rounds", "noted_older_rounds", "trim_older_prompts", "split_older_prompts")
 DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "no_room", "room_one",
            "no_stub_text", "show_once", "lying_room", "in_place", "inflate", *OLDER)
 # What each defect does (the reviewers' wrong engines among them):
@@ -66,7 +68,12 @@ DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "n
 # - drop_older_rounds: from each turn start on, the rounds of earlier turns are removed, calls and results,
 #   and written to a page; their prompts and final answers stay, and nothing names the page;
 # - noted_older_rounds: the same, but the last earlier answer kept ends with a line naming that page. This
-#   one is right: rule 3 accounts for the rounds through the page id in the request's text.
+#   one is right: rule 3 accounts for the rounds through the page id in the request's text;
+# - trim_older_prompts, split_older_prompts: drop_older_rounds, with each earlier prompt losing its last
+#   character, or split into two text blocks with every byte kept (reviewer A's trim and split at
+#   304e598e: a changed prompt is not evidence that its turn was paged);
+# - drop_older_turns: every earlier turn is removed whole and paged, with no index naming the page
+#   (reviewer A's wholeturns).
 # The last four strip thinking where they rewrite: in each earlier turn, from the first item they change to
 # the next prompt.
 
@@ -228,7 +235,7 @@ class ToyPager:
         forwarded, size = self.view(claude, state, items, head)
         before = size
         # The defects that take earlier turns out of view leave the batch the running turn's results only.
-        start = self.prompt_index(items) if self.defect in ("silent_older", "drop_older_rounds", "noted_older_rounds") else 0
+        start = self.prompt_index(items) if self.defect in ("silent_older", "drop_older_turns", *ROUNDS_GONE) else 0
         one = self.defect == "inflate" and state.batched and not self.inflated and size <= high
         if size > high or self.defect == "rewrite_always" or one:
             first = None
@@ -280,6 +287,8 @@ class ToyPager:
         p = self.prompt_index(items)
         if p and write and p not in self.older_pages:
             (self.older_pages[p],) = self.store.page_out([items[:p]], len(self.older_pages))
+        if self.defect == "drop_older_turns":
+            return forwarded[p:]
         out: list[dict] = []
         first = None
         for i, (item, form) in enumerate(zip(items, forwarded)):
@@ -288,8 +297,10 @@ class ToyPager:
                 continue
             if self.is_prompt(True, item):  # each turn was rewritten at its own turn start: its responses after that
                 first = None
+                if self.defect in ("trim_older_prompts", "split_older_prompts"):
+                    form = self.changed_prompt(form)
             blocks = item.get("content") if isinstance(item.get("content"), list) else []
-            if self.defect in ("drop_older_rounds", "noted_older_rounds"):
+            if self.defect in ROUNDS_GONE:
                 if self.results(True, item) or any(b.get("type") == "tool_use" for b in blocks):
                     first = i if first is None else first
                     continue
@@ -312,6 +323,17 @@ class ToyPager:
             note = {"type": "text", "text": f"[the tool rounds before this point are stored as page {self.older_pages[p]}]"}
             out[last] = {**out[last], "content": [*out[last]["content"], note]}
         return out
+
+    def changed_prompt(self, form: dict) -> dict:
+        """trim_older_prompts: the prompt's text less its last character; split_older_prompts: its text as two
+        text blocks, every byte kept."""
+        content = form.get("content")
+        text = content if isinstance(content, str) else next(
+            (b["text"] for b in content or [] if isinstance(b, dict) and b.get("type") == "text"), "")
+        half = len(text) // 2
+        blocks = ([{"type": "text", "text": text[:-1]}] if self.defect == "trim_older_prompts"
+                  else [{"type": "text", "text": text[:half]}, {"type": "text", "text": text[half:]}])
+        return self.older_form(form, blocks)
 
     def older_form(self, form: dict, content: list[dict]) -> dict:
         """``form`` with ``content``, the same object for the same form every time."""

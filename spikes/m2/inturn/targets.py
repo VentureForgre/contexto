@@ -23,7 +23,7 @@ REWRITE_BATCH = 6  # a loop may rewrite its prefix twice, and once more per rewr
 REWRITE_FLOOR = 30  # which is bound / REWRITE_BATCH, or less under a large head, but never under bound / REWRITE_FLOOR
 HEAD_SHARE = 0.5  # of what sits between the head and the room line: what one batch can be expected to free
 ESTIMATE_MARGIN = 0.02  # of the bound: how far under the room line the engine's estimate may be for a second rewrite
-ESTIMATE_TRUST = 110  # percent: the engine's estimate counts at most 1.1 x the upstream's count of the same request
+ESTIMATE_TRUST = 102  # percent: the engine's estimate counts at most 1.02 x the upstream's count of the same request
 ROOM_PERCENT = 95  # of a loop's late requests: the response-time room is at least half of min_turn_room
 
 
@@ -89,9 +89,10 @@ def storage(run: Run) -> list[str]:
     - a ``StubRef`` in that request names its call and its page reaches it, or the ``StubRef`` has
       empty ``call_ids`` (it references a page as a whole, as a fold note naming a rounds page does) and
       its page reaches it; a page that reaches nothing that is missing covers nothing;
-    - or, for a result of an earlier turn only, its call is gone from the request too, and either that
-      turn's prompt is gone as well (the whole turn left, as at a turn-start rotation) or a page id
-      anywhere in the request's text reaches it.
+    - or, for a result of an earlier turn only, its call is gone from the request too, and the text the
+      model reads (text parts of messages, not tool results or other fields) names where it went: a page
+      id there reaches it, or that text carries the index's "older pages omitted" line and the result is
+      stored byte for byte.
 
     Anything else fails. A result that is not whole in the request is also stored byte for byte in
     some page (a result of Contexto's own search, recall or state calls may be named by a reference with
@@ -147,8 +148,8 @@ def cache(run: Run) -> list[str]:
     - In a row: a loop request is not a rewrite right after another rewrite, unless the engine's own
       pre-send estimate of it without the rewrite (the ``estimate`` of its ``request`` event) is over
       ``room_line`` less 2% of the bound, so the room rule would fail without it. That estimate counts
-      at most 1.1 x the upstream's count of the same request (the previous request plus what was added
-      since).
+      at most 1.02 x the upstream's count of the same request (the previous request plus what was added
+      since); v0.5.24's estimate ran at most 1.0009 x on loop requests past 50,000 tokens.
     """
     problems = []
     config = run.config
@@ -182,7 +183,7 @@ def cache(run: Run) -> list[str]:
 
 
 def _estimate_before(previous, sent) -> float:
-    """The engine's pre-send estimate of ``sent`` without its rewrite, at most 1.1 x the upstream's count
+    """The engine's pre-send estimate of ``sent`` without its rewrite, at most 1.02 x the upstream's count
     of the previous request and the items added since; that count when the engine publishes none."""
     counted = previous.tokens + sent.appended_tokens
     if sent.estimate_before is None:

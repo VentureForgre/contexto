@@ -23,7 +23,11 @@ defects makes it wrong in one way, and the target written for that way fails it:
 - ``drop_older_stubs``: from each turn start on, an earlier turn's stub becomes ``[result removed]``
   (reviewer B);
 - ``drop_older_rounds``: from each turn start on, the rounds of earlier turns still in view are removed
-  and paged, and nothing names the page.
+  and paged, and nothing names the page;
+- ``trim_older_prompts``, ``split_older_prompts``: the same, with each earlier prompt trimmed by one
+  character or split into two blocks (reviewer A's ``trim`` and ``split`` at 304e598e);
+- ``drop_older_turns``: every earlier turn removed whole and paged, with no index (reviewer A's
+  ``wholeturns``).
 
 Two more are the toy with other batch lines: reviewer A's ``trickle`` (100,000 down to 75,000) and
 reviewer B's (112,500 down to 87,500). Both page in batches of a sixth of the bound or so and re-send
@@ -116,7 +120,8 @@ WRONG = [
 TRICKLE = (100_000, 75_000)  # reviewer A
 NARROW = (112_500, 87_500)  # reviewer B
 HIGHER = (110_000, 70_000)  # a batch leaves the request over the pressure line, so a second one is held to the in-a-row rule
-OLDER = [("silent_older", 51), ("drop_older_stubs", 31), ("drop_older_rounds", 51)]  # requests failed, quick build
+OLDER = [("silent_older", 51), ("drop_older_stubs", 31), ("drop_older_rounds", 51), ("trim_older_prompts", 51),
+         ("split_older_prompts", 51), ("drop_older_turns", 51)]  # requests failed, quick build
 
 
 @pytest.mark.parametrize(("defect", "rules"), WRONG)
@@ -151,8 +156,8 @@ def test_a_pager_that_batches_a_sixth_of_the_bound_at_a_time_re_sends_more_than_
 @pytest.mark.parametrize(("defect", "requests"), OLDER)
 def test_an_engine_that_takes_earlier_turns_results_out_of_view_without_naming_them_fails(defect, requests):
     """Rule 3 for earlier turns. ``silent_older`` and ``drop_older_stubs`` keep the calls in view, so no
-    exemption applies; ``drop_older_rounds`` removes the calls but keeps the turns' prompts, and no page
-    id in the request reaches the rounds. Each pages what it takes out, so no result is lost."""
+    exemption applies; the others remove the calls (and change, split or drop the prompts), and no page id
+    in the text the model reads reaches them. Each pages what it takes out, so no result is lost."""
     run = toy_run("multiturn", "claude", defect)
     assert targets.unmet_by_rule(run) == {"storage": [
         f"{requests} requests left out a tool result that no stub, fold note or page id in that request accounts for "
@@ -177,7 +182,7 @@ def test_the_v0_5_24_turn_start_rotation_is_accounted_for_by_its_turn_pages():
 
 
 def test_an_engine_that_inflates_its_estimate_to_rewrite_twice_in_a_row_fails():
-    """Reviewer A's L1: the second rewrite publishes an estimate of 999,999; it counts as 1.1 x the
+    """Reviewer A's L1: the second rewrite publishes an estimate of 999,999; it counts as 1.02 x the
     upstream's count of the request, which leaves it under the line."""
     for quick in (True, False):
         assert targets.unmet_by_rule(toy_run("loop120", "claude", lines=HIGHER, quick=quick)) == {}
@@ -580,7 +585,7 @@ def test_the_rewrite_allowance_scales_with_the_head():
 
 def test_the_cache_rule_forbids_a_rewrite_right_after_a_rewrite_unless_the_room_forces_it():
     """The exception counts as the room rule does, with the engine's own pre-send estimate, and allows
-    2% of the bound for it: over 113,000 - 3,000. The estimate counts at most 1.1 x the upstream's count
+    2% of the bound for it: over 113,000 - 3,000. The estimate counts at most 1.02 x the upstream's count
     of the same request."""
     run = base()
     first, second = loop(run)[4:6]
@@ -599,10 +604,10 @@ def test_the_cache_rule_forbids_a_rewrite_right_after_a_rewrite_unless_the_room_
     first.tokens, second.estimate_before = 120_000, 109_000  # the engine's count rules, though the upstream's is over
     assert len(targets.cache(run)) == 1
     first.tokens, second.appended_tokens, second.estimate_before = 70_000, 1_000, 999_999  # reviewer A's L1
-    assert len(targets.cache(run)) == 1  # it counts as 78,100
-    first.tokens = 99_001  # 100,001 counted: 1.1 x that is over 110,000
+    assert len(targets.cache(run)) == 1  # it counts as 72,420
+    first.tokens = 106_844  # 107,844 counted: 1.02 x that is over 110,000
     assert targets.cache(run) == []
-    first.tokens = 99_000
+    first.tokens = 106_843
     assert len(targets.cache(run)) == 1
 
 
@@ -754,3 +759,14 @@ def test_a_recall_reply_counts_only_with_the_line_and_the_two_after_it():
     assert harness._recall_outcome((mcp.BUDGET_SPENT,), PROBE, False) == "refused"
     assert harness._recall_outcome((mcp.RECALL_NEARLY_SPENT.format(tokens=40),), PROBE, False) == "refused"
     assert harness._recall_outcome(("Unknown page id: zz. Page ids appear in the paged-history index.",), PROBE, True) == "error"
+
+
+def test_only_the_text_the_model_reads_names_a_page():
+    """Reviewer A's M1 at 304e598e: a page id inside a tool result, or in a request field the model does not
+    read, names nothing for rule 3; one in a message's text part does."""
+    from inturn.harness import _read_texts
+    assert _read_texts({"role": "user", "content": "see pg_0123456789abcdef"}) == ["see pg_0123456789abcdef"]
+    blocks = [{"type": "tool_result", "tool_use_id": "t", "content": "pg_0123456789abcdef"},
+              {"type": "text", "text": "the index"}, {"type": "input_text", "text": "codex"}]
+    assert _read_texts({"role": "user", "content": blocks}) == ["the index", "codex"]
+    assert _read_texts({"type": "function_call_output", "call_id": "c", "output": "pg_0123456789abcdef"}) == []

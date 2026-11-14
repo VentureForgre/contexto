@@ -75,8 +75,9 @@ The research note gives the measured run times and the load they were measured a
    - On every request, each result the CLI has delivered so far in that conversation that is not
      whole in the request has to be covered by one of these references in that request. The one
      exception is a result of an earlier turn whose call is gone from the request too: it is accounted
-     for when that turn's prompt is gone as well (the whole turn left, as at a turn-start rotation, and
-     is stored byte for byte), or when a page id anywhere in the request's text reaches it.
+     for only when the text the model reads (text parts of messages, not tool results or other request
+     fields) names where it went: a page id there reaches it, or that text carries the index's "older
+     pages omitted" line and the result is stored byte for byte.
    - `page_id`: the store page that holds them. `None` only when every call is one of Contexto's own
      search, recall or state calls (`contexto.store.render.own_call_ids`), which may be stubbed
      without a stored copy.
@@ -86,7 +87,7 @@ The research note gives the measured run times and the load they were measured a
 2. Publish, in the engine's `request` event, `estimate`: its pre-send estimate of the request without
    that request's rewrite (the previous forwarded request and the items added since), and
    `sent_estimate`: of what it forwarded. The second-rewrite-in-a-row exception reads `estimate`,
-   counted at most 1.1 x the upstream's count of the same request.
+   counted at most 1.02 x the upstream's count of the same request.
 3. Remove the `xfail` marks in `tests/test_inturn_targets.py` (the `NOT_BUILT` mark). They are strict:
    a scenario that meets its targets while still marked fails as XPASS.
 

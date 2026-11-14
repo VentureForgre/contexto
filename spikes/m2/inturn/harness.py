@@ -57,6 +57,7 @@ SESSION = "inturn"
 PAGE_LINE = re.compile(r"(\S+) \(turn \d+\)")
 HIT_LINE = re.compile(r"> (\d+): ")
 PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")  # contexto.store.pages.page_id
+OMITTED = re.compile(r"\d+ older pages omitted; use contexto_search")  # render_index's line past its budget
 NEARLY_SPENT = mcp.RECALL_NEARLY_SPENT.split("{")[0]
 StubFinder = Callable[[str, dict], list[StubRef]]
 EngineFactory = Callable[[Any, Config], Any]
@@ -383,6 +384,20 @@ def _digest(item: dict) -> str:
     return scripts.digest(dumps(item))
 
 
+def _read_texts(item: Any) -> list[str]:
+    """The text the model reads of a forwarded message or item as prose: a string content and its
+    ``text`` and ``input_text`` parts. Tool results and outputs are left out, so a page id inside some
+    tool's output (or a request field the model never reads) names nothing."""
+    if not isinstance(item, dict):
+        return []
+    content = item.get("content")
+    if isinstance(content, str):
+        return [content]
+    return [block["text"] for block in content if isinstance(content, list) and isinstance(block, dict)
+            and block.get("type") in ("text", "input_text") and isinstance(block.get("text"), str)] \
+        if isinstance(content, list) else []
+
+
 def _texts(item: Any) -> list[str]:
     """The texts of a forwarded message or item: a string content, its text and ``input_text`` parts, and
     a string tool result or output, where a prompt the engine moved could be."""
@@ -527,9 +542,10 @@ class _Play:
     def unnamed(self, actor: _Actor, forwarded: dict, items: list, missing: list[str]) -> int:
         """Rule 3: of ``missing`` (results left out of ``forwarded`` that no ``StubRef`` in it names),
         how many are not accounted for. Only a result of an earlier turn whose call is gone from the
-        request as well can be: when that turn's prompt is gone too (the whole turn left; rule 4's
-        storage check then holds it to a page), or when a page id anywhere in the request's text
-        reaches it."""
+        request as well can be, and only when the text the model reads names where it went: a page id
+        in the request's own text (a text part of a message, not a tool result and not another request
+        field) reaches it, or that text carries the index's "older pages omitted" line and the result is
+        stored byte for byte in some page (an index past its budget lists only the newest pages)."""
         current = len(actor.prompts) - 1
         earlier = [call_id for call_id in missing if actor.call_turn.get(call_id, current) < current]
         if not earlier:
@@ -538,14 +554,13 @@ class _Play:
         gone = [call_id for call_id in earlier if call_id not in calls]
         if not gone:
             return len(missing)
-        texts = "\0".join(text for item in forwarded.get(self.field) or [] for text in _texts(item))
-        prompts = {turn for turn in {actor.call_turn[call_id] for call_id in gone} if actor.prompts[turn] in texts}
-        kept = [call_id for call_id in gone if actor.call_turn[call_id] in prompts]
+        texts = "\0".join(text for item in forwarded.get(self.field) or [] for text in _read_texts(item))
         reached: set[str] = set()
-        if kept:
-            for page_id in set(PAGE_ID.findall(dumps(forwarded))):
-                reached |= self.stubs.reach(page_id)
-        accounted = sum(1 for call_id in gone if actor.call_turn[call_id] not in prompts or call_id in reached)
+        for page_id in set(PAGE_ID.findall(texts)):
+            reached |= self.stubs.reach(page_id)
+        omitted = OMITTED.search(texts) is not None
+        accounted = sum(1 for call_id in gone
+                        if call_id in reached or (omitted and actor.results[call_id] in self.paged.get(call_id, ())))
         return len(missing) - accounted
 
     # One request ----------------------------------------------------------------------------------

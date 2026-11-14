@@ -507,10 +507,12 @@ min_turn_room`, 113,000 at the defaults.
      `call_ids` (it references a page as a whole, as a fold note naming a rounds or folds page does)
      and its page reaches it. A reference with empty `call_ids` whose page reaches nothing that is
      missing covers nothing, so a junk page still fails;
-   - or, for a result of an earlier turn only, its call is gone from the request as well, and either
-     that turn's prompt is gone too (the whole turn left, as at a turn-start rotation; the result must
-     then be stored byte for byte in some page) or a page id appearing anywhere in the request's text
-     reaches it.
+   - or, for a result of an earlier turn only, its call is gone from the request as well, and the
+     text the model reads names where it went: a page id in a text part of a message (not a tool
+     result, not another request field) reaches it, or that text carries the index's "older pages
+     omitted; use contexto_search" line and the result is stored byte for byte in some page. A missing
+     prompt is not evidence that a turn was paged: an engine that trims, splits or drops earlier
+     prompts without naming the page fails.
 
    Anything else fails. An earlier turn's result whose call is still in view is held to the first
    way, like the running turn's.
@@ -548,7 +550,7 @@ min_turn_room`, 113,000 at the defaults.
      estimate of it without the rewrite (`estimate` in its `request` event) is over 110,000, the room
      line less 2% of the bound. The room rule reads the room the engine publishes from the same
      estimate, so an engine whose estimate runs a little high is not made to break one rule to keep
-     the other. That estimate counts at most 1.1 x the upstream's count of the same request (the
+     the other. That estimate counts at most 1.02 x the upstream's count of the same request (the
      previous request plus the items added since), so an inflated estimate buys nothing. When the
      engine publishes no `estimate`, the upstream's count is used.
 8. **Room.** Every main request in a loop publishes a room before the send and after the response,
@@ -581,9 +583,11 @@ The table's "request room over the truth" column counts every request, the first
 
 Each rule has an engine that breaks it and fails (`spikes/m2/inturn/tests/test_inturn_engines.py`).
 All but the last two are `toy.py`'s pager (below) with one defect; the numbers are `loop120` on Claude
-Code at the target tests' size (120 rounds), or `multiturn` on Claude Code for the three engines that
+Code at the target tests' size (120 rounds), or `multiturn` on Claude Code for the six engines that
 change earlier turns, and the quick build in the tests also fails. At 0e41361c `inflate`,
-`silent_older`, `drop_older_stubs` and `drop_older_rounds` met every rule.
+`silent_older`, `drop_older_stubs` and `drop_older_rounds` met every rule; at 304e598e
+`trim_older_prompts`, `split_older_prompts` and `drop_older_turns` did, because a missing prompt
+counted as the turn having been paged, and a page id anywhere in the serialized request counted.
 
 Two engines are right and pass every rule: `noted_older_rounds`, which is `drop_older_rounds` with a
 line naming the page at the end of the last earlier answer it keeps (rule 3's page id in the
@@ -607,6 +611,9 @@ request's text), and the toy with every `StubRef` naming its page as a whole, wi
 | `silent_older` (reviewer A) | from each turn start, every earlier turn's result is `[cleared]`, its rounds paged, its calls and prompt kept | storage | `multiturn`: 117 requests leave out up to 112 results; none lost |
 | `drop_older_stubs` (reviewer B) | from each turn start, an earlier turn's toy stub becomes `[result removed]` | storage | `multiturn`: 97 requests, up to 99 results |
 | `drop_older_rounds` | from each turn start, the rounds of earlier turns are removed and paged; prompts and final answers kept; nothing names the page | storage | `multiturn`: 117 requests, up to 112 results |
+| `trim_older_prompts` (reviewer A's `trim`) | `drop_older_rounds`, with each earlier prompt one character shorter | storage | `multiturn`: 117 requests, up to 112 results |
+| `split_older_prompts` (reviewer A's `split`) | `drop_older_rounds`, with each earlier prompt split into two text blocks, every byte kept | storage | `multiturn`: 117 requests, up to 112 results |
+| `drop_older_turns` (reviewer A's `wholeturns`) | every earlier turn removed whole and paged, with no index naming the page | storage | `multiturn`: 117 requests, up to 112 results |
 | a page reference to a junk page | every `StubRef` names its page as a whole (empty `call_ids`), and the page holds none of the results | storage, recall | |
 | `count_tokens` answered with the CLI's request | | count_tokens | |
 
