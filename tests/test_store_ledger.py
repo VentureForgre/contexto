@@ -96,8 +96,8 @@ def test_pinned_text_budget_and_omitted_count(store):
     full = store.state_text().splitlines()
     assert len(full) == len(DEFAULT_LINES) + 1 + 40  # opening lines, the group heading, the items
     # The opening lines and about 100 tokens of items. The budget was 480 when the opening lines were about
-    # 380 tokens (D51); D63's recall example line in DEFAULT_LINES takes them from 411 to 451, as
-    # _within_budget counts them, which left no room for an item.
+    # 380 tokens (D51); D63's recall example line in DEFAULT_LINES takes them from 411 to 449, as
+    # _within_budget counts them (a line at a time), which left no room for an item.
     opening = sum(estimate_tokens(line + "\n") for line in DEFAULT_LINES)
     capped = store.pinned_text(opening + 100).splitlines()
     shown = [line for line in capped if line.startswith("- ")]
