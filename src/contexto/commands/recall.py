@@ -69,8 +69,9 @@ def run(args: argparse.Namespace) -> int:
                 return fail(f"session {session_id} is not in a project, or project memory is off for it, so it "
                             "has no earlier session to read from")
             return fail(f"{args.origin[:40]!r} is {e}; `contexto search --project` shows their labels")
-        print(f"from earlier session {earlier.id} ({earlier.label}, {earlier.date})", file=sys.stderr)
-    where = f"earlier session {earlier.id}" if earlier else f"session {session_id}"
+        # The id is a directory name: any characters (review A on D69, finding 3).
+        print(f"from earlier session {safe_text(earlier.id)} ({earlier.label}, {earlier.date})", file=sys.stderr)
+    where = f"earlier session {safe_text(earlier.id)}" if earlier else f"session {session_id}"
     try:
         page = store.earlier_page(earlier, args.page_id) if earlier else store.get_page(args.page_id)
     except PageUnreadableError as e:

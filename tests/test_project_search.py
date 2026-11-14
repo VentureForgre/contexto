@@ -343,6 +343,36 @@ def test_a_session_id_with_a_line_break_cannot_forge_a_line_of_the_reply(home, r
         'Unknown page id: pg_0000000000000000 in session a\\n[b:]\\n\\".')
 
 
+@pytest.mark.parametrize("odd", ["a [b:]", "a b\x85c", "a\x7fb\x9b2Kc", "a‮b\U000e0041c"])
+def test_a_session_id_with_any_character_that_does_not_print_cannot_break_a_line(home, root, odd, monkeypatch,
+                                                                                  capsys):
+    """Review A finding 3: U+2028, U+2029, U+0085 and the C1 controls are line breaks or terminal controls
+    that JSON leaves as they are; the label shows every character that does not print as a JSON escape, so
+    it still reads back as the id inside a JSON string."""
+    _, (page_id,) = earlier(home, odd, root, 1, "needle in an oddly named session")
+    cur = new_session(home, "cur", root, 2)
+    server = serve(cur)
+    text = text_of(call(server, "contexto_search", {"query": "needle", "scope": "project"}))
+    (line,) = session_lines(text)
+    assert line.isprintable() and text.splitlines() == text.split("\n")
+    label = json.loads('"' + line.removeprefix("[session ").rsplit(",", 1)[0] + '"')
+    assert label == odd
+    assert "oddly named" in text_of(call(server, "contexto_recall", {"page_id": page_id, "session": label}))
+    # The command names the session by its id, which a directory name gives, through safe_text.
+    monkeypatch.setenv("CONTEXTO_HOME", str(home))
+    monkeypatch.delenv("CONTEXTO_SESSION", raising=False)
+    cur.release()
+    assert cli.main(["recall", page_id, "--session", "cur", "--from", odd]) == 0
+    err = capsys.readouterr().err
+    assert err.isprintable() or all(part.isprintable() for part in err.split("\n"))
+    assert cli.main(["recall", "pg_" + "0" * 16, "--session", "cur", "--from", odd]) == 1
+    err = capsys.readouterr().err
+    assert all(part.isprintable() for part in err.split("\n")) and "no page 'pg_0000000000000000'" in err
+    assert cli.main(["search", "--project", "needle", "--session", "cur"]) == 0
+    out, err = capsys.readouterr()
+    assert all(part.isprintable() for part in (out + err).split("\n"))
+
+
 def test_a_query_that_matches_only_in_an_earlier_session(three):
     cur = three["cur"]
     server = serve(cur)
