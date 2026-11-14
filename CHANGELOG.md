@@ -16,7 +16,9 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   Claude Code session gets its own store. It requires a token, the first path segment of the base
   URL `--print-settings` prints. The printed settings turn on Claude Code's gateway hint headers,
   which the engine reads and the service removes before forwarding (`--forward-hint-headers`
-  passes them on). See [docs/serve.md](docs/serve.md).
+  passes them on). They mark that setting as Contexto's, so a `contexto run claude` that inherits
+  them, or finds them merged into your Claude Code settings, removes the hints too. See
+  [docs/serve.md](docs/serve.md).
 - `contexto mcp --serve` gives those clients Contexto's tools: one MCP server for every
   conversation, which asks the service which session each tool call belongs to.
   `--print-mcp-config` prints its config.
