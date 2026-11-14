@@ -1584,3 +1584,50 @@ def test_a_large_uncertain_pdf_once_measured_is_stubbed_without_folding_the_loop
     assert batch["rounds_folded"] == 0 and not batch["unseen_results_stubbed"]
     assert pdf_at in {i for i, _, _ in cli.state.inturn.stubs}
     assert abs(sent.estimate - sent.real) <= 0.05 * sent.real
+
+
+@pytest.mark.parametrize("bound,head,rounds,usage", [(60_000, 26_000, 60, True), (60_000, 28_000, 120, True),
+                                                     (80_000, 48_000, 60, True), (60_000, 20_000, 120, False)],
+                         ids=["60000-head-26000", "60000-head-28000", "80000-head-48000", "60000-no-usage"])
+def test_at_a_tight_bound_each_result_is_read_once_past_the_show_line(bound, head, rounds, usage):
+    # Reviewer B at 15293e9c, M1: with 20 KB results, every result was stubbed unread (60 of 60, 120 of
+    # 120, 60 of 60, and 120 of 120 with usage never arriving), though each request with it whole would
+    # be about 35,000 to 42,000. At a tight bound a new result is shown once when the request with it fits
+    # under read_line (the bound less the output allowance and as much again), measured head or not.
+    config = Config(bound=bound)
+    cli = Cli(memory(), config, head_bytes=int(head * BYTES))
+    if not usage:
+        cli.engine.observe_usage = lambda *args, **kwargs: []
+    cli.prompt("Read every module.")
+    cli.loop(rounds, lambda r: output(f"m-{r}", RESULT))
+    assert not [e for e in batches(cli) if e["unseen_results_stubbed"]]
+    assert max(s.real for s in cli.sent) <= inturn.read_line(config)
+    # Without usage a batch rewrites only over the bound (L2), so the estimate, never corrected, rides up
+    # to the bound; the upstream's count stays under read_line.
+    assert max(s.estimate for s in cli.sent) <= (inturn.read_line(config) if usage else config.bound)
+    assert not cli.events("over_bound") and not cli.events("in_turn_exhausted")
+    # Once per turn (a turn start's own turn_room_low, without a reason, may come before it).
+    assert len([e for e in cli.events("turn_room_low") if e.get("reason") == "in_turn_small_bound"]) == 1
+    # Each result is stubbed at a later batch once seen.
+    arrivals = [i for i, m in enumerate(cli.history) if m["role"] == "user" and blocks(m)
+                and blocks(m)[0].get("type") == "tool_result"]
+    edits = cli.state.inturn
+    stubbed = {i for i, _, _ in edits.stubs} | {i for _, ranges, _ in edits.folds for a, b in ranges
+                                                 for i in range(a, b + 1)}
+    assert set(arrivals[:-2]) <= stubbed
+
+
+def test_with_usage_never_arriving_no_batch_rewrites_right_after_another():
+    # Reviewer B at 15293e9c, L2: at 150,000 with a 92,000 head and usage never arriving, 138 of 151
+    # requests rewrote the prefix, 126 back to back: each new round stayed counted at the fresh results'
+    # dense ratio. Until usage arrives after a batch, the next one rewrites only over the bound itself.
+    cli = Cli(memory(), head_bytes=int(92_000 * BYTES))
+    cli.engine.observe_usage = lambda *args, **kwargs: []
+    cli.prompt("Read every module.")
+    cli.loop(100, lambda r: output(f"m-{r}", RESULT))
+    rewrote = [any(e["event"] == "in_turn_batch" and e["first_changed"] < len(cli.sent[n - 1].forwarded)
+                   for e in s.events) for n, s in enumerate(cli.sent) if n]
+    assert sum(rewrote) and not any(a and b for a, b in zip(rewrote, rewrote[1:]))
+    assert max(s.real for s in cli.sent) <= BOUND
+    assert not cli.events("over_bound") and not cli.events("in_turn_exhausted")
+    assert not [e for e in batches(cli) if e["unseen_results_stubbed"]]

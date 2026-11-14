@@ -339,6 +339,9 @@ class EpochState:
     # D63: (the keys of the unmeasured uncertain PDFs the newest request carried, the estimate of everything
     # else in that request). Per-request, never recorded.
     pending_documents: tuple[tuple, int] | None = None
+    # D63: an in-turn batch ran and no response's usage has arrived since; the next batch then rewrites the
+    # prefix only when the request is over the bound. Per engine, never recorded.
+    batch_unmeasured: bool = False
     # D69 (rule 19): the records carried from the project's earlier sessions, read once when the main
     # conversation's state is created and sent while k == 0; past that the preamble's pinned text holds them.
     start_text: str = ""
@@ -3301,7 +3304,8 @@ class RewriteEngine:
             measured = (Measured(state.last_sent_scope, *state.last_sent_anchor, text_bytes, real, keys)
                         if state.last_sent_anchor[0] else None)
             state = replace(state, last_input_tokens=real, pending_usage=None, last_measured=measured,
-                            document_costs=measured_costs(state, real), pending_documents=None)
+                            document_costs=measured_costs(state, real), pending_documents=None,
+                            batch_unmeasured=False)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried
                 # messages, which also covers a resumed first request with a long history). The messages

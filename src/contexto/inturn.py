@@ -943,6 +943,13 @@ def show_line(config: Any) -> int:
     return config.bound - config.headroom_floor - config.min_turn_room // OUTPUT_ALLOWANCE_SHARE
 
 
+def read_line(config: Any) -> int:
+    """The line a new result is shown once under when the bound is tight (Reviewer B at 15293e9c, M1): the
+    bound less the response's output allowance and as much again for the estimate's error. The headroom
+    floor and the recall room are given up for that request; ``turn_room_low`` says so once per turn."""
+    return config.bound - 2 * (config.min_turn_room // OUTPUT_ALLOWANCE_SHARE)
+
+
 def _tightness(request: dict, messages: list[dict], sent: list[dict], state: Any, config: Any, estimator: Any,
                dialect: Any) -> tuple[int, bool]:
     """(the head's tokens, whether the bound is tight): tight when it leaves less than two
@@ -1137,9 +1144,11 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     least = head + base - pageable + sum(c.saving - c.plain for c in unseen)
     # Reviewer B, finding 3: when the bound leaves less than two min_turn_room between the head and the
     # prompt and T, every new result would fail the test against T, though the request would be far under
-    # the bound. Then a result is shown once if it fits under the bound less the floor and the output
-    # allowance; the room on that request may fall under min_turn_room, logged once per turn.
+    # the bound. Then a result is shown once if the request with it fits under ``read_line``, measured head
+    # or not (Reviewer B at 15293e9c, M1: against show_line no result was read past a 25,000 head at a
+    # 60,000 bound); the room on that request may fall under min_turn_room, logged once per turn.
     show = show_line(config) if tight else trigger(config)
+    read = read_line(config) if tight else trigger(config)
     if tight and pressure > trigger(config) and state.inturn.room_low != start + 1:
         events.append({"event": "turn_room_low", "epoch": state.epoch, "reason": "in_turn_small_bound",
                        "room": max(0, config.bound - pressure - config.headroom_floor),
@@ -1151,7 +1160,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         least -= sum(c.saving - c.plain for c in unseen)
     huge: list[_Candidate] = []
     for c in sorted(unseen, key=lambda c: (-c.saving, c.i, c.j)):
-        if least <= show:
+        if least <= read:
             break
         if c.document and c.plain <= config.bound:
             continue  # a document is read whole unless it is over the bound on its own (Reviewer B, finding 8)
@@ -1159,9 +1168,13 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         least -= c.plain if tight else c.saving
     # A batch that changes earlier messages rewrites the cached prefix. The request right after one starts
     # no other unless without it the request would publish less than min_turn_room (its estimate over
-    # T, the room's own line) or be over the bound; and none starts for less than min_turn_room.
+    # T, the room's own line) or be over the bound; and none starts for less than min_turn_room. Until a
+    # response's usage has arrived since the last batch, none starts unless the request is over the bound
+    # (Reviewer B at 15293e9c, L2: with usage never arriving each new round stayed counted at the fresh
+    # results' dense ratio, and 126 of 151 requests rewrote the prefix back to back).
     after_rewrite = state.inturn.rewrote == previous_n and state.inturn.rewrote > 0
-    may_rewrite = over_bound or (freeable >= config.min_turn_room
+    unmeasured = state.batch_unmeasured
+    may_rewrite = over_bound or (not unmeasured and freeable >= config.min_turn_room
                                  and (not after_rewrite or estimate - unknown > show))
     if not (huge or may_rewrite):
         return state, None
@@ -1224,7 +1237,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         unseen = [c for c in unseen if c not in huge]
         # Reviewer A at 7575c76f, finding 2: every later step is sized from the request as it stands after
         # step 0, not with the stubbed results still counted (which kept steps 1 to 3 from running).
-        may_rewrite = cur > config.bound or (freeable >= config.min_turn_room
+        may_rewrite = cur > config.bound or (not unmeasured and freeable >= config.min_turn_room
                                              and (not after_rewrite or measured(state) - unknown > show))
     target, escalate = sized(cur)
     # Steps 1 to 3 change messages the previous request had: a rewrite of the cached prefix.
@@ -1289,7 +1302,8 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
                            "bound": config.bound})
         return state, None
     rewrote = n if first_changed < previous_n else state.inturn.rewrote
-    state = replace(state, inturn=state.inturn._replace(batches=state.inturn.batches + 1, rewrote=rewrote))
+    state = replace(state, inturn=state.inturn._replace(batches=state.inturn.batches + 1, rewrote=rewrote),
+                    batch_unmeasured=True)
     after = measured(state)
     if first_changed <= state.k:  # the first retained message changed: everything sent is new
         resent = tokens(rw.transform_messages(messages, state))
