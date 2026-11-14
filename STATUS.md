@@ -1,7 +1,8 @@
 # Contexto status
 
-Updated 2026-11-06 by claude (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
-D48 to D61, live acceptance run #4, and deleting the v0.1.0 to v0.4.0 releases, D62). Decisions taken and still open, with reasons:
+Updated 2026-11-14 by claude (D66: the benchmark `contexto bench`, PRs #255, #262, #264, #269 and
+#273, recorded in the docs PR; before that v0.5.24: the 2026-11-05 QA run and the fix round, PRs
+#232 to #250, D48 to D61, live acceptance run #4, and deleting the v0.1.0 to v0.4.0 releases, D62). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -50,6 +51,46 @@ compaction never fires, and accuracy equals full context.
   to, is on.
 - CLIProxyAPI compatibility (D35, PR #210) and upstream affinity (D36, PR #212, deployed on the
   owner's proxy and verified for cache reuse). Guide: `docs/cliproxyapi.md`.
+
+## Benchmark (D66)
+
+`contexto bench` runs one generated session three ways and scores each the same, by exact match
+with no model judge: through Contexto, as full context sent straight to the model, and as plain
+Claude Code compacting on its own near the bound. Guide: `docs/bench.md`; decision: D66. Why: run
+#4's 52 of 54 against 47 is inside noise (exact McNemar p = 0.18), all runs used one seed, plain
+Claude Code was never run, and nobody outside could rerun the scoring. No model was called to build
+it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
+
+- Merged: #255 (script generator, statistics, `--script-only`) and #262 (scale harness). Open, near
+  merge: #264 (`--report`, `--chart`, cost at published prices), #269 (`--replay`) and #273 (the
+  live runner, `--dry-run`). The benchmark is not in a release yet (D67: releases are batched).
+- Protocols: `d27`, the 54 probes of runs #3 and #4, byte-identical to the spike's script; `v2`
+  (default), 72 probes, adding 18 whose questions name no key (`paraphrase`, `concluded`,
+  `toolloop`). Seed 20261016 at bound 150,000: `v2` is 34 turns and 467,012 estimated tokens, 3.09
+  times the bound.
+- Verdict rule: a direction is named only when the pooled difference is significant (Tango interval
+  excludes 0 and exact McNemar p < 0.05) and the seed-level sign-flip p < 0.05, both the same way.
+  Fewer than 6 seeds cannot reach 0.05 (2 / 2^5 = 0.0625).
+- Replay, keyless (`contexto bench --replay`), pinned session of 952,971 estimated tokens (6.35
+  times the bound): 138 requests, largest 116,278 estimated tokens, 0 over the bound, 14 rotations,
+  47 pages, no failure event, no compaction marker. Search reach under mechanical queries: 48 of
+  72 by the fixed rule (54 with facts still in view), 60 by the best query from the question's
+  words. It cannot show accuracy or cache reads.
+- Plain arm: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` = bound + 33,000 (183,000 at 150,000); the 33,000
+  was read in the Claude Code 2.1.322 bundle, not documented, not confirmed live. Stub runs with
+  the real 2.1.322 compacted at `pre_tokens` 147,140 to 168,178.
+- Scale harness: repaired, with a 200-turn run (634 requests, 913,084 tokens of history) in the
+  required `ci` check with latency and memory budgets.
+- The minimum run that makes the claim testable, for the owner to start (dry-run figures, tokens):
+
+  ```sh
+  contexto bench --model claude-haiku-5-5 --seeds 10 --repeats 3 --budget-tokens 598290000 --out <dir>
+  contexto bench --model claude-opus-5-5 --seeds 5 --budget-tokens 250500000 --out <dir>
+  ```
+
+  Haiku: 36 units, 180,251,043 expected, 598,285,396 worst case, 720 pooled paired probes per pair
+  of arms. Opus: 15 units, 97,122,711 expected, 250,490,244 worst case; with 5 seeds it alone can
+  name no direction. Not run: no live model spend under D66.
 
 ## QA run and fix round (2026-11-05 to 2026-11-06, v0.5.9 to v0.5.24)
 
@@ -551,6 +592,9 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   overheads in the start warning, `pdf_uncertain` only when the PDF is the cause).
 - D62: the v0.1.0 to v0.4.0 releases and tags are deleted, because their source archives held the
   owner's proxy hostname; their commits stay on `main`.
+- D66: `contexto bench`, a benchmark anyone can run: Contexto, full context and plain Claude Code
+  on the same generated script, exact-match scoring, paired statistics with a seed-level test, cost
+  at published prices, a keyless replay, and the scale harness repaired into CI.
 
 ## Open follow-ups
 
@@ -571,6 +615,19 @@ PR #250 (D61, v0.5.24) fixed the low findings the fix round's reviews left:
 
 Still open:
 
+- Found by D66's scale harness, not fixed: on Linux each proxy response on a kept-open connection
+  waits about 41 ms for a delayed ACK, because the proxy leaves Nagle on and writes headers and
+  chunks separately (CI: 41.3 to 41.5 ms for a 104-byte request; 0.6 to 1.5 ms with Nagle off in a
+  harness-only experiment; macOS has no wait). Whether a real streamed response waits per chunk was
+  not tested [inferred: Claude Code users on Linux see it on each request].
+- Found by D66's scale harness, not fixed: the proxy opens a new upstream connection for every
+  request (914 in one short run); on an HTTPS upstream each also pays a TCP connect, a TLS handshake
+  and about 2.5 ms to build the SSL context (the handshake cost not measured).
+- D66 follow-ups: merge #264, #269 and #273; then generate the replay's request-size chart for
+  `docs/bench.md` and the README; the owner's minimum live run (above, under "Benchmark (D66)"),
+  which would also confirm the plain arm's 33,000-token reserve live; the scale harness's review
+  lows (its 30 s port pool is shared across burst threads; the `TCP_NODELAY` test passes without
+  the driver's line; a docstring and a README sentence on the Linux wait).
 - A head denser than the 3.5 text seed is estimated low until the first usage, on Codex and Claude
   alike, so tool-loop requests can still go over the bound unflagged when no response carries an
   input count (12 of 32 synthetic Codex sessions in D61's measurement, 445 requests in reviewer A's).
