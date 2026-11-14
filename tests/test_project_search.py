@@ -31,7 +31,7 @@ from contexto.tokens import estimate_tokens
 BASE = 1_780_000_000  # 2026-05-28T20:26:40Z
 DAY = 86_400
 RATIO = 1.5  # set_window(200_000, 2.0): min(measured 2.0, 1.5) characters per token
-GOLDEN = Path(__file__).parent / "fixtures" / "tools_list_fdfc055b.json"
+GOLDEN = Path(__file__).parent / "fixtures" / "tools_list_65f33e4f.json"
 NOTES = (mcp.SEARCH_COVERAGE, mcp.SEARCH_COVERAGE_UNCHECKED)
 
 
@@ -146,7 +146,7 @@ def three(home, root):
 # The tool list
 
 
-def test_without_a_project_view_the_tool_list_is_the_list_of_main_at_fdfc055b_and_the_arguments_are_refused(home, root):
+def test_without_a_project_view_the_tool_list_is_the_list_of_main_at_65f33e4f_and_the_arguments_are_refused(home, root):
     golden = GOLDEN.read_text().rstrip("\n")
     earlier(home, "e1", root, 1, "needle in an earlier session")
     off = new_session(home, "off", root, 2, memory=False)
@@ -181,7 +181,7 @@ def test_with_a_project_view_the_two_tools_gain_scope_and_session_and_the_list_i
     assert recall == base["contexto_recall"].pop("description").replace(
         "a paged-out turn of this session ", "a paged-out turn of this session (or, with session, of an earlier "
         "session of this project) ")  # review B finding 4
-    assert got == base  # nothing else changed: the descriptions and every other field are those of main at fdfc055b
+    assert got == base  # nothing else changed: the descriptions and every other field are those of main at 65f33e4f
     assert scope["enum"] == ["session", "project"] and scope["default"] == "session"
     assert "earlier sessions" in scope["description"] and session["type"] == "string"
     # Review B finding 1 (c): an earlier session's text is old and untrusted, not instructions.
@@ -246,7 +246,7 @@ def test_a_first_session_of_a_project_has_the_view_and_no_earlier_session(home, 
 def test_session_scope_is_todays_reply_and_cost_and_never_lists_the_project(three, monkeypatch):
     cur = three["cur"]
     cur.set_window(200_000, 2.0)
-    cur.project = lambda: None  # a server started without a project view: the code path of main at fdfc055b
+    cur.project = lambda: None  # a server started without a project view: the code path of main at 65f33e4f
     base = serve(cur)
     del cur.project
     server = serve(cur)

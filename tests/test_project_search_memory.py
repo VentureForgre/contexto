@@ -7,7 +7,9 @@ command's lines) as soon as they are read, and the records are let go. Two thing
 
 - the replies are what they were: the MCP reply, its log spans, the command's text and ``--json``, for a
   project with every kind of earlier match, equal ``fixtures/project_search_replies.json``, recorded with
-  ``python tests/test_project_search_memory.py`` at b54c5041, before the change;
+  ``python tests/test_project_search_memory.py`` on code that holds the pages: first at b54c5041, before
+  the change, then again on this branch rebased onto 65f33e4f (whose D63 changed search's coverage line)
+  with the change reverted (``git apply -R`` of ab83f1ba's ``src/`` diff), so only that line moved;
 - the peak memory of one search over many sessions of large pages stays near one session's pages.
 
 Helpers come from ``tests/test_project_search.py``.

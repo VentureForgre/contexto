@@ -3237,9 +3237,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     follow.
   - **Search across sessions, on request.** `contexto_search` takes `scope` (`"session"`, the default,
     or `"project"`) and `contexto_recall` takes `session`, on a server whose session has a project view
-    when it starts. Without one the tool list is #279's byte for byte and both arguments are refused as
-    unexpected; with one the list is fixed at start (turning memory off later does not change the
-    cached head) and grows by 437 bytes of compact JSON, about 125 tokens. A session-scope reply, its
+    when it starts. Without one the tool list is main's byte for byte (65f33e4f, with #274's search
+    wording) and both arguments are refused as unexpected; with one the list is fixed at start (turning memory off later does not change the
+    cached head) and grows by 437 bytes of compact JSON, about 124 tokens. A session-scope reply, its
     charge and its log are unchanged except for the `scope` field. With `"project"` the reply is the
     session-scope reply (with no hit in it, `No paged-out turn of this session contains every word of
     that query.`), then the earlier sessions' part: for each of the newest 50 earlier sessions with a

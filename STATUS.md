@@ -772,7 +772,7 @@ D61 (#250, v0.5.24). Live acceptance run #4 passed on v0.5.20. Left: the open fo
 D69 (project memory): the first pull request, #279 (carry-over, rule 19, the off switch, the start
 line, `contexto project show|forget`), is merged, unreleased. The second, search and recall
 across a project's earlier sessions (`scope: "project"`, `session`, `--project`, `--from`) with the
-zero-spend measurements, is pull request #287 (branch `claude/d69-search-pr2`, on main at fdfc055b):
+zero-spend measurements, is pull request #287 (branch `claude/d69-search-pr2`, on main at 65f33e4f):
 both reviewers approved, and B2's round-2 notes are fixed on the branch (an earlier session's stub
 row escapes `\n`, a search lets go of each session's page records once their rows are made, an
 earlier page's recall opens with a block that says whose page it is, and the docs state what

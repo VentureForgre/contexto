@@ -7,7 +7,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [
@@ -98,7 +98,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [
@@ -157,7 +157,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [],
@@ -179,7 +179,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [
@@ -209,7 +209,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [
@@ -238,7 +238,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [],
@@ -260,7 +260,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [],
@@ -282,7 +282,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [
@@ -303,7 +303,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [
@@ -330,7 +330,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [
@@ -413,7 +413,7 @@
    },
    {
     "type": "text",
-    "text": "[Paged hits come only from paged-out turns; the conversation in view is newer than any of them. In view not checked.]"
+    "text": "[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked \"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position. In view not checked.]"
    }
   ],
   "returned": [
