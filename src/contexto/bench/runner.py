@@ -96,7 +96,7 @@ TURN_FAILURE_CAP = 200
 UNIT_TOKEN_CAP_FACTOR = 2
 LOCK_NAME = ".lock"
 STUB_LABEL = ("Stub run: the upstream was a server on this machine (127.0.0.1), not a model API, so the answers, "
-              "tokens and costs in it were made up by that stub.")
+              "tokens and costs in it were made up by that stub")  # no full stop: the report adds one
 PINNED = ("model", "bound", "protocol", "turn_kbytes", "seed")  # what an existing output directory fixes
 PINNED_NAMES = {"model": "--model", "bound": "--bound", "protocol": "--protocol", "turn_kbytes": "--turn-kbytes",
                 "seed": "--seed"}

@@ -816,6 +816,25 @@ def test_a_request_moves_the_cache_breakpoint_without_changing_the_history():
     assert history[0]["content"][0]["text"].startswith("<system-reminder>")
 
 
+def test_a_failed_request_names_the_errno(small, monkeypatch, tmp_path):
+    """#269 Reviewer A nit 2 at 8ef2742e: under load the replay printed only "OSError", which read as a
+    proxy failure; the cause was no free local port. The errno and its text name no path or host."""
+    import errno
+
+    from contexto.store import SessionStore
+
+    replay = client.Client(1, "s", small, SessionStore(tmp_path / "home", "s"))
+
+    def no_port(self, *args, **kwargs):
+        raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "request", no_port)
+    with pytest.raises(client.ReplayError) as raised:
+        replay.send([client.user_message("x", True)])
+    assert str(raised.value) == (f"the request to the proxy failed: OSError [Errno {errno.EADDRNOTAVAIL}] "
+                                 "Can't assign requested address")
+
+
 def test_the_client_connects_to_loopback_only(small):
     for host in ("localhost", "0.0.0.0", "example.com"):
         with pytest.raises(ValueError, match="connects to 127.0.0.1 only"):

@@ -175,7 +175,8 @@ DECISION_ASK = ("Reply with exactly one line and nothing else, in this form:", "
 _TOKEN = re.compile(r"[a-z0-9]+")
 _CFG_LINE = re.compile(r"^cfg ([^=\s]+)=\S*$")
 CFG_CLASSES = ("paraphrase", "toolloop")  # the new classes planted as cfg lines
-_HYPHENS = str.maketrans({c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2212\ufe63\uff0d"})
+# Unicode hyphens read as "-", and a typographic apostrophe as "'", so "don\u2019t" is a negation too.
+_HYPHENS = str.maketrans({**{c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2212\ufe63\uff0d"}, "\u2019": "'"})
 
 
 def build(seed: int = DEFAULT_SEED, protocol: str = "v2", bound: int = 150_000, turn_bytes: int = 40_000,

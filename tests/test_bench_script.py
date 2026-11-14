@@ -628,6 +628,8 @@ WRONG_REPLIES = (
     "DECISION {label}: {other} (not {value})", "DECISION {label}: ({value}) {other}",
     "DECISION {label}: no, {value} is wrong", "DECISION {label}: {other} = 110 [{value}]",
     "DECISION {label}-0: {value}",
+    # #255 Reviewer A nit 2 at b6a4fff6: a negation with a typographic apostrophe is a negation too.
+    "DECISION {label}: I don\u2019t pick {value}",
 )
 
 

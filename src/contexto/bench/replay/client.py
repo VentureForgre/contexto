@@ -242,7 +242,9 @@ class Client:
             response = connection.getresponse()
             raw = response.read()
         except (OSError, http.client.HTTPException) as exc:
-            raise ReplayError(f"the request to the proxy failed: {type(exc).__name__}") from exc
+            # The errno names the cause (no free local port, under load) and no path or host.
+            detail = f" [Errno {exc.errno}] {exc.strerror}" if isinstance(exc, OSError) and exc.errno else ""
+            raise ReplayError(f"the request to the proxy failed: {type(exc).__name__}{detail}") from exc
         finally:
             connection.close()
         if response.status != 200:
