@@ -29,6 +29,7 @@ import email.parser
 import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import sys
@@ -209,8 +210,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 def fetch(url, timeout=30):
     """GET `url` and return (status, body). A redirect is returned, not followed.
 
-    Raises OSError or http.client.HTTPException when there is no whole answer, and OSError when the
-    answer is larger than MAX_ANSWER.
+    Raises OSError or http.client.HTTPException when no answer arrives, when the status line or the
+    headers are broken, or when a chunked body breaks off; OSError when the answer is larger than
+    MAX_ANSWER, which is never read past. A body cut short of its Content-Length is returned as far
+    as it came: http.client does not raise for it on a read with a limit. On a 200 the JSON check of
+    the caller refuses it. A cut 404 is taken as 404, because its status line arrived whole and the
+    body of a 404 is not read for anything.
+
+    `timeout` bounds each read, not the whole answer: a body sent a byte at a time is never cut off
+    here. The pypi job's `timeout-minutes` is the bound for that.
     """
     request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
     handlers = [_NoRedirect]
@@ -235,7 +243,9 @@ def _published(release, project, index, fetch):
     try:
         status, body = fetch(url)
     except (OSError, http.client.HTTPException) as error:
-        # No connection, a timeout, or an answer that broke off or was not HTTP.
+        # No connection, a timeout, or an answer that was not HTTP or broke off in its status line,
+        # its headers or a chunked body. A body cut short of its Content-Length is not an error here
+        # (see fetch): a cut 200 fails the JSON check below, and a cut 404 is a 404.
         raise _Unreadable(f"no usable answer from {url}: {error!r}") from None
     if status == 404:
         return None
@@ -244,9 +254,11 @@ def _published(release, project, index, fetch):
     try:
         files = json.loads(body)["urls"]
         published = {entry["filename"]: entry["digests"]["sha256"] for entry in files}
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, RecursionError):
+        # RecursionError: JSON nested deeper than the parser's recursion limit.
         raise _Unreadable(f"{url} answered 200 with a body that is not a release's file list") from None
-    if not isinstance(files, list) or not all(
+    # PyPI never lists a file name twice: an answer that does would hide one of the two digests.
+    if not isinstance(files, list) or len(published) != len(files) or not all(
         isinstance(name, str) and isinstance(digest, str) and SHA256.fullmatch(digest)
         for name, digest in published.items()
     ):
@@ -341,6 +353,20 @@ def index_url(value):
     raise argparse.ArgumentTypeError("the index must be an https:// URL (http:// only for 127.0.0.1 or localhost)")
 
 
+def _count(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return number
+
+
+def _seconds(value):
+    number = float(value)
+    if not (math.isfinite(number) and number >= 0):
+        raise argparse.ArgumentTypeError("must be a finite number, 0 or more")
+    return number
+
+
 def main(argv=None, fetch=fetch):
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--dist", required=True, type=Path, help="directory with the release's assets")
@@ -348,8 +374,8 @@ def main(argv=None, fetch=fetch):
     common.add_argument("--tag", required=True, help="the release tag, vX.Y.Z")
     asks = argparse.ArgumentParser(add_help=False)
     asks.add_argument("--index", default="https://pypi.org", type=index_url, help="base URL of the JSON API")
-    asks.add_argument("--attempts", type=int, help="how many times to ask the index")
-    asks.add_argument("--delay", type=float, help="seconds between two attempts")
+    asks.add_argument("--attempts", type=_count, help="how many times to ask the index (1 or more)")
+    asks.add_argument("--delay", type=_seconds, help="seconds between two attempts (0 or more)")
 
     parser = argparse.ArgumentParser(description="Checks for the pypi job. Never uploads.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -381,10 +407,19 @@ def main(argv=None, fetch=fetch):
                 )
             else:
                 print(f"::notice::PyPI already has both files of {what} with the same sha256. Nothing to upload.")
-            args.output.write_text("".join(f"{release.files[name]}\n" for name in names), encoding="utf-8")
+            try:
+                args.output.write_text("".join(f"{release.files[name]}\n" for name in names), encoding="utf-8")
+            except OSError as error:
+                raise Refused(f"Cannot write the plan: {error}. Nothing was uploaded.") from None
             if os.environ.get("GITHUB_OUTPUT"):
-                with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-                    output.write(f"upload_count={len(names)}\n")
+                try:
+                    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                        output.write(f"upload_count={len(names)}\n")
+                except OSError as error:
+                    raise Refused(
+                        f"The plan is in {args.output}, but upload_count cannot be written to GITHUB_OUTPUT: "
+                        f"{error}. Nothing was uploaded."
+                    ) from None
             return 0
 
         confirm(release, args.project, args.index, fetch, **retry)

@@ -27,6 +27,23 @@ def sigint_default():
         signal.signal(signal.SIGINT, previous)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def no_managed_settings(tmp_path_factory):
+    """Keep the tests that read settings in this process off this machine's Claude Code managed
+    settings file. ``contexto run claude`` reads it from a fixed system path (D70) that no variable
+    moves, so the table of paths is pointed at a temporary directory where no file exists. A launcher a
+    test starts as a subprocess reads the real path; the tests that do so with the real ``claude``
+    skip when that file exists. A test that needs a managed file passes its own path."""
+    from contexto import upstream
+
+    saved = dict(upstream.MANAGED_SETTINGS_FILES)
+    empty = str(tmp_path_factory.mktemp("managed") / "managed-settings.json")
+    upstream.MANAGED_SETTINGS_FILES.update({platform: empty for platform in saved})
+    yield
+    upstream.MANAGED_SETTINGS_FILES.clear()
+    upstream.MANAGED_SETTINGS_FILES.update(saved)
+
+
 # The stub upstream and proxy factory of test_proxy_server, shared with test_upstream_affinity.
 
 

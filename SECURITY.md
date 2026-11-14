@@ -127,6 +127,9 @@ These hold no conversation text:
   Claude Code's own transcript files, so they link a Contexto store to those transcripts.
 - `log.jsonl`: the session log. It records sizes, counts, request paths, status codes, error
   names, hashes, event names, and the upstream source, never prompts, replies or the upstream URL.
+  It also records three labels from fixed word lists: a request's class (`request_class`), what
+  triggered a compaction (`compaction`, `context_compacted`), and what the launch does with Claude
+  Code's hint headers (`hint_headers`: `stripped`, `forwarded` or `off`).
 - `page.key`: a random key that page ids are derived from.
 - `live.lock`, `meta.lock`, `ledger.lock`: empty lock files.
 
