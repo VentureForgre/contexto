@@ -189,6 +189,7 @@ PDF once and working from the answer avoids it.
 ```sh
 contexto run --no-in-turn-paging claude
 CONTEXTO_IN_TURN_PAGING=0 contexto run claude      # also: false, off, no
+contexto serve --no-in-turn-paging                 # every session of the standing service
 ```
 
 With it off, a turn that grows past the bound inside a tool loop is sent whole, as in v0.5.24: the
