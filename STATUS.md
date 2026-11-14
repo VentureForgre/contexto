@@ -55,8 +55,8 @@ compaction never fires, and accuracy equals full context.
   weight counts, and one typo is tolerated. A strict hit's result is unchanged. On 192 probes at
   6,000 pages, recall at 3 on each class that used to miss rose from 0 to between 73 percent
   (typos) and 92 percent (one extra word), and exact queries stayed at 15 of 15. False hits stayed
-  at 0 of 16. A miss now takes 0.6 to 1.4 s instead of an empty answer at 0.3 to 0.6 s, above the
-  range the brief asked for (D65 says why). Guide: `docs/search.md`.
+  at 0 of 16. A miss now takes 0.6 to 1.4 s instead of an empty answer at 0.3 to 0.6 s; strict
+  hits are unchanged (D65 gives the latency in full). Guide: `docs/search.md`.
 
 ## QA run and fix round (2026-11-05 to 2026-11-06, v0.5.9 to v0.5.24)
 
@@ -559,8 +559,8 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
 - D62: the v0.1.0 to v0.4.0 releases and tags are deleted, because their source archives held the
   owner's proxy hostname; their commits stay on `main`.
 - D65: when strict search finds nothing, search returns approximate matches, labelled as such with
-  the words each page matched; deterministic, no embeddings or model call, and a one-letter typo
-  step that narrows D34's ruling against stemming.
+  the words each page matched; deterministic, no embeddings or model call. Its one-letter typo
+  step is the one exception to the owner's ruling against fuzzy matching that D34 records.
 
 ## Open follow-ups
 
@@ -732,8 +732,8 @@ Needs the owner:
   seen, so a shell call made that way is hidden from search (recall keeps it); strings holding `//`,
   `/*` or `tools` leave the echo searchable.
 - Search has no synonyms, and no stemming beyond D65's one-letter typo step (D34, D65): `database`
-  does not find `DB`. The fallback runs only when no turn holds every word, so a query whose words
-  some other turn all holds gets that turn instead: 8 of 192 probes at 6,000 pages, 6 paraphrases
+  does not find `DB`. The fallback runs only when no turn holds every word, so when another turn
+  holds every word of the query, search returns that turn and never looks further: 8 of 192 probes at 6,000 pages, 6 paraphrases
   and 2 with an extra word. Limits are listed in `docs/search.md`.
 - Main conversation (D50, D59): main follows Claude Code's session id, measured on 2.1.302 to
   2.1.318. Without a session id (another client) only the turn-start rule applies. A headless

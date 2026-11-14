@@ -2926,7 +2926,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
      letter is tolerated. Such a match counts at half weight, and the work is capped per query.
 
   At most six distinct words are searched, the specific ones first. The tool shows 3 approximate
-  matches in detail and lists 10 more. `contexto search` shows up to `--limit` of at most 50.
+  matches in detail and lists 10 more. `contexto search` shows up to `--limit` matches, at most 50.
 
   Every reply says the matches are approximate. It names the words searched when some were dropped,
   and under each page the words the page matched (`refresh_token as refreshToken` when the page
@@ -2946,16 +2946,18 @@ the owner's delegation. Open decisions are listed at the end with the options an
   would reach at most the 2 of these 8 that strict search answers with one page (the other six get
   7 to 25 pages), and it would change strict results.
 
-  It stays inside D34: no embeddings, no model call, no new dependency, and the same store and query
-  always give the same result. The typo step narrows D34's ruling against stemming, for one letter
-  only: `servers` finds `server`. The brief asked for it. It applies only to a word that no page
-  holds as typed, so it never changes a strict result.
+  It keeps to D34 in all but one place: no embeddings, no model call, no new dependency, and the
+  same store and query always give the same result. The exception is the typo step. D34 records
+  the owner's ruling against fuzzy matching ("not RAG"), which is why it rejected stemming. The
+  typo step is fuzzy matching for one letter only (`servers` finds `server`), and the brief asked
+  for it. It applies only to a word that no page holds as typed, so it never changes a strict
+  result.
 
   Measured at zero spend on the 6,000-page synthetic store with
   `spikes/m2/scale/store/fallback_bench.py`. The 192 probes are in `fallback_probes.py` (#266,
-  `a5ffbaa`), and the results are under
-  `spikes/m2/scale/store/results/d65/`. The after run was at `045cd599`, a local merge whose `src/`
-  is #267 at `5280096`. The quality part was run again at #267's merged head and gave the same rows.
+  `a5ffbaa`), and the results are under `spikes/m2/scale/store/results/d65/`. The after run was at
+  `045cd599`, a local merge whose `src/` is #267 at `5280096`. The quality part was run again at
+  #267's merged head and gave the same rows.
   Recall at 3, before and after (at 10 where it differs):
 
   | class | probes | before | after |
@@ -2981,12 +2983,15 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **Queries strict search misses:** 0.63 to 1.43 s, against 0.26 to 0.59 s for the empty answer
     they got before. By pass, that is 2.2 to 3.7 times; paraphrase is the costliest at 3.4 to 3.7.
 
-  The misses are outside the range the brief asked to keep. The audit's 0.13 to 0.25 s and 0.9 s
-  first search were measured on a small store and cannot be compared with these. At 6,000 pages,
+  The brief asked to keep latency in the audit's range: 0.13 to 0.25 s, and 0.9 s for a first
+  search. Strict hits and misses are both above it here, but the audit ran on a small store, so
+  its seconds cannot be compared with these. At 6,000 pages,
   D41 measured strict queries at 0.22 to 0.37 s and a first search at 1.49 s on an idle machine.
   Against those, strict hits here are 1.12 to 1.17 times idle (the before run: 1.15 to 1.23). A
   miss now does work: up to about 1.4 s at this load, still under the first search of a process.
-  It is accepted because the cost lands only on queries that used to return nothing.
+  The misses are the part that moved: 2.2 to 3.7 times what they cost before. That is outside the
+  "same range" the brief asked for. It is accepted because the cost lands only on queries that used
+  to return nothing.
 
   Options considered:
   - **Falling back on "too few" hits:** rejected, for the reason above.
@@ -2994,7 +2999,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     should find nothing.
   - **An edit distance over every word:** rejected. It costs too much at 6,000 pages and matches
     short words falsely.
-  - **Stemming:** rejected by D34.
+  - **General stemming:** rejected by D34.
 
 ## Open decisions
 
