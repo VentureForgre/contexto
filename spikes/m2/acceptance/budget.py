@@ -52,7 +52,7 @@ HEAD = (HEAD_MEASURED
 def fixed_preamble_tokens() -> int:
     """The pinned text's fixed opening lines (``contexto.store.recall.DEFAULT_LINES``) by the engine's
     estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it,
-    409 with D69's clause on whose words are pinned."""
+    409 with D69's clause on whose words are pinned, 422 with its earlier sessions' text in that clause."""
     from contexto.store.recall import DEFAULT_LINES
     from contexto.tokens import estimate_tokens
 
