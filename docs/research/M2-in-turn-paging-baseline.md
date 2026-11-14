@@ -512,16 +512,21 @@ min_turn_room`, 113,000 at the defaults.
      result, not another request field) reaches it, or that text carries the index's "older pages
      omitted; use contexto_search" line, with N at least 1 and at most the number of store pages the
      text does not name, the whole turn left (no 40-character run of its prompt or of any of its
-     answers, whitespace removed, is anywhere in that text, plain-text documents included), and the
+     answers that no other turn shares, whitespace and Unicode format characters removed, is anywhere
+     in that text, plain-text documents included), and the
      result is stored byte for byte in some page. An index past its budget lists only the newest pages,
      so a correct long session needs the second way (v0.5.24 with a 40-token index fails 6 requests
      without it). A missing prompt alone is not evidence that a turn was paged: an engine that trims,
      splits or drops earlier prompts without naming the page fails, and so does one that adds the
-     omission line while the turn stays in view in any form: whole, split, trimmed, prompt and answers
-     both trimmed, or moved into a document block (`fake_omission`, `fake_omission_split`,
-     `fake_omission_trim`, `fake_omission_trimall`, `fake_omission_doc`), and one whose omission line
-     claims 0 or more pages than the store holds unnamed (`omit_turns_n0`, `omit_turns_n99`). The open
-     case is tested as passing (`omit_turns`). What remains open: an engine that
+     omission line while the turn stays in view whole, split, trimmed, with prompt and answers both
+     trimmed, moved into a document block, lower-cased, or with zero-width characters between its
+     letters (`fake_omission`, `fake_omission_split`, `fake_omission_trim`, `fake_omission_trimall`,
+     `fake_omission_doc`, and the reviewers' probes), and one whose omission line claims 0 or more
+     pages than the store holds unnamed (`omit_turns_n0`, `omit_turns_n99`). The rule does not catch
+     every form: a turn cut to fewer than 40 characters of each prompt and answer, with the omission
+     line, passes, as does the open case itself (`omit_turns`, tested as passing). A correct engine
+     whose turns share text (every prompt "continue", a common template or answer opener) is not
+     failed: runs another turn shares are not counted. What remains open: an engine that
      drops an earlier turn whole, prompt included, and writes an omission line the store bears out
      passes rule 3 for that turn; that is what a turn-start rotation past the index budget does, and
      the results stay stored and searchable. `system` (Codex `instructions`) is not read for page ids:

@@ -30,6 +30,7 @@ import io
 import json
 import os
 import re
+import unicodedata
 import statistics
 import tempfile
 from collections import Counter
@@ -410,17 +411,25 @@ def _read_texts(item: Any) -> list[str]:
 WINDOW = 40  # characters: a turn is still in view when any window this long of its prompt or answers is
 
 
-def _in_view(texts: tuple[str, ...], haystack: str) -> bool:
-    """Whether any ``WINDOW``-character run of ``texts`` (whitespace removed, windows every half window)
-    is in ``haystack`` (whitespace removed). A text shorter than the window counts whole."""
+def _bare(text: str) -> str:
+    """``text`` without whitespace and Unicode format characters (zero-width spaces and joiners), so
+    neither can hide a turn that is still in view."""
+    return "".join(c for c in text if not c.isspace() and unicodedata.category(c) != "Cf")
+
+
+def _windows(texts: tuple[str, ...]) -> set[str]:
+    """Every ``WINDOW``-character run of ``texts`` (bare), one every half window and the last one; a text
+    shorter than the window counts whole."""
+    found: set[str] = set()
+    step = max(1, WINDOW // 2)
     for text in texts:
-        t = re.sub(r"\s+", "", text)
-        if not t:
-            continue
-        step = max(1, WINDOW // 2)
-        if any(t[i:i + WINDOW] in haystack for i in range(0, max(1, len(t) - WINDOW + 1), step)):
-            return True
-    return False
+        t = _bare(text)
+        if len(t) <= WINDOW:
+            found.update([t] if t else [])
+        else:
+            found.update(t[i:i + WINDOW] for i in range(0, len(t) - WINDOW + 1, step))
+            found.add(t[-WINDOW:])
+    return found
 
 
 def _estimate(events: list[dict]) -> tuple[int | None, int | None]:
@@ -560,7 +569,8 @@ class _Play:
         request as well can be, and only when the text the model reads names where it went: a page id
         in the request's own text (a text part of a message, not a tool result and not another request
         field) reaches it; or the whole turn left (no 40-character run of its prompt or of any of its
-        answers, whitespace removed, is anywhere in that text), that text
+        answers that no other turn shares, whitespace and format characters removed, is anywhere in that
+        text), that text
         carries the index's "(N older pages omitted; use contexto_search" line with N at least 1 and at
         most the number of store pages it does not name, and the result is stored byte for byte in some
         page. An index past its budget lists only the newest pages, so a correct long session needs the
@@ -580,10 +590,14 @@ class _Play:
         named = set(PAGE_ID.findall(texts))
         unlisted = sum(1 for name in self.page_names if name[:-5] not in named)
         omitted = any(1 <= int(n) <= unlisted for n in OMITTED.findall(texts))
-        haystack = re.sub(r"\s+", "", texts)
+        haystack = _bare(texts)
+        turns = {turn: _windows((actor.prompts[turn], *actor.answers.get(turn, ()))) for turn in range(len(actor.prompts))}
 
-        def left(turn: int) -> bool:  # no 40-character run of the turn's prompt or answers is anywhere in view
-            return not _in_view((actor.prompts[turn], *actor.answers.get(turn, ())), haystack)
+        def left(turn: int) -> bool:
+            # No run of the turn's own prompt or answers is in view. Runs the turn shares with another turn
+            # (a recurring short prompt, a template, a common opener) say nothing about which turn is there.
+            others = set().union(*(w for t, w in turns.items() if t != turn))
+            return not any(w in haystack for w in turns[turn] - others)
 
         accounted = sum(1 for call_id in gone if call_id in reached or (
             omitted and left(actor.call_turn[call_id]) and actor.results[call_id] in self.paged.get(call_id, ())))

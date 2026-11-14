@@ -801,3 +801,18 @@ def test_the_open_case_an_omission_line_the_store_bears_out_after_a_whole_turn_l
     run = toy_run("multiturn", "claude", "omit_turns")
     assert targets.unmet_by_rule(run) == {}
     assert run.metrics()["requests_with_a_lost_result"] == 0
+
+
+def test_text_two_turns_share_says_nothing_about_which_turn_is_in_view():
+    """Reviewer B's L1 at 10c8ae79: a run of a turn's text that another turn shares (every prompt
+    "continue", a common template) is not evidence that this turn is still in view."""
+    from inturn.harness import _windows
+    shared = "Use the same checklist as before and report the result in one table."
+    one, two = _windows((shared, "the first answer names the file src/a.py")), _windows((shared, "the second answer names src/b.py"))
+    assert one & two and one - two and two - one
+
+
+def test_format_characters_cannot_hide_a_turn_in_view():
+    """Reviewer B's L2 at 10c8ae79: a zero-width space between characters is removed before matching."""
+    from inturn.harness import _bare
+    assert _bare("con\u200btin ue\u2060d") == "continued"
