@@ -6,7 +6,8 @@ This is a port, kept line for line where the random-number call order depends on
 - ``spikes/m2/acceptance/run.py::build_script`` and ``spikes/m2/acceptance/budget.py::turn_tokens``,
 - ``spikes/m0/fidelity/harder.py`` (``_Pools``, ``_group``, ``_merge``),
 - ``spikes/m0/fidelity/session.py::_filler_text`` and ``spikes/m0/fidelity/l2d.py::_WORDS``,
-- ``spikes/m0/fidelity/scoring.py`` (``normalize``, ``parse_answers``).
+- ``spikes/m0/fidelity/scoring.py`` (``normalize``, ``parse_answers``), which also read answer lines
+  written in markdown (``contexto.bench.script.score`` lists the differences from the spike's scoring).
 
 The spike's probe mix is fixed here (``CHAIN_HEAVY`` in the spike): its 2-hop and reasoning branches
 are not ported because that mix never takes them. For any seed, bound and turn size the turns,
@@ -351,25 +352,76 @@ def build_script(seed: int, turns: int, turn_bytes: int, bound: int) -> tuple[Sc
         n += 1
 
 
-# Scoring: exact match after normalization, as spikes/m0/fidelity/scoring.py.
+# Scoring: exact match after normalization, as spikes/m0/fidelity/scoring.py, except that an answer
+# line may be written in markdown, that a line in a blockquote is never read, and that a line in a
+# fenced code block yields to an answer for the same id outside any fence (contexto.bench.script.score
+# names the differences).
 
-_TRIM = " \t\r\n\"'`.,;:!"
-_ANSWER_LINE = re.compile(r"^\s*(q_[a-z0-9_]+)\s*[:=]\s*(.*?)\s*$")
+_TRIM = " \t\r\n\"'`*_.,;:!"  # the spike's, plus "*" and "_": markdown emphasis; no generated answer has either
+# After the leading "-", "*" and spaces are dropped (as the spike does): a list marker ("-", "*", "+", or a
+# number of up to three digits with "." or ")"), then emphasis or code marks ("*", "_", "`") on both sides
+# of the id. The id ends in a letter or digit, so its own underscores stay.
+_ANSWER_LINE = re.compile(r"^(?:(?:[-*+]|\d{1,3}[.)])\s+)?[*_`]*(q_[a-z0-9_]*[a-z0-9])[*_`]*"
+                          r"\s*[:=]\s*(.*?)\s*$")
+# A code fence: three or more backticks or tildes, at any indentation (a fence in a list item is
+# indented). A backtick fence's info string holds no backtick (CommonMark), else the line is inline code.
+_FENCE = re.compile(r"^(`{3,}|~{3,})(.*)$")
 
 
 def normalize(text: str | None) -> str:
-    """Case folded, trimmed of whitespace, quotes, backticks and trailing punctuation, with inner
-    whitespace collapsed. Nothing else is forgiven."""
+    """Case folded, trimmed of whitespace, quotes, backticks, ``*`` and ``_`` (markdown emphasis) and
+    trailing punctuation, with inner whitespace collapsed. Nothing else is forgiven."""
     if text is None:
         return ""
     return " ".join(text.strip(_TRIM).casefold().split()).strip(_TRIM)
 
 
+def _fence(line: str) -> tuple[str, int] | None:
+    """The fence character and length of a line that opens or closes a code fence, else None."""
+    match = _FENCE.match(line)
+    if match is None or (match.group(1)[0] == "`" and "`" in match.group(2)):
+        return None
+    return match.group(1)[0], len(match.group(1))
+
+
 def parse_answers(text: str) -> dict[str, str]:
-    """Parse ``q_<id>: <answer>`` lines. The last line for an id wins; other lines are ignored."""
+    """Parse ``q_<id>: <answer>`` lines (``=`` also separates). The last line for an id wins; other
+    lines are ignored. A line may be markdown: a list item or a numbered item, with ``**``, ``__`` or
+    backticks around the id or the separator, so ``**q_a_01**: x``, ``1. q_a_01: x`` and
+    ``- `q_a_01`: x`` all give ``x``. The answer is kept as written; ``normalize`` trims the marks
+    around it (``**q_a_01:** x`` gives ``** x``, and ``- `q_a_01: x``` gives ``x` ``; both normalize to
+    ``x``).
+
+    A line in a blockquote (starting with ``>``, also after a list marker) is never an answer:
+    markdown marks it as quoted text, not the reply's own. A line in a fenced code block (from a line
+    of three or more backticks or tildes to a line of at least as many of the same character and
+    nothing else; a fence may open after a list marker; a fence never closed runs to the end of the
+    text) is read, but an answer for the same id on a line outside any fence wins over it, wherever
+    the two stand. So a reply that writes all its answers in a code fence is scored, and a note or
+    file the reply quotes in a fence after its answers cannot override them. The spike read only
+    ``q_<id>: x`` after leading ``-``, ``*`` and spaces, inside a code fence as well as outside, with
+    the last line winning; every other line it read is read the same."""
     answers: dict[str, str] = {}
-    for line in text.splitlines():
-        match = _ANSWER_LINE.match(line.strip().lstrip("-* "))
+    fenced: dict[str, str] = {}  # answers read inside a code fence; an answer outside any fence wins
+    fence: tuple[str, int] | None = None
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if fence is not None:
+            mark = _fence(stripped)
+            if mark is not None and mark[0] == fence[0] and mark[1] >= fence[1] and not stripped.strip(mark[0]):
+                fence = None
+                continue
+            line = stripped.lstrip("-* ")
+            if not line.startswith(">") and (match := _ANSWER_LINE.match(line)):
+                fenced[match.group(1)] = match.group(2)
+            continue
+        line = stripped.lstrip("-* ")
+        if (mark := _fence(line)) is not None:  # also a fence opened in a list item ("- ```")
+            fence = mark
+            continue
+        if line.startswith(">") or stripped.startswith(">"):
+            continue
+        match = _ANSWER_LINE.match(line)
         if match:
             answers[match.group(1)] = match.group(2)
-    return answers
+    return {**fenced, **answers}

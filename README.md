@@ -228,9 +228,9 @@ The full list, with sources, is in [docs/limitations.md](docs/limitations.md).
   counted high, 4,568 tokens a page, so a large PDF can page out the earlier conversation.
 - **New CLI versions** come out every week and can change the text Contexto recognises in their
   requests. Until a version is tested, the launch warns ([CLI updates](docs/cli-updates.md)).
-- **Search** matches words, not meaning, with no synonyms and no stemming. It lists the turns that
-  hold every word of the query; when none does, the unreleased code on `main` (not v0.5.24) falls
-  back to approximate matches ([Search](docs/search.md), [MCP tools](docs/mcp-tools.md)).
+- **Search** matches words, not meaning, with no synonyms and no stemming beyond one-letter typos.
+  It lists the turns that hold every word of the query; when none does, the unreleased code on
+  `main` (not v0.5.24) falls back to approximate matches ([Search](docs/search.md), [MCP tools](docs/mcp-tools.md)).
 
 ## How it is built
 
