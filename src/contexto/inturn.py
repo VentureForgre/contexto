@@ -92,9 +92,10 @@ BATCH_FRACTION = 0.25
 HEADWAY_ROOMS = 2  # a batch leaves this many min_turn_room of growth before the line when it can
 LOCATOR_CHARS = 200  # characters of a path, command or input a stub shows; a longer one loses its middle
 NOTE_NAMES = 12  # tool names a fold note counts
+NOTE_NAME_CHARS = 64  # characters of a tool name there (the API's own limit on a name)
 NOTE_CALLS = 40  # calls a fold note lists, each with its locator
 NOTE_CALL_CHARS = 120  # characters of a locator in a fold note's list
-NOTE_CALLS_BUDGET = 1_600  # characters of the whole list
+NOTE_CALLS_BUDGET = 1_600  # UTF-8 bytes of the whole list
 # What a stub shows of a call, by the first key its input has: the command of a shell call, the pattern
 # or query of a search (with where it searched), else the address or the path of what it read or wrote.
 LOCATOR_KEYS = ("command", "pattern", "query", "url", "file_path", "notebook_path", "path")
@@ -108,12 +109,14 @@ ROTATION_REASON = "in_turn"
 # has no searchable block; ``transform_messages`` and ``strip_carried`` leave it out by identity.
 FOLDED: dict[str, Any] = {"role": "assistant", "content": []}
 _NOTE_CACHE_SIZE = 256
-# A turn's one fold note is at most this many bytes (about 2,000 tokens, a byte rule) besides its call ids:
-# the newest fold in detail, the earlier ones as page ids and round numbers, and past the cap a page that
-# lists them. The ids of every folded call are named too (about 31 bytes a call), so that a reader of the
-# request alone can tell which page holds each call's result; they are the one part that grows.
+# A turn's one fold note is at most this many UTF-8 bytes (about 2,000 tokens, a byte rule), call ids
+# included, however long the loop: the newest fold in detail, the earlier ones as page ids and round
+# numbers, and past the cap one folds page that lists them. A page a note names covers every call reachable
+# from it (the rounds page holds the results, a folds page names the rounds pages), so the note needs no id
+# to account for a call; it lists the ids of the newest folds only, within NOTE_IDS_BYTES, newest first.
 NOTE_BYTES = 6_000
-FOLDS_PAGE = "folds"  # a page holding the detailed notes of a turn's earlier folds
+NOTE_IDS_BYTES = 1_200
+FOLDS_PAGE = "folds"  # a page holding the detailed notes of a turn's earlier folds, every call id included
 
 
 class InTurn(NamedTuple):
@@ -455,10 +458,13 @@ def is_own_stub(content: Any) -> bool:
 
 
 _NOTE_IDS = re.compile(r"\ncall ids: ([^\n]*)\n")
+_EARLIER = re.compile(r"\nearlier folds of this turn: ([^\n]*)\n")
+_ITEM = re.compile(r"(?:in|listed in page) (pg_[0-9a-f]{16})(?: \(ids: ([^)]*)\))?")
 
 
 def note_calls(text: Any) -> tuple[str, ...]:
-    """The call ids a fold note lists (every call it folded), or () when ``text`` is not one."""
+    """The call ids a fold note lists for its newest fold, or () when ``text`` is not one. A note in a
+    request lists at most NOTE_IDS_BYTES of ids; one in a folds page lists every call of its fold."""
     if note_page(text) is None:
         return ()
     found = _NOTE_IDS.search(text)
@@ -479,22 +485,23 @@ def _counted(names: list[str]) -> str:
     counts: OrderedDict[str, int] = OrderedDict()
     for name in names:
         counts[name] = counts.get(name, 0) + 1
-    shown = [f"{name} x{count}" for name, count in list(counts.items())[:NOTE_NAMES]]
+    shown = [f"{_clip(name, NOTE_NAME_CHARS)} x{count}" for name, count in list(counts.items())[:NOTE_NAMES]]
     if len(counts) > NOTE_NAMES:
         shown.append(f"and {len(counts) - NOTE_NAMES} more")
     return ", ".join(shown) or "none"
 
 
 def _calls(calls: list[str]) -> str:
-    """The calls a fold note lists, in order, up to ``NOTE_CALLS`` and ``NOTE_CALLS_BUDGET`` characters;
-    the rest are counted."""
+    """The calls a fold note lists, in order, up to ``NOTE_CALLS`` and ``NOTE_CALLS_BUDGET`` bytes; the
+    rest are counted."""
     shown: list[str] = []
     used = 0
     for call in calls[:NOTE_CALLS]:
-        if shown and used + len(call) + 2 > NOTE_CALLS_BUDGET:
+        size = len(utf8(call)) + 2
+        if shown and used + size > NOTE_CALLS_BUDGET:
             break
         shown.append(call)
-        used += len(call) + 2
+        used += size
     text = "; ".join(shown) or "none"
     if len(calls) > len(shown):
         text += f"; and {len(calls) - len(shown):,} more calls"
@@ -506,65 +513,84 @@ def _safe_id(call_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_\-]", "", call_id)
 
 
-def _ids(ids: list[str]) -> str:
-    return " ".join(ids) or "none"
-
-
-_ITEM = re.compile(r"(?:in|listed in page) (pg_[0-9a-f]{16}) \(ids: ([^)]*)\)")
-_ID_TEXT = re.compile(r" \(ids: [^)]*\)|\ncall ids: [^\n]*")
+def _ids(ids: list[str], budget: int | None) -> str:
+    """The ids of a fold's calls, all of them or as many as fit in ``budget`` bytes; the rest are counted
+    (the page the note names holds them)."""
+    if budget is None:
+        return " ".join(ids) or "none"
+    shown, used = [], 0
+    for call_id in ids:
+        if used + len(call_id) + 1 > budget:
+            break
+        shown.append(call_id)
+        used += len(call_id) + 1
+    text = " ".join(shown) or "none"
+    if len(ids) > len(shown):
+        text += f"; and {len(ids) - len(shown):,} more, in the same page"
+    return text
 
 
 def note_refs(text: Any) -> list[tuple[str, tuple[str, ...]]]:
     """(page id, call ids) for each page a fold note names: the newest fold's rounds page, then each
-    earlier fold's (or the folds page that lists several). [] when ``text`` is not a fold note."""
+    earlier fold's, or the folds page that lists several. Every page stands for every call reachable from
+    it; the ids are those the note lists for it, () for a page it names as a whole. [] when ``text`` is not
+    a fold note."""
     page = note_page(text)
     if page is None:
         return []
     refs = [(page, note_calls(text))]
-    for found in _ITEM.finditer(text):
-        refs.append((found.group(1), tuple(i for i in found.group(2).split(" ") if i)))
+    earlier = _EARLIER.search(text)
+    for found in _ITEM.finditer(earlier.group(1) if earlier else ""):
+        refs.append((found.group(1), tuple(i for i in (found.group(2) or "").split(" ") if i)))
     return refs
 
 
 def note_size(text: str) -> int:
-    """A note's bytes without its call ids: what NOTE_BYTES caps."""
-    return len(utf8(_ID_TEXT.sub("", text)))
+    """A note's UTF-8 bytes, call ids included: what NOTE_BYTES caps."""
+    return len(utf8(text))
 
 
 _NOTE_TAIL = ('If you have the contexto_recall tool, call it with a page_id named here to read them (pass the '
               "next offset to continue; a page is long); contexto_search finds lines in them. Without it, run the "
               "calls again.]")
 _NOTES: OrderedDict[tuple[str, int], str] = OrderedDict()
+_TURN_NOTES: OrderedDict[tuple, str] = OrderedDict()
 _NOTES_LOCK = threading.Lock()  # engines of several sessions can share a process
+
+
+def _cached(cache: OrderedDict, key: Any, build: Any) -> str:
+    with _NOTES_LOCK:
+        note = cache.get(key)
+        if note is not None:
+            cache.move_to_end(key)
+            return note
+    note = build()
+    with _NOTES_LOCK:
+        cache[key] = note
+        while len(cache) > _NOTE_CACHE_SIZE:
+            cache.popitem(last=False)
+    return note
 
 
 def fold_note(hooks: Any, removed: list[dict], page_id: str) -> str:
     """The note a fold leaves in the turn-start message: how many rounds, which tools, the calls with
-    what each ran or read (enough to run them again where Contexto's tools are not available), their
-    size, and the page. ``removed`` is what the folded messages were as sent (a stubbed result is its
-    stub). Kept per page id and count, so the messages are measured once per process."""
-    key = (page_id, len(removed))
-    with _NOTES_LOCK:
-        note = _NOTES.get(key)
-        if note is not None:
-            _NOTES.move_to_end(key)
-            return note
-    note = _fold_note_uncached(hooks, removed, page_id)
-    with _NOTES_LOCK:
-        _NOTES[key] = note
-        while len(_NOTES) > _NOTE_CACHE_SIZE:
-            _NOTES.popitem(last=False)
-    return note
+    what each ran or read (enough to run them again where Contexto's tools are not available), the ids of
+    as many of them as NOTE_IDS_BYTES holds, their size, and the page. ``removed`` is what the folded
+    messages were as sent (a stubbed result is its stub). Kept per page id and count, so the messages are
+    measured once per process."""
+    return _cached(_NOTES, (page_id, len(removed)),
+                   lambda: _fold_note_uncached(hooks, removed, page_id, NOTE_IDS_BYTES))
 
 
-def _fold_note_uncached(hooks: Any, removed: list[dict], page_id: str) -> str:
+def _fold_note_uncached(hooks: Any, removed: list[dict], page_id: str, ids_budget: int | None = None) -> str:
+    """``fold_note`` with every call id when ``ids_budget`` is None: the form a folds page keeps."""
     rounds, tools, calls, ids = hooks.note_facts(removed)
     size = sum(len(canonical_bytes(m)) for m in removed)
     note = (f"[Contexto folded {rounds:,} earlier tool round{'s' if rounds != 1 else ''} of this turn into page "
             f"{page_id} to keep the request under its bound. They are stored in page {page_id}.\n"
             f"tools: {_counted(tools)}\n"
             f"calls: {_calls(calls)}\n"
-            f"call ids: {_ids(ids)}\n"
+            f"call ids: {_ids(ids, ids_budget)}\n"
             f"was: {size:,} bytes\n"
             f"{_NOTE_TAIL}")
     return note
@@ -586,8 +612,18 @@ def turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
               dialect: Any) -> str:
     """The one fold note of the turn starting at ``start``: the newest fold in detail (``fold_note``),
     then the earlier ones as round numbers and page ids, the first ``listed[0]`` of them as one item
-    naming the folds page ``listed[1]`` that lists them in detail. A pure function of the CLI's blocks and
-    the page ids. ``sent`` is the view before the folded messages are replaced."""
+    naming the folds page ``listed[1]`` that lists them in detail. The ids left of NOTE_IDS_BYTES after
+    the newest fold's go to the folds just before it, newest first, each whole or not at all; older ones
+    are named by their page alone. A pure function of the CLI's blocks and the page ids, kept per turn,
+    folds and folds page, so a request with no new fold builds none. ``sent`` is the view before the
+    folded messages are replaced."""
+    key = (start, tuple(group), listed)
+    return _cached(_TURN_NOTES, key, lambda: _turn_note(hooks, messages, sent, start, group, listed, dialect))
+
+
+def _turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
+               group: list[tuple[tuple[tuple[int, int], ...], str]], listed: tuple[int, str] | None,
+               dialect: Any) -> str:
     ranges, page_id = group[-1]
     note = fold_note(hooks, [sent[i] for a, b in ranges for i in range(a, b)], page_id)
     earlier = group[:-1]
@@ -600,26 +636,37 @@ def turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
         first, end = numbers[rs[0][0] - start], numbers[rs[-1][1] - 1 - start]
         return f"round {first}" if first == end else f"rounds {first} to {end}"
 
-    def ids(group_: list) -> str:
-        return " ".join(_safe_id(b["id"]) for rs, _ in group_ for a, b_ in rs for i in range(a, b_)
+    def ids(rs: tuple[tuple[int, int], ...]) -> str:
+        return " ".join(_safe_id(b["id"]) for a, b_ in rs for i in range(a, b_) if dialect.is_assistant(messages[i])
                         for b in _blocks(messages[i]) if isinstance(b, dict) and b.get("type") == "tool_use"
-                        and isinstance(b.get("id"), str) and b["id"] and dialect.is_assistant(messages[i]))
+                        and isinstance(b.get("id"), str) and b["id"])
 
-    parts = []
     covered = listed[0] if listed is not None else 0
+    budget = NOTE_IDS_BYTES - sum(len(i) + 1 for i in note_calls(note))
+    items = []
+    for rs, pid in reversed(earlier[covered:]):
+        named = ids(rs) if budget > 0 else ""
+        if named and len(named) + 8 <= budget:
+            budget -= len(named) + 8
+            items.append(f"{span(rs)} in {pid} (ids: {named})")
+        else:
+            budget = 0  # an older fold gets no ids once a newer one went without
+            items.append(f"{span(rs)} in {pid}")
+    parts = []
     if covered:
         whole = ((earlier[0][0][0][0], earlier[covered - 1][0][-1][1]),)
-        parts.append(f"{span(whole)} in {covered} pages listed in page {listed[1]} (ids: {ids(earlier[:covered])})")
-    parts += [f"{span(rs)} in {pid} (ids: {ids([(rs, pid)])})" for rs, pid in earlier[covered:]]
+        parts.append(f"{span(whole)} in {covered} pages listed in page {listed[1]}")
+    parts += reversed(items)
     head, tail = note[:-len(_NOTE_TAIL)], _NOTE_TAIL
     return f"{head}earlier folds of this turn: {'; '.join(parts)}\n{tail}"
 
 
 def folds_page(hooks: Any, sent: list[dict], group: list[tuple[tuple[tuple[int, int], ...], str]]) -> list[dict]:
-    """The messages of a folds page: the detailed note of each fold in ``group``, in order, so search
-    finds them and a reader follows each to its rounds page. ``sent`` is the view with no fold applied."""
+    """The messages of a folds page: the detailed note of each fold in ``group``, in order, with every
+    call id, so search finds them and a reader follows each to its rounds page. ``sent`` is the view with
+    no fold applied."""
     return [{"role": "user", "content": [
-        {"type": "text", "text": _fold_note_uncached(hooks, [sent[i] for a, b in rs for i in range(a, b)], pid)}
+        {"type": "text", "text": _fold_note_uncached(hooks, [sent[i] for a, b in rs for i in range(a, b)], pid, None)}
         for rs, pid in group]}]
 
 
@@ -642,9 +689,19 @@ def view(messages: list[dict], state: Any, dialect: Any) -> list[dict]:
             return kept
     out = list(messages)
     n = len(out)
+    by_turn: dict[int, list[tuple[tuple[tuple[int, int], ...], str]]] = {}
+    for start, ranges, page_id in edits.folds:
+        if start < n and ranges[-1][1] <= n:
+            by_turn.setdefault(start, []).append((ranges, page_id))
+    # A folded message is FOLDED in the view, so its stubs are not built (a long loop has thousands),
+    # except in each turn's newest fold, whose note reads the messages as sent (``fold_note``).
+    folded = [(a, b) for group in by_turn.values() for ranges, _ in group[:-1] for a, b in ranges]
+    folded.sort()
+    starts = [a for a, _ in folded]
     by_message: dict[int, list[tuple[int, str]]] = {}
     for i, j, page_id in edits.stubs:
-        if i < n:
+        k = bisect.bisect_right(starts, i) - 1
+        if i < n and not (k >= 0 and i < folded[k][1]):
             by_message.setdefault(i, []).append((j, page_id))
     for i, entries in by_message.items():
         item = messages[i]
@@ -655,10 +712,6 @@ def view(messages: list[dict], state: Any, dialect: Any) -> list[dict]:
                 texts[j] = stub_text(hooks, hooks.call(messages, i, result["tool_use_id"]), result, page_id)
         if texts:
             out[i] = hooks.with_stubs(item, texts)
-    by_turn: dict[int, list[tuple[tuple[tuple[int, int], ...], str]]] = {}
-    for start, ranges, page_id in edits.folds:
-        if start < n and ranges[-1][1] <= n:
-            by_turn.setdefault(start, []).append((ranges, page_id))
     listed = {start: (covered, page_id) for start, covered, page_id in edits.lists}
     for start, group in by_turn.items():
         # One note per turn, however many folds (Reviewer B, finding 1): rebuilt at each fold, bounded.
@@ -1165,8 +1218,11 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
 
 
 def _listed(messages: list[dict], state: Any, store: Any, start: int, hooks: Any, dialect: Any) -> Any:
-    """Keep the turn's note under NOTE_BYTES: when it would pass the cap, write a folds page that lists
-    every fold but the newest in detail, and let the note name that page instead of each of them."""
+    """Keep the turn's note under NOTE_BYTES, call ids included: when it would pass the cap, write a folds
+    page that lists every fold but the newest in detail, each with every call id, and let the note name
+    that page instead of each of them. The note is then the newest fold and one item, whatever the
+    number of folds; each page holds or leads to every call it stands for, within three pages (the note,
+    the folds page, the rounds page, a result page)."""
     edits = state.inturn
     group = [(ranges, pid) for s, ranges, pid in edits.folds if s == start]
     if len(group) < 2:

@@ -1055,7 +1055,7 @@ def test_stub_and_note_wording_is_true_without_contextos_tools():
     assert "calls: Grep pattern: marker (in src/0); Bash command: make check-1; " in note and "check-29" in note
     assert "If you have the contexto_recall tool" in note and "Without it, run the calls again." in note
     assert inturn.note_page(note) == "pg_fedcba9876543210"
-    # It names every call it folded, so a reader of the request alone can tell which results it stands for.
+    # It names the calls it folded, as many as its share of the cap holds, and the page that holds them all.
     assert inturn.note_calls(note) == tuple(f"t{i}" for i in range(30))
     assert inturn.note_calls("[Contexto folded nothing]") == ()
     # The list of calls is capped; what is left out is counted.
@@ -1067,8 +1067,12 @@ def test_stub_and_note_wording_is_true_without_contextos_tools():
     long_note = inturn.fold_note(inturn.MESSAGES, many, "pg_0000000000000001")
     calls_part = long_note[:long_note.index("\ncall ids: ")] + long_note[long_note.index("\nwas: "):]
     assert len(calls_part) < 2_600 and " more calls" in long_note
-    # The ids are not capped: a reader of the request alone can name every folded call.
-    assert len(inturn.note_calls(long_note)) == 600
+    # The ids are capped too, so the note is bounded however much one fold takes: the rest are counted, and
+    # the page the note names holds them. A folds page's copy of the note lists every one.
+    shown = inturn.note_calls(long_note)
+    assert 0 < len(shown) < 600 and sum(len(i) + 1 for i in shown) <= inturn.NOTE_IDS_BYTES
+    assert f"; and {600 - len(shown):,} more, in the same page\n" in long_note
+    assert len(inturn.note_calls(inturn._fold_note_uncached(inturn.MESSAGES, many, "pg_0000000000000001"))) == 600
 
 
 def test_codex_has_no_in_turn_paging_yet():
@@ -1109,12 +1113,11 @@ def test_one_fold_note_per_turn_stays_bounded_and_is_not_rebuilt_per_fold(monkey
     assert len(edits.folds) > 40 and edits.lists  # past the cap, a folds page lists the earlier folds
     (start, covered, listing), = edits.lists
     notes = [b["text"] for b in cli.sent[-1].messages[0]["content"][1:]]
-    assert len(notes) == 1 and inturn.note_size(notes[0]) <= inturn.NOTE_BYTES  # the cap leaves out the ids
-    # Every folded call is named in the request, with the page that leads to its result.
-    named = {i for _, ids in inturn.note_refs(notes[0]) for i in ids}
-    folded = {b["id"] for _, ranges, _ in edits.folds for a, b_ in ranges for i in range(a, b_)
-              for b in cli.history[i]["content"] if b.get("type") == "tool_use"}
-    assert named == folded
+    assert len(notes) == 1 and inturn.note_size(notes[0]) <= inturn.NOTE_BYTES  # the cap holds the ids too
+    # Every fold's page is named in the request: the newest and the latest ones by their rounds pages, the
+    # rest by the folds page that lists them.
+    named = [page for page, _ in inturn.note_refs(notes[0])]
+    assert named == [edits.folds[-1][2], listing, *[pid for _, _, pid in edits.folds[covered:-1]]]
     assert f"pages listed in page {listing}" in notes[0] and inturn.note_page(notes[0]) == edits.folds[-1][2]
     # The folds page holds each earlier fold's own note, byte for byte, each naming its rounds page.
     page = cli.store.get_page(listing)
@@ -1122,13 +1125,80 @@ def test_one_fold_note_per_turn_stays_bounded_and_is_not_rebuilt_per_fold(monkey
     listed = [inturn.note_page(b["text"]) for b in page["messages"][0]["content"]]
     assert listed[:covered] == [pid for _, _, pid in edits.folds[:covered]]
     # Requests with no new fold build no note: the cost does not grow with the number of folds.
-    builds.clear()
-    for r in range(3):
+    quiet = 0
+    for r in range(12):
+        builds.clear()
         sent = cli.send([("Read", {"file_path": f"tail_{r}.py"})])
         cli.results([output(f"tail-{r}", 300)])
-        assert "in_turn_batch" not in sent.names
-    assert builds == []
+        if "in_turn_batch" not in sent.names:
+            assert builds == []
+            quiet += 1
+    assert quiet >= 3
     assert not [e for e in batches(cli) if e["unseen_results_stubbed"]]
+
+
+def _reach(store, page_id: str, depth: int, seen: dict) -> set[str]:
+    """The calls a page leads to within ``depth`` pages: a result it holds whole, a stub's call when the
+    stub's page leads to it, and every call a fold note's pages lead to (the harness's rule)."""
+    if depth == 0:
+        return set()
+    if (page_id, depth) in seen:
+        return seen[page_id, depth]
+    got: set[str] = set()
+    for message in store.get_page(page_id)["messages"]:
+        for b in message["content"] if isinstance(message["content"], list) else []:
+            if b.get("type") == "tool_result":
+                inner = inturn.stub_page(b.get("content"))
+                if inner is None and not inturn.is_own_stub(b.get("content")):
+                    got.add(b["tool_use_id"])
+                elif inner is not None and b["tool_use_id"] in _reach(store, inner, depth - 1, seen):
+                    got.add(b["tool_use_id"])
+            elif b.get("type") == "text" and inturn.note_page(b.get("text")) is not None:
+                for ref, _ in inturn.note_refs(b["text"]):
+                    got |= _reach(store, ref, depth - 1, seen)
+    seen[page_id, depth] = got
+    return got
+
+
+def test_the_fold_note_is_flat_from_50_to_2000_folded_rounds_and_every_folded_result_stays_reachable():
+    # The orchestrator's bound on the note: call ids count against NOTE_BYTES, so the note's whole size,
+    # ids included, stops growing once it reaches the cap, however many rounds fold after that; the
+    # pages it names (rounds pages, the folds page) lead to every folded result within the harness's
+    # eight pages.
+    cli = Cli(memory(), SMALL, head_bytes=int(38_000 * BYTES))
+    cli.prompt("Read every module.")
+    sizes: list[tuple[int, int]] = []  # (rounds folded so far, note bytes)
+    r = 0
+    while sum(e["rounds_folded"] for e in batches(cli)) < 2_000:
+        sent = cli.send([("Read", {"file_path": f"src/deep/module_{r:05d}.py"})])
+        cli.results([output(f"m-{r}", 3_000)])  # small results keep 2,000 rounds of history cheap to send
+        notes = [b["text"] for b in sent.messages[0]["content"][1:] if b.get("type") == "text"]
+        if notes:
+            sizes.append((sum(e["rounds_folded"] for e in batches(cli)), inturn.note_size(notes[-1])))
+        r += 1
+    assert_bound_held(cli, SMALL.bound)
+    assert max(size for _, size in sizes) <= inturn.NOTE_BYTES
+    # Flat: the note grows by one short item a fold until the cap, then a folds page takes the older folds
+    # and it starts again; the peaks of the first and the second thousand folded rounds are the same cap.
+    early = max(size for folded, size in sizes if 50 <= folded < 1_000)
+    late = max(size for folded, size in sizes if folded >= 1_000)
+    assert inturn.NOTE_BYTES - 500 < early <= inturn.NOTE_BYTES and inturn.NOTE_BYTES - 500 < late <= inturn.NOTE_BYTES
+    assert sum(1 for (_, a), (_, b) in zip(sizes, sizes[1:]) if b < a - 2_000) >= 3  # three folds pages
+    final = cli.sent[-1].messages
+    note, = [b["text"] for b in final[0]["content"][1:]]
+    whole = {b["tool_use_id"] for m in final for b in blocks(m) if b.get("type") == "tool_result"
+             and inturn.stub_page(b.get("content")) is None}
+    # Every call the final request answers: the last call's result came after it.
+    calls = {b["id"] for m in cli.history[:-2] for b in blocks(m) if b.get("type") == "tool_use"}
+    seen: dict = {}
+    reached = set().union(*(_reach(cli.store, ref, 8, seen) for ref, _ in inturn.note_refs(note)))
+    for m in final:
+        for b in blocks(m):
+            if b.get("type") == "tool_result" and inturn.stub_page(b.get("content")):
+                if b["tool_use_id"] in _reach(cli.store, inturn.stub_page(b["content"]), 8, seen):
+                    reached.add(b["tool_use_id"])
+    assert len(cli.state.inturn.folds) > 100 and cli.state.inturn.lists  # the cap was passed many folds ago
+    assert len(calls) > 2_000 and calls - whole <= reached
 
 
 def test_a_document_result_is_stubbed_once_seen_and_unread_only_when_over_the_bound_alone():

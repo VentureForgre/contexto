@@ -246,12 +246,76 @@ def replay(name: str) -> dict:
 REPLAY = ("loop120", "large", "small", "subagent", "images", "multiturn", "mixed")
 
 
+def bighead(store) -> Cli:
+    """Reviewer B's case: a 92,000-token head at the default bound, 400 rounds of 20 KB results."""
+    cli = Cli(store, Config(), head_bytes=int(92_000 * 3.2))
+    cli.prompt("Read every module and report what each one does.")
+    cli.loop(400, lambda r: output(f"module-{r:04d}", RESULT))
+    return cli
+
+
+def pdf1000(store) -> Cli:
+    """A 10-page PDF in every result, 1,000 rounds, at the default configuration."""
+    import base64
+
+    from test_pdf_pages import simple_pdf
+
+    pdf = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                          "data": base64.b64encode(simple_pdf(10)).decode()}}
+    cli = Cli(store, Config())
+    cli.prompt("Read the reports.")
+    cli.loop(1_000, lambda r: [pdf])
+    return cli
+
+
+CASES = {"bighead": bighead, "pdf1000": pdf1000}
+
+
+def case(name: str) -> dict:
+    """One of ``CASES`` with the replay harness's cache rules applied by hand: rewrites against the
+    head-scaled allowance, and the breakpoint model's re-sent tokens against max(loop tokens, bound)."""
+    from inturn import targets
+
+    with tempfile.TemporaryDirectory() as home:
+        store = SessionStore(Path(home), "d63")
+        started = time.time()
+        cli = CASES[name](store)
+        seconds = time.time() - started
+        config = cli.config
+        head = cli.upstream.tokens({**cli.request(), "messages": []})
+        prompt = cli.upstream.tokens({**cli.request(), "messages": cli.history[:1]}) - head
+        loop_tokens = cli.upstream.tokens({**cli.request(), "messages": cli.history}) - head - prompt
+        rewrites, resent = 0, 0
+        for a, b in zip(cli.sent, cli.sent[1:]):
+            if b.digests[:len(a.digests)] != a.digests:
+                rewrites += 1
+                resent += b.real - head
+        room = config.bound - config.headroom_floor - config.min_turn_room - head
+        d = min(config.bound / targets.REWRITE_BATCH, max(config.bound / targets.REWRITE_FLOOR, targets.HEAD_SHARE * room))
+        ceiling = max(loop_tokens, config.bound)
+        return {
+            "case": name, "requests": len(cli.sent), "head": head, "loop_tokens": loop_tokens,
+            "over_bound": len(cli.events("over_bound")) + len(cli.events("in_turn_exhausted")),
+            "largest_real": max(s.real for s in cli.sent), "largest_estimate": max(s.estimate for s in cli.sent),
+            "rewrites": rewrites, "allowed": round(2 + loop_tokens / d, 1),
+            "breakpoint_resent": resent, "ceiling": ceiling, "share_of_ceiling": round(resent / ceiling, 3),
+            "folds": len(cli.state.inturn.folds), "stubs": len(cli.state.inturn.stubs),
+            "smallest_room": min(s.room for s in cli.sent),
+            "engine_ms_per_request": round(1000 * seconds / len(cli.sent), 1),
+        }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--digest", action="store_true", help="hash what is forwarded with in-turn paging off")
     parser.add_argument("--replay", action="store_true", help="the replay harness's Claude Code scenarios, full size")
+    parser.add_argument("--cases", action="store_true", help="the large-head and PDF cases, through the test CLI")
     parser.add_argument("scenarios", nargs="*")
     args = parser.parse_args()
+    if args.cases:
+        for name in args.scenarios or CASES:
+            print(json.dumps(case(name)), flush=True)
+        return 0
     if args.replay:
         for name in args.scenarios or REPLAY:
             print(json.dumps(replay(name)), flush=True)

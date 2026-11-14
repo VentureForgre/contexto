@@ -56,6 +56,8 @@ COUNT_EVERY = 16
 SESSION = "inturn"
 PAGE_LINE = re.compile(r"(\S+) \(turn \d+\)")
 HIT_LINE = re.compile(r"> (\d+): ")
+PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")  # contexto.store.pages.page_id
+OMITTED = re.compile(r"\d+ older pages omitted; use contexto_search")  # render_index's line past its budget
 NEARLY_SPENT = mcp.RECALL_NEARLY_SPENT.split("{")[0]
 StubFinder = Callable[[str, dict], list[StubRef]]
 EngineFactory = Callable[[Any, Config], Any]
@@ -106,7 +108,7 @@ class Sent:
     stubbed_on_arrival: int  # of those results, how many are not whole in the forwarded request
     lost: int  # results delivered so far that are neither whole in this request nor byte for byte in a page
     violations: dict[str, int]
-    unnamed: int = 0  # results delivered so far, not whole in this request and named by no stub in it
+    unnamed: int = 0  # results delivered so far, not whole in this request and not accounted for in it (rule 3)
     estimate_before: int | None = None  # the engine's estimate of the request without this request's rewrite
     output_tokens: int = 0  # the response, by the upstream's tokenizer
     cache_read_any: int = 0  # the any-prefix read (upstream.py): on Messages an upper bound
@@ -114,7 +116,13 @@ class Sent:
 
 
 class Stubs:
-    """Checks ``StubRef``s against the store (see ``stubs.py`` for the rules)."""
+    """Checks ``StubRef``s against the store (see ``stubs.py`` for the rules).
+
+    Reachability is defined once, here. A call is reachable from a page when the page holds the call's
+    original result byte for byte, or holds a stub or fold reference (``find_stubs`` on the page's
+    messages) whose page leads to it, through at most ``STUB_DEPTH`` pages. A reference with
+    ``call_ids`` leads only to those calls; one with empty ``call_ids`` references its page as a whole
+    and leads to every call reachable from it."""
 
     def __init__(self, store: SessionStore, upstream: FakeUpstream, dialect: str, find: StubFinder,
                  originals: dict[str, bytes], own: Callable[[], set[str]]) -> None:
@@ -122,7 +130,7 @@ class Stubs:
         self.originals, self.own = originals, own
         self.field = "messages" if dialect == "claude" else "input"
         self.seen: dict[StubRef, bool] = {}
-        self.single: dict[tuple[str | None, str], bool] = {}
+        self.covers: dict[str, frozenset[str]] = {}  # page id -> the calls reachable from it
 
     def page_results(self, page: dict) -> dict[str, set[bytes]]:
         held: dict[str, set[bytes]] = {}
@@ -137,52 +145,71 @@ class Stubs:
             known = self.seen[ref] = self.reachable(ref)
         return known
 
+    def reach(self, page_id: str) -> frozenset[str]:
+        """The delivered calls reachable from page ``page_id``; empty when there is no such page."""
+        known = self.covers.get(page_id)
+        if known is None:
+            known = self.covers[page_id] = self._reach(page_id, 0, {})
+        return known
+
+    def _reach(self, page_id: Any, depth: int, memo: dict[tuple[str, int], frozenset[str]]) -> frozenset[str]:
+        if not isinstance(page_id, str):
+            return frozenset()
+        if (page_id, depth) in memo:
+            return memo[page_id, depth]
+        memo[page_id, depth] = frozenset()  # a page that leads back to itself adds nothing
+        try:
+            page = self.store.get_page(page_id)
+        except (PageUnreadableError, ValueError, OSError):
+            page = None
+        if page is None or not isinstance(page.get("messages"), list):
+            return frozenset()
+        found = {call_id for call_id, contents in self.page_results(page).items()
+                 if self.originals.get(call_id) in contents}
+        if depth < STUB_DEPTH:
+            try:
+                nested = self.find(self.dialect, {self.field: page["messages"]})
+            except NotImplementedError:
+                nested = []
+            for inner in nested:
+                if not isinstance(inner.call_ids, tuple) or inner.page_id is None:
+                    continue
+                wanted = {call_id for call_id in inner.call_ids if call_id not in found}
+                if inner.call_ids and not wanted:
+                    continue
+                further = self._reach(inner.page_id, depth + 1, memo)
+                found |= further & wanted if inner.call_ids else further
+        memo[page_id, depth] = frozenset(found)
+        return memo[page_id, depth]
+
     def names(self, found: list[StubRef]) -> set[str]:
-        """The calls the stubs and fold notes in ``found`` name, each counted only when its own original
-        is reachable from the page the reference names (a fold note naming ten calls whose page holds
-        nine names those nine)."""
+        """The calls the stubs and fold notes in ``found`` name. A reference with ``call_ids`` names each
+        of them whose own original is reachable from its page (a fold note naming ten calls whose page
+        holds nine names those nine); one with empty ``call_ids`` names every call reachable from its
+        page, so a page that leads nowhere names nothing."""
         named: set[str] = set()
         for ref in found:
             if not isinstance(ref.call_ids, tuple):
                 continue
-            for call_id in ref.call_ids:
-                if call_id in named or not isinstance(call_id, str):
-                    continue
-                known = self.single.get((ref.page_id, call_id))
-                if known is None:
-                    known = self.single[ref.page_id, call_id] = self.reachable(StubRef(ref.page_id, (call_id,)))
-                if known:
-                    named.add(call_id)
+            if ref.page_id is None:
+                own = self.own()
+                named.update(call_id for call_id in ref.call_ids if isinstance(call_id, str) and call_id in own)
+                continue
+            reached = self.reach(ref.page_id)
+            named.update(reached if not ref.call_ids else (c for c in ref.call_ids if c in reached))
         return named
 
-    def reachable(self, ref: StubRef, depth: int = 0) -> bool:
-        if not isinstance(ref.call_ids, tuple) or not ref.call_ids:
+    def reachable(self, ref: StubRef) -> bool:
+        """Whether ``ref`` leads to its originals: every call it names is reachable from its page, or,
+        for a reference to a page as a whole, at least one delivered call is. A reference with no page
+        leads to its originals only when every call it names is one of Contexto's own."""
+        if not isinstance(ref.call_ids, tuple):
             return False
         if ref.page_id is None:
             own = self.own()
-            return all(call_id in own for call_id in ref.call_ids)
-        try:
-            page = self.store.get_page(ref.page_id)
-        except PageUnreadableError:
-            return False
-        if page is None or not isinstance(page.get("messages"), list):
-            return False
-        held = self.page_results(page)
-        nested: list[StubRef] | None = None
-        for call_id in ref.call_ids:
-            original = self.originals.get(call_id)
-            if original is None:
-                return False
-            if original in held.get(call_id, ()):
-                continue
-            if depth >= STUB_DEPTH:
-                return False
-            if nested is None:
-                nested = self.find(self.dialect, {self.field: page["messages"]})
-            if not any(call_id in inner.call_ids and self.reachable(StubRef(inner.page_id, (call_id,)), depth + 1)
-                       for inner in nested):
-                return False
-        return True
+            return bool(ref.call_ids) and all(call_id in own for call_id in ref.call_ids)
+        reached = self.reach(ref.page_id)
+        return bool(reached) if not ref.call_ids else all(call_id in reached for call_id in ref.call_ids)
 
 
 @dataclass
@@ -202,6 +229,9 @@ class Run:
     stubs: dict[str, int] | None = None  # None: stubs.find_stubs is not filled in
     probes: list[dict[str, Any]] = field(default_factory=list)
     count_tokens: dict[str, int] = field(default_factory=lambda: {"sent": 0, "different": 0, "published": 0})
+    # Per conversation, the head its first request carried, by the upstream's count: system and tools (Codex:
+    # instructions and tools, and the items before the first prompt), as the CLI sent them.
+    heads: dict[str, int] = field(default_factory=dict)
 
     def check_stubs(self) -> list[str]:
         """What is wrong with the stubs, as sentences; empty when every stub's original is reachable."""
@@ -296,6 +326,7 @@ class Run:
             "thinking": {"newest_missing": sum(s.latest_thinking_missing for s in self.sent)},
             "arrival": {"requests_with_a_stubbed_new_result": sum(1 for s in self.sent if s.stubbed_on_arrival),
                         "results_stubbed_on_arrival": sum(s.stubbed_on_arrival for s in self.sent)},
+            "heads": self.heads,
             "history_tokens": self.history_tokens,
             "scripted_tokens": self.scripted_tokens,
             "originals": self.originals,
@@ -324,10 +355,8 @@ class _Actor:
         self.appended_tokens = 0
         self.fresh: list[str] = []  # the calls whose results were added since the previous request
         self.results: dict[str, bytes] = {}  # every result delivered: call id -> digest of its content
-        # The calls delivered in the running turn. Rule 3's naming check covers these; a result of an earlier
-        # turn may leave the request with its whole turn at a turn-start rotation (a turn page, named by the
-        # index, not per call), and is then checked only for being stored.
-        self.turn_calls: set[str] = set()
+        self.prompts: list[str] = []  # each turn's prompt text, in order
+        self.call_turn: dict[str, int] = {}  # call id -> the turn (index into prompts) that delivered its result
         self.result_tokens: dict[str, int] = {}
         self.scripted: dict[str, str] = {}  # the scripted ones: call id -> call key
         self.hit: tuple[str, int] | None = None  # the page and offset the last search named
@@ -353,6 +382,37 @@ class _Actor:
 
 def _digest(item: dict) -> str:
     return scripts.digest(dumps(item))
+
+
+def _read_texts(item: Any) -> list[str]:
+    """The text the model reads of a forwarded message or item as prose: a string content and its
+    ``text`` and ``input_text`` parts. Tool results and outputs are left out, so a page id inside some
+    tool's output (or a request field the model never reads) names nothing."""
+    if not isinstance(item, dict):
+        return []
+    content = item.get("content")
+    if isinstance(content, str):
+        return [content]
+    return [block["text"] for block in content if isinstance(content, list) and isinstance(block, dict)
+            and block.get("type") in ("text", "input_text") and isinstance(block.get("text"), str)] \
+        if isinstance(content, list) else []
+
+
+def _texts(item: Any) -> list[str]:
+    """The texts of a forwarded message or item: a string content, its text and ``input_text`` parts, and
+    a string tool result or output, where a prompt the engine moved could be."""
+    if not isinstance(item, dict):
+        return []
+    found = [item["output"]] if isinstance(item.get("output"), str) else []
+    content = item.get("content")
+    if isinstance(content, str):
+        return [*found, content]
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict):
+            found.extend(t for t in (block.get("text"), block.get("content")) if isinstance(t, str))
+            if isinstance(block.get("content"), list):
+                found.extend(b["text"] for b in block["content"] if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return found
 
 
 def _estimate(events: list[dict]) -> tuple[int | None, int | None]:
@@ -433,7 +493,7 @@ class _Play:
                 actor.results[call_id] = self.originals[call_id] = content
                 actor.result_tokens[call_id] = block_tokens(blocks[n]) if blocks else item_tokens(item)
                 actor.fresh.append(call_id)
-                actor.turn_calls.add(call_id)
+                actor.call_turn[call_id] = len(actor.prompts) - 1
 
     def resolve(self, actor: _Actor, step: Step) -> Step:
         """A probe step as the model would answer it: a search, then a recall of the page it named."""
@@ -479,6 +539,30 @@ class _Play:
                     self.paged.setdefault(call_id, set()).update(contents)
         self.page_names = names
 
+    def unnamed(self, actor: _Actor, forwarded: dict, items: list, missing: list[str]) -> int:
+        """Rule 3: of ``missing`` (results left out of ``forwarded`` that no ``StubRef`` in it names),
+        how many are not accounted for. Only a result of an earlier turn whose call is gone from the
+        request as well can be, and only when the text the model reads names where it went: a page id
+        in the request's own text (a text part of a message, not a tool result and not another request
+        field) reaches it, or that text carries the index's "older pages omitted" line and the result is
+        stored byte for byte in some page (an index past its budget lists only the newest pages)."""
+        current = len(actor.prompts) - 1
+        earlier = [call_id for call_id in missing if actor.call_turn.get(call_id, current) < current]
+        if not earlier:
+            return len(missing)
+        calls = {call_id for item in items for call_id in item.uses}
+        gone = [call_id for call_id in earlier if call_id not in calls]
+        if not gone:
+            return len(missing)
+        texts = "\0".join(text for item in forwarded.get(self.field) or [] for text in _read_texts(item))
+        reached: set[str] = set()
+        for page_id in set(PAGE_ID.findall(texts)):
+            reached |= self.stubs.reach(page_id)
+        omitted = OMITTED.search(texts) is not None
+        accounted = sum(1 for call_id in gone
+                        if call_id in reached or (omitted and actor.results[call_id] in self.paged.get(call_id, ())))
+        return len(missing) - accounted
+
     # One request ----------------------------------------------------------------------------------
 
     def play(self) -> Run:
@@ -494,14 +578,16 @@ class _Play:
         turn = actor.turn
         in_loop = not actor.at_prompt()
         if not in_loop:
-            actor.turn_calls = set()
-        if not in_loop:
             before = len(actor.cli.items)
             actor.cli.prompt(actor.conversation.turns[turn])
+            actor.prompts.append(actor.conversation.turns[turn].prompt)
             actor.loop_tokens = 0
             new = actor.cli.items[before:]
             actor.prompt_tokens = upstream.tokens(self.dialect, new[0])
             self.added(actor, new)
+            if actor.requests == 0:  # the head: system and tools, and on Codex the items before the first prompt
+                result.heads[name] = (upstream.head_tokens(self.endpoint, actor.cli.request())
+                                      + sum(upstream.tokens(self.dialect, item) for item in actor.cli.items[:before]))
         step = actor.advance()
         if step.probe:
             step = self.resolve(actor, step)
@@ -525,8 +611,8 @@ class _Play:
         if room is None:
             room = next((r for r in reversed(store.side_published[sides:]) if r is not None), None)
 
-        # What became of every result delivered so far: whole in this request, or named in it by a stub
-        # or fold note whose page leads to it; and whether it is in some page at all.
+        # What became of every result delivered so far: whole in this request, or accounted for in it
+        # (``unnamed``, rule 3); and whether it is in some page at all.
         self.index_pages()
         view: dict[str, set[bytes]] = {}
         for item in reply.items:
@@ -545,7 +631,7 @@ class _Play:
                         unstored.update(ref.call_ids)
                 named = self.stubs.names(found)
         missing = [call_id for call_id, content in actor.results.items() if content not in view.get(call_id, ())]
-        unnamed = sum(1 for call_id in missing if call_id in actor.turn_calls and call_id not in named)
+        unnamed = self.unnamed(actor, forwarded, reply.items, [c for c in missing if c not in named])
         lost = sum(1 for call_id in missing
                    if actor.results[call_id] not in self.paged.get(call_id, ()) and call_id not in unstored)
         stubbed = sum(1 for call_id in actor.fresh if actor.results[call_id] not in view.get(call_id, ()))

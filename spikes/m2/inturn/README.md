@@ -68,10 +68,16 @@ The research note gives the measured run times and the load they were measured a
 1. Replace the body of `stubs.find_stubs(dialect, request)`. It returns a `StubRef(page_id, call_ids)`
    for each stub and each fold note in `request`:
    - `call_ids`: the tool calls whose results the stub stands for (Messages `tool_use` ids, Responses
-     `call_id`s); for a fold note, every call of the rounds it folded. Never empty.
+     `call_id`s). A reference that names a page as a whole, such as a fold note naming a rounds or
+     folds page, may carry empty `call_ids`: it then covers every call reachable from that page.
+   - A call is reachable from a page when the page holds the call's original byte for byte, or holds
+     a stub or fold reference whose page leads to it, within 8 pages.
    - On every request, each result the CLI has delivered so far in that conversation that is not
-     whole in the request has to be named by one of these, in that request: a stubbed result, a
-     folded round, and the turns a turn-start rotation paged (the index message) alike.
+     whole in the request has to be covered by one of these references in that request. The one
+     exception is a result of an earlier turn whose call is gone from the request too: it is accounted
+     for only when the text the model reads (text parts of messages, not tool results or other request
+     fields) names where it went: a page id there reaches it, or that text carries the index's "older
+     pages omitted" line and the result is stored byte for byte.
    - `page_id`: the store page that holds them. `None` only when every call is one of Contexto's own
      search, recall or state calls (`contexto.store.render.own_call_ids`), which may be stubbed
      without a stored copy.
@@ -80,7 +86,8 @@ The research note gives the measured run times and the load they were measured a
      a page. Read only that one field.
 2. Publish, in the engine's `request` event, `estimate`: its pre-send estimate of the request without
    that request's rewrite (the previous forwarded request and the items added since), and
-   `sent_estimate`: of what it forwarded. The second-rewrite-in-a-row exception reads `estimate`.
+   `sent_estimate`: of what it forwarded. The second-rewrite-in-a-row exception reads `estimate`,
+   counted at most 1.02 x the upstream's count of the same request.
 3. Remove the `xfail` marks in `tests/test_inturn_targets.py` (the `NOT_BUILT` mark). They are strict:
    a scenario that meets its targets while still marked fails as XPASS.
 
