@@ -21,14 +21,22 @@ only generous ceilings are asserted on them.
 
 from __future__ import annotations
 
+import builtins
+import io
+import json
 import os
+import shutil
+import statistics
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from contexto import mcp
-from contexto.rewrite import compose_preamble
+from contexto import launcher, mcp
+from contexto.rewrite import MESSAGES, RewriteEngine, compose_preamble
+from contexto.store import SessionStore
 from contexto.store import project as project_module
 from contexto.store.project import MAIN_AUTHOR, read_records
 from contexto.tokens import estimate_tokens
@@ -50,6 +58,7 @@ from synthetic_project import (
     session_id,
     show,
 )
+from test_rewrite import FILL, request, user
 
 OFF_PATH = {"over_bound", "bound_too_small", "degraded_enter", "store_error", "fallback_failed", "transform_error",
             "start_text_unavailable"}
@@ -181,10 +190,15 @@ def test_two_sessions_the_first_session_ran_as_a_session_does(two):
     assert sum(r.kind == "closure" for r in records) == len(CLOSED)
     assert len(first.rotations()) >= 3 and not OFF_PATH & every_event(first)
     assert all(c.result["isError"] is False for c in first.calls)
-    fact_turns = [t for t, turn in enumerate(first.turn_starts) if any(
-        f.key in str(first.history[turn:first.turn_starts[t + 1] if t + 1 < len(first.turn_starts) else None])
-        for f in FACTS)]
-    assert max(fact_turns) < first.paged_turns()  # every fact the plan spreads is paged out
+    assert max(fact_turns(first, FACTS)) < first.paged_turns()  # every fact the plan spreads is paged out
+    assert min(fact_turns(first, TAIL)) >= first.paged_turns()  # and the tail's are in the retained window
+
+
+def fact_turns(session: Session, said: tuple[Fact, ...]) -> list[int]:
+    """The turns of ``session`` that say one of the facts."""
+    starts = [*session.turn_starts, len(session.history)]
+    return [t for t in range(len(session.turn_starts))
+            if any(f.key in str(session.history[starts[t]:starts[t + 1]]) for f in said)]
 
 
 def test_two_sessions_the_window_holds_the_open_rules_and_decisions_and_nothing_else(two):
@@ -230,19 +244,18 @@ def test_two_sessions_one_project_search_reaches_every_paged_fact_and_a_session_
         assert call.event["earlier_searched"] == 1 and call.event["earlier_not_searched"] == 0
     by_place = {where: sum(1 for f in FACTS if f.where == where and f.key in project)
                 for where in ("prompt", "tool", "answer")}
-    show("two_sessions.search", {"facts": len(FACTS), "reached_project_scope": len(project),
-                                 "reached_session_scope": len(session), "reached_by_place": by_place,
-                                 "first_session_turns": len(two.first.turn_starts),
-                                 "first_session_turns_paged": two.first.paged_turns()})
+    show("two_sessions.search", {
+        "facts": len(FACTS), "reached_project_scope": len(project), "reached_session_scope": len(session),
+        "reached_by_place": by_place, "first_session_turns": len(two.first.turn_starts),
+        "first_session_turns_paged": two.first.paged_turns(),
+        "tail_facts_in_the_first_sessions_retained_window": len(TAIL),
+        "tail_facts_reached_project_scope": len(reached(second, "project", TAIL))})
 
 
 @pytest.mark.xfail(strict=True, reason="D69 finding: a project-scope search reads only an earlier session's pages, "
                    "so what it said in its last retained window (never paged out when it ended) cannot be reached")
 def test_two_sessions_a_fact_said_in_the_last_turns_of_the_first_session_is_reachable(two):
-    tail = reached(two.second, "project", TAIL)
-    show("two_sessions.tail", {"tail_facts": len(TAIL), "reached_project_scope": len(tail),
-                               "first_session_turns_not_paged": len(two.first.turn_starts) - two.first.paged_turns()})
-    assert tail == [f.key for f in TAIL]
+    assert reached(two.second, "project", TAIL) == [f.key for f in TAIL]
 
 
 def test_two_sessions_sizes(two):
@@ -427,3 +440,223 @@ def test_a_carried_set_over_the_budget_is_cut_inside_it_and_says_how_many_were_o
         "records": total, "shown": len(shown), "omitted": cut, "omitted_line": line,
         "start_text_tokens": estimate_tokens(start), "pin_budget": CONFIG.pin_budget,
         "full_section_tokens": estimate_tokens(last.store.state_text())})
+
+
+# Fifty earlier sessions -----------------------------------------------------------------------------
+
+EARLIER, RECORDS, PAGES = 50, 20, 40  # earlier sessions of the project, pinned records and pages of each
+OTHERS, OTHER_PROJECTS = 150, 15  # sessions of other projects in the same home, and how many projects
+REPEATS = 5
+# Generous ceilings (seconds) for a loaded CI runner; facts.md measured about 50 ms (start line, cold),
+# 8 ms (session scope, cold) and 620 ms (project scope, cold) on a machine at load average 27 to 50.
+CEILINGS = {"start_added_cold": 5.0, "start_added_warm": 2.0, "session_search_cold": 2.0,
+            "session_search_warm": 2.0, "project_search_cold": 30.0, "project_search_warm": 15.0}
+QUERY = "deploy key"  # on two pages of every session of the project, so every earlier session matches
+
+
+def page_turn(text: str) -> list[dict]:
+    return [{"role": "user", "content": [{"type": "text", "text": text}]},
+            {"role": "assistant", "content": [{"type": "text", "text": f"noted\n{FILL}"}]}]
+
+
+def earlier_session(home: Path, sid: str, root: Path, n: int, records: int, pages: int) -> None:
+    """A session of ``root`` as a long one ends: ``records`` pins of the main conversation and ``pages``
+    paged turns of about 2 KB, two of which mention the deploy key and one a fact of its own."""
+    store = launcher.open_session(home, sid, root)
+    for i in range(records):
+        kind = "obligation" if i % 2 == 0 else "decision"
+        store.pin(kind, f"record {i} of session {n}: keep the migration for table {i} reversible",
+                  author=MAIN_AUTHOR)
+    texts = [f"turn {j} of session {n}\n{FILL}" for j in range(pages)]
+    for j in (3 % pages, (pages // 2) % pages):
+        texts[j] = f"turn {j} of session {n}: the deploy key was rotated to key-{n}-{j}\n{FILL}"
+    texts[(n + 7) % pages] += f"\nFor the record, FIFTYKEY{n:03d}Z is fifty-value-{n:03d}."
+    store.page_out([page_turn(t) for t in texts], 0)
+    store.release()
+
+
+def median_ms(samples: list[float]) -> float:
+    return round(statistics.median(samples) * 1000, 2)
+
+
+def timed(action: Callable[[], object]) -> tuple[float, object]:
+    started = time.perf_counter()
+    result = action()
+    return time.perf_counter() - started, result
+
+
+class Reads:
+    """Every path under ``sessions`` that the file functions are asked for while installed, outside ``own``."""
+
+    NAMES = ("open", "scandir", "listdir", "stat", "lstat")
+
+    def __init__(self, sessions: Path, own: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.sessions, self.own, self.mp, self.outside = str(sessions), str(own), monkeypatch, []
+
+    def _wrap(self, real: Callable) -> Callable:
+        def spy(path=".", *args, **kwargs):
+            if isinstance(path, (str, os.PathLike)):
+                text = os.fspath(path)
+                text = text if isinstance(text, str) else os.fsdecode(text)
+                if text.startswith(self.sessions + os.sep) and not (text == self.own or
+                                                                   text.startswith(self.own + os.sep)):
+                    self.outside.append(text)
+            return real(path, *args, **kwargs)
+        return spy
+
+    def __enter__(self) -> Reads:
+        for name in self.NAMES:
+            self.mp.setattr(os, name, self._wrap(getattr(os, name)))
+        self.mp.setattr(builtins, "open", self._wrap(builtins.open))
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.mp.undo()
+
+
+def start(home: Path, root: Path, sid: str, memory: bool, seen: dict[str, str] | None = None) -> dict[str, float]:
+    """A session start in process, as ``contexto run`` makes it: open the session, record the memory
+    choice, the start line, and the engine's first request (which reads the carried text). The session
+    is removed afterwards, so each start sees the same project. ``seen`` gets the line and the text."""
+    total = time.perf_counter()
+    store = launcher.open_session(home, sid, root)
+    launcher.record_project_memory(store, memory)
+    err = io.StringIO()
+    notice, _ = timed(lambda: launcher.project_memory_notice(store, err))
+    engine = RewriteEngine(store, config=CONFIG)
+    first, (upstream, _, events) = timed(lambda: engine(request([user(f"prompt 0\n{FILL}", context=True)]), {},
+                                                        MESSAGES))
+    total = time.perf_counter() - total
+    assert (MARK in json.dumps(upstream)) is memory
+    assert any(e["event"] == "start_text" for e in events) is memory
+    if seen is not None:
+        seen.update(line=err.getvalue().strip(), text=next(iter(engine.states.values())).start_text)
+    store.release()
+    shutil.rmtree(store.dir)
+    return {"total": total, "notice": notice, "first_request": first}
+
+
+def searcher(home: Path, sid: str) -> tuple[SessionStore, mcp.Server]:
+    """The current session reopened, as the MCP server opens it, with a fresh process cache."""
+    project_module.forget_cache()
+    store = SessionStore(home, sid)
+    store.set_window(200_000, 3.2)
+    return store, mcp.Server(store, io.StringIO(), io.StringIO())
+
+
+def search(store: SessionStore, server: mcp.Server, scope: str, query: str = QUERY) -> tuple[float, dict, dict]:
+    store.set_turn_room("1", 20_000)
+    arguments = {"query": query} if scope == "session" else {"query": query, "scope": scope}
+    line = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "contexto_search", "arguments": arguments}})
+    elapsed, response = timed(lambda: server.handle_line(line))
+    result = response["result"]
+    assert result["isError"] is False, result
+    event = [json.loads(x) for x in (store.dir / "log.jsonl").read_text().splitlines()][-1]
+    assert event["event"] == "mcp_call" and event["turn_budget"] == "charged" and event["room_left"] >= 0
+    return elapsed, result, event
+
+
+def test_fifty_earlier_sessions_time(tmp_path, clean_env, monkeypatch):
+    """The 50-session timing: what project memory adds to a session's start, and search latency, cold
+    (the process's project cache emptied; the OS file cache stays warm) and warm, in process."""
+    load_before = os.getloadavg()
+    home, root = tmp_path / "contexto-home", repo(tmp_path)
+    built, _ = timed(lambda: [earlier_session(home, session_id("fifty", n), root, n, RECORDS, PAGES)
+                              for n in range(EARLIER)])
+    for n in range(OTHERS):
+        other = repo(tmp_path / "others", f"project-{n % OTHER_PROJECTS}") if n < OTHER_PROJECTS else \
+            tmp_path.resolve() / "others" / f"project-{n % OTHER_PROJECTS}"
+        earlier_session(home, session_id("other", n), other, 1_000 + n, 5, 10)
+    project = project_module.Project(home, root)  # the view of a session started now
+    assert len(project.earlier) == EARLIER and len(project.carried()) == EARLIER * RECORDS
+
+    times: dict[str, list[float]] = {}
+    seen: dict[str, str] = {}
+
+    def add(name: str, value: float) -> None:
+        times.setdefault(name, []).append(value)
+
+    # The session start, project memory on and off, cold and warm.
+    for i in range(REPEATS):
+        for memory in (True, False):
+            tag = "on" if memory else "off"
+            project_module.forget_cache()
+            cold = start(home, root, session_id(f"start-{tag}-cold", i), memory, seen if memory else None)
+            warm = start(home, root, session_id(f"start-{tag}-warm", i), memory)
+            for name, value in cold.items():
+                add(f"start_{tag}_cold_{name}", value)
+            for name, value in warm.items():
+                add(f"start_{tag}_warm_{name}", value)
+    for temp in ("cold", "warm"):
+        times[f"start_added_{temp}"] = [on - off for on, off in zip(times[f"start_on_{temp}_total"],
+                                                                     times[f"start_off_{temp}_total"])]
+
+    # A session-scope search reads nothing outside its own session, here and in a home with no other session.
+    current = session_id("fifty", "current")  # the session that searches: 40 pages of its own
+    earlier_session(home, current, root, 999, 0, PAGES)
+    solo = tmp_path / "solo-home"
+    (solo / "sessions").mkdir(parents=True, mode=0o700)
+    shutil.copytree(home / "sessions" / current, solo / "sessions" / current)
+    for name, where in (("session_search", home), ("session_search_alone", solo)):
+        for _ in range(REPEATS):
+            store, server = searcher(where, current)
+            with Reads(where / "sessions", store.dir, monkeypatch) as reads:
+                cold, result, event = search(store, server, "session")
+                warm, _, _ = search(store, server, "session")
+            assert reads.outside == [] and "earlier_searched" not in event
+            assert "key-999-3" in result["content"][0]["text"]
+            add(f"{name}_cold", cold)
+            add(f"{name}_warm", warm)
+            store.release()
+
+    # A project-scope search, cold and warm; the same spy sees it read the earlier sessions.
+    for _ in range(REPEATS):
+        store, server = searcher(home, current)
+        with Reads(home / "sessions", store.dir, monkeypatch) as reads:
+            cold, result, event = search(store, server, "project")
+        # It lists the home's sessions to find the project's, so it reads other projects' meta.json, and
+        # nothing else of theirs: no ledger, no page.
+        assert any(f"{os.sep}{session_id('fifty', 0)}{os.sep}pages" in p for p in reads.outside)
+        others = {session_id("other", n) for n in range(OTHERS)}
+        touched = {Path(p).relative_to(home / "sessions").parts for p in reads.outside}
+        assert {parts[1:] for parts in touched if parts[0] in others} <= {(), ("meta.json",)}
+        assert event["earlier_searched"] == EARLIER and event["earlier_matched"] == EARLIER
+        assert event["earlier_not_searched"] == 0 and event["earlier_skipped"] == 0
+        add("project_search_cold", cold)
+        for _ in range(2):
+            warm, _, _ = search(store, server, "project")
+            add("project_search_warm", warm)
+        one, result, event = search(store, server, "project", "FIFTYKEY007Z")
+        assert "fifty-value-007" in result["content"][0]["text"] and event["earlier_matched"] == 1
+        add("project_search_one_key_warm", one)
+        store.release()
+
+    load_after = os.getloadavg()
+    medians = {name: median_ms(values) for name, values in sorted(times.items())}
+    margins = {}
+    for name, ceiling in CEILINGS.items():
+        measured = statistics.median(times[name])
+        assert measured <= ceiling, f"{name}: median {measured:.3f} s over the ceiling of {ceiling} s"
+        margins[name] = f"median {measured * 1000:.1f} ms against a ceiling of {ceiling:g} s " \
+                        f"({ceiling / max(measured, 1e-6):.0f}x headroom)"
+    sizes = sum(p.stat().st_size for p in (home / "sessions").rglob("*") if p.is_file())
+    project_pages = sum(p.stat().st_size for n in range(EARLIER)
+                        for p in (home / "sessions" / session_id("fifty", n) / "pages").iterdir())
+    shown, cut = len(carried_lines(seen["text"])), omitted(seen["text"])
+    assert shown + cut == len(project.carried()) and estimate_tokens(seen["text"]) <= CONFIG.pin_budget
+    assert seen["line"].startswith(f"contexto: project memory: {len(project.carried())} records carried from "
+                                   f"{EARLIER} of {EARLIER} earlier sessions in ")
+    show("fifty_sessions", {
+        "earlier_sessions": EARLIER, "records_each": RECORDS, "pages_each": PAGES,
+        "other_project_sessions": OTHERS, "home_bytes": sizes, "project_page_bytes": project_pages,
+        "build_seconds_for_the_50": round(built, 2), "carried": len(project.carried()),
+        "start_line": seen["line"].replace(str(root), "<root>"), "start_text_lines_shown": shown,
+        "start_text_omitted": cut, "start_text_tokens": estimate_tokens(seen["text"]),
+        "start_text_shown_by_kind": {kind: sum(k == kind for _, k, _, _ in carried_lines(seen["text"]))
+                                     for kind in ("obligation", "decision")},
+        "repeats": REPEATS, "medians_ms": medians, "ceilings": margins,
+        "samples_ms": {name: [round(v * 1000, 2) for v in values] for name, values in sorted(times.items())},
+        "load_average_before": [round(x, 2) for x in load_before],
+        "load_average_after": [round(x, 2) for x in load_after],
+        "cpu_count": os.cpu_count()})
