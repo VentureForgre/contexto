@@ -891,14 +891,19 @@ def _tightness(request: dict, messages: list[dict], sent: list[dict], state: Any
     """(the head's tokens, whether the bound is tight): tight when it leaves less than two
     ``min_turn_room`` between the head plus the turn's prompt and ``T`` (Reviewer B, finding 3). Then a
     batch holds requests under ``show_line`` instead of ``page_line``, and a new result is shown once if
-    it fits there; the room may fall under ``min_turn_room``, logged once per turn."""
+    it fits there; the room may fall under ``min_turn_room``, logged once per turn. What the engine adds
+    that no batch can page counts with the head: the carried records sent while ``k == 0`` (D69), or
+    from the first rotation on the preamble that holds them."""
     rw = _rw()
     head = rw.measured_head(request, state, estimator)
     if head is None:
         head = estimator.estimate(canonical_json(dialect.head_estimate_source(request)))
     start = rw.turn_starts(messages)[-1]
     prompt = rw.estimate_items(estimator, [sent[start]])
-    return head, trigger(config) - (head + prompt) < HEADWAY_ROOMS * config.min_turn_room
+    added = (state.start_text if state.k == 0
+             else rw.compose_preamble(config, state.pinned_text, state.index_text))
+    fixed = estimator.estimate(added) if added else 0
+    return head, trigger(config) - (head + fixed + prompt) < HEADWAY_ROOMS * config.min_turn_room
 
 
 class _Candidate(NamedTuple):

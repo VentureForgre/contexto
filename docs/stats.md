@@ -500,6 +500,10 @@ Events that are **not** counted, because they happen in normal use:
 - `main_record_unmatched`: a signal for whoever updates Contexto for a new CLI: Contexto's own pin
   or close call had a reply of a shape it does not read, so that record is not carried. It is not a
   fault of the session.
+- `in_turn_batch`, `in_turn_exhausted`: in-turn paging's records (D63,
+  [in-turn paging](in-turn-paging.md)). A batch is paging working as designed. `in_turn_exhausted`
+  comes with an `over_bound` for the same request, which the bound line already counts, so it is
+  not counted twice.
 - `proxy_stop_incomplete`: the proxy stopped (Ctrl+C) with requests still in a handler. It is not
   a fault, but those requests may have no request line: `requests.in_flight_at_stop` counts them
   and the `requests` line says so.
