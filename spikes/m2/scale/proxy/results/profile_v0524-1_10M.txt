@@ -1,87 +1,87 @@
 # cProfile of the proxy's _transform and observe_usage, run v0524-1; sorted by cumulative time
-Thu Nov 12 20:04:23 2026    /tmp/contexto-scale-77n2dd72/profile_v0524-1_10M.prof
+Fri Nov 13 20:24:17 2026    /tmp/contexto-scale-2dwq6nbz/profile_v0524-1_10M.prof
 
-         3921700 function calls (3828248 primitive calls) in 1.570 seconds
+         3921707 function calls (3828248 primitive calls) in 1.297 seconds
 
    Ordered by: cumulative time
-   List reduced from 445 to 40 due to restriction <40>
+   List reduced from 448 to 40 due to restriction <40>
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-       10    0.000    0.000    1.520    0.152 proxy.py:1159(_transform)
-       10    0.000    0.000    1.101    0.110 launcher.py:461(__call__)
-       10    0.000    0.000    1.101    0.110 worker.py:189(__call__)
-       10    0.000    0.000    1.101    0.110 rewrite.py:2286(__call__)
-       10    0.000    0.000    1.100    0.110 rewrite.py:2292(_call)
-       10    0.000    0.000    0.985    0.098 rewrite.py:1741(rewrite)
-       10    0.000    0.000    0.985    0.098 rewrite.py:1753(_rewrite)
-    48040    0.029    0.000    0.785    0.000 rewrite.py:400(message_hash)
-       10    0.005    0.000    0.770    0.077 rewrite.py:1315(matching_prefix)
-    24030    0.069    0.000    0.735    0.000 rewrite.py:384(_message_hash)
-    24311    0.008    0.000    0.564    0.000 canonical.py:40(canonical_bytes)
-    24314    0.006    0.000    0.545    0.000 canonical.py:28(canonical_json)
-    24369    0.015    0.000    0.544    0.000 __init__.py:185(dumps)
-    24369    0.014    0.000    0.526    0.000 encoder.py:185(encode)
-    24369    0.507    0.000    0.507    0.000 encoder.py:207(iterencode)
-       30    0.000    0.000    0.304    0.010 canonical.py:62(loads_bounded)
-       69    0.000    0.000    0.253    0.004 __init__.py:304(loads)
-       69    0.000    0.000    0.223    0.003 decoder.py:340(decode)
-       69    0.223    0.003    0.223    0.003 decoder.py:351(raw_decode)
-       10    0.002    0.000    0.209    0.021 rewrite.py:1634(send)
-       14    0.000    0.000    0.153    0.011 rewrite.py:992(carried_content)
-       14    0.012    0.001    0.133    0.010 rewrite.py:975(carried_blocks)
-    81690    0.010    0.000    0.128    0.000 rewrite.py:441(is_turn_start)
-       11    0.000    0.000    0.119    0.011 rewrite.py:1132(transform_messages)
-    81690    0.037    0.000    0.118    0.000 rewrite.py:306(_anthropic_is_turn_start)
-93478/225    0.067    0.000    0.111    0.000 tokens.py:192(split_media)
-       10    0.000    0.000    0.109    0.011 rewrite.py:2727(prime)
-       20    0.000    0.000    0.109    0.005 tokens.py:397(prime_media)
-       85    0.001    0.000    0.083    0.001 rewrite.py:322(_turn_starts)
-     7690    0.006    0.000    0.082    0.000 rewrite.py:330(<genexpr>)
-    94129    0.017    0.000    0.076    0.000 {built-in method builtins.any}
-    24064    0.068    0.000    0.068    0.000 {built-in method _hashlib.openssl_sha256}
-   884791    0.066    0.000    0.066    0.000 {method 'get' of 'dict' objects}
-    33550    0.007    0.000    0.065    0.000 rewrite.py:559(is_turn_start)
-        2    0.000    0.000    0.054    0.027 rewrite.py:1490(guarded_rotation)
-        2    0.000    0.000    0.054    0.027 rewrite.py:1326(rotate_at_turn_start)
-       21    0.042    0.002    0.051    0.002 canonical.py:44(nesting_exceeds)
-       10    0.000    0.000    0.050    0.005 rewrite.py:2735(observe_usage)
-       10    0.000    0.000    0.049    0.005 toolcheck.py:337(observe)
-       10    0.000    0.000    0.049    0.005 rewrite.py:2742(_observe_usage)
+       10    0.000    0.000    0.934    0.093 launcher.py:461(__call__)
+       10    0.000    0.000    0.934    0.093 worker.py:196(__call__)
+       10    0.000    0.000    0.934    0.093 rewrite.py:2286(__call__)
+       10    0.000    0.000    0.930    0.093 rewrite.py:2292(_call)
+       10    0.000    0.000    0.844    0.084 rewrite.py:1741(rewrite)
+       10    0.000    0.000    0.844    0.084 rewrite.py:1753(_rewrite)
+    48040    0.022    0.000    0.677    0.000 rewrite.py:400(message_hash)
+    24030    0.059    0.000    0.639    0.000 rewrite.py:384(_message_hash)
+       10    0.003    0.000    0.600    0.060 rewrite.py:1315(matching_prefix)
+    24311    0.006    0.000    0.493    0.000 canonical.py:40(canonical_bytes)
+    24369    0.011    0.000    0.479    0.000 __init__.py:185(dumps)
+    24314    0.004    0.000    0.479    0.000 canonical.py:28(canonical_json)
+    24369    0.010    0.000    0.466    0.000 encoder.py:185(encode)
+    24369    0.452    0.000    0.452    0.000 encoder.py:207(iterencode)
+     11/4    0.000    0.000    0.444    0.111 proxy.py:1159(_transform)
+       30    0.000    0.000    0.228    0.008 canonical.py:62(loads_bounded)
+       69    0.000    0.000    0.190    0.003 __init__.py:304(loads)
+       10    0.001    0.000    0.176    0.018 rewrite.py:1634(send)
+       69    0.000    0.000    0.156    0.002 decoder.py:340(decode)
+       69    0.156    0.002    0.156    0.002 decoder.py:351(raw_decode)
+       14    0.000    0.000    0.130    0.009 rewrite.py:992(carried_content)
+       14    0.010    0.001    0.114    0.008 rewrite.py:975(carried_blocks)
+       11    0.000    0.000    0.102    0.009 rewrite.py:1132(transform_messages)
+    81690    0.009    0.000    0.100    0.000 rewrite.py:441(is_turn_start)
+93478/225    0.055    0.000    0.092    0.000 tokens.py:192(split_media)
+    81690    0.030    0.000    0.091    0.000 rewrite.py:306(_anthropic_is_turn_start)
+       10    0.000    0.000    0.090    0.009 rewrite.py:2727(prime)
+       20    0.000    0.000    0.090    0.005 tokens.py:397(prime_media)
+    94129    0.013    0.000    0.062    0.000 {built-in method builtins.any}
+       85    0.001    0.000    0.061    0.001 rewrite.py:322(_turn_starts)
+    24064    0.061    0.000    0.061    0.000 {built-in method _hashlib.openssl_sha256}
+     7690    0.004    0.000    0.061    0.000 rewrite.py:330(<genexpr>)
+    33550    0.006    0.000    0.054    0.000 rewrite.py:559(is_turn_start)
+   884791    0.050    0.000    0.050    0.000 {method 'get' of 'dict' objects}
+        2    0.000    0.000    0.044    0.022 rewrite.py:1490(guarded_rotation)
+        2    0.000    0.000    0.044    0.022 rewrite.py:1326(rotate_at_turn_start)
+       10    0.000    0.000    0.041    0.004 toolcheck.py:337(observe)
+       10    0.000    0.000    0.039    0.004 rewrite.py:2735(observe_usage)
+       21    0.031    0.001    0.039    0.002 canonical.py:44(nesting_exceeds)
+       10    0.000    0.000    0.039    0.004 rewrite.py:2742(_observe_usage)
 
 
 # sorted by own time
-Thu Nov 12 20:04:23 2026    /tmp/contexto-scale-77n2dd72/profile_v0524-1_10M.prof
+Fri Nov 13 20:24:17 2026    /tmp/contexto-scale-2dwq6nbz/profile_v0524-1_10M.prof
 
-         3921700 function calls (3828248 primitive calls) in 1.570 seconds
+         3921707 function calls (3828248 primitive calls) in 1.297 seconds
 
    Ordered by: internal time
-   List reduced from 445 to 25 due to restriction <25>
+   List reduced from 448 to 25 due to restriction <25>
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-    24369    0.507    0.000    0.507    0.000 encoder.py:207(iterencode)
-       69    0.223    0.003    0.223    0.003 decoder.py:351(raw_decode)
-    24030    0.069    0.000    0.735    0.000 rewrite.py:384(_message_hash)
-    24064    0.068    0.000    0.068    0.000 {built-in method _hashlib.openssl_sha256}
-93478/225    0.067    0.000    0.111    0.000 tokens.py:192(split_media)
-   884791    0.066    0.000    0.066    0.000 {method 'get' of 'dict' objects}
-   887159    0.043    0.000    0.043    0.000 {built-in method builtins.isinstance}
-       21    0.042    0.002    0.051    0.002 canonical.py:44(nesting_exceeds)
-    81690    0.037    0.000    0.118    0.000 rewrite.py:306(_anthropic_is_turn_start)
-       48    0.029    0.001    0.029    0.001 {method 'decode' of 'bytes' objects}
-    48040    0.029    0.000    0.785    0.000 rewrite.py:400(message_hash)
-       10    0.018    0.002    0.038    0.004 toolcheck.py:137(_system_texts)
-    94129    0.017    0.000    0.076    0.000 {built-in method builtins.any}
-   141173    0.017    0.000    0.025    0.000 rewrite.py:520(_dialect)
-    85898    0.016    0.000    0.024    0.000 rewrite.py:296(_blocks)
-     3853    0.015    0.000    0.024    0.000 rewrite.py:345(_drop_cache_control)
-    24369    0.015    0.000    0.544    0.000 __init__.py:185(dumps)
-    24369    0.014    0.000    0.526    0.000 encoder.py:185(encode)
-    24030    0.012    0.000    0.018    0.000 rewrite.py:378(_is_single_text)
-       14    0.012    0.001    0.133    0.010 rewrite.py:975(carried_blocks)
-    81728    0.012    0.000    0.017    0.000 rewrite.py:313(<genexpr>)
-   189361    0.011    0.000    0.011    0.000 {method 'get' of '_contextvars.ContextVar' objects}
-    18625    0.011    0.000    0.019    0.000 rewrite.py:301(_anthropic_is_context_block)
-    81690    0.010    0.000    0.128    0.000 rewrite.py:441(is_turn_start)
-    69138    0.010    0.000    0.014    0.000 tokens.py:177(_media_kind)
+    24369    0.452    0.000    0.452    0.000 encoder.py:207(iterencode)
+       69    0.156    0.002    0.156    0.002 decoder.py:351(raw_decode)
+    24064    0.061    0.000    0.061    0.000 {built-in method _hashlib.openssl_sha256}
+    24030    0.059    0.000    0.639    0.000 rewrite.py:384(_message_hash)
+93478/225    0.055    0.000    0.092    0.000 tokens.py:192(split_media)
+   884791    0.050    0.000    0.050    0.000 {method 'get' of 'dict' objects}
+   887159    0.036    0.000    0.036    0.000 {built-in method builtins.isinstance}
+       21    0.031    0.001    0.039    0.002 canonical.py:44(nesting_exceeds)
+    81690    0.030    0.000    0.091    0.000 rewrite.py:306(_anthropic_is_turn_start)
+    48040    0.022    0.000    0.677    0.000 rewrite.py:400(message_hash)
+        1    0.018    0.018    0.018    0.018 {method 'poll' of 'select.poll' objects}
+       48    0.016    0.000    0.016    0.000 {method 'decode' of 'bytes' objects}
+       10    0.015    0.001    0.031    0.003 toolcheck.py:137(_system_texts)
+   141173    0.013    0.000    0.020    0.000 rewrite.py:520(_dialect)
+    94129    0.013    0.000    0.062    0.000 {built-in method builtins.any}
+    85898    0.013    0.000    0.021    0.000 rewrite.py:296(_blocks)
+     3853    0.012    0.000    0.019    0.000 rewrite.py:345(_drop_cache_control)
+    24369    0.011    0.000    0.479    0.000 __init__.py:185(dumps)
+       14    0.010    0.001    0.114    0.008 rewrite.py:975(carried_blocks)
+    24369    0.010    0.000    0.466    0.000 encoder.py:185(encode)
+    81728    0.010    0.000    0.014    0.000 rewrite.py:313(<genexpr>)
+    24030    0.009    0.000    0.014    0.000 rewrite.py:378(_is_single_text)
+   189361    0.009    0.000    0.009    0.000 {method 'get' of '_contextvars.ContextVar' objects}
+    18625    0.009    0.000    0.016    0.000 rewrite.py:301(_anthropic_is_context_block)
+    81690    0.009    0.000    0.100    0.000 rewrite.py:441(is_turn_start)
 
 
