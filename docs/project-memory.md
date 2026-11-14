@@ -79,7 +79,8 @@ the main conversation by a restarted proxy or `contexto run --resume`, unless th
 restart did not trust it either). After a restart, another conversation that reaches the proxy
 first is trusted only when a proxy on this session trusted it before (a `--continue` or `--resume`
 of your own conversation) or it is a new Claude Code session; otherwise a restarted proxy may carry
-less, never more. The proxy keeps the keys of the last 64 conversations it trusted in the session's
+less, never more. A session that has served Claude Code counts as restarted even when its epoch
+record (`epoch.json`) is missing, damaged or from another Contexto version. The proxy keeps the keys of the last 64 conversations it trusted in the session's
 `meta.json` (`trusted_conversations`). A conversation of yours that is not among them, and is not
 the one the proxy last recorded for a resume, is not trusted after a restart and carries nothing in
 that launch or later ones. That happens at the first launch after upgrading from v0.5.24, which kept
@@ -92,8 +93,9 @@ trusted conversation's is that conversation to the proxy, before and after a res
 0.163.0 that changes nothing, since a Codex session's pins are never carried. A conversation also
 becomes trusted when it became the main
 one after `/clear`, `/resume`, a compaction, or a side request that came first. After a restart, one
-that takes over after a side request is trusted only when the rules above would trust it had it
-reached the proxy first. Claude Code subagents
+that takes over after a side request, after `/clear` or by `/resume` is trusted only when the rules
+above would trust it had it reached the proxy first. So `/clear`, which starts a new Claude Code
+session, is trusted, and so is `/resume` of a conversation a proxy on this session trusted before. Claude Code subagents
 are told apart by the `X-Claude-Code-Agent-Id` header Claude Code sends with their requests, and never
 take over as the main conversation. A request that carries `X-Claude-Code-Agent-Id` or a parent session id
 is never read for pins, even when it has the main conversation's key, as a fork of the main

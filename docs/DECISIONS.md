@@ -2869,13 +2869,17 @@ the owner's delegation. Open decisions are listed at the end with the options an
       engine that resumes such a record does not trust it either (review B round 4, N9). The fork
       guard reads the agent header itself as well as the parsed session, so a request that carries
       it with no session id is left out too (N10). After a restart the engine's first main is
-      trusted only when the store has no epoch record, the record names that conversation without
+      trusted only when the store is new (no readable epoch record and no Claude Code session served
+      before the engine started), the record names that conversation without
       `untrusted`, or it is a Claude Code request in a session id the store had not served before
       the engine started, with no agent id and no parent (a new CLI session, which no subagent of an
       earlier conversation can be: a subagent carries its parent's id). Before review B round 5 (N13)
       the first conversation to reach a restarted proxy was trusted whatever it was, so a subagent
       without its agent id, or a Codex child, sent while the user's conversation waited on it, had its
-      pins confirmed. A conversation an earlier engine on the store trusted as main is trusted again
+      pins confirmed. Before review B round 8 (N21a) a store with no readable record counted as new
+      even when it had served sessions: after a failed record write, or with an `epoch.json` that is
+      damaged or of an unknown version (`epoch_record` reads each as none), the first main and any
+      conversation that took main by `after_side_request` were trusted. A conversation an earlier engine on the store trusted as main is trusted again
       (`meta.json` `trusted_conversations`, the newest 64 conversation keys by last trust: each
       engine writes a key it trusts once, and a key already listed moves to the end, as review A
       round 7 finding 6 and review B round 7 N20 asked; a failed write is the content-free
@@ -2895,12 +2899,17 @@ the owner's delegation. Open decisions are listed at the end with the options an
       of it carries nothing. That happens at the first launch after an upgrade from v0.5.24, which
       kept no list, and to a key whose write failed or that fell off the list; `/clear` starts a
       conversation that is carried (review A round 7, finding 1). After a restart,
-      `after_side_request` trusts the conversation that takes main only when the first-main rules
-      above would trust it. Before review B round 7 (N17), a tool-less side request that reached a
+      `after_side_request`, `new_cli_session` and `resumed_cli_session` trust the conversation that
+      takes main only when the first-main rules above would trust it; in a new store's engine those
+      rules trust every conversation, so a first engine is unchanged. Before review B round 7 (N17), a tool-less side request that reached a
       restarted engine first was main untrusted, and the next conversation seen with a tool list was
       trusted whatever it was: a subagent without its agent id, started before main's next turn
       start, had its pins confirmed, and the list then kept it trusted in later engines over the
-      record's `untrusted`. A Codex child whose first prompt is byte-identical to a listed
+      record's `untrusted`. Before review B round 8 (N21b) the session rules were trusted
+      unconditionally, and a new engine knows no session's owner from before it started, so a
+      subagent without its agent id, still sending in a session cleared before the restart, took main
+      as `new_cli_session` and was trusted. A `/clear` after a restart is still trusted, since it is a
+      session id the store had not served, and so is a `/resume` of a listed conversation. A Codex child whose first prompt is byte-identical to a listed
       conversation's has that conversation's key, so it is trusted after a restart, as it already
       was inside the engine that listed the key, where the two share one state (review B round 7,
       N18). That is latent: a Codex session confirms nothing in code mode on codex-cli 0.163.0.
