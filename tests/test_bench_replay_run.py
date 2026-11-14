@@ -318,12 +318,16 @@ def check_requests_jsonl(run):
     # The proxy's own estimate is beside the fake upstream's count; once usage is known the two are close. On a
     # request where an in-turn batch ran (D63) it is the anchored estimate less what the batch freed by the
     # estimator, which errs high when the paged content was estimated low: never under the count there, and
-    # close again on the next request.
+    # close again on the next request. Nor far over it: the pinned run's one batch request (113, an in-turn
+    # rotation of 53 turns) is estimated 43,495 against a count of 34,128, 1.274 times; at most 1.35 leaves
+    # that error a margin of 6% and fails an estimate that leaves freed content uncounted (Reviewer A at
+    # 15293e9c, finding 3: 56,473 for a request of 7,301).
     batch = {n for n, events in enumerate(logged) if any(t["event"] == "in_turn_batch" for t in events)}
     assert all(type(r["proxy_estimate"]) is int for r in replayed)
     assert all(abs(r["proxy_estimate"] - r["uncached"]) < 0.15 * r["uncached"]
                for n, r in enumerate(replayed) if n and n not in batch)
-    assert all(replayed[n]["proxy_estimate"] >= replayed[n]["uncached"] for n in batch)
+    assert all(replayed[n]["uncached"] <= replayed[n]["proxy_estimate"] <= 1.35 * replayed[n]["uncached"]
+               for n in batch)
     # The modelled arms: the same rows the model gives for the measured head.
     assert by_arm["full"] == lines.full_rows(script, expected["head_tokens"])
     assert by_arm["plain"] == lines.plain_rows(script, expected["head_tokens"], 150_000)
