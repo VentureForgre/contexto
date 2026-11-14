@@ -28,7 +28,6 @@ Mapping onto the contract's rules (``contexto.rewrite``):
 
 from __future__ import annotations
 
-import builtins
 import hashlib
 import json
 import os
@@ -671,7 +670,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         except Exception as exc:  # unreadable, as when it prints no version
             version, version_error = None, type(exc).__name__
         installed = version, version_error
-        if _start_failure(version_error):
+        if cliversions.start_failure(version_error):
             raise launcher.LaunchError(f"'{CODEX_BIN}' at {codex} cannot be run ({version_error}); check its #! "
                                        "line or reinstall Codex", launcher.EXIT_NOT_FOUND)
         shared = needs_shared_server(codex_args)
@@ -784,14 +783,6 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                            log_incomplete="log_unwritable" in getattr(notices, "shown", ()))
         if not started:
             _remove_session(created)
-
-
-def _start_failure(error: str | None) -> bool:
-    """Whether ``installed_version``'s error means ``codex`` could not be started at all: the name of an
-    ``OSError`` from starting it (FileNotFoundError for a missing #! interpreter, PermissionError,
-    OSError for an exec format error), not a timeout, an exit code, or unparsed output."""
-    cls = getattr(builtins, error or "", None)
-    return isinstance(cls, type) and issubclass(cls, OSError) and not issubclass(cls, TimeoutError)
 
 
 def _remove_session(created: Path | None) -> None:

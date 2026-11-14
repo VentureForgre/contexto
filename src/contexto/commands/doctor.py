@@ -84,8 +84,7 @@ from urllib.parse import urlsplit
 from contexto import __version__
 from contexto.cliversions import CLI_NAMES, REPORT_URL, TESTED_VERSIONS, installed_version, is_tested, tested_list
 from contexto.cliversions import _kill_group as kill_group
-from contexto.codex import API_KEY_MODE, KEY_HELPER_ENV, UPSTREAM_ENV, CodexLaunchError, codex_upstream_with_source
-from contexto.codex import _start_failure as cannot_start
+from contexto.cliversions import start_failure as cannot_start
 from contexto.launcher import (
     LaunchError,
     Terminated,
@@ -563,6 +562,7 @@ def check_claude_upstream(ctx: Context) -> Check:
 
 
 def codex_upstream_place(source: str, claude_source: str, env: Mapping[str, str]) -> str:
+    from contexto.codex import UPSTREAM_ENV  # here, not at import: see check_codex_upstream
     if source == "codex-env":
         return f"{UPSTREAM_ENV} in the environment"
     if source.startswith("claude-"):
@@ -573,6 +573,10 @@ def codex_upstream_place(source: str, claude_source: str, env: Mapping[str, str]
 def check_codex_upstream(ctx: Context) -> Check:
     """The upstream ``contexto run codex`` would use in API-key mode with no ``--codex-upstream``, resolved
     as ``codex.run_codex`` resolves it: a project's base URL only from a folder Claude Code trusts."""
+    # Imported here: the CLI imports every command module to build its parser, so a top-level import made
+    # every command fail when contexto.codex is missing, where `contexto run codex` must exit 2 and say so.
+    from contexto.codex import API_KEY_MODE, UPSTREAM_ENV, CodexLaunchError, codex_upstream_with_source
+
     claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files)
     untrusted = (untrusted_note(f"env.{BASE_URL_KEY}", claude.ignored, "Pass --codex-upstream", ctx.env)
                  if claude.ignored else None)
@@ -631,6 +635,8 @@ def check_codex_key(ctx: Context) -> Check:
     not shown. The variable is read as the launcher reads it: any value that is not empty is the helper,
     and one that is only spaces is then refused ("the key helper command is empty"), where reading on
     to ``apiKeyHelper`` would report a helper the launch never uses."""
+    from contexto.codex import KEY_HELPER_ENV  # here, not at import: see check_codex_upstream
+
     if ctx.env.get(KEY_HELPER_ENV):
         details = {"name": KEY_HELPER_ENV, "source": "env"}
         if ctx.env[KEY_HELPER_ENV].strip():
