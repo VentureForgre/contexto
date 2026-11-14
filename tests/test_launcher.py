@@ -672,6 +672,22 @@ def test_run_codex_without_the_codex_module_exits_2(monkeypatch, capsys):
     assert "codex support is not installed" in capsys.readouterr().err
 
 
+def test_every_command_loads_without_the_codex_module(tmp_path):
+    """The CLI imports every command module to build its parser. #258's doctor imported contexto.codex at
+    the top, so with the module missing every command, `contexto run codex` too, failed with
+    ModuleNotFoundError; the test above passed in the full suite only because an earlier test had already
+    imported the doctor module. A fresh interpreter with the module blocked does not depend on test order."""
+    code = ("import sys\n"
+            "sys.modules['contexto.codex'] = None\n"  # behaves as not installed
+            "from contexto import cli\n"
+            "raise SystemExit(cli.main(['run', 'codex', 'exec', 'hi']))\n")
+    env = {**os.environ, "HOME": str(tmp_path), "CONTEXTO_HOME": str(tmp_path / "store")}
+    done = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env, capture_output=True, text=True,
+                          timeout=60)
+    assert done.returncode == 2, done.stderr
+    assert "codex support is not installed" in done.stderr and "Traceback" not in done.stderr
+
+
 def test_run_codex_dispatches_to_contexto_codex(monkeypatch):
     import types
 
