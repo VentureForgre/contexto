@@ -114,6 +114,7 @@ NOT_FAULT_EVENTS = frozenset({
     "epoch_not_resumed", "head_changed", "window_minimal", "side_room_expired", "hold_skipped", "upstream_retry",
     "stale_temp_removed", "estimate_error", "pdf_allowance", "pdf_pages_uncertain", "cli_version_untested",
     "proxy_stop_incomplete", "carried_text_growing", "sizing_not_restored", "window_budget_warning",
+    "hint_mismatch",
 })
 
 DISK_FULL = frozenset({"ENOSPC", "EDQUOT"})

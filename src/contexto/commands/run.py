@@ -32,7 +32,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                         help="minimum headroom below the bound that triggers a rotation (default 25,000; "
                              "must be below the bound)")
     parser.add_argument("--session", default=None,
-                        help="full session id to resume or create (default: the one that served "
+                        help="full session id to resume or create; a prefix of an existing id is refused, since a "
+                             "new id creates a session (default: the one that served "
                              "'claude --resume <id>' or, for 'claude --continue', the last one used in this "
                              "directory; else a new one, printed at start)")
     parser.add_argument("--upstream", default=None,
@@ -65,7 +66,7 @@ def run(args: argparse.Namespace) -> int:
         try:
             from contexto.codex import run_codex
         except ImportError:
-            print("contexto run: codex support is not installed in this build", file=sys.stderr)
+            print("contexto: codex support is not installed in this build", file=sys.stderr)
             return 2
         return run_codex(args)
     return run_claude(options_from_args(args))

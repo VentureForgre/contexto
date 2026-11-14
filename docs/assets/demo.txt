@@ -1,0 +1,36 @@
+# Synthetic session: a stub CLI and a fake upstream on 127.0.0.1. No model.
+[fake upstream] listening on 127.0.0.1:8471, counting 1 token per 3.5 bytes received
+$ contexto run --bound 60000 --headroom-floor 5000 --no-version-check \
+    --upstream http://127.0.0.1:8471 claude
+contexto: session cb30efa45136422ca5cc2a782614b6fc (bound 60,000, upstream flag)
+[stub claude] turn 0: history 13,240 tokens -> [fake upstream] received 13,240 tokens
+[stub claude] turn 1 ends with: "The release codename is amber-kestrel-17."
+[stub claude] turn 1: history 25,567 tokens -> [fake upstream] received 25,567 tokens
+[stub claude] turn 2: history 37,881 tokens -> [fake upstream] received 37,881 tokens
+[stub claude] turn 3: history 50,195 tokens -> [fake upstream] received 13,830 tokens
+[stub claude] turn 4: history 62,509 tokens -> [fake upstream] received 26,144 tokens
+[stub claude] turn 5: history 74,823 tokens -> [fake upstream] received 38,458 tokens
+[stub claude] turn 6: history 87,137 tokens -> [fake upstream] received 14,027 tokens
+[stub claude] turn 7: history 99,451 tokens -> [fake upstream] received 26,341 tokens
+[stub claude] runs (the turns now on disk): contexto sessions show $CONTEXTO_SESSION \
+[stub claude]     | grep -E 'Pages:|Over-bound|pg_' | cut -c1-74
+Pages: 6
+Over-bound turns: 0
+  pg_4e75999c2e5a9a89 turn 5: Build log for step 5. Keep it for reference.
+  pg_bb02a2b906bb0d5a turn 4: Build log for step 4. Keep it for reference.
+  pg_6005d089a0a6b5f7 turn 3: Build log for step 3. Keep it for reference.
+  pg_813af7e67a223bd6 turn 2: Build log for step 2. Keep it for reference.
+  pg_d8c283d18991beb9 turn 1: Build log for step 1. Keep it for reference.
+  pg_146e06e96ce5c934 turn 0: Build log for step 0. Keep it for reference.
+[stub claude] turn 8 asks: "What is the release codename?"
+[stub claude] turn 8: history 99,492 tokens -> [fake upstream] received 26,382 tokens
+[fake upstream] scripted reply: call contexto_search {"query": "release codename"}
+[stub claude] ran contexto_search on the contexto MCP server, which returns:
+[best matching pages by relevance, shown newest first:]
+pg_d8c283d18991beb9 (turn 1)
+  42050: build 01.0904 linked module mod_164 in 335 ms
+> 42096: The release codename is amber-kestrel-17.
+  42138: [turn 1] assistant:
+[Paged hits come only from paged-out turns; the conversation in view is newer than any of them.]
+[stub claude] turn 8: history 99,667 tokens -> [fake upstream] received 26,557 tokens
+[stub claude] scripted reply: "The search result names it: amber-kestrel-17."

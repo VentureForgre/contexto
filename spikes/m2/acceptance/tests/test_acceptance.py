@@ -1054,7 +1054,7 @@ def test_head_follows_contexto_tool_bytes():
     assert measured == budget.CONTEXTO_TOOL_BYTES, f"Contexto's tool definitions are {measured} bytes; update budget.HEAD"
     instructions = len(INSTRUCTIONS.encode("utf-8"))  # in Claude Code's system prompt, so in the head too (D51)
     assert instructions == budget.CONTEXTO_INSTRUCTIONS_BYTES, f"the MCP instructions are {instructions} bytes"
-    assert budget.HEAD == budget.Params().head == 47_786
+    assert budget.HEAD == budget.Params().head == 47_816
     assert budget.HEAD == budget.HEAD_MEASURED + math.ceil(
         (budget.CONTEXTO_TOOL_BYTES - budget.CONTEXTO_TOOL_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN) + math.ceil(
         (budget.CONTEXTO_INSTRUCTIONS_BYTES - budget.CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN)

@@ -260,6 +260,17 @@ RESPONSES = ResponsesDialect()
 API_KEY_MODE = "apikey"
 CHATGPT_MODE = "chatgpt"
 KEY_HELPER_ENV = "CONTEXTO_CODEX_KEY_HELPER"
+# The helper the "no key helper" error and the option's help give as an example (D64): it prints the key
+# from the environment Codex runs it in, has nothing for a shell or an environment variable to expand or
+# quote, and fails with no output when the variable is unset, where `echo "$OPENAI_API_KEY"` would hand
+# Codex an empty key. Set but empty it still prints an empty line; Codex 0.167.2 refuses that as a token
+# and sends no Authorization header (PR #257 review B).
+KEY_HELPER_EXAMPLE = "printenv OPENAI_API_KEY"
+# The whole command the error gives. It names the upstream: without --codex-upstream the requests, and so
+# the key, go to Claude Code's upstream plus /v1, which is no upstream at all on a default setup and
+# need not be OpenAI's on any other.
+KEY_HELPER_COMMAND = ("contexto run --codex-upstream https://api.openai.com/v1 "
+                      f"--codex-key-helper '{KEY_HELPER_EXAMPLE}' codex")
 UPSTREAM_ENV = "CONTEXTO_CODEX_UPSTREAM"
 CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
 ANTHROPIC_DOMAIN = "anthropic.com"
@@ -378,9 +389,10 @@ MCP_APPROVAL_MODE = "approve"
 # left code mode's ALL_TOOLS with no contexto tool). The server is started as the Claude path starts it
 # (launcher.mcp_payload): this interpreter by absolute path, "-P -m contexto" (-P keeps the
 # project directory Codex starts it in off sys.path, so a project's own contexto package cannot
-# shadow the installed one).
+# shadow the installed one). The session is one "--session=<id>" argument, as mcp_payload passes it, so
+# an id starting with "-" is the option's value and not another option.
 def _mcp_server(session_id: str) -> tuple[str, list[str]]:
-    return sys.executable, ["-P", "-m", "contexto", "mcp", "--session", session_id]
+    return sys.executable, ["-P", "-m", "contexto", "mcp", f"--session={session_id}"]
 
 
 def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: Path,
@@ -574,9 +586,11 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
             notes.append(untrusted_note("apiKeyHelper", found.ignored,
                                         f"Pass --codex-key-helper (or set {KEY_HELPER_ENV})", base_env))
     if not helper:
-        raise CodexLaunchError(f"no key helper: {notes[0]}" if notes else
-                               f"no key helper: pass --codex-key-helper, set {KEY_HELPER_ENV}, "
-                               "or configure apiKeyHelper in Claude Code settings")
+        example = f"With an OpenAI key in $OPENAI_API_KEY, run `{KEY_HELPER_COMMAND}`"
+        raise CodexLaunchError(f"no key helper: {notes[0]}. {example}" if notes else
+                               "no key helper: Codex gets its API key from a command that prints it. "
+                               f"{example}; or set {KEY_HELPER_ENV} to such a command, or configure apiKeyHelper in "
+                               "Claude Code settings")
     if codex_home_dir is not None:
         # Kept under the Contexto session directory so Codex's rollouts stay resumable; only the
         # config (which names the helper command) is removed on exit.
@@ -614,8 +628,9 @@ def add_arguments(parser) -> None:
                        help=f"how Codex authenticates (default {API_KEY_MODE}: a private CODEX_HOME in the session "
                             f"directory whose provider runs the key helper). {CHATGPT_MODE}: {CHATGPT_MODE_HELP}")
     group.add_argument("--codex-key-helper", default=None,
-                       help=f"command that prints the API key, run with {KEY_HELPER_SHELL} -c as Claude Code runs "
-                            f"apiKeyHelper (default ${KEY_HELPER_ENV}, else Claude Code's apiKeyHelper)")
+                       help=f"command that prints the API key, for example '{KEY_HELPER_EXAMPLE}', run with "
+                            f"{KEY_HELPER_SHELL} -c as Claude Code runs apiKeyHelper (default ${KEY_HELPER_ENV}, "
+                            "else Claude Code's apiKeyHelper)")
     group.add_argument("--codex-upstream", default=None,
                        help=f"upstream for Codex requests, with its version path, such as https://api.openai.com/v1 "
                             f"(default ${UPSTREAM_ENV}, else the ChatGPT backend in chatgpt mode, else Claude Code's "

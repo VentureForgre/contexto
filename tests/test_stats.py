@@ -1260,3 +1260,20 @@ def test_one_request_refused_with_415_is_said_in_the_singular(tmp_path):
     write_log(tmp_path, "e1", [*launch(0), request(1), refused])
     text = "\n".join(render(session_stats(tmp_path, "e1")))
     assert "1 more refused with 415 before it was read" in text
+
+
+
+def test_state_json_carries_the_faults_stats_json_gives(tmp_path, capsys, monkeypatch):
+    """#257 added `state --json` and this pull request the fault report: the JSON carries it under `faults`,
+    the same object `session_faults` gives (what `contexto stats --json` has under that key), so a script
+    sees a stopped store too."""
+    from contexto import cli
+
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path))
+    monkeypatch.delenv("CONTEXTO_SESSION", raising=False)
+    write_log(tmp_path, "f9", [*launch(0), request(1, degraded=True, events=(store_error(), ENTER)),
+                               request(2, degraded=True)])
+    assert cli.main(["state", "--json", "--session", "f9"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["faults"] == session_faults(tmp_path, "f9")
+    assert data["faults"]["degraded"]["now"] is True and data["faults"]["messages"]
