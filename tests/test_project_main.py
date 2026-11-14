@@ -15,7 +15,7 @@ import pytest
 import test_codex as codex
 from contexto import mcp
 from contexto.mainrecords import CLOSE_TOOL, PIN_TOOL, MainRecords, confirmed_id
-from contexto.rewrite import MESSAGES, Config, RewriteEngine
+from contexto.rewrite import ANTHROPIC, MESSAGES, Config, RewriteEngine, keyed
 from contexto.store import SIDE_ROOM_TTL_S
 from contexto.store.project import MAIN_RECORDS_KEPT
 from test_clear_main import NEW, OLD, SUBAGENT_TOOLS, headers, main_request, metadata, side_request, subagent_request
@@ -572,3 +572,120 @@ def test_a_store_with_a_record_and_no_served_sessions_counts_no_session_as_new(h
     two(main_request([*conversation("SUB-TASK do it", 2), *pin_pair("c1", reply), user("next")], OLD),
         headers(OLD), MESSAGES)
     assert first.main_records() == []
+
+
+# A takeover after a restart (review B round 7, N17; review A round 7, finding 2)
+
+
+def key_of(messages: list[dict]) -> str:
+    return keyed(ANTHROPIC, {"messages": messages})
+
+
+def _after_side_request_subagent(home, tmp_path, agent: bool):
+    """Engine 1 sees the user's conversation in OLD; after a restart a tool-less side request arrives first,
+    then a subagent's first request, whose later request carries a pin. Returns the store, the second
+    engine, the subagent's history, the pinned id and the repo."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    first.record_cli_session("claude", OLD)
+    users = conversation("the user's prompt", 3)
+    send(RewriteEngine(first, config=ROOMY), MESSAGES, main_request(users, OLD))
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="pinned by the subagent")
+    two = RewriteEngine(first, config=ROOMY)
+    send(two, MESSAGES, side_request("synthetic title request", OLD))
+    sub = [user("SUB-TASK read the page", context=True), *pin_pair("s1", reply), assistant("done"),
+           user("SendMessage: continue")]
+    events = send(two, MESSAGES, request(sub[:1], tools=SUBAGENT_TOOLS, metadata=metadata(OLD)), agent=agent)
+    assert reasons(events) == ([] if agent else ["after_side_request"])
+    send(two, MESSAGES, request(sub, tools=SUBAGENT_TOOLS, metadata=metadata(OLD)), agent=agent)
+    return first, users, sub, rid, root
+
+
+@pytest.mark.parametrize("agent", [False, True])
+def test_after_a_restart_a_subagent_that_takes_main_after_a_side_request_is_not_trusted(agent, home, tmp_path):
+    """Review B round 7, N17 (pocM M5): after a restart a side request is main untrusted, and a subagent
+    without its agent id that comes next takes main by ``after_side_request``. That rule trusts it only
+    when the first-main rules would (``_first_trusted``), so its pin is not confirmed and it is not listed."""
+    first, users, sub, rid, root = _after_side_request_subagent(home, tmp_path, agent)
+    assert first.main_records() == [] and carried_ids(new_session(home, "s2", root, 2)) == []
+    assert first.trusted_conversations() == [key_of(users)]
+
+
+def test_a_subagent_that_took_main_after_a_side_request_stays_untrusted_in_later_engines(home, tmp_path):
+    """N17 (pocM M6): engine 3 resumes the user's conversation, then the same subagent takes main by turn
+    starts and writes an ``untrusted`` record; engine 4 resumes that record and still does not trust it,
+    because no engine listed the subagent."""
+    first, users, sub, rid, root = _after_side_request_subagent(home, tmp_path, agent=False)
+    three = RewriteEngine(first, config=ROOMY)
+    send(three, MESSAGES, main_request([*users, assistant("u"), user("u next")], OLD))
+    rid3, reply3 = call_tool(first, "contexto_pin", kind="obligation", text="engine 3's pin of the subagent")
+    sub3 = [*sub]
+    for turn in range(5):
+        sub3 += [assistant(f"s{turn}"), user(f"SendMessage {turn}")]
+    sub3 += [*pin_pair("s3", reply3), assistant("ok"), user("SendMessage: more")]
+    events = send(three, MESSAGES, request(sub3, tools=SUBAGENT_TOOLS, metadata=metadata(OLD)))
+    assert reasons(events) == ["more_turn_starts"]
+    assert first.epoch_record()["conversation"] == key_of(sub) and first.epoch_record()["untrusted"] is True
+    rid4, reply4 = call_tool(first, "contexto_pin", kind="obligation", text="engine 4's pin of the subagent")
+    four = RewriteEngine(first, config=ROOMY)
+    sub4 = [*sub3, *pin_pair("s4", reply4), assistant("ok4"), user("SendMessage: four")]
+    events = send(four, MESSAGES, request(sub4, tools=SUBAGENT_TOOLS, metadata=metadata(OLD)))
+    assert any(e["event"] == "epoch_resumed" for e in events)
+    assert first.main_records() == [] and key_of(sub) not in first.trusted_conversations()
+    assert carried_ids(new_session(home, "s2", root, 2)) == []
+
+
+@pytest.mark.parametrize("config", [ROOMY, Config(bound=900_000)])
+def test_after_a_restart_the_users_conversation_after_a_side_request_is_still_trusted(config, home, tmp_path):
+    """N17's control: the conversation the record names (resumed or not), and an older conversation on the
+    list that the record does not name (``--resume`` of A after ``/clear`` to B), each after a side
+    request, are trusted."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    first.record_cli_session("claude", OLD)
+    one = RewriteEngine(first, config=ROOMY)
+    a = conversation("conversation A", 3)
+    send(one, MESSAGES, main_request(a, OLD))
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="pinned in A after the restart")
+    two = RewriteEngine(first, config=config)
+    send(two, MESSAGES, side_request("synthetic title request", OLD))
+    send(two, MESSAGES, main_request([*a, assistant("x"), user("A again"), *pin_pair("c1", reply), user("more")],
+                                     OLD))
+    assert first.main_records() == [rid]
+    first.record_cli_session("claude", NEW)
+    b = [user("conversation B", context=True)]
+    send(one, MESSAGES, main_request(b, NEW), session=NEW)
+    assert first.epoch_record()["conversation"] == key_of(b)
+    later, later_reply = call_tool(first, "contexto_pin", kind="obligation", text="pinned in A again")
+    three = RewriteEngine(first, config=config)
+    send(three, MESSAGES, side_request("synthetic title request", OLD))
+    events = send(three, MESSAGES, main_request([*a, assistant("x"), user("A again"), *pin_pair("c1", reply),
+                                                 user("more"), *pin_pair("c2", later_reply), user("again")], OLD))
+    assert reasons(events) == ["after_side_request"]
+    assert first.main_records() == [rid, later]
+
+
+@pytest.mark.parametrize("agent", [True, False])
+def test_after_a_restart_a_listed_conversation_that_takes_main_by_turn_starts_is_trusted(agent, home, tmp_path):
+    """Review A round 7, finding 2 (round 6 minor 5) and review B round 7, N20 (pocM M7): the user's
+    conversation A is listed; after a restart where its record does not resume, a subagent (with its agent
+    id or without) reaches the engine first, and A takes main back by turn starts. A is trusted, since an
+    earlier engine trusted it, so its pin is confirmed and the record it writes is not ``untrusted``."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    first.record_cli_session("claude", OLD)
+    a = conversation("conversation A", 3)
+    send(RewriteEngine(first, config=ROOMY), MESSAGES, main_request(a, OLD))
+    assert first.trusted_conversations() == [key_of(a)]
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="pinned in A")
+    two = RewriteEngine(first, config=Config(bound=900_000))
+    send(two, MESSAGES, subagent_request(OLD, turns=2), agent=agent)
+    a = [*a, assistant("x"), user("go"), *pin_pair("c1", reply), assistant("y"), user("next")]
+    events = send(two, MESSAGES, main_request(a, OLD))
+    assert reasons(events) == ["more_turn_starts"] and events[-1]["main"] is True
+    for turn in range(3):
+        a = [*a, assistant(f"z{turn}"), user(f"more {turn}")]
+        send(two, MESSAGES, main_request(a, OLD))
+    assert first.main_records() == [rid]
+    assert first.epoch_record()["conversation"] == key_of(a) and "untrusted" not in first.epoch_record()
+    assert carried_ids(new_session(home, "s2", root, 2)) == [rid]

@@ -2596,6 +2596,18 @@ class RewriteEngine:
         return bool(session and session.id and not session.agent and not session.parent
                     and not self._agent_header.get(key) and session.id not in self._served_before)
 
+    def _trusted_takeover(self, key: str) -> bool:
+        """D69: whether ``key``, which has just taken main from another conversation, is trusted. By a
+        session rule or a compaction (``TRUSTED_MAIN_REASONS``), by ``after_side_request`` only when the
+        first-main rules trust it (``_first_trusted``): after a restart a tool-less side request is main
+        untrusted, and the next conversation seen with a tool list could be a subagent without its agent
+        id (review B round 7, N17). By ``more_turn_starts`` only when an earlier engine trusted it
+        (``trusted_conversations``): the user's conversation retaking main after a restart where something
+        else came first (review A round 7, finding 2)."""
+        if self._main_reason == "after_side_request":
+            return self._first_trusted(key)
+        return self._main_reason in TRUSTED_MAIN_REASONS or key in self._trusted_before
+
     def _trust(self, key: str) -> None:
         """D69: trust ``key`` as the main conversation and record it for later engines on this store. A
         failed write is not fatal: that conversation is then trusted again only by the other rules."""
@@ -2842,8 +2854,7 @@ class RewriteEngine:
         previous = self._main
         main, self._turn_starts[key] = self._main_after(key, messages, dialect)
         self._set_main(main)
-        if (previous is None and self._first_trusted(main)) or (
-                previous != main and self._main_reason in TRUSTED_MAIN_REASONS):
+        if (previous is None and self._first_trusted(main)) or (previous != main and self._trusted_takeover(main)):
             self._trust(main)  # D69: its pins and closures are confirmed (_confirm_main_records)
         session = self._cli_sessions.get(main)
         if previous is not None and previous != main:
