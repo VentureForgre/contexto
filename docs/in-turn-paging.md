@@ -44,7 +44,10 @@ requests under the bound less the headroom floor and 3,000 instead (32,000 at a 
 new result is still read once whenever the request with it fits under the bound less 6,000 (54,000
 at a bound of 60,000), and also fits under the bound less 3,000 (57,000) with the result counted at
 1.5 bytes per token; it is paged at a later batch. A result that fails either test is stubbed before
-the model reads it. On such a request the headroom floor and the
+the model reads it. The second test costs something: a result is read once only if it fits at 1.5
+bytes per token whatever its real density, so the largest one read once is about 53 KB at a bound of
+60,000 over a 20,000-token head (about 81 KB at 150,000 over a 92,000-token head), and a larger sparse
+result that would fit is stubbed unread. On such a request the headroom floor and the
 room for `contexto_recall` are given up, so recall can be refused there; the session log says so
 once per turn (`turn_room_low` with `reason: "in_turn_small_bound"`). With a 28,000-token system
 prompt at a bound of 60,000, each 20 KB read is read whole and the largest request is about 43,000.
@@ -87,7 +90,9 @@ request's size, Contexto takes the PDF's cost from it (the request's real size l
 everything else) and counts the PDF at that cost from then on, also for a second read of the same
 file, so a later batch can stub it and knows what that frees. When one request carries several
 such PDFs, the cost is shared among them by their size as sent (a PDF by URL or file id counts by the
-size of its reference, so its share can be low). The costs are kept with the session's state, so a
+size of its reference, so its share can be low; read again alone later, such a PDF can take a request
+over the bound, which the log records as `over_bound` from usage. Claude Code sends PDFs inline, so
+its sessions do not reach this). The costs are kept with the session's state, so a
 proxy restart keeps them; one a restart still lost is measured again, as on the PDF's first sending. Tool search results (`tool_reference`) are never stubbed.
 
 The wording is the same in every conversation. A subagent given only some tools, or a session where
