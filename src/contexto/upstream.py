@@ -303,12 +303,18 @@ def read_settings(path: Path) -> Any:
         with os.fdopen(fd, "rb") as handle:
             fd = -1
             text = handle.read().decode("utf-8-sig")
-        return json.loads(text, parse_int=json_int, parse_constant=json_constant)
+        data = json.loads(text, parse_int=json_int, parse_constant=json_constant)
     except (OSError, ValueError, RecursionError):  # unreadable or not JSON: as if the file were absent
         return None
     finally:
         if fd >= 0:
             os.close(fd)
+    if isinstance(data, dict) and "env" in data and not isinstance(data["env"], dict):
+        # Claude Code loads nothing from a file with a wrong-typed key (2.1.322: "These settings files did
+        # not load"), so its apiKeyHelper never runs (PR #258's round 3). Only `env`'s type is checked
+        # here; another wrong-typed key is not (docs/doctor.md, "What doctor does not check").
+        return None
+    return data
 
 
 def _settings_string(path: Path, pick: Callable[[dict], object]) -> str | None:

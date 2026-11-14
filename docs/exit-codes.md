@@ -19,7 +19,7 @@ The exit codes of the `contexto` commands. The Command column names the subcomma
 | `mcp` | 1 | An invalid or unknown session id (it serves existing sessions only) |
 | `mcp` | 2 | Invalid `--search-cache-mb` |
 | `doctor` | 0 | No check failed (there may be warnings) |
-| `doctor` | 1 | At least one check failed: `contexto run` could not work as things are |
+| `doctor` | 1 | At least one check failed: `contexto run` could not work as things are; also when the reader of its output left before the end |
 | `doctor` | 130, 143, 129 | Stopped by Ctrl+C, SIGTERM or SIGHUP |
 | `sessions`, `recall`, `search`, `state` | 0 | Success (an empty session list, or a search with no match, is a success) |
 | `sessions`, `recall`, `search`, `state` | 1 | Unknown, ambiguous or invalid session id, pages that cannot be read, an unknown or malformed page id, an offset past the end of the page, an unreadable ledger, or a `CONTEXTO_HOME` that is not a directory |

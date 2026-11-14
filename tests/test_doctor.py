@@ -1233,17 +1233,18 @@ def test_a_settings_file_with_a_very_long_number_is_read_by_every_check(both, ca
     assert found["provider"]["status"] == "warn"
 
 
-def test_an_env_block_that_is_not_an_object_does_not_hide_the_rest_of_the_file(both, capsys, fast_mcp):
-    """Reviewer B's re-review: the step said Contexto reads nothing from such a file, while both key
-    checks report its ``apiKeyHelper`` and ``contexto run codex`` uses it."""
-    write_settings(both.home / ".claude" / "settings.json", {"env": None, "apiKeyHelper": f"echo {HELPER_SECRET}"})
+@pytest.mark.parametrize("env_block", [None, [], "x"])
+def test_a_file_whose_env_is_not_an_object_is_not_read_at_all(both, capsys, fast_mcp, env_block):
+    """Reviewer B, round 3: Claude Code 2.1.322 loads nothing from a settings file with a wrong-typed key
+    ("These settings files did not load"), so its apiKeyHelper never runs and `contexto run claude -p` ended
+    "Not logged in" while doctor reported the helper and "Ready". No reader takes anything from such a file."""
+    write_settings(both.home / ".claude" / "settings.json",
+                   {"env": env_block, "apiKeyHelper": f"echo {HELPER_SECRET}"})
     code, found = checks(capsys)
     settings = found["settings"]
-    assert code == 0 and settings["status"] == "warn"
-    assert "env block that is not a JSON object" in settings["summary"]
-    assert "reads nothing" not in settings["action"] and "its other settings are read" in settings["summary"]
-    assert found["claude-key"]["status"] == "pass"
-    assert found["claude-key"]["details"] == {"found": [{"name": "apiKeyHelper", "source": "settings:user"}]}
+    assert settings["status"] == "warn" and "env block that is not a JSON object" in settings["summary"]
+    assert "Claude Code loads nothing from it" in settings["summary"]
+    assert found["claude-key"]["status"] == "warn" and found["claude-key"]["details"] == {"found": []}
 
 
 def test_a_fifo_settings_file_is_named_and_the_other_checks_go_on(both, capsys, fast_mcp):

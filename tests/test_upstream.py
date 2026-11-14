@@ -330,3 +330,12 @@ def test_a_settings_file_with_a_non_json_number_is_not_read(tmp_path, home, lite
         f'{{"env": {{"ANTHROPIC_BASE_URL": "http://project.invalid"}}, "n": {literal}}}')
     up = resolve_upstream(env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tmp_path, home=home)
     assert up.url == "http://env.invalid"
+
+
+@pytest.mark.parametrize("env_block", [None, [], "x"])
+def test_a_settings_file_whose_env_is_not_an_object_is_not_read(tmp_path, home, env_block):
+    """Claude Code loads nothing from such a file (PR #258, Reviewer B's round 3), so neither its
+    apiKeyHelper nor, in a file whose env is fine, anything else is taken from it here."""
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(json.dumps({"env": env_block, "apiKeyHelper": "print-a-key"}))
+    assert claude_key_helper(tmp_path, home, {}, trusted_only=False).value is None

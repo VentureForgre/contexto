@@ -451,8 +451,8 @@ def settings_problem(path: Path) -> str | None:
     if not isinstance(data, dict):
         return "is not a JSON object"
     if "env" in data and not isinstance(data["env"], dict):
-        # Only the block is lost: the readers still take the file's other settings, such as apiKeyHelper.
-        return "has an env block that is not a JSON object, so nothing in env is read (its other settings are read)"
+        # Claude Code loads nothing from a file with a wrong-typed key, and the readers follow it.
+        return "has an env block that is not a JSON object, so Claude Code loads nothing from it"
     return None
 
 
@@ -657,7 +657,8 @@ def check_store(env: Mapping[str, str], *, claude: bool = True) -> Check:
     - ``contexto run claude`` refuses a home whose path holds ``${`` (``launcher.check_mcp_values``, the
       launcher's own check, asked here when ``claude`` is usable; ``contexto run codex`` takes such a home).
     - Sessions are made in ``sessions``. The store sets that directory to 0700 itself, which its owner
-      can always do, so a read-only one the user owns is no obstacle and is not probed; one that
+      can always do, but only after it has looked in it: without read permission no launch gets that
+      far, and without search permission it depends on the Python (``_launcher_can_look_in``). One that
       belongs to another user stops the launch whatever its mode. Without it the home must be writable.
     - A home that cannot be written, with a ``sessions`` that can be used, is a warning: the launch
       works, and Contexto cannot make its lock and salt files there."""

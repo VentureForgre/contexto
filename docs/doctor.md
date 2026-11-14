@@ -129,10 +129,11 @@ The line names the ones that were read.
 
 A file that is there and cannot be used is a warning that names it and says what is wrong: it
 cannot be read as JSON, it cannot be read (a permission), it is a directory, it is not a JSON object,
-or its `env` block is not one. `contexto run` reads nothing from such a file, and neither do the
-checks below, so without this line a broken file that sets your upstream would show only as "nothing
-sets ANTHROPIC_BASE_URL". A file that starts with a UTF-8 byte order mark is read like any other,
-as Claude Code reads it.
+or its `env` block is not one (Claude Code loads nothing from such a file). `contexto run` reads
+nothing from such a file, and neither do the checks below, so without this line a broken file that
+sets your upstream would show only as "nothing sets ANTHROPIC_BASE_URL". A named pipe, socket or
+device in place of a settings file is skipped, as Claude Code skips it, and named here. A file that
+starts with a UTF-8 byte order mark is read like any other, as Claude Code reads it.
 
 ### `claude-upstream` and `codex-upstream`
 
@@ -178,9 +179,12 @@ follows what the launcher does, and changes nothing:
 - A home that does not exist yet can be created. The check reads permissions only, so a read-only
   or full file system shows up at `contexto run`, not here.
 - A home that exists is a directory, and sessions can be made in it. They go in its `sessions`
-  directory. `contexto run` sets that directory to mode 0700 itself, so a read-only `sessions` that
-  you own passes, and the line says so. A `sessions` that belongs to another user fails. Without a
-  `sessions` directory, the home must be writable.
+  directory. `contexto run` sets that directory to mode 0700 itself, but only after it has looked in
+  it. So a `sessions` that you own and can read and enter (0500) passes, and the line says so; one
+  you cannot read fails, with the `chmod` to run. One you can read but not enter (0400, 0600) passes
+  on Python 3.14 and later, where `contexto run` gets past that first look, and fails on 3.12 and
+  3.13, where it does not: doctor answers for the Python it runs on. A `sessions` that belongs to
+  another user fails. Without a `sessions` directory, the home must be writable.
 - A home that cannot be written, with a `sessions` directory that can be used, is a warning:
   `contexto run` starts, and cannot create its lock file and salt file in the home.
 - A home whose path contains `${` fails when `claude` is installed: `contexto run claude` refuses
@@ -271,6 +275,11 @@ is set up for by a login it holds, without a variable.
 - `--upstream`, `--codex-upstream`, `--codex-key-helper` and `--codex-auth chatgpt`: it reports what
   `contexto run` does without them.
 - Organization-managed Claude Code settings.
+- The type of every setting. Claude Code loads nothing from a settings file in which any setting has
+  the wrong type. Contexto checks the `env` block's type only, so a file with another wrong-typed
+  setting (for example `permissions` as a string) is read by doctor and `contexto run` though Claude
+  Code ignores it: an upstream, key helper or provider variable set there is reported, and acted on,
+  when Claude Code would not use it.
 
 ## JSON
 
