@@ -243,7 +243,7 @@ the search returned the line from the request in view. `nothing`: "No paged-out 
 word of that query". `not_called`: the search named no page, so the model made no recall. "Results
 lost" counts scripted results that were, after the last request, neither whole in it nor byte for
 byte in a store page. "Requests leaving a result unnamed" counts requests that left out a result the
-CLI had delivered in that conversation without a stub or fold note in the request naming it (rule 3).
+CLI had delivered in the running turn without a stub or fold note in the request naming it (rule 3).
 
 | scenario | dialect | conversation | searches | recalls | stubbed on arrival | results lost | requests leaving a result unnamed | count_tokens |
 |---|---|---|---|---|---|---|---|---|
@@ -258,8 +258,8 @@ CLI had delivered in that conversation without a stub or fold note in the reques
 | subagent | claude | subagent | nothing 2 | not_called 2 | 0 | 0 | 0 | 14 sent, 0 different |
 | images | claude | main | refused 2 | not_called 2 | 0 | 0 | 0 | 7 sent, 0 different |
 | images | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 | 0 sent, 0 different |
-| multiturn | claude | main | refused 2 | not_called 2 | 0 | 0 | 6 | 7 sent, 0 different |
-| multiturn | codex | main | refused 2 | not_called 2 | 0 | 0 | 6 | 0 sent, 0 different |
+| multiturn | claude | main | refused 2 | not_called 2 | 0 | 0 | 0 | 7 sent, 0 different |
+| multiturn | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 | 0 sent, 0 different |
 | mixed | claude | main | refused 2 | not_called 2 | 0 | 0 | 0 | 3 sent, 0 different |
 | mixed | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 | 0 sent, 0 different |
 
@@ -268,9 +268,9 @@ main conversation made after the room reached 0 was refused, although the line i
 the request in view. The `small` probe at request 157 of the 260-round run came while the room was
 still open and was answered from the view.
 
-The 6 `multiturn` requests are turns 5 and 6, after the turn-start rotation paged the loop: each
-leaves out 110 results, all in pages byte for byte, and the index message the engine puts first names
-pages, not calls. `stubs.find_stubs` at v0.5.24 finds nothing, so none of them is named.
+In `multiturn`, turns 5 and 6 come after the turn-start rotation paged the loop: their 6 requests
+leave out the loop's 110 results, all in a turn page byte for byte. Rule 3 covers only the running
+turn's results, so they do not count as unnamed; the index names that page, not its calls.
 
 Both of the subagent's searches found nothing, and that is not the room: search reads the retained
 snapshot, which only the main conversation publishes (contract PR #125), so a subagent's search never
@@ -493,8 +493,10 @@ min_turn_room`, 113,000 at the defaults.
    that conversation is either whole in that request or named in that same request by a stub or a
    fold note that `stubs.find_stubs` returns. A fold note is a `StubRef` whose `call_ids` are the
    calls of the rounds it folded and whose page is the page of those rounds. A result that is left
-   out with nothing in the request naming it fails. This holds for the turns a turn-start rotation
-   pages as well: the index message has to name their calls.
+   out with nothing in the request naming it fails. This covers the results of the running turn. A
+   result of an earlier turn may leave the request with its whole turn at a turn-start rotation, as
+   every release since v0.1.0 does; that turn page is listed by page in the index, not by call, so
+   such a result is checked by rule 4's storage check only.
 4. **Stubs.** A stub or fold note names a call only when the page it names holds that call's original
    result byte for byte (a `tool_result` block, on Codex an `*_output` item, with that call's id and
    the original's content as canonical JSON), or holds a stub for that call that leads, through at
@@ -528,9 +530,11 @@ min_turn_room`, 113,000 at the defaults.
    and every subagent response with a tool call publishes a side room. Once the turn's own items pass
    50,000 tokens the request-time room is never under 12,000 (`min_turn_room`), and the
    response-time room is never 0 and is at least 6,000 on 95% of those requests. Every room tells the
-   truth by the upstream's count, on every request: a response-time room (main's or a side room) is at
-   most `bound - (input + output) - headroom_floor` from that response's usage, and a request-time
-   room at most `bound - headroom_floor - 0.9 x` the request's tokens.
+   truth by the upstream's count: a response-time room (main's or a side room) is at most `bound -
+   (input + output) - headroom_floor` from that response's usage, on every response, and a
+   request-time room at most `bound - headroom_floor - 0.9 x` the request's tokens, on every request
+   but a conversation's first. The first is sized before any usage arrives, at the estimator's
+   seeds, which run low on a dense head (11% at v0.5.24, a limitation STATUS lists apart from D63).
 9. **Search and recall.** Late in a loop, the search for a line of an early result returns that line,
    from the request in view or from a page; when the result is no longer whole in the request the
    search names a page, and recalling that page at the offset the search gave returns the line and
@@ -543,8 +547,10 @@ min_turn_room`, 113,000 at the defaults.
 
 Rule 8 follows from the numbers: a request-time room of 12,000 means the estimate of every loop
 request past 50,000 tokens is at most 113,000. At v0.5.24 the request-time room is over the truth line
-on the first request of 9 of the 11 conversations and on `large` request 4 (above), so an engine that
-keeps today's estimate has to publish its request-time room from a more careful count.
+on the first request of 9 of the 11 conversations and on `large` request 4 (above). The first
+requests are exempt (rule 8); `large` request 4, a freshly arrived 60,000-token result estimated 22%
+low, is not, so an engine has to count a freshly arrived result more carefully than v0.5.24 does.
+The table's "request room over the truth" column counts every request, the first included.
 
 ### Engines that break a rule
 

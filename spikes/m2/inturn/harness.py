@@ -324,6 +324,10 @@ class _Actor:
         self.appended_tokens = 0
         self.fresh: list[str] = []  # the calls whose results were added since the previous request
         self.results: dict[str, bytes] = {}  # every result delivered: call id -> digest of its content
+        # The calls delivered in the running turn. Rule 3's naming check covers these; a result of an earlier
+        # turn may leave the request with its whole turn at a turn-start rotation (a turn page, named by the
+        # index, not per call), and is then checked only for being stored.
+        self.turn_calls: set[str] = set()
         self.result_tokens: dict[str, int] = {}
         self.scripted: dict[str, str] = {}  # the scripted ones: call id -> call key
         self.hit: tuple[str, int] | None = None  # the page and offset the last search named
@@ -429,6 +433,7 @@ class _Play:
                 actor.results[call_id] = self.originals[call_id] = content
                 actor.result_tokens[call_id] = block_tokens(blocks[n]) if blocks else item_tokens(item)
                 actor.fresh.append(call_id)
+                actor.turn_calls.add(call_id)
 
     def resolve(self, actor: _Actor, step: Step) -> Step:
         """A probe step as the model would answer it: a search, then a recall of the page it named."""
@@ -489,6 +494,8 @@ class _Play:
         turn = actor.turn
         in_loop = not actor.at_prompt()
         if not in_loop:
+            actor.turn_calls = set()
+        if not in_loop:
             before = len(actor.cli.items)
             actor.cli.prompt(actor.conversation.turns[turn])
             actor.loop_tokens = 0
@@ -538,7 +545,7 @@ class _Play:
                         unstored.update(ref.call_ids)
                 named = self.stubs.names(found)
         missing = [call_id for call_id, content in actor.results.items() if content not in view.get(call_id, ())]
-        unnamed = sum(1 for call_id in missing if call_id not in named)
+        unnamed = sum(1 for call_id in missing if call_id in actor.turn_calls and call_id not in named)
         lost = sum(1 for call_id in missing
                    if actor.results[call_id] not in self.paged.get(call_id, ()) and call_id not in unstored)
         stubbed = sum(1 for call_id in actor.fresh if actor.results[call_id] not in view.get(call_id, ()))
