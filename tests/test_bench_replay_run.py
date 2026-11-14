@@ -34,6 +34,7 @@ from contexto.bench import script as bench_script
 from contexto.bench.model import NEW_CLASSES, Script
 from contexto.bench.modes import replay as replay_mode
 from contexto.bench.replay import client, lines, output, reach, scripted, session, trace
+from contexto.commands import bench as bench_command
 from contexto.store import SessionStore
 
 SHORT = ["--protocol", "d27", "--replay-turns", "8"]  # 14 turns, about 3 seconds
@@ -932,7 +933,6 @@ def test_options_a_replay_cannot_use_are_usage_errors(monkeypatch, capsys, tmp_p
     assert list(tmp_path.iterdir()) == []  # nothing dumped, nothing recorded
 
 
-LIVE_STUB = "FLAG = None\ndef add_arguments(parser):\n    pass\ndef run(args):\n    print('live run')\n    return 0\n"
 
 
 @pytest.mark.parametrize("argv", [["--dump-trace", "DIR"], ["--record-trace", "trace.json"], ["--replay-turns", "8"],
@@ -945,12 +945,9 @@ def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path
     monkeypatch.chdir(tmp_path)
     said = f"contexto bench: error: {argv[0]} belongs to the replay mode; give --replay with it, or leave it out"
     assert argv[0] in replay_mode.OWN_OPTIONS
-    assert cli.main(["bench", *argv]) == 2  # this build has no live run: refused either way
-    capsys.readouterr()
-    # With a live run installed, as the live slice adds one.
-    (tmp_path / "t_live_stub.py").write_text(LIVE_STUB, encoding="utf-8")
-    monkeypatch.setattr(modes, "__path__", [*modes.__path__, str(tmp_path)])
-    monkeypatch.delitem(sys.modules, "contexto.bench.modes.t_live_stub", raising=False)
+    # The live run is installed (contexto.bench.modes.live, the default mode), so with no mode flag this
+    # would be a live run: the replay's option is refused before any mode runs.
+    assert any(getattr(m, "FLAG", 0) is None for m in bench_command.discover()), modes.__path__
     assert cli.main(["bench", *argv]) == 2
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err.strip() == said
@@ -958,7 +955,6 @@ def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err.strip() == said
     assert not any((tmp_path / name).exists() for name in ("DIR", "trace.json", "scripts-out"))  # nothing written
-    monkeypatch.delitem(sys.modules, "contexto.bench.modes.t_live_stub", raising=False)
 
 
 @pytest.mark.parametrize("bound", ["20000", "25000", "170001", "200000"])
