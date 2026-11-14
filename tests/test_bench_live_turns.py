@@ -253,7 +253,7 @@ def test_a_second_run_into_the_same_output_directory_is_refused_at_once(env, tmp
 def test_the_lock_is_released_when_a_run_is_refused_or_fails(env, tmp_path, script, monkeypatch):
     out = tmp_path / "out"
     first = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, out=out, budget=10)
-    assert first.code == 2 and not out.exists()  # the budget is below the plan: refused, and the directory it made is gone
+    assert first.code == 2 and not out.exists()  # below the plan: refused, and the directory it made is gone
     bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, out=out)
     monkeypatch.setattr(runner, "_run_units", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
     with pytest.raises(RuntimeError):
