@@ -252,11 +252,15 @@ prints as it is only right after a character it varies (an emoji or another non-
 ideograph, or a keycap such as 1️⃣); anywhere else, and after a blank symbol such as U+2800, it and
 the invisible operators U+2061 to U+2064 are escapes. So is every character of a run of two or more
 zero-width characters, counting among them the characters drawn as nothing (U+034F, U+115F, U+1160,
-U+17B4, U+17B5 and U+180B to U+180F), and a zero-width character next to a space. A blank cell
+U+17B4, U+17B5, U+180B to U+180F and U+16FE4, and the format controls U+13430 to U+1343F, U+1BCA0 to
+U+1BCA3 and U+1D173 to U+1D17A), and a zero-width character next to a space, except a Mongolian free
+variation selector (U+180B to U+180D or U+180F) that ends a word before a space. A blank cell
 (U+2800, U+3164 or U+FFA0) prints on its own, so braille art and spaced Hangul read normally, and is
 an escape next to a zero-width character. One selector after a symbol or an ideograph, or one zero-width character between two letters, can
-still carry a few bits that a terminal does not show; the model gets every carried record as ASCII escapes, so this affects
-only what you see. `contexto state --raw` prints the text the model gets, with the heading above and the
+still carry a few bits that a terminal does not show. So can blank cells and spaces mixed in a run (U+3164
+or U+2800 with spaces, no-break spaces with spaces, en spaces with em spaces): the run shows as blank,
+but which kind is where cannot be seen, and at the end of a line it reads as trailing space. The model
+gets every carried record as ASCII escapes, so this affects only what you see. `contexto state --raw` prints the text the model gets, with the heading above and the
 JSON literals, except that those characters in your session's own records are shown as escapes; the
 model gets them as they were pinned. The carried records hold none, since their literals are ASCII.
 `contexto state --json` lists them under `carried` (always present, empty when nothing is carried),

@@ -76,7 +76,8 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   or reorder or hide text as its escape. Joiners and other format characters print as they are, and
   so does a variation selector right after the emoji or ideograph it varies; anywhere else it is an
   escape. One zero-width character between letters prints (a ZWNJ in Persian, a ZWJ in an emoji);
-  a run of them, or one next to a space, is escapes.
+  a run of them, or one next to a space, is escapes, except a Mongolian variation selector that ends
+  a word.
 - Records pinned before this release are never carried, so project memory starts empty.
 - `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
   described in the command's `--help`; an error is still one line on stderr with the usual exit
