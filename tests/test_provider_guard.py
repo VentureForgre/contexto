@@ -468,7 +468,7 @@ def test_a_malformed_utf16le_file_s_base_url_and_hint_setting_are_used(tree):
     b"\xff\xfe" + '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}} // on'.encode("utf-16-le"),
     b"\xff\xfe" + '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1",}}'.encode("utf-16-le") + b"\x20",
     '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}'.encode("utf-16-le"),
-])
+], ids=["utf-16-le-mark-comment", "utf-16-le-mark-trailing-comma-odd", "utf-16-le-no-mark"])
 def test_a_wide_file_that_still_does_not_parse_refuses_through_its_nul_bytes(tree, content):
     """The NUL rule is the backstop: these files hold the switch's name only as UTF-16LE, never as the
     UTF-8 bytes the parse rule looks for, and no ``\\u`` escape, so the NUL bytes alone mark them."""
