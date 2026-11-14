@@ -7,18 +7,20 @@ moving the oldest turns to disk, word for word, and giving the model tools to se
 
 - **A fixed bound.** Each turn starts with the request under the bound, 150,000 tokens by default,
   however long the session runs. The turns removed to make room stay on disk word for word, not as
-  a summary. A request can still pass it inside one very long tool loop (the requests the CLI sends
-  while the model calls tools, before it answers you) or with an oversized prompt
-  ([limitations](#known-limitations)).
+  a summary. A request can still pass it, for example inside one very long tool loop (the
+  requests the CLI sends while the model calls tools, before it answers you) or with an oversized
+  prompt ([limitations](#known-limitations)).
 - **Recall no worse than full context on a scripted recall test.** In acceptance run 4, on
   claude-haiku-5-5, Contexto answered 52 of 54 questions; the same model given the whole history
-  of about 426,000 tokens answered 47. That is one synthetic session and one seed, and the gap is inside noise (p = 0.18).
-  On claude-opus-5-5 it was 53 against 54 ([results](docs/results.md)).
+  of about 426,000 tokens answered 47. That is one synthetic session and one seed, and the gap is
+  inside noise (p = 0.18). In a separate run on claude-opus-5-5 it was 53 against 54
+  ([results](docs/results.md)).
 - **Fewer input tokens, not always less money.** In acceptance run 3 Contexto sent 46.6% fewer input
-  tokens than a partly modeled plain Claude Code. At Haiku 5.5's prices, which rise 5 times above
-  100,000 tokens, that cost 49.7% less. At flat prices such as Opus 5.5's the same counts cost 66%
-  more when plain Claude Code reads its prompt cache on every request. With the two cache misses
-  the full-context run had, Contexto costs less ([results](docs/results.md#tokens-and-cost)).
+  tokens than a partly modeled plain Claude Code. Haiku 5.5 charges 5 times the rate on a prompt
+  over 100,000 tokens, and at its prices that cost 49.7% less. At flat prices such as Opus 5.5's
+  the same counts cost 66% more when plain Claude Code reads its prompt cache on every request.
+  With the two cache misses the measured plain requests had, Contexto costs less
+  ([results](docs/results.md#tokens-and-cost)).
 
 ## Install
 
@@ -58,10 +60,13 @@ configuration is edited. Every option: [docs/run-reference.md](docs/run-referenc
 
 ## Who it is for
 
-You run Claude Code or Codex sessions that pass the CLI's own compaction point (about 967,000 tokens
-on a 1M-window model) and you want the old turns kept word for word instead of summarized, or you
-want every request kept small, for example under Haiku 5.5's price step at 100,000 tokens. Your
-upstream is the vendor's API with an API key, or a CLIProxyAPI instance
+It is for you if either holds:
+
+- Your Claude Code or Codex sessions pass the CLI's own compaction point (about 967,000 tokens on a
+  1M-window model), and you want the old turns kept word for word, not summarized.
+- You want every request kept small, for example under Haiku 5.5's price step at 100,000 tokens.
+
+Your upstream must be the vendor's API with an API key, or a CLIProxyAPI instance
 ([docs/cliproxyapi.md](docs/cliproxyapi.md)). It is not for:
 
 - **A claude.ai Pro or Max login.** That is not a supported setup, and Contexto does not detect it.
@@ -71,7 +76,7 @@ upstream is the vendor's API with an API key, or a CLIProxyAPI instance
   same question applies there. Whether your plan allows either is for you to check against its
   terms, and the risk to the account is yours.
 - **Sessions that end before the compaction point, when a large request is fine for you.** Apart
-  from idle compaction they do not compact, with or without Contexto
+  from compaction after about an hour idle, they do not compact, with or without Contexto
   ([comparison](#why-not-compaction-a-1m-window-or-the-memory-tool)).
 - **Work that needs every old detail in view at once.** The model sees a paged-out turn only when
   it runs a search for it.
@@ -101,7 +106,7 @@ and writes them, word for word, to a local store under `~/.contexto`. Those turn
 out**. In their place the model sees the **page index**, which holds the opening of each paged-out
 turn, and the **pinned state**: the decisions, obligations and facts the model recorded with the
 `contexto_pin` tool. The room left for conversation turns is the **window budget**: the bound, minus
-the headroom floor, minus the fixed overhead of every request (the CLI's system prompt and tool
+the headroom (at least the floor), minus the fixed overhead of every request (the CLI's system prompt and tool
 definitions).
 
 The model reads paged-out turns back with MCP tools: `contexto_search` finds turns by the words they
@@ -134,10 +139,11 @@ cache. If your sessions fit, you do not need Contexto. What Contexto changes is 
 request, which stays under the bound where a 1M window carries the whole history every time. That
 is worth it in the cases under [Who it is for](#who-it-is-for).
 
-**Compaction** "replaces the conversation with a structured summary". After it, the project-root
-CLAUDE.md and auto memory are re-injected from disk and up to five recently modified files are
-re-read; the rest is summarized away. `/compact focus on ...` steers the summary, and `/autocompact 500k` sets the point, from
-100K to 1M. If a summary of the old turns is enough, compaction needs no searches and no proxy.
+**Compaction** "replaces the conversation with a structured summary". After it, most startup
+content reloads (the system prompt, the project-root CLAUDE.md, unscoped rules, auto memory,
+skills) and up to five recently modified files are re-read. Path-scoped rules and nested CLAUDE.md
+files are summarized away with the conversation until they load again. `/compact focus on ...`
+steers the summary, and `/autocompact 500k` sets the point, from 100K to 1M. If a summary of the old turns is enough, compaction needs no searches and no proxy.
 Contexto keeps the removed turns word for word, and pays for it: the model sees them only through
 a search it must choose to run, each search is another request, and each rotation rewrites the
 prompt cache.
@@ -148,7 +154,7 @@ of every session. The API's [memory tool](https://platform.claude.com/docs/en/ag
 lets the model write files under `/memories` that your application stores and that later
 conversations read back. All three hold what someone chose to save, across sessions. Contexto holds
 every paged-out turn of one session word for word, and nothing across sessions. It edits none of
-them.
+those files.
 
 ## What you see
 

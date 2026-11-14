@@ -21,8 +21,9 @@ Contexto: 46.6% fewer in the measured run ([Results](results.md#tokens-and-cost)
 of the prompt, so the request after it writes a new prompt cache instead of reading the old one.
 Between rotations the cache is reused as usual: each acceptance run reused it on all but at
 most one eligible request. Whether a session costs less in money depends on the model's prices and
-on cache hits: the measured session cost less at Haiku 5.5's prices and would cost more at flat
-prices such as Opus 5.5's ([Results](results.md#tokens-and-cost)).
+on cache hits: the measured session cost less at Haiku 5.5's prices. At flat prices such as Opus
+5.5's it would cost more if plain Claude Code hit the prompt cache on every request, and less with
+the two cache misses the full-context run had ([Results](results.md#tokens-and-cost)).
 
 **Does it send anything anywhere?** No. The proxy listens on `127.0.0.1` only and forwards your
 CLI's own requests to the upstream you configured. There is no telemetry and no update check. The
