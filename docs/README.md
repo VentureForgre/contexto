@@ -17,6 +17,8 @@ install it and how to start it.
   setup, checks, and what was tested.
 - [sessions.md](sessions.md): how to tell that Contexto is working, what a session stores and
   where, and the commands that inspect and remove sessions.
+- [stats.md](stats.md): the summary `contexto run` prints at exit and `contexto stats`: every
+  number defined, which are measured and which estimated, and what counts as a fault.
 - [standing-rules.md](standing-rules.md): how a rule you give once stays in view after its turn is
   paged out.
 - [mcp-tools.md](mcp-tools.md): the five MCP tools the model gets, how search ranks, and the recall

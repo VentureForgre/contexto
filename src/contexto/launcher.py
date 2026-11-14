@@ -131,6 +131,7 @@ from contexto.mcp import TOOLS as MCP_TOOLS
 from contexto.paths import contexto_home, mcp_env, session_dir
 from contexto.private import affinity_salt, open_private, private_dir
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
+from contexto.stats import fault_notices, log_unwritable_message, print_exit_summary, quiet_from_env
 from contexto.store import LIVE_LOCK, SessionStore
 from contexto.store.prune import discard_new_session
 from contexto.store.sessions import named, starting_with
@@ -164,7 +165,8 @@ WATCHDOG_EXITED = b"exited\n"  # the child was reaped: its pid may be reused
 # Contexto's own ``contexto run`` options, and whether each takes a value (D55: a hint when one is put
 # after the CLI's name). The codex options are not listed: they only apply before 'codex'.
 RUN_OPTIONS = {"--bound": True, "--allow-large-bound": False, "--window-fraction": True, "--headroom-floor": True,
-               "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False}
+               "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False,
+               "--quiet": False}
 # Claude Code's long options whose value is the next argument even when it starts with "-": every main-command
 # option declared with a required ``<value>`` in the 2.1.314 and 2.1.318 binaries, shown in ``--help`` or
 # hidden (variadic ones take at least that one). ``claude_options`` skips that value.
@@ -233,6 +235,7 @@ class LaunchOptions:
     headroom_floor: int | None = None
     claude_bin: str = "claude"
     version_check: bool = True
+    quiet: bool = False  # D64: no summary at exit; warnings are still printed
 
 
 def check_user_args(claude_args: list[str]) -> None:
@@ -447,7 +450,8 @@ class NoticeLog:
     first window budget under MIN_WINDOW_BUDGET, first ``mcp_tools_denied`` (D44), and first
     ``mcp_tools_missing`` (from a request, or logged at exit by ``report_missing_tools``) are also shown
     on stderr, once each; an exit-time ``mcp_tools_missing`` that repeats a mid-run one is shown once
-    more, after the CLI exited.
+    more, after the CLI exited. A store failure (``store_error``, ``page_conflict``) is shown once per cause
+    with what to do about it, and so is a session log that cannot be written (D64).
 
     Between ``hold`` and ``release`` (while the CLI owns the terminal) the lines are kept and printed at
     ``release``, in order: a line written mid-run landed in Claude Code's input box and garbled the next
@@ -470,7 +474,14 @@ class NoticeLog:
             print(f"contexto: {message}", file=self.stderr, flush=True)
 
     def log(self, event: dict[str, Any]) -> None:
-        self.store.log(event)
+        # D64: store failures first, because on a full disk the write below fails as well.
+        for key, message in fault_notices(event, getattr(self.store, "session_id", None)):
+            self._once(key, "warning: " + message)
+        try:
+            self.store.log(event)
+        except OSError as exc:
+            self._once("log_unwritable", "warning: " + log_unwritable_message(exc))
+            raise
         for inner in [event, *(event.get("transform_events") or [])]:
             if not isinstance(inner, dict):
                 continue
@@ -1047,7 +1058,8 @@ def options_from_args(args: Any) -> LaunchOptions:
         claude_args=list(getattr(args, "cli_args", None) or []), bound=args.bound, session_id=args.session,
         upstream=args.upstream, observe_thinking=args.observe_thinking, allow_large_bound=args.allow_large_bound,
         window_fraction=args.window_fraction, headroom_floor=args.headroom_floor,
-        version_check=not getattr(args, "no_version_check", False))
+        version_check=not getattr(args, "no_version_check", False),
+        quiet=bool(getattr(args, "quiet", False)) or quiet_from_env())
 
 
 def check_options(options: LaunchOptions) -> None:
@@ -1245,6 +1257,7 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     tmp: Path | None = None
     watchdog: Watchdog | None = None
     code = EXIT_PROXY
+    started: float | None = None  # when claude was started (D64: a launch that never ran it has no summary)
     try:
         tmp = Path(tempfile.mkdtemp(prefix="contexto-run-"))  # mode 0700, removed on exit
         watchdog = Watchdog.start(tmp, store)
@@ -1266,6 +1279,7 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
             store.log({"event": "window_budget_warning", "bound": options.bound,
                        "assumed_overhead": assumed_overhead()})
         notices.hold()  # claude owns the terminal until it exits (D55)
+        started = time.monotonic()
         # The CLI's shell commands (`contexto state`, `contexto search`) then name this session (D57).
         code = run_child(claude_argv(claude, settings, mcp, options.claude_args), session_env(session_id),
                          stderr=stderr, watchdog=watchdog)
@@ -1283,7 +1297,12 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
             shutil.rmtree(tmp, ignore_errors=True)
         if watchdog is not None:
             watchdog.done()
-        store.log({"event": "exit", "code": code})
+        try:
+            notices.log({"event": "exit", "code": code})
+        except OSError:  # D64: a full disk, already said by the NoticeLog; claude's exit code stands
+            pass
+        print_exit_summary(store, "claude", started, cli_args=options.claude_args, quiet=options.quiet,
+                           log_incomplete="log_unwritable" in notices.shown, stderr=stderr, code=code)
         after_exit(options, home, session_id, recorder, choice, stderr)
 
 

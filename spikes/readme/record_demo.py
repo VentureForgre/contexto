@@ -214,7 +214,10 @@ def record(port: int = PORT, pace: float = PACE, cols: int = termsvg.COLS, rows:
             wrapper.chmod(0o755)
         env = {"PATH": os.pathsep.join([str(work / "bin"), "/usr/bin", "/bin"]),
                "HOME": str(work / "home"), "CONTEXTO_HOME": str(work / "contexto-home"), "TERM": "dumb",
-               "LC_ALL": "C.UTF-8", "TZ": "UTC", "README_DEMO_PACE": str(pace)}
+               "LC_ALL": "C.UTF-8", "TZ": "UTC", "README_DEMO_PACE": str(pace),
+               # D64: `contexto run` prints a summary at exit whose run time differs at every recording, so
+               # the committed recording could not match a fresh one; the demo ends at the stub's reply.
+               "CONTEXTO_QUIET": "1"}
         std = {"stdin": subprocess.DEVNULL, "stdout": capture.slave, "stderr": capture.slave}
 
         capture.add(f"# {script.SYNTHETIC_LABEL}\n")
