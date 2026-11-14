@@ -71,9 +71,10 @@ from collections.abc import Sequence
 from typing import Any
 
 from contexto.bench import d27
-from contexto.bench.d27 import DEFAULT_SEED, REPLY_TOKENS, normalize, parse_answers, turn_tokens
+from contexto.bench.d27 import REPLY_TOKENS, normalize, parse_answers, turn_tokens
 from contexto.bench.model import (
     D27_CLASSES,
+    DEFAULT_SEED,
     FILE_DIR,
     NEW_CLASSES,
     PROTOCOLS,

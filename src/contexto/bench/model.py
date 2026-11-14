@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 FORMAT = 1
+DEFAULT_SEED = 20261016  # the seed of live runs #3 and #4
 PROTOCOLS = ("d27", "v2")
 D27_CLASSES = ("paged_only", "multihop", "chain", "obligations", "distractor")
 NEW_CLASSES = ("paraphrase", "concluded", "toolloop")
