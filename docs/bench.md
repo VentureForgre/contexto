@@ -3,10 +3,16 @@
 [Contexto](../README.md) / [Documentation](README.md)
 
 `contexto bench` runs one generated session three ways and scores each way the same: through
-Contexto, as full context sent straight to the model, and as plain Claude Code compacting on its
-own. The question it answers: on a session whose history grows several times past the bound, does
-Contexto answer questions about early details as well as full context does, and better than plain
-Claude Code's own compaction? It also reports input tokens and cost for each arm.
+Contexto, as full context sent straight to the model, and as plain Claude Code with its auto-compact
+window set so that compaction fires near the bound (the bound plus 33,000 tokens). At its defaults,
+Claude Code on these models, whose windows are 1,000,000 tokens, would compact near 967,000 tokens
+and would not compact at all in this session. The question it answers: on a session whose history
+grows several times past the bound, does Contexto answer questions about early details as well as
+full context does, and how does it compare with plain Claude Code compacting at the same bound? It
+also reports input tokens and cost for each arm. The session is generated log text with facts
+planted in it, not real coding work, so the benchmark says nothing about real sessions, and nothing
+about plain Claude Code at its default compaction threshold; its limits are under
+[What the benchmark does not show](#what-the-benchmark-does-not-show).
 
 The benchmark exists because the earlier evidence could not settle that question. Live run #4
 ([research/M2-acceptance-run4.md](research/M2-acceptance-run4.md)) answered 52 of 54 probes through
@@ -19,9 +25,12 @@ could not be repeated by anyone outside. The decision record is D66 in
 ## Quick start
 
 The benchmark ships in the package, with no runtime dependency beyond Python's standard library. It
-is on `main` and not yet in a release: v0.5.24 does not have it, and releases are cut by hand
-(D67). From a release that has it, run the commands as shown. From a checkout, put `uv run` in
-front of each one (`uv run contexto bench --replay`).
+is on `main` and not yet in a release: v0.5.24, the latest release, does not have it, and releases
+are cut by hand and batched ([RELEASING.md](../RELEASING.md), D67). From a release that has it, run
+the commands as shown. From a checkout, put `uv run` in front of each one (`uv run contexto bench
+--replay`). A live run refuses an `--out` inside a git work tree, so that results are not committed
+before anyone has looked at them: from a checkout, give it a directory outside, such as `--out
+../bench-haiku`, or pass `--allow-git-out` to keep it inside on purpose.
 
 With no key, no `claude` and no network, see what can be shown without a model:
 
@@ -29,14 +38,23 @@ With no key, no `claude` and no network, see what can be shown without a model:
 contexto bench --replay --out bench-replay
 ```
 
+It checks that every request of a pinned synthetic session stays under the bound, by sizes
+estimated from bytes, and which planted facts search can reach. It cannot show answer accuracy,
+cache reads or real token counts
+([what the replay shows](#what-the-replay-shows-and-what-it-cannot)).
+
 With no key, see what a live run would cost before you start one:
 
 ```sh
 contexto bench --dry-run --model claude-haiku-5-5 --seeds 10 --repeats 3
 ```
 
-A live run calls the model with your own key and spends tokens. It refuses to start without a
-`--budget-tokens` ceiling at or above the dry run's worst case:
+A live run calls the model with your own key and is paid by whoever runs it, at their account's
+prices. The run below is estimated at about $14 expected and about $456 in the plan's worst case
+(about $602 with `--cache-ttl 1h`), from the dry run's plan priced at the shipped price table ([the
+minimum run](#the-minimum-run-that-makes-the-claim-testable) says how). Those are estimates, not a
+ceiling: the ceiling is `--budget-tokens`, and the run refuses to start without one at or above the
+dry run's worst case in tokens:
 
 ```sh
 export ANTHROPIC_API_KEY=...        # or --key-helper COMMAND, or --settings FILE
@@ -194,8 +212,11 @@ seed (and, for the first seed, one repeat). For each seed the arm order is rotat
   `tool_choice: none`. Its exact input size is asked from `count_tokens` first; a request that does
   not fit the model's window makes the unit `not_run` with the reason.
 - **`plain`**: the same headless Claude Code as the `contexto` arm with no Contexto, and its
-  auto-compaction window set so that it compacts near the bound
-  ([below](#the-plain-arms-compaction)).
+  auto-compact window set so that compaction fires near the bound, at the bound plus 33,000 tokens
+  ([below](#the-plain-arms-compaction)). At its defaults, Claude Code on these models
+  (1,000,000-token windows) would compact near 967,000 tokens and would not compact at all in this
+  session; the arm moves the trigger to the bound so that both Claude Code arms work under the same
+  limit.
 
 Every way the arms differ is written into the manifest's `arm_differences`. In short:
 
@@ -229,11 +250,29 @@ Every way the arms differ is written into the manifest's `arm_differences`. In s
 Every billed request of every arm goes through one pass-through meter on 127.0.0.1, which records
 counts only: tokens by class from the response, the status, the turn, and main or side request.
 
+## What the benchmark does not show
+
+- Real coding tasks. The session is generated log text with planted facts, not recorded work.
+- A real user's session shape: its turn sizes, tool use and the way facts recur.
+- Plain Claude Code at its default compaction threshold. On the 1,000,000-token windows of the
+  models priced here, Claude Code compacts near 967,000 tokens and would not compact at all in a
+  session of this length (467,012 estimated tokens at the default settings). The `plain` arm is
+  set to compact near the bound (the bound plus 33,000) so that both Claude Code arms work under the
+  same bound; that is a choice, not Claude Code's default.
+- Other CLIs: Codex is not an arm.
+- Models other than the ones run, and Claude Code versions other than the one run.
+- Answers judged by a model. Scoring is exact match, which can count a right answer in another form
+  as wrong, in every arm alike.
+- With fewer than 6 seeds, which way two arms differ.
+- From a replay: answer accuracy, cache reads and real token counts
+  ([what the replay shows](#what-the-replay-shows-and-what-it-cannot)).
+
 ## Protocols and probe classes
 
 **`d27`** is the 54-probe protocol of live runs #3 and #4. Its turn texts and probe fields are
-byte-identical to `spikes/m2/acceptance/run.py::build_script` for any seed, bound and turn size (216
-scripts compared by a reviewer, 280 by the builder). Use it for continuity with those runs:
+byte-identical to `spikes/m2/acceptance/run.py::build_script` for any seed, bound and turn size
+(compared on 216 generated scripts in one check and 280 in another while #255 was built and
+reviewed). Use it for continuity with those runs:
 `--protocol d27`. Every one of its questions names its subject's key, which suits a word search.
 Its classes: `paged_only` (4), `multihop` (8), `chain` (30), `obligations` (6) and `distractor` (6).
 
@@ -258,7 +297,7 @@ shares with its plant. Measured mean overlap for seed 20261016, in words: `paged
 service's own words), `concluded` 0.00 and `toolloop` 2.00.
 
 What the harder classes test, measured with the store's real search on generated pages (4,560
-probes per class, reviewer B's measurement on #255):
+probes per class, measured during the review of #255):
 
 | Query | Class | Plant page first | In the top 3 |
 |---|---|---|---|
@@ -277,28 +316,30 @@ shown, not whether search finds the page; `paged_only` is the keyed control of t
 ## Scoring
 
 Exact match after normalisation against the generator's answers, with no model judge. A `value`
-answer is right when it equals the expected answer after normalisation (case folded, outer
-whitespace, quotes, backticks and markdown emphasis trimmed, inner whitespace collapsed); a `set`
+answer is right when it equals the expected answer after normalisation (case folded; outer
+whitespace, quotes, backticks, markdown emphasis `*` and `_`, and the punctuation `.` `,` `;` `:`
+`!` trimmed; inner whitespace collapsed); a `set`
 answer when its ids are the expected ids in any order. A wrong `value` answer that equals an older
 value of the same fact, or a planted decoy, is also counted stale.
 
-Three deliberate differences from the spike's scoring (`spikes/m0/fidelity/l2f.py::score`), applied
-to every arm alike:
+Three deliberate differences from the spike's scoring (`spikes/m0/fidelity/l2f.py::score`, with
+`normalize` and `parse_answers` from `spikes/m0/fidelity/scoring.py`), applied to every arm alike:
 
 1. A probe with no answer line, or an empty answer, is never correct. The spike read a missing
    answer to a `set` probe as the empty set, so a `set` probe whose answer is `none` scored correct
    when the arm said nothing.
-2. Answer lines written in markdown are read: a bulleted or numbered item, with `**`, `__` or
+2. More answer lines written in markdown are read: a numbered item or a `+` item, and `**`, `__` or
    backticks around the id, the separator or the answer (`**q_a_01**: x`, `1. q_a_01: x`,
-   `` - `q_a_01`: x ``). The spike dropped those lines, so an answer Claude Code wrote in markdown
-   counted as no answer.
-3. A line in a blockquote (`> q_a_01: x`) is never read: markdown marks it as quoted text, not the
-   reply's own. A line in a fenced code block is read, but an answer for the same id on a line
-   outside any fence wins over it wherever the two stand, so a note or file the reply quotes in a
-   fence after its answers cannot override them. A reply that writes all its answers in a fence is
-   still scored. The spike read fenced lines like any other.
+   `` - `q_a_01`: x ``). The spike read a plain `-` or `*` item (`- q_a_01: x`) but dropped these,
+   so an answer Claude Code wrote in them counted as no answer.
+3. A line in a fenced code block is read, but an answer for the same id on a line outside any fence
+   wins over it wherever the two stand, so a note or file the reply quotes in a fence after its
+   answers cannot override them. A reply that writes all its answers in a fence is still scored.
+   The spike read fenced lines like any other.
 
-Every other line the spike read is read the same. Table rows and headings are not read.
+Every other line the spike read is read the same, and a line the spike did not read stays unread:
+as in the spike, a line in a blockquote (`> q_a_01: x`) is never read. Table rows and headings are
+not read.
 
 For `concluded` probes the report also counts how many decision replies were right in each arm, so
 a failed recall can be told apart from a wrong conclusion.
@@ -326,10 +367,13 @@ Otherwise the report says no difference was shown, with each reason that applies
   0.0625 at 5 seeds. With fewer than 6 seeds no direction can be named. A seed whose difference is
   exactly 0 carries no sign, so it is the seeds with a non-zero difference that must number 6 or
   more; the report says when this applies.
-- **The interval over seeds does not decide.** Its coverage, simulated over 4,000 benchmarks of 72
-  probes: 94.7% to 95.7% at 3 to 20 seeds when both arms' error rates are fixed across seeds. When
-  the rates vary between seeds and one arm rarely wins alone, it covers less: 75.6%, 82.9%, 86.6%
-  and 89.7% at 3, 5, 10 and 20 seeds. It assumes roughly symmetric per-seed differences.
+- **The interval over seeds does not decide.** Its coverage was simulated over 4,000 benchmarks of
+  72 probes from two discordance rates (the share of probes right only in the first arm, and only
+  in the second). With the rates fixed across seeds at 0.10 and 0.04, 0.13 and 0.04, or 0.06
+  and 0.06, it covered 94.7% to 95.7% at 3 to 20 seeds; where one arm almost never wins alone (0.03
+  and 0), 92.1% at 3 seeds. When the rates vary between seeds and one arm rarely wins alone, it
+  covers less: at 0.03 and 0, 75.6%, 82.9%, 86.6% and 89.7% at 3, 5, 10 and 20 seeds. It assumes
+  roughly symmetric per-seed differences.
 - **Run-to-run noise** comes from repeats of the first seed: each arm's accuracy range over the
   repeats, the probes that flipped, and the repeated seed's own difference between two arms in each
   repeat. It is reported beside each pair and is not part of the rule.
@@ -413,23 +457,40 @@ before publishing.
 The audit behind D66 suggested 10 seeds on claude-haiku-5-5, 5 seeds on claude-opus-5-5, and 3
 repeats of one seed. With `v2`'s 72 probes, the Haiku run gives 720 pooled paired probes per pair of
 arms over 10 seeds, and its three runs of the first seed give 216 probes per arm for run-to-run
-noise (repeats are not pooled). The Opus run gives 360. The owner starts these runs; no agent does.
+noise (repeats are not pooled). The Opus run gives 360. The project's maintainer will start these
+runs; anyone can run the same commands with their own key, at their own cost.
 
 ```sh
 contexto bench --model claude-haiku-5-5 --seeds 10 --repeats 3 --budget-tokens 598290000 --out <dir>
 contexto bench --model claude-opus-5-5 --seeds 5 --budget-tokens 250500000 --out <dir>
 ```
 
-From the dry run (tokens, input and output of every arm together):
+From the dry run (tokens, input and output of every arm together), with an estimated cost in USD:
 
-| Run | Units | Expected | Worst case | `--budget-tokens` |
-|---|---|---|---|---|
-| claude-haiku-5-5, 10 seeds, first seed 3 times | 36 | 180,251,043 | 598,285,396 | 598,290,000 |
-| claude-opus-5-5, 5 seeds | 15 | 97,122,711 | 250,490,244 | 250,500,000 |
+| Run | Units | Expected | Worst case | `--budget-tokens` | Expected, USD | Worst case, USD (5-minute / 1-hour cache) |
+|---|---|---|---|---|---|---|
+| claude-haiku-5-5, 10 seeds, first seed 3 times | 36 | 180,251,043 | 598,285,396 | 598,290,000 | about $14 | about $456 / $602 |
+| claude-opus-5-5, 5 seeds | 15 | 97,122,711 | 250,490,244 | 250,500,000 | about $90 | about $2,025 / $2,622 |
+
+How the dollar figures were computed: every request the dry run's plan simulates
+(`simulate_contexto`, `simulate_plain` and `simulate_full` in `contexto.bench.plan`) was split into
+uncached input, cache write, cache read and output as the plan splits it, and priced on its own
+with the shipped table (`contexto.bench.prices.request_cost`). `--dry-run` prints those classes
+only as totals, and claude-haiku-5-5's size step needs each request's size: in the Haiku plan's
+expected case, 524 of 1,606 requests are over 100,000 input tokens and pay the higher row on the
+whole request, as the report applies it. The token totals of that computation equal the dry run's.
+The Haiku expected cost splits as about $2.71 for `contexto`, $6.08 for `full` and $5.19 for
+`plain`; the Opus one as $36.37, $16.97 and $36.57. These are estimates from a plan, not a quote:
+the run is paid by whoever runs it, at their account's prices, and `--budget-tokens` is the
+ceiling.
 
 The expected case is a rough size. Its tool rounds are calibrated on the two recorded live runs,
 and the plain arm's figures are assumed: no plain arm has been run live, and two of its figures come
-from Claude Code 2.1.322 against a stub. The Opus expected figure scales the Haiku calibration by
+from Claude Code 2.1.322 against a stub. The plan assumes a 3,000-token summary and 25,000 tokens of
+re-attached files per compaction, which errs toward more spend; the replay's modelled plain line
+uses a 7,920-token summary and nothing re-attached, which errs toward plain Claude Code (see
+[below](#what-the-replay-shows-and-what-it-cannot)). The two serve different ends, a budget and a
+lower bound on plain Claude Code's request size, so they are kept apart. The Opus expected figure scales the Haiku calibration by
 1.381, the ratio of the recorded Opus run's Contexto arm to run #4's (4,726,388 against 3,422,988
 tokens), and the plain arm by the same factor [assumed]. The worst case counts every input token as
 a cache write with a 10% margin and reserves 32,000 output tokens per Claude Code request and 8,192
@@ -484,7 +545,10 @@ and plain Claude Code compacting at the bound would compact 8 times with a large
 140,441. The plain model takes the summary as 7,920 tokens (the mean of three measured summaries in
 [research/M0-proxy-measurements.md](research/M0-proxy-measurements.md)) and assumes that only the
 head, the summary and the current turn survive a compaction; anything re-attached would make plain
-Claude Code's requests larger, so the assumption errs toward plain Claude Code.
+Claude Code's requests larger, so the assumption errs toward plain Claude Code. The dry run's plan
+models the same arm differently on purpose, with a 3,000-token summary and 25,000 tokens of
+re-attached files, to err toward more spend
+([the minimum run](#the-minimum-run-that-makes-the-claim-testable)).
 
 A replay cannot show answer accuracy, cache reads, real token counts, what a real CLI or a real
 model does, or what the proxy does with what only Claude Code sends (its session start, the role
@@ -505,7 +569,11 @@ near 1M tokens, so the other two lines look flatter than they are; the bound is 
 Each request of a turn, tool-loop rounds included, is plotted at that turn's history length.
 
 Made with `contexto bench --replay --out D` and `contexto bench --chart D/results.json` from
-`main` at c476834f; the notes under the chart are the ones `--chart` writes.
+`main` at c476834f, before any release had the command; the notes under the chart are the ones
+`--chart` writes. Its subtitle's `0.0.0+checkout` is the placeholder version every build from a
+checkout carries (`pyproject.toml`), not a release. The chart's own notes do not yet say that
+Contexto's drops are rotations and plain Claude Code's are compactions; a planned follow-up to the
+code adds that, and until then this caption says it.
 
 ## The plain arm's compaction
 
@@ -515,7 +583,9 @@ Claude Code has no setting for the token count at which it compacts. Every docum
 capped at the model's window. Claude Code 2.1.322 compacts 33,000 tokens below that window. The
 33,000 was read in the installed 2.1.322 bundle, not in the documentation, and has not been
 confirmed by a live run; the documentation's one figure, compaction "at about 967K" on a 1,000,000
-window, agrees with it.
+window, agrees with it. At that default, plain Claude Code on these models would compact near
+967,000 tokens. The live run's session at the default settings is 467,012 estimated tokens, so
+plain Claude Code at its defaults would not compact at all in it.
 
 So the plain arm sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the bound plus 33,000 (183,000 for the
 default 150,000), which outranks the flag and the settings. That works for bounds from 67,000 to
@@ -529,16 +599,6 @@ the check runs. In stub runs with the real 2.1.322 at bound 150,000, compaction 
 tokens (stub-modelled usage). The manifest's `plain_compaction` records the variable, the value, the
 intended trigger and whether it could be placed; each unit records every compaction's `pre_tokens`;
 the report shows how far past the intended start each one was.
-
-## What the benchmark does not show
-
-- Real coding tasks. The session is generated log text with planted facts, not recorded work.
-- A real user's session shape: its turn sizes, tool use and the way facts recur.
-- Other CLIs: Codex is not an arm.
-- Models other than the ones run, and Claude Code versions other than the one run.
-- Answers judged by a model. Scoring is exact match, which can count a right answer in another form
-  as wrong, in every arm alike.
-- With fewer than 6 seeds, which way two arms differ.
 
 ## Public benchmarks as a later arm
 
