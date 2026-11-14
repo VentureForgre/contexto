@@ -28,6 +28,7 @@ measured-on constants next to each signature must name (``tests/test_cliversions
 
 from __future__ import annotations
 
+import builtins
 import os
 import re
 import selectors
@@ -105,6 +106,14 @@ def untested_warning(cli: str, version: str) -> str:
 def check_disabled(env: Mapping[str, str] | None = None) -> bool:
     value = (os.environ if env is None else env).get(NO_CHECK_ENV, "").strip().lower()
     return value not in ("", "0", "false", "no")
+
+
+def start_failure(error: str | None) -> bool:
+    """Whether ``installed_version``'s error means the CLI could not be started at all: the name of an
+    ``OSError`` from starting it (FileNotFoundError for a missing #! interpreter, PermissionError,
+    OSError for an exec format error), not a timeout, an exit code, or unparsed output."""
+    cls = getattr(builtins, error or "", None)
+    return isinstance(cls, type) and issubclass(cls, OSError) and not issubclass(cls, TimeoutError)
 
 
 def installed_version(binary: str, *, timeout: float = VERSION_TIMEOUT_S,
