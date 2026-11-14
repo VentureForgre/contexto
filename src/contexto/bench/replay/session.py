@@ -66,14 +66,17 @@ FAILURE_EVENTS = (
 # package changes. HOME and PATH are read as well, but only to find a CLI or a memory file's ``@~/``
 # import, and a replay has neither, so they are left as they are.
 # ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN are read by ``contexto doctor``
-# (D64), which a replay does not call either; they are held unset for the same reason.
+# (D64), which a replay does not call either; they are held unset for the same reason. So is
+# CONTEXTO_PROJECT_MEMORY (D69), read only by ``launcher.project_memory_wanted``, which a replay does not
+# call: its session is the only one in its home (--out's store, else a temporary directory), so no
+# earlier session of its project has records to carry.
 ENVIRONMENT = (
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_CUSTOM_OAUTH_URL",
     "CLAUDE_CODE_GATEWAY_HINT_HEADERS", "CLAUDE_CODE_IGNORE_PERSISTED_TRUST", "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
     "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "CONTEXTO_CODEX_KEY_HELPER",
-    "CONTEXTO_CODEX_UPSTREAM", "CONTEXTO_HOME", "CONTEXTO_NO_VERSION_CHECK", "CONTEXTO_RECALL_VARIANT",
-    "CONTEXTO_SEARCH_CACHE_MB", "CONTEXTO_SESSION", "OPENRIG_SESSION_NAME",
+    "CONTEXTO_CODEX_UPSTREAM", "CONTEXTO_HOME", "CONTEXTO_NO_VERSION_CHECK", "CONTEXTO_PROJECT_MEMORY",
+    "CONTEXTO_RECALL_VARIANT", "CONTEXTO_SEARCH_CACHE_MB", "CONTEXTO_SESSION", "OPENRIG_SESSION_NAME",
 )
 ENVIRONMENT_PREFIXES = ("CONTEXTO_", "CLAUDE_CODE_USE_")
 

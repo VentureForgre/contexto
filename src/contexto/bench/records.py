@@ -26,8 +26,8 @@ A request number ``n`` is unique within one attempt of a unit, but numbers may b
 meter takes a number for a request before forwarding it and writes a record only for a request that
 got a response, so a request the upstream never answered leaves a gap with nothing lost. A record
 that was lost shows in the unit's counts instead. Where the manifest gives no count for an attempt,
-nothing in the directory can show that its records were cut short at its end; ``Run.unchecked``
-names those attempts and the report says so.
+nothing in the directory can show that one of its records was lost, wherever it stood, or that the
+file was cut short; ``Run.unchecked`` names those attempts and the report says so.
 
 What the live run (``contexto.bench.runner``) adds and this module reads:
 
@@ -38,7 +38,20 @@ What the live run (``contexto.bench.runner``) adds and this module reads:
 - ``usage_unreadable`` and ``reserved_tokens`` on a request record: the meter could not read the
   response's usage in full, so the four token counts are what it read (possibly nothing), and
   ``reserved_tokens`` is what its spend guard reserved for the request (the request's bytes at
-  1.5 bytes per token plus its ``max_tokens``), an upper bound on what it can have cost.
+  1.5 bytes per token plus its ``max_tokens``), an upper bound on what it can have cost. Since the
+  live run counted torn records, every request record carries ``reserved_tokens``; the report reads
+  it only where the usage could not be read.
+- ``requests_unanswered`` and ``unanswered_tokens`` on a unit and on each entry of its ``attempts``
+  (absent means 0): requests the upstream got and never answered, which have no record, and the
+  reservations the run kept as spent for them.
+- ``torn_lines`` in the manifest: the lines a resumed run found cut short by a killed run. A request
+  record it moved aside carries ``counted_tokens``, the reservation the run counted for it (null when
+  nothing bounded it), or ``counted_from: "journal"`` when the reservation journal counts it instead,
+  and the unit (``arm``, ``seed``, ``repeat``, ``attempt``) when the fragment named it.
+- ``in_flight`` in the manifest: the requests the reservation journal has with no record (in flight
+  when a run was killed, or the record cut short), each with its unit, attempt, ``n`` and
+  ``reserved_tokens``, which the run counted as spent; ``requests_in_flight`` and ``in_flight_tokens``
+  sum them.
 - A unit's ``status`` is ``running`` only while a run is in progress or after it was killed; such
   a directory is refused, naming the session, with what to do (the same command resumes the run
   and records the unit).
@@ -231,8 +244,10 @@ def _status(value: Any, field: str) -> None:
     _choice(*STATUSES, RUNNING)(value, field)
 
 
+_UNANSWERED: dict[str, Check] = {"requests_unanswered": _integer(0, nullable=True),
+                                 "unanswered_tokens": _integer(0, nullable=True)}
 _ATTEMPT = _object({"attempt": _integer(0)}, optional={"status": _string(nullable=True),
-                                                      "requests": _integer(0, nullable=True)})
+                                                      "requests": _integer(0, nullable=True), **_UNANSWERED})
 
 _UNIT: dict[str, Check] = {
     "arm": _string(), "seed": _integer(0), "repeat": _integer(0), "status": _status,
@@ -244,7 +259,7 @@ _UNIT: dict[str, Check] = {
 _UNIT_OPTIONAL: dict[str, Check] = {
     "probes": _integer(0, nullable=True), "requests": _integer(0, nullable=True),
     "cache_ttl": _or_null(_choice(*CACHE_TTLS)), "attempt": _integer(0, nullable=True),
-    "attempts": _or_null(_list_of(_ATTEMPT)),
+    "attempts": _or_null(_list_of(_ATTEMPT)), **_UNANSWERED,
 }
 
 _MANIFEST: dict[str, Check] = {
@@ -257,7 +272,14 @@ _MANIFEST: dict[str, Check] = {
     "cache_ttl": _or_null(_choice(*CACHE_TTLS)), "started": _string(), "finished": _string(nullable=True),
     "units": _list_of(_object(_UNIT, optional=_UNIT_OPTIONAL)),
 }
-_MANIFEST_OPTIONAL: dict[str, Check] = {"label": _label}
+_TORN = _object({"file": _string(), "action": _string()},
+                optional={"bytes": _integer(0), "counted_tokens": _integer(0, nullable=True), "arm": _string(),
+                          "seed": _integer(0), "repeat": _integer(0), "attempt": _integer(0)})
+_IN_FLIGHT = _object({"arm": _string(), "seed": _integer(0), "repeat": _integer(0), "attempt": _integer(0),
+                      "n": _integer(0), "reserved_tokens": _integer(0)})
+_MANIFEST_OPTIONAL: dict[str, Check] = {"label": _label, "torn_lines": _or_null(_list_of(_TORN)),
+                                        "in_flight": _or_null(_list_of(_IN_FLIGHT)),
+                                        "requests_in_flight": _integer(0), "in_flight_tokens": _integer(0)}
 
 
 def _check_manifest(data: dict[str, Any]) -> None:
@@ -515,8 +537,8 @@ class Run:
     """One live output directory, read and checked: its manifest and its two record files.
 
     ``unchecked`` names, in manifest order, each unit that has attempts whose request records the
-    manifest does not count, with those attempts: a ``requests.jsonl`` cut short at the end of one
-    of them cannot be detected. A unit that was not run is never named."""
+    manifest does not count, with those attempts: a request record lost from one of them, or a
+    ``requests.jsonl`` cut short, cannot be detected. A unit that was not run is never named."""
 
     path: Path
     manifest: dict[str, Any]

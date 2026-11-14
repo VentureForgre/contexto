@@ -3,7 +3,7 @@
 For each seed (and each repeat of the first) it runs the arms one after another on the same generated
 script: ``contexto`` (Claude Code under ``contexto run``), ``full`` (direct requests carrying the
 whole script) and ``plain`` (Claude Code with its own auto-compaction set from the bound). It writes
-``manifest.json``, ``scripts/``, ``probes.jsonl`` and ``requests.jsonl`` into ``--out``; see
+``manifest.json``, ``scripts/``, ``probes.jsonl``, ``requests.jsonl`` and ``reservations.jsonl`` into ``--out``; see
 ``contexto.bench.runner``. Nothing in those files or in what is printed names the key, the key
 helper, a settings file, the upstream's host or a home directory.
 

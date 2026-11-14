@@ -45,7 +45,7 @@ MIN_TURNS = 4  # the generator's own minimum of d27 content turns
 # Everything a replay or a live run writes into --out (the shared output schema): a directory that holds
 # any of them already holds results, which a replay must not overwrite.
 OUTPUT_NAMES = ("manifest.json", "requests.jsonl", "probes.jsonl", "reach.jsonl", "results.json", "results.md",
-                "scripts", "charts", "store")
+                "scripts", "charts", "store", "reservations.jsonl")
 SHOWN_DIFFERENCES = 5  # the differences a failed pinned replay lists before giving their count
 RECORD_COMMAND = "contexto bench --replay --record-trace src/contexto/bench/data/{name} --force"
 EXIT_FAILED, EXIT_USAGE = 1, 2

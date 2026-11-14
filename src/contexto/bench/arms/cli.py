@@ -55,6 +55,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -154,12 +155,23 @@ def working_directory(unit: Unit) -> Path:
 
 
 def claude_version(claude: str, environ: Mapping[str, str] | None = None) -> str | None:
-    """The version ``claude --version`` prints, for example ``2.1.322``, or None."""
+    """The version ``claude --version`` prints, for example ``2.1.322``, or None. It runs as the arms'
+    sessions run, less the credential and the base URL it does not need: the same variables dropped
+    and kept (``STRIPPED_PREFIXES``, ``STRIPPED_NAMES``, ``KEPT_NAMES``), ``ENV`` set
+    (``DISABLE_AUTOUPDATER=1`` among them), and a configuration directory and working directory of its
+    own, both temporary, so it reads neither the user's Claude Code configuration nor the settings of
+    the directory the benchmark was started from."""
     environ = os.environ if environ is None else environ
-    env = {k: v for k, v in environ.items() if not k.startswith(STRIPPED_PREFIXES)}
+    env = {k: v for k, v in environ.items()
+           if k in KEPT_NAMES or not (k.startswith(STRIPPED_PREFIXES) or k in STRIPPED_NAMES)}
+    env.update(ENV)
     try:
-        proc = subprocess.run([claude, "--version"], capture_output=True, text=True, timeout=60, env=env,
-                              stdin=subprocess.DEVNULL)
+        with tempfile.TemporaryDirectory(prefix="contexto-bench-version-") as tmp:
+            config = Path(tmp) / "config"
+            config.mkdir()
+            env["CLAUDE_CONFIG_DIR"] = str(config)
+            proc = subprocess.run([claude, "--version"], capture_output=True, text=True, timeout=60, env=env,
+                                  stdin=subprocess.DEVNULL, cwd=tmp)
     except (OSError, subprocess.TimeoutExpired):
         return None
     words = proc.stdout.split()

@@ -24,6 +24,13 @@ moving the oldest turns to disk, word for word, and giving the model tools to se
   66% more if plain Claude Code read its prompt cache on every request, and less given the two cache
   misses the measured plain requests had ([results](docs/results.md#tokens-and-cost)).
 
+Plain Claude Code compacting on its own was not run in these sessions. `contexto bench` runs
+Contexto, full context and plain Claude Code set to compact at the same bound (at its defaults,
+Claude Code on a 1M-token window would compact near 967,000 tokens) on the same generated session
+for seeds you choose, with your own key; its replay needs no key ([benchmark](docs/bench.md)). It
+is on `main` and not yet in a release (releases are cut by hand and batched under D67): from a
+checkout, run `uv run contexto bench --replay`.
+
 ## Install
 
 On macOS or Linux, Contexto needs Python 3.12 or later, pipx, `claude` (Claude Code) or `codex` on
@@ -248,7 +255,8 @@ requests come from that process ([docs/maintainer-process.md](docs/maintainer-pr
 SDK, CI). Use: [Sessions](docs/sessions.md), [MCP tools](docs/mcp-tools.md), [Search](docs/search.md),
 [Rules you give once](docs/standing-rules.md), [Project memory](docs/project-memory.md),
 [FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
-Evidence: [Results](docs/results.md), [Limitations](docs/limitations.md), [CLI updates](docs/cli-updates.md),
+Evidence: [Results](docs/results.md), [Benchmark](docs/bench.md), [Limitations](docs/limitations.md),
+[CLI updates](docs/cli-updates.md),
 [changelog](CHANGELOG.md).
 
 ## Troubleshooting
