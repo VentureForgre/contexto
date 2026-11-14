@@ -55,6 +55,12 @@ Some tests skip when something is missing, and pytest prints the reason:
 - A shallow clone: one research test that reads git history.
 - Running as root: two file-permission tests.
 
+The tests assume the machine has no Claude Code managed settings file
+(`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
+`/etc/claude-code/managed-settings.json` on Linux). The tests against the real `claude` skip when
+one exists; the launcher tests that start `contexto run claude` read it and fail if it turns on a
+cloud-provider switch or the gateway hint headers.
+
 CI has neither `claude` nor `codex`, so a green CI run does not cover the tests against the real
 CLIs. If you change how Contexto talks to a CLI, install it and run the suite locally.
 

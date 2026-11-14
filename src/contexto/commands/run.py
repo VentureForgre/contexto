@@ -32,7 +32,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                         help="minimum headroom below the bound that triggers a rotation (default 25,000; "
                              "must be below the bound)")
     parser.add_argument("--session", default=None,
-                        help="full session id to resume or create (default: the one that served "
+                        help="full session id to resume or create; a prefix of an existing id is refused, since a "
+                             "new id creates a session (default: the one that served "
                              "'claude --resume <id>' or, for 'claude --continue', the last one used in this "
                              "directory; else a new one, printed at start)")
     parser.add_argument("--upstream", default=None,
@@ -43,6 +44,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--no-version-check", action="store_true",
                         help="do not compare the CLI's --version with the versions Contexto was tested with "
                              "(also CONTEXTO_NO_VERSION_CHECK=1)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="do not print the summary when the CLI exits; warnings are still printed "
+                             "(also CONTEXTO_QUIET=1)")
     parser.add_argument("cli", choices=["claude", "codex"], help="the CLI to run")
     parser.add_argument("cli_args", nargs=argparse.REMAINDER, help="arguments passed to the CLI unchanged")
     try:
@@ -59,7 +63,7 @@ def run(args: argparse.Namespace) -> int:
         try:
             from contexto.codex import run_codex
         except ImportError:
-            print("contexto run: codex support is not installed in this build", file=sys.stderr)
+            print("contexto: codex support is not installed in this build", file=sys.stderr)
             return 2
         return run_codex(args)
     return run_claude(options_from_args(args))

@@ -11,17 +11,20 @@ not start it by hand.
 
 | Tool | What it does |
 |---|---|
-| `contexto_search(query)` | Finds turns that contain every word of the query (details below) |
+| `contexto_search(query)` | Finds turns that contain every word of the query, or approximate matches when none does (details below) |
 | `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
 | `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`. Decisions and obligations always show in the pinned state; an event, artifact, or reference shows there only when verified with a provenance source, and the reply says so when it will not |
 | `contexto_close(obligation_id, note)` | Close an open obligation |
 | `contexto_state()` | The full pinned state, with no pin-budget cap. It is charged against the turn's recall budget and cut at a whole line, with a trailer, when the budget runs out |
 
 **Search.** `contexto_search` finds turns holding every word of the query, in any case and any
-order. Words match as substrings, so identifiers and paths work; there is no stemming and no fuzzy
-or similarity matching. A query with no words finds nothing. Contexto's own search, recall and
-state calls (a turn's earlier search replies, for example) are kept for recall but not searched,
-since they copy older pages and would outrank the turns they quote.
+order. Words match as substrings, so identifiers and paths work. When no turn holds every word, the
+reply gives approximate matches and says so: stop words dropped, identifier styles folded, turns
+holding enough of the query (rarer words count more), one typo ([search.md](search.md)). There is no
+stemming beyond that one-letter typo step, and no embedding search. A query with no words finds
+nothing. Contexto's own search, recall and state calls (a turn's earlier search replies, for
+example) are kept for recall but not searched, since they copy older pages and would outrank the
+turns they quote.
 
 - Turns holding the whole query rank first, then by relevance (BM25), with newer turns preferred
   among similar ones. A word counts once per text of a turn (a reply, a tool input, a tool output),

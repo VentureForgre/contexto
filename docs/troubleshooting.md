@@ -3,7 +3,7 @@
 [Contexto](../README.md) / [Documentation](README.md)
 
 The warnings and errors you are most likely to see from `contexto`, each with its cause and what to
-do. Entries quote the message text, so search this page for the words you saw.
+do. An entry about a printed message quotes its text, so search this page for the words you saw.
 
 **Which upstream does `contexto run` use?** The first of: `--upstream`; `env.ANTHROPIC_BASE_URL` from
 the first Claude Code settings file that sets it: the main checkout's `.claude/settings.local.json`

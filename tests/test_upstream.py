@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from contexto.upstream import DEFAULT_UPSTREAM, claude_settings_order, main_checkout, resolve_upstream
+from contexto.upstream import (
+    DEFAULT_UPSTREAM,
+    claude_key_helper,
+    claude_settings_order,
+    main_checkout,
+    resolve_upstream,
+)
 
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid", "GIT_COMMITTER_NAME": "t",
            "GIT_COMMITTER_EMAIL": "t@example.invalid", "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -263,3 +269,108 @@ def test_an_unreadable_user_settings_file_is_skipped(tmp_path, home, make):
     from contexto.codex import claude_api_key_helper
 
     assert claude_api_key_helper(tmp_path, home, env) is None
+
+
+BOM = b"\xef\xbb\xbf"
+
+
+@pytest.mark.parametrize("where", ["project", "user"])
+def test_a_settings_file_that_starts_with_a_byte_order_mark_is_read(tmp_path, home, where):
+    """Claude Code reads such a file (measured on 2.1.322 with plain ``claude -p`` and the project's
+    file, spikes/m2/providers: every request went to the file's base URL, and the file's
+    ``apiKeyHelper`` ran; the user's file goes through the same reader here). Read as plain UTF-8
+    it was not JSON and counted as absent, so the proxy forwarded to another upstream than Claude Code's
+    own, and ``contexto run codex`` did not find the helper."""
+    path = (tmp_path if where == "project" else home) / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(BOM + json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://marked.invalid"},
+                                       "apiKeyHelper": "print-a-key"}).encode())
+    up = resolve_upstream(env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tmp_path, home=home)
+    assert (up.url, up.source) == ("http://marked.invalid", f"settings:{where}")
+    helper = claude_key_helper(tmp_path, home, {}, trusted_only=False)
+    assert (helper.value, helper.source) == ("print-a-key", where)
+
+
+
+def test_a_settings_file_with_a_number_too_long_for_python_is_read(tmp_path, home):
+    """Claude Code 2.1.322 reads a settings file holding an integer of 5,000 digits (PR #258, Reviewer
+    B's re-review, zero spend: every request went to the file's base URL). ``json.loads`` refuses an
+    integer past 4,300 digits, so the file counted as absent and the proxy forwarded elsewhere."""
+    path = tmp_path / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    text = json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://long-number.invalid"}, "apiKeyHelper": "print-a-key",
+                       "cleanupPeriodDays": 0})
+    path.write_text(text.replace(": 0}", f": 1{'0' * 5000}}}"))
+    up = resolve_upstream(env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tmp_path, home=home)
+    assert (up.url, up.source) == ("http://long-number.invalid", "settings:project")
+    assert claude_key_helper(tmp_path, home, {}, trusted_only=False).value == "print-a-key"
+
+
+def test_a_fifo_in_place_of_a_settings_file_is_skipped(tmp_path, home):
+    """Claude Code 2.1.322 skips a named pipe at a settings path (PR #258, Reviewer A's re-review); the
+    reader waited on it for ever, so `contexto run` never started."""
+    import os
+    import time
+
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://user.invalid"}}))
+    (tmp_path / ".claude").mkdir()
+    os.mkfifo(tmp_path / ".claude" / "settings.json")
+    started = time.monotonic()
+    up = resolve_upstream(env={}, cwd=tmp_path, home=home)
+    assert (up.url, up.source) == ("http://user.invalid", "settings:user")
+    assert time.monotonic() - started < 5
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_a_settings_file_with_a_non_json_number_is_not_read(tmp_path, home, literal):
+    """Claude Code rejects a file holding these, so Contexto must not take its base URL either."""
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(
+        f'{{"env": {{"ANTHROPIC_BASE_URL": "http://project.invalid"}}, "n": {literal}}}')
+    up = resolve_upstream(env={"ANTHROPIC_BASE_URL": "http://env.invalid"}, cwd=tmp_path, home=home)
+    assert up.url == "http://env.invalid"
+
+
+@pytest.mark.parametrize("env_block", [None, [], "x"])
+def test_a_settings_file_whose_env_is_not_an_object_is_not_read(tmp_path, home, env_block):
+    """Claude Code loads nothing from such a file (PR #258, Reviewer B's round 3), so neither its
+    apiKeyHelper nor, in a file whose env is fine, anything else is taken from it here."""
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(json.dumps({"env": env_block, "apiKeyHelper": "print-a-key"}))
+    assert claude_key_helper(tmp_path, home, {}, trusted_only=False).value is None
+
+
+NOT_LOADED = "has an env that is not a JSON object, so Claude Code loads nothing from it"
+
+
+@pytest.mark.parametrize("text, problem", [
+    ('{"env": {"CLAUDE_CODE_USE_BEDROCK": "0"}, "n": NaN}', "is not valid JSON"),
+    ('{"env": {}, "n": -Infinity}', "is not valid JSON"),
+    ('{"env": ["CLAUDE_CODE_USE_BEDROCK=1"]}', NOT_LOADED),
+    ('{"env": null}', NOT_LOADED),
+])
+def test_read_settings_file_reports_a_file_claude_code_does_not_load(tmp_path, text, problem):
+    """The rules of PR #258 in the one reader: Claude Code 2.1.322 loads nothing from a file holding
+    ``NaN`` or ``Infinity``, or whose ``env`` is not an object, so none of its settings is taken; the
+    file is named as unusable, as a syntax error is."""
+    from contexto.upstream import read_settings_file
+
+    path = tmp_path / "settings.json"
+    path.write_text(text)
+    found = read_settings_file(path)
+    assert (found.data, found.problem) == (None, problem)
+    # An env that is not an object holds no switch (#271's guard tests); a file that is not JSON may.
+    assert found.may_name_provider is ("CLAUDE_CODE_USE_" in text and problem == "is not valid JSON")
+
+
+def test_read_settings_file_reads_an_integer_past_python_s_digit_limit(tmp_path):
+    """JavaScript reads it as Infinity and Claude Code loads the file (PR #258's re-review)."""
+    from contexto.upstream import js_string, read_settings_file
+
+    path = tmp_path / "settings.json"
+    path.write_text('{"env": {"CLAUDE_CODE_USE_BEDROCK": 1' + "0" * 5000 + ', "X": -1' + "0" * 5000 + "}}")
+    found = read_settings_file(path)
+    assert found.problem is None
+    assert [js_string(found.data["env"][name]) for name in ("CLAUDE_CODE_USE_BEDROCK", "X")] == ["Infinity",
+                                                                                                "-Infinity"]
