@@ -11,6 +11,7 @@ every run and a script's bytes can be compared with recorded ones. The sizes and
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -610,6 +611,33 @@ def test_a_project_part_that_raises_at_a_turn_start_keeps_the_text_sent(home, tm
     upstream, _, events = engine(body(MESSAGES, requests[2]), {}, MESSAGES)
     assert {"event": "start_text_unavailable", "epoch": 0, "error": "MemoryError"} in events
     assert state_of(engine, MESSAGES, requests[2]).start_text == text and marks(upstream) == 1
+
+
+def test_a_failed_turn_start_refresh_is_one_fault_event_and_other_reads_still_log_theirs(home, tmp_path, monkeypatch):
+    """Review A round 9, finding 1: at a turn start the engine's ``start_text_unavailable`` is the one event
+    for a project that cannot be read; the store's strict read logs no ``project_unavailable`` of its own,
+    and a read that is not strict still does."""
+    store = later_session(home, tmp_path)
+    requests = script(MESSAGES, 3)
+    engine = RewriteEngine(store, config=ROOMY)
+    drive(engine, MESSAGES, requests[:2])
+
+    def broken(self, own=None):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(store_module.project.Project, "carried", broken)
+
+    def logged() -> list[str]:
+        path = store.dir / "log.jsonl"
+        return [json.loads(line)["event"] for line in path.read_text().splitlines()] if path.exists() else []
+
+    _, _, events = engine(body(MESSAGES, requests[2]), {}, MESSAGES)
+    assert {"event": "start_text_unavailable", "epoch": 0, "error": "OSError"} in events
+    assert "project_unavailable" not in logged()
+    with pytest.raises(OSError):
+        store.carried_text(6_000, strict=True)
+    assert "project_unavailable" not in logged()
+    assert store.carried_text(6_000) == "" and logged().count("project_unavailable") == 1
 
 
 def test_a_start_text_that_grows_at_a_turn_start_is_in_the_pre_send_estimate(home, tmp_path):

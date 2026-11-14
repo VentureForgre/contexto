@@ -16,10 +16,12 @@ conversation's messages to ``scan`` only while it is main and trusted. Trusted a
 main conversation (main since its own first request, or the conversation a new engine resumed from the
 epoch record, unless the record says ``untrusted`` and the conversation is not in the session's
 ``trusted_conversations``; after a restart a first main the record does not resume is trusted only when
-the store has no record, the conversation is in ``trusted_conversations``, the record names it
-unmarked, or it is a new Claude Code session: ``RewriteEngine._first_trusted``) and one that took main
-by one of D50's session rules, ``new_cli_session`` (``/clear``), ``resumed_cli_session`` (``/resume``)
-or ``compacted``, by ``after_side_request`` when ``_first_trusted`` holds for it, or by
+the store is new (no readable record and no Claude Code session served before the engine started), the
+conversation is in ``trusted_conversations``, the record names it unmarked, or it is a new Claude Code
+session: ``RewriteEngine._first_trusted``; a store that served sessions and has no readable record is
+not new) and one that took main by ``compacted``, by D50's other session rules, ``new_cli_session``
+(``/clear``) and ``resumed_cli_session`` (``/resume``), or by ``after_side_request`` when
+``_first_trusted`` holds for it (in a new store's engine it holds for every conversation), or by
 ``more_turn_starts`` when it is in ``trusted_conversations`` (``RewriteEngine._trusted_takeover``). Each
 conversation an engine trusts is written to that list (``SessionStore.add_trusted_conversation``). One
 that took main from a known main by ``more_turn_starts``, the turn-start rule, and is not in the list
