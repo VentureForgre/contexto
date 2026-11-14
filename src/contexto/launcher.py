@@ -37,8 +37,9 @@ place of signatures that change between Claude Code versions. A launch is in one
 - ``forwarded``: the user had turned them on themselves (the process environment, a settings file
   ``env`` block, or the managed settings file), so they pass through as they did.
 - ``off``: the user set ``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` to ``0``, ``false``, ``no`` or ``off`` in
-  the process environment, their user settings file or the managed settings file. The launcher then leaves the variable out of
-  its ``env`` block, Claude Code sends no hint header, and the engine reads its signatures.
+  the process environment, their user settings file or the managed settings file. The launcher then
+  leaves the variable out of its ``env`` block, Claude Code sends no hint header, and the engine reads
+  its signatures.
 
 Claude Code applies the ``env`` block to its own environment, so every process the session starts (a
 tool command, a hook, an MCP server) inherits it. The block therefore also holds
