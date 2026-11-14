@@ -31,9 +31,11 @@ an HTTP version, an unknown version, too many headers, an unsupported method) ge
 echo of what was sent and no library version, and ``Expect: 100-continue`` is answered only after
 the checks. Every refusal and every failure before the check is logged through one limiter
 (``ServeService.refused``). A connection that has not passed the check has ``UNCHECKED_DEADLINE_S``
-in total for its request head and for a refused request's body, then its read side is shut; at most
-``MAX_UNCHECKED_CONNECTIONS`` such connections are open, and one more is closed at once. A
-connection that passed the check is outside both limits for the rest of its life.
+in total for its request head and for a refused request's body, then its read side is shut. At most
+``MAX_UNCHECKED_CONNECTIONS`` such connections are open: one more takes the place of the oldest whose
+request line has not shown the token, which is shut (``ServeService._make_room``), so holding the
+cap full keeps no token holder out. A connection that passed the check is outside both limits for
+the rest of its life.
 
 Routing. A ``POST /v1/messages`` or ``/v1/messages/count_tokens`` is routed by Claude Code's session
 id: the ``X-Claude-Code-Session-Id`` header (``CLI_SESSION_ID``), else ``metadata.user_id``'s
@@ -71,10 +73,16 @@ unstarted ``ContextoProxy`` per session as its ``owner`` for the request, so deg
 stream hold and fail-open are the launcher path's own code. At most ``max_sessions`` sessions are
 open; one idle for ``idle_s`` is closed (recorder flushed, ``report_missing_tools``, logged, store
 released), and the least recently used one is closed to make room. A session with a request in
-flight is never closed: when every open session is busy, a request for another id waits up to
-``CAP_WAIT_S`` for one to finish, and is then forwarded unchanged and logged (``session_cap``). A
-later request reopens a closed session and its engine resumes from the epoch record (contract rule
-16).
+flight is never closed: when every open session is busy, a request for another id waits for one to
+finish until ``CAP_WAIT_S`` after it arrived (in total, however many requests of its id were ahead
+of it), and is then forwarded unchanged and logged (``session_cap``). A later request reopens a
+closed session and its engine resumes from the epoch record (contract rule 16).
+
+Shutdown (``ServeService.stop``): routing stops first, so a request that arrives on a connection
+already open gets a 503 (``STOPPING_MESSAGE``) and its connection is closed, and nothing opens or
+makes a session; ``serve.json`` is removed while the port is still the service's, then the port is
+closed; the requests already in flight have up to ``STOP_DRAIN_S`` to finish, then every session is
+closed and the lock released. A store a request made while ``stop`` began is removed again.
 
 Local endpoints, under the token prefix and never forwarded: ``GET /contexto/health`` and ``POST
 /contexto/resolve``. Claude Code 2.1.322 puts the model's ``tool_use`` id in each MCP ``tools/call``
@@ -82,11 +90,13 @@ Local endpoints, under the token prefix and never forwarded: ``GET /contexto/hea
 ``resolve`` which Contexto session a tool call belongs to. The map (the newest ``TOOL_CALLS_KEPT``
 ids) is filled by the proxy's ``on_tool_calls`` hook, which hands over the id of each client tool
 call as soon as the proxy has read it off the response and before it writes the bytes that carry it:
-in a stream it relays event by event, in a stream it relays chunk by chunk, and in a JSON body,
-whether or not the response has ``usage``. So an id resolves before the client can act on the call
-whenever the response is not content-encoded. For a response upstream encoded although the proxy
-asked for identity, the id is read from a decoded side copy, which may trail the client's own
-decoder: there the MCP client's retry covers the gap. A response the proxy cannot read (an encoding
+in a stream it relays event by event and in a stream it relays chunk by chunk. A JSON body is read
+only once it has ended, so in either framing (``Content-Length`` or chunked) the proxy holds back
+what completes the body (its last chunk, and the whitespace after it) until the ids are handed
+over. That holds whether or not the response has ``usage``. So an id resolves before the client can
+act on the call whenever the response is not content-encoded. For a response upstream encoded
+although the proxy asked for identity, the id is read from a decoded side copy, which may trail the
+client's own decoder: there the MCP client's retry covers the gap. A response the proxy cannot read (an encoding
 it cannot decode, a JSON body past its limit) registers nothing, and neither does one that answers
 a request forwarded unrouted: those calls resolve as unknown and the MCP server refuses them. An id
 two sessions registered is ambiguous and resolves as unknown too (``tool_use_ambiguous`` in the log).
@@ -95,8 +105,9 @@ Files under ``$CONTEXTO_HOME``, all 0600 (``contexto.servecontract``): ``serve.t
 ``serve.lock`` (empty; the service holds an exclusive ``flock`` on it from before it binds until it
 exits, so a second service on the same home is refused whatever its port, and "running" means the
 lock is held, never that a recorded pid is alive); ``serve.json`` (``{"port", "pid"}``: a record
-left by an earlier run is removed once the lock is taken, the new one is written once listening and
-removed on a clean shutdown; ``pid`` is for messages); ``serve.log`` (JSON lines: events, reasons,
+left by an earlier run is removed as soon as the lock is taken, the new one is written once the port
+is listening and removed before the port is closed, so it names a port only while the service
+listens on it; ``pid`` is for messages); ``serve.log`` (JSON lines: events, reasons,
 counts, paths without the token, status codes; never header values, bodies, the token or the
 upstream URL), rotated once to ``serve.log.1`` at 5 MB.
 
@@ -167,7 +178,6 @@ from contexto.proxy import (
     utc_now,
 )
 from contexto.servecontract import (
-    CLOUD_PROVIDER_VARIABLES,
     HEALTH_PATH,
     LOCAL_PREFIX,
     LOCK_FILE,
@@ -191,7 +201,7 @@ from contexto.servecontract import (
 )
 from contexto.store import SessionStore, redact
 from contexto.store.prune import SessionLiveError, SessionNotFoundError, remove_session
-from contexto.upstream import JS_WHITESPACE, TRUTHY, Upstream, resolve_upstream, untrusted_note
+from contexto.upstream import Upstream, resolve_upstream, untrusted_note
 
 DEFAULT_PORT = 7837
 DEFAULT_MAX_SESSIONS = 64
@@ -202,7 +212,8 @@ ROTATE_HINT = "Run `contexto serve --rotate-token` to replace it"
 REFUSAL_LOG_INTERVAL_S = 1.0  # at most one refusal line this often; the rest are counted (``not_logged``)
 UNCHECKED_DEADLINE_S = 5.0  # a connection has this long, in total, to pass the token check
 MAX_LINGER_BYTES = 1024 * 1024  # read and dropped after the 403 to a request that could not be parsed
-MAX_UNCHECKED_CONNECTIONS = 64  # connections that have not passed the token check; one more is closed at once
+MAX_UNCHECKED_CONNECTIONS = 64  # connections that have not passed the token check; one more takes the oldest's place
+TOKEN_PEEK_BYTES = 16  # room for the method and " /" in front of the token, when a request line is peeked at
 CAP_WAIT_S = 0.3  # how long a request waits for a session to finish before it is forwarded as session_cap
 UNBOUNDED_WARN_INTERVAL_S = 60.0  # at most one stderr warning per reason this often, with a count
 OPEN_FAILED_TTL_S = 5.0  # how long a store that could not be opened is not tried again
@@ -213,6 +224,7 @@ NOTICES_KEPT = 4096  # sessions whose printed warnings are remembered, so a reop
 UNSERVED_KEPT = 1024  # ids a count_tokens found no session for, remembered for UNSERVED_TTL_S
 UNSERVED_TTL_S = 5.0  # /context sends 26 count_tokens in a row (2.1.322): one lookup on disk, not 26
 STATUS_TIMEOUT_S = 3.0
+STOPPING_MESSAGE = "contexto serve is stopping; the request was not forwarded"
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 # Why a /v1/messages request was forwarded unchanged, for the stderr warning (``ServeService.unrouted``).
 UNBOUNDED_REASONS = {
@@ -303,10 +315,9 @@ def mcp_config_payload(home: Path) -> dict[str, Any]:
 
 
 def cloud_provider_variables(env: Mapping[str, str] | None = None) -> list[str]:
-    """The cloud-provider switches ``env`` sets (``CLOUD_PROVIDER_VARIABLES``), read as Claude Code
-    reads a boolean variable: ``1``, ``true``, ``yes`` or ``on``, any case, trimmed."""
-    env = os.environ if env is None else env
-    return [name for name in CLOUD_PROVIDER_VARIABLES if env.get(name, "").lower().strip(JS_WHITESPACE) in TRUTHY]
+    """The cloud-provider switches ``env`` (default the process environment) turns on
+    (``servecontract.cloud_provider_variables``)."""
+    return servecontract.cloud_provider_variables(os.environ if env is None else env)
 
 
 def cloud_provider_warning(names: list[str], what: str) -> str:
@@ -600,6 +611,7 @@ class ServeService:
         self._refusals_not_logged = 0
         self._unbounded: dict[str, list[Any]] = {}  # reason -> [when last warned, requests since]
         self._unchecked: dict[socket.socket, float] = {}  # connections before the token check -> their deadline
+        self._vouched: set[socket.socket] = set()  # unchecked connections whose request line showed the token
         self._unchecked_changed = threading.Condition()
         self._server: _ServeServer | None = None
         self._thread: threading.Thread | None = None
@@ -610,7 +622,8 @@ class ServeService:
 
     def start(self, port: int = DEFAULT_PORT) -> int:
         """Take the home's lock, remove a ``serve.json`` left by an earlier run, bind 127.0.0.1:port (0
-        picks a free port), serve in a thread, write ``serve.json``, and return the bound port.
+        picks a free port) and listen, write ``serve.json``, serve in a thread, and return the bound
+        port. ``serve.json`` names a port only while this service listens on it.
         ``ServeError`` when another service holds the lock (whatever its port) or the lock file cannot
         be used; OSError when the port cannot be bound or the record cannot be written."""
         service = self
@@ -621,6 +634,10 @@ class ServeService:
                              f"it, then start the service again") from None
         if lock is None:
             raise ServeError(self._already_running())
+        try:  # first: a record left by a service that was killed names a port that is not ours
+            os.unlink(self.home / STATE_FILE)
+        except OSError:
+            pass
 
         class Handler(_ServeHandler):
             pass
@@ -628,10 +645,6 @@ class ServeService:
         Handler.service = service
         server = None
         try:
-            try:
-                os.unlink(self.home / STATE_FILE)  # left by a service that was killed: its port is not ours
-            except OSError:
-                pass
             self._served.refresh()
             server = _ServeServer((LISTEN_HOST, port), Handler, bind_and_activate=False)
             server.service = service
@@ -668,11 +681,22 @@ class ServeService:
                 f"Contexto home; one service runs per home")
 
     def stop(self, *, hurry: Callable[[], bool] | None = None, signal_name: str | None = None) -> None:
-        """Stop accepting connections, wait up to ``STOP_DRAIN_S`` for requests in flight (``hurry``
-        returning true ends the wait, as a second signal does), close every session, remove
-        ``serve.json``, release the lock and log ``serve_stop``."""
+        """Stop routing (``_stopping``: a request that arrives from now on, on a connection already
+        open, gets a 503 with ``STOPPING_MESSAGE`` and its connection is closed; nothing opens or makes
+        a session), remove ``serve.json`` while the port is still this service's, then stop accepting
+        connections and close the port, wait up to ``STOP_DRAIN_S`` for the requests already in flight
+        (``hurry`` returning true ends the wait, as a second signal does), close every session, release
+        the lock and log ``serve_stop``. So whoever binds the port once it is closed is never named by
+        ``serve.json``: a caller holds back the token while the lock is held and the record is missing."""
         if self._server is None:
             return
+        with self._lock:
+            self._stopping = True
+            self._freed.notify_all()  # a request waiting at the cap gives up now
+        try:
+            os.unlink(self.home / STATE_FILE)  # ours: nobody else writes it while the lock is held
+        except OSError:
+            pass
         self._server.shutdown()
         self._server.server_close()
         self._server = None
@@ -690,7 +714,6 @@ class ServeService:
                 hurried = True  # a second Ctrl+C ends the wait early, with no traceback
             in_flight = self._in_flight
         with self._lock:
-            self._stopping = True
             sessions = list(self._sessions.values())
             self._sessions.clear()
             self._routes.clear()
@@ -699,6 +722,7 @@ class ServeService:
             self._close(session, "shutdown")
         with self._unchecked_changed:
             self._unchecked.clear()
+            self._vouched.clear()
             self._unchecked_changed.notify_all()  # the deadline thread sees _reaper_stop and ends
         self._release_home()
         with self._refusal_lock:
@@ -713,7 +737,7 @@ class ServeService:
         self.log.log(event)
 
     def _release_home(self) -> None:
-        """Remove this service's ``serve.json``, then let go of the lock."""
+        """Remove this service's ``serve.json`` (``stop`` has already), then let go of the lock."""
         lock, self._lock_fd = self._lock_fd, None
         if lock is None:
             return
@@ -761,18 +785,76 @@ class ServeService:
         self.log.log(event)
 
     def admit(self, connection: socket.socket) -> bool:
-        """A new connection: give it its deadline, or False when ``max_unchecked`` connections are
-        already waiting to pass the token check (the caller closes this one at once)."""
+        """A new connection: give it its deadline. When ``max_unchecked`` connections are already
+        waiting to pass the token check, the oldest of them that has not shown the token is shut to
+        make room (``_make_room``), so a process without the token cannot keep a token holder out by
+        holding the cap full: its own connections are what make way. False only when every waiting
+        connection has shown the token; the caller then closes this one at once."""
         with self._unchecked_changed:
+            evicted = self._make_room() if len(self._unchecked) >= self.max_unchecked else None
             admitted = len(self._unchecked) < self.max_unchecked
             if admitted:
                 self._watch(connection)
-        if not admitted:
+        if evicted is not None or not admitted:
             self.refused("connection_cap")
         return admitted
 
+    def _make_room(self) -> socket.socket | None:
+        """With the deadline lock held: shut the read side of the unchecked connection nearest its
+        deadline (the oldest) whose request line has not shown the token, and stop counting it; its
+        handler reads an end of stream and closes, as at its deadline. Return it, or None when every
+        one has shown the token.
+
+        Why closing the oldest is enough: a client sends its request line as soon as it connects, so
+        the time it spends as the newest connection is the time a connection would need to become the
+        oldest of 64, and the line is in the socket from that moment. Whether it is the token is read
+        here without taking it from the socket (``shows_token``, a peek), and the handler takes the
+        same look before it reads anything (``vouch``), so a request line that carries the token is
+        never mistaken for a silent connection however the handler and this thread interleave. A
+        process without the token then cannot close a token holder's connection by opening more of
+        its own, however fast it opens them; it can only close its own."""
+        for connection, _ in sorted(self._unchecked.items(), key=lambda item: item[1]):
+            if connection in self._vouched:
+                continue
+            if self.shows_token(connection, wait=False):
+                self._vouched.add(connection)
+                continue
+            del self._unchecked[connection]
+            try:
+                connection.shutdown(socket.SHUT_RD)
+            except OSError:
+                pass
+            return connection
+        return None
+
+    def shows_token(self, connection: socket.socket, *, wait: bool) -> bool:
+        """Whether the bytes waiting on ``connection`` start a request line whose target's first segment
+        is the token, compared in constant time. The bytes are peeked at, never taken from the socket;
+        ``wait`` waits for the first of them (the handler's look), else only what has arrived counts. A
+        line that has not arrived whole up to the slash after the token counts as not showing it."""
+        want = TOKEN_PEEK_BYTES + len(self.token_bytes) + 1
+        flags = socket.MSG_PEEK if wait else socket.MSG_PEEK | socket.MSG_DONTWAIT
+        try:
+            head = connection.recv(want, flags)
+        except OSError:  # nothing has arrived (BlockingIOError), or the connection is gone
+            return False
+        _, space, target = head.partition(b" ")
+        segment = target[1:1 + len(self.token_bytes)]
+        return (bool(space) and target[:1] == b"/" and target[1 + len(self.token_bytes):][:1] == b"/"
+                and hmac.compare_digest(segment, self.token_bytes))
+
+    def vouch(self, connection: socket.socket) -> None:
+        """The handler's look before it reads a new connection's first request: once its request line
+        has arrived and shows the token, the connection is never the one shut to make room (it keeps
+        its deadline)."""
+        if self.shows_token(connection, wait=True):
+            with self._unchecked_changed:
+                if connection in self._unchecked:
+                    self._vouched.add(connection)
+
     def _watch(self, connection: socket.socket) -> None:
         self._unchecked[connection] = time.monotonic() + self.unchecked_deadline_s
+        self._vouched.discard(connection)
         self._unchecked_changed.notify_all()
 
     def watch(self, connection: socket.socket) -> None:
@@ -783,12 +865,14 @@ class ServeService:
 
     def passed(self, connection: socket.socket) -> bool:
         """The connection passed the token check: its deadline is lifted for good. False when the
-        deadline came first, and the connection is already shut."""
+        deadline came first, or it was shut to make room, and the connection is already shut."""
         with self._unchecked_changed:
+            self._vouched.discard(connection)
             return self._unchecked.pop(connection, None) is not None
 
     def forget(self, connection: socket.socket) -> None:
         with self._unchecked_changed:
+            self._vouched.discard(connection)
             self._unchecked.pop(connection, None)
 
     def _expire_unchecked(self) -> None:
@@ -801,6 +885,7 @@ class ServeService:
                 due = [connection for connection, deadline in self._unchecked.items() if deadline <= now]
                 for connection in due:
                     del self._unchecked[connection]
+                    self._vouched.discard(connection)
                     try:
                         connection.shutdown(socket.SHUT_RD)
                     except OSError:
@@ -901,7 +986,10 @@ class ServeService:
             return parent
 
     def _leased(self, key: str) -> _Session | None:
+        """The open session ``key`` is routed to, leased; ``_Unrouted("stopping")`` once ``stop`` began."""
         with self._lock:
+            if self._stopping:
+                raise _Unrouted("stopping")
             session = self._sessions.get(self._routes.get(key, ""))
             if session is not None:
                 session.leases += 1
@@ -927,6 +1015,9 @@ class ServeService:
         return session
 
     def _acquire(self, key: str, create: bool) -> _Session | None:
+        # The wait at the cap is measured from here, so a request queued behind others of its id, each
+        # of which waited at the cap holding the id's guard, has no wait of its own left.
+        cap_deadline = time.monotonic() + self.cap_wait_s
         session = self._leased(key)
         if session is not None:
             return session
@@ -953,11 +1044,11 @@ class ServeService:
                     if session is not None:  # open already, for another id it served
                         self._lease_new_route(session, key)
                         return session
-                reserved, victim = self._reserve()
+                reserved, victim = self._reserve(cap_deadline)
                 if victim is not None:
                     self._close(victim, "cap")
                 if not reserved:
-                    raise _Unrouted("session_cap")
+                    raise _Unrouted("stopping" if self._stopping else "session_cap")
                 try:
                     session = self._open(session_id, created)
                 except Exception as exc:
@@ -970,7 +1061,7 @@ class ServeService:
                     raise _Unrouted("session_open_failed") from None
                 with self._lock:
                     self._opening -= 1
-                    stopping = self._stopping  # stop() emptied the registry meanwhile: do not add to it
+                    stopping = self._stopping  # stop() began meanwhile: do not add to the registry
                     if not stopping:
                         self._sessions[session_id] = session
                         self._lease_new_route(session, key)
@@ -978,7 +1069,7 @@ class ServeService:
                     count = len(self._sessions)
                     self._freed.notify_all()
                 if stopping:
-                    self._finish(session, "shutdown")
+                    self._discard(session, created)
                     raise _Unrouted("stopping")
                 self.log.log({"event": "session_open", "session": session_id, "created": created, "open": count})
                 return session
@@ -1010,13 +1101,13 @@ class ServeService:
             while len(memory) > kept:
                 memory.popitem(last=False)
 
-    def _reserve(self) -> tuple[bool, _Session | None]:
+    def _reserve(self, deadline: float) -> tuple[bool, _Session | None]:
         """Take a place for a session about to open: (True, None) when there is room, (True, victim)
         when the least recently used session without a request in flight was taken out of the registry
-        to make room (the caller closes it), (False, None) when every open session stayed in use for
-        ``cap_wait_s``. The wait is what keeps a request that arrives just after another session's
-        response completed, a moment before that session's lease is returned, from going unbounded."""
-        deadline = time.monotonic() + self.cap_wait_s
+        to make room (the caller closes it), (False, None) when every open session stayed in use until
+        ``deadline`` (the request's ``cap_wait_s``, counted from when it arrived) or ``stop`` began. The
+        wait is what keeps a request that arrives just after another session's response completed, a
+        moment before that session's lease is returned, from going unbounded."""
         with self._lock:
             while True:
                 if len(self._sessions) + self._opening < self.max_sessions:
@@ -1082,6 +1173,24 @@ class ServeService:
                     pass
             raise
         return _Session(session_id, store, proxy, recorder, self.clock())
+
+    def _discard(self, session: _Session, created: bool) -> None:
+        """With the session's guard held: a session opened by a request that lost the race with
+        ``stop`` and never added to the registry. One it made is removed again, as a failed open's is:
+        no Claude Code id leads to it yet, since the id is recorded only once the request is routed.
+        One that existed is closed like any other at shutdown."""
+        if not created:
+            self._finish(session, "shutdown")
+            return
+        try:
+            session.store.release()
+        except Exception:
+            pass
+        try:
+            remove_session(self.home, session.session_id, now=0.0, grace=float("-inf"))
+        except (SessionLiveError, SessionNotFoundError, ValueError, OSError):
+            pass
+        self.log.log({"event": "session_discarded", "session": session.session_id, "reason": "stopping"})
 
     def _close(self, session: _Session, reason: str) -> None:
         """Close a session already taken out of the registry, under the session's guard, so the close
@@ -1173,6 +1282,7 @@ class _ServeHandler(_Handler):
         super().setup()
         self._trusted = False  # this connection has passed the token check: no deadline applies to it
         self._passed = False  # the request being handled has passed the checks
+        self.service.vouch(self.connection)  # before anything is read: see ServeService._make_room
 
     def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
         """What ``http.server`` calls for a request it will not hand to a ``do_`` method: a malformed
@@ -1253,9 +1363,11 @@ class _ServeHandler(_Handler):
             self._trusted = True
         self._passed = True
         self._drop_token_headers()
+        path_only = self.path.split("?", 1)[0]
+        if service._stopping:
+            return self._refuse_stopping(path_only)
         if (self.headers.get("Expect") or "").strip().lower() == "100-continue" and self.request_version == "HTTP/1.1":
             BaseHTTPRequestHandler.handle_expect_100(self)
-        path_only = self.path.split("?", 1)[0]
         if path_only == LOCAL_PREFIX or path_only.startswith(LOCAL_PREFIX + "/"):
             self._local(path_only)
             return
@@ -1263,6 +1375,8 @@ class _ServeHandler(_Handler):
         try:
             session = self._route(path_only)
         except _Unrouted as unrouted:
+            if unrouted.reason == "stopping":
+                return self._refuse_stopping(path_only)
             service.unrouted(unrouted.reason, self.command, path_only)
         except Exception as exc:  # routing must never cost the client its request: forward it unchanged
             service.unrouted("route_error", self.command, path_only, type(exc).__name__)
@@ -1272,6 +1386,26 @@ class _ServeHandler(_Handler):
         finally:
             if session is not None:
                 service.release(session)
+
+    def _refuse_stopping(self, path_only: str) -> None:
+        """A request that passed the checks after ``stop`` began: not routed or forwarded, answered with
+        a 503 and its connection closed, so a kept-alive connection sends nothing more to a service
+        that is going away. The body is read and dropped first, so the answer is not lost to a reset."""
+        self.service.log.log({"event": "stopping_refused", "method": self.command, "path": path_only})
+        if self._body is None:
+            self._discard_body()
+        self.close_connection = True
+        payload = json.dumps({"type": "error", "error": {"type": "overloaded_error",
+                                                         "message": STOPPING_MESSAGE}}).encode()
+        try:
+            self.send_response_only(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(payload)
+        except OSError:
+            pass
 
     def _take_token(self) -> str | None:
         """``"token"`` unless the request target starts with ``/<token>/``; else None, with the prefix
@@ -1299,10 +1433,10 @@ class _ServeHandler(_Handler):
         return None
 
     def _drop_token_headers(self) -> None:
-        """Remove every request header whose value holds the token (a ``Referer`` that quotes the base
-        URL, say) before anything is forwarded; the log gets the count and no name or value."""
+        """Remove every request header whose name or value holds the token (a ``Referer`` that quotes
+        the base URL, say) before anything is forwarded; the log gets the count and no name or value."""
         token = self.service.token
-        names = {name for name, value in self.headers.items() if token in value}
+        names = {name for name, value in self.headers.items() if token in name or token in value}
         if not names:
             return
         count = sum(len(self.headers.get_all(name) or []) for name in names)

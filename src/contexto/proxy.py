@@ -441,6 +441,11 @@ class UsageReader:
         for raw in self._events.feed(chunk):
             self.feed_event(raw)
 
+    @property
+    def overflowed(self) -> bool:
+        """A JSON body went past ``MAX_JSON_RESPONSE_BYTES``: nothing will be read from it."""
+        return self._overflow
+
     def finish(self) -> None:
         if self.sse:
             # A final event that upstream ended the stream on without its blank line is still what
@@ -1326,8 +1331,12 @@ class _Handler(BaseHTTPRequestHandler):
         # The client must not see the response complete before the engine has its usage and the
         # session log has the entry: Claude Code sends its next request right away, and the engine
         # sizes it from the last real usage (rule 4). So the chunk terminator, or the last chunk of
-        # a Content-Length response, is written only after usage feedback and logging.
+        # a Content-Length response, is written only after usage feedback and logging. A JSON body is
+        # read only once it has ended (``UsageReader.finish``), so in either framing what completes it
+        # is held too (``hold_json``) and written after its tool-call ids are handed on (``announce``).
         held = b""
+        json_body = not reader.sse
+        identity = decoder.encoding in ("", "identity")
         relay_ok = True
         observed = False
         # D59: the client has the stream's last event, so a close after it (before the terminator) is
@@ -1380,6 +1389,15 @@ class _Handler(BaseHTTPRequestHandler):
             except (OSError, http.client.HTTPException) as exc:  # IncompleteRead is not an OSError
                 raise _UpstreamReadError from exc
 
+        def hold_json(held: bytes, chunk: bytes) -> tuple[bytes, bytes]:
+            """(bytes to write now, bytes to hold) for one more chunk of a JSON body. The last chunk is
+            held; for an identity body, so is every chunk after the last one with a byte that is not
+            JSON whitespace, so the client never has the body's closing bracket before the end. A body
+            past the reader's limit registers nothing, and is relayed as a Content-Length body is."""
+            if identity and held and not chunk.strip(b" \t\r\n") and not reader.overflowed:
+                return b"", held + chunk
+            return held, chunk
+
         def write_events(events: list[bytes]) -> None:
             nonlocal delivered_end
             for raw in events:
@@ -1411,7 +1429,11 @@ class _Handler(BaseHTTPRequestHandler):
                     continue
                 reader.feed(decoder.decode(chunk))
                 announce()
-                if chunked:
+                if json_body:
+                    pending, held = hold_json(held, chunk)
+                    if pending:
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(pending), pending) if chunked else pending)
+                elif chunked:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 else:
                     if held:
@@ -1458,7 +1480,7 @@ class _Handler(BaseHTTPRequestHandler):
         if hold is not None:
             entry["stream_hold"] = {"held_events": hold.held_events, "triggered": hold.triggered}
         reader.finish()
-        announce()  # a JSON body is read whole: its ids are known here, before its last bytes are written
+        announce()  # a JSON body's ids are known only now, and what completes it is still held (hold_json)
         if entry.get("api") == "responses":
             usage = reader.usage or None  # Responses usage kept as given (see UsageReader)
         else:
@@ -1481,6 +1503,8 @@ class _Handler(BaseHTTPRequestHandler):
         if relay_ok:
             try:
                 if chunked:
+                    if held:
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(held), held))
                     self.wfile.write(b"0\r\n\r\n")
                 elif held:
                     self.wfile.write(held)

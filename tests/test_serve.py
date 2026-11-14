@@ -1075,6 +1075,102 @@ def test_a_second_signal_ends_the_wait_for_requests_in_flight(home, running):
     assert stopped.get("hurried") is True, f"the whole drain was waited out ({waited:.2f} s)"
 
 
+class Gated(BaseHTTPRequestHandler):
+    """An upstream that answers only once ``gate`` is set, so a request stays in flight until then."""
+
+    protocol_version = "HTTP/1.1"
+    reached = threading.Event()
+    gate = threading.Event()
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        Gated.reached.set()
+        Gated.gate.wait(30)
+        data = json.dumps({"type": "message", "role": "assistant", "content": [],
+                           "usage": {"input_tokens": 1, "output_tokens": 1}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class Recorder:
+    """A listener on a port the service gave up: it records every byte a connection sends it, then
+    closes that connection, so a client asking it gives up at once."""
+
+    def __init__(self, sock: socket.socket) -> None:
+        self.sock = sock
+        self.received: list[bytes] = []
+        self.thread = threading.Thread(target=self._accept, daemon=True)
+        self.thread.start()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(2)
+                try:
+                    self.received.append(conn.recv(65536))
+                except OSError:
+                    self.received.append(b"")
+
+    def close(self) -> None:
+        self.sock.close()
+        self.thread.join(10)
+
+
+def bind(port: int) -> socket.socket | None:
+    try:
+        return socket.create_server(("127.0.0.1", port))
+    except OSError:
+        return None
+
+
+def test_after_a_stop_signal_whoever_binds_the_port_is_never_sent_the_token(home, running):
+    """Round-2 review: while the service drains, its port is closed and its lock still held. A process
+    that binds the port then must get nothing from ``--status`` or the MCP server's resolve call: the
+    service stops advertising its port before it closes it."""
+    Gated.reached, Gated.gate = threading.Event(), threading.Event()
+    gated = ThreadingHTTPServer(("127.0.0.1", 0), Gated)
+    gated.daemon_threads = True
+    threading.Thread(target=gated.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    recorder = None
+    try:
+        service = running("--upstream", f"http://127.0.0.1:{gated.server_address[1]}")
+        client = socket.create_connection(("127.0.0.1", service.port))
+        data = body(A)
+        client.sendall(b"POST /%s/v1/messages HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-Claude-Code-Session-Id: %s\r\n"
+                       b"Content-Length: %d\r\n\r\n%s" % (service.token.encode(), service.port, A.encode(),
+                                                          len(data), data))
+        assert Gated.reached.wait(20)
+        service.process.send_signal(signal.SIGTERM)
+        recorder = Recorder(until(lambda: bind(service.port), "the service's port to be free", timeout=20))
+        out = io.StringIO()
+        status = serve.status(home, out)
+        with pytest.raises(serveclient.ResolveError) as refused:
+            serveclient.resolve(home, "toolu_01D70window", sleep=lambda seconds: None)
+        assert servecontract.service_running(home), "the drain was over before the checks ran"
+        Gated.gate.set()
+        assert service.process.wait(timeout=30) == 0
+        client.close()
+    finally:
+        Gated.gate.set()
+        if recorder is not None:
+            recorder.close()
+        gated.shutdown()
+        gated.server_close()
+    assert recorder.received == []
+    assert status == 1 and "starting or stopping" in out.getvalue()
+    assert refused.value.kind == serveclient.NOT_RUNNING and "serve.json" in refused.value.reason
+
+
 def test_a_hangup_ignored_at_start_stays_ignored(home, running):
     """``nohup contexto serve &`` must outlive its terminal."""
     service = running(hangup=signal.SIG_IGN)
@@ -1506,7 +1602,37 @@ def test_a_request_at_the_cap_waits_for_a_session_to_finish_and_is_then_bounded(
     assert [e["reason"] for e in session_log(home, served(home)[A]) if e["event"] == "serve_close"] == ["cap"]
 
 
-def test_a_request_that_opens_a_session_during_shutdown_adds_nothing_to_the_registry(make_service, home):
+def test_waits_at_the_cap_do_not_add_up_for_requests_of_one_id(make_service, home):
+    """Six first requests of one new id at once, with the one open session busy: each waits for the
+    ``cap_wait_s`` it was given from when it arrived, not that long again behind each request queued
+    for the same id before it."""
+    service = make_service(max_sessions=1, cap_wait_s=1.0)
+    turn(service, A)
+    held = service.acquire(A, create=True)  # A has a request in flight
+    took: list[float] = []
+
+    def first_request() -> None:
+        started = time.monotonic()
+        assert post(service, B)[0].status == 200
+        took.append(time.monotonic() - started)
+
+    threads = [threading.Thread(target=first_request) for _ in range(6)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+    finally:
+        service.release(held)
+    assert len(took) == 6
+    # One cap_wait_s for all of them; queued one after another they would take up to 6 s.
+    assert max(took) < 3 * service.cap_wait_s, sorted(took)
+    assert [e["reason"] for e in serve_log(home, "unrouted", 6)] == ["session_cap"] * 6
+
+
+def test_a_store_made_by_a_request_that_loses_the_race_with_shutdown_is_removed(make_service, home):
+    """A request that began to open a new store before ``stop()`` and finished after it: nothing is
+    added to the registry, and the store, which no Claude Code id leads to yet, is removed again."""
     service = None
 
     def stopping(store, config):
@@ -1518,9 +1644,117 @@ def test_a_request_that_opens_a_session_during_shutdown_adds_nothing_to_the_regi
     with pytest.raises(serve._Unrouted) as unrouted:
         service.acquire(A, create=True)
     assert unrouted.value.reason == "stopping" and service._sessions == {} and service._routes == {}
-    (name,) = sessions(home)
-    assert [e["reason"] for e in session_log(home, name) if e["event"] == "serve_close"] == ["shutdown"]
-    assert [e["event"] for e in serve_log(home) if e["event"].startswith("session_")] == ["session_close"]
+    assert sessions(home) == []
+    logged = [e for e in serve_log(home) if e["event"].startswith("session_")]
+    assert [(e["event"], e["reason"]) for e in logged] == [("session_discarded", "stopping")]
+
+
+def test_an_existing_store_reopened_during_shutdown_is_closed_and_kept(make_service, home):
+    service = None
+    clock = Clock()
+    stop_on_open = []
+
+    def engine(store, config):
+        if stop_on_open:
+            with service._lock:
+                service._stopping = True
+        return build_engine(store, config)
+
+    service = make_service(engine_factory=engine, clock=clock, idle_s=10)
+    turn(service, A)
+    name = served(home)[A]
+    clock.now += 11
+    assert service.reap() == 1
+    stop_on_open.append(True)
+    with pytest.raises(serve._Unrouted):
+        service.acquire(A, create=True)
+    assert sessions(home) == [name] and served(home) == {A: name}
+    assert [e["reason"] for e in session_log(home, name) if e["event"] == "serve_close"] == ["idle", "shutdown"]
+
+
+def test_during_the_drain_a_request_on_a_kept_connection_is_refused_and_routed_nowhere(make_service, home,
+                                                                                    tool_upstream):
+    service = make_service(upstream=tool_upstream)
+    kept = http.client.HTTPConnection("127.0.0.1", service.port, timeout=30)
+    kept.request("POST", f"/{service.token}/v1/messages?beta=true", body(A), headers(A))
+    first = kept.getresponse()
+    assert first.status == 200 and first.read()
+    # A streamed request whose response upstream holds open: the drain waits for it.
+    streamed: list = []
+    stream = threading.Thread(target=lambda: streamed.append(post(service, B, stream=True)[0].status))
+    stream.start()
+    assert ToolUpstream.block_sent.wait(30)
+    stopper = threading.Thread(target=service.stop)
+    stopper.start()
+    try:
+        until(lambda: not (home / serve.STATE_FILE).exists(), "the service to stop advertising itself")
+        kept.request("POST", f"/{service.token}/v1/messages?beta=true", body(C), headers(C))
+        refused = kept.getresponse()
+        answer = json.loads(refused.read())
+        assert refused.status == 503 and refused.getheader("Connection") == "close"
+        assert answer["error"]["message"] == serve.STOPPING_MESSAGE
+        assert C not in served(home) and len(ToolUpstream.received) == 2  # A's, and B's held one
+        assert stopper.is_alive()  # still draining: B is in flight
+    finally:
+        ToolUpstream.gate.set()
+        stopper.join(30)
+        stream.join(30)
+        kept.close()
+    assert streamed == [200]
+    stopped = serve_log(home, "serve_stop", 1)[-1]
+    assert stopped["in_flight"] == 0 and "hurried" not in stopped and stopped["sessions_closed"] == 2
+
+
+def test_shutdown_under_keep_alive_load_finishes_what_is_in_flight_and_leaves_no_stray_store(make_service, home):
+    """Clients on kept-alive connections send requests back to back, a new conversation every third
+    request, while the service stops: the drain covers only the requests already in flight, every
+    session is closed with none in flight, and every store left has the metadata that leads to it."""
+    service = make_service()
+    answers: list[list] = [[] for _ in range(6)]
+    stopped_at: list[int] = []  # each client's answer count when stop() returned
+
+    def client(n: int) -> None:
+        conn = http.client.HTTPConnection("127.0.0.1", service.port, timeout=30)
+        try:
+            for i in range(100_000):
+                if stopped_at and len(answers[n]) > max(stopped_at):  # a client that was never refused stops too
+                    return
+                session = f"11111111-2222-4333-8444-{n:04d}{i // 3:08d}"
+                try:
+                    conn.request("POST", f"/{service.token}/v1/messages?beta=true", body(session), headers(session))
+                    response = conn.getresponse()
+                    response.read()
+                except (OSError, http.client.HTTPException) as exc:
+                    answers[n].append(type(exc).__name__)
+                    return
+                answers[n].append(response.status)
+                if response.status != 200:
+                    return
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=client, args=(n,)) for n in range(len(answers))]
+    for thread in threads:
+        thread.start()
+    until(lambda: all(len(mine) >= 3 for mine in answers), "every client to have three answers")
+    started = time.monotonic()
+    service.stop()
+    took = time.monotonic() - started
+    stopped_at.append(max(len(mine) for mine in answers))
+    for thread in threads:
+        thread.join(60)
+    stopped = serve_log(home, "serve_stop", 1)[-1]
+    assert stopped["in_flight"] == 0 and "hurried" not in stopped, stopped
+    assert took < serve.STOP_DRAIN_S, f"the drain ran out ({took:.2f} s)"
+    for mine in answers:  # 200s, then at most one clean refusal or a closed connection
+        assert set(mine[:-1]) == {200} and mine[-1] in (200, 503, "RemoteDisconnected", "ConnectionResetError",
+                                                        "BrokenPipeError"), mine
+    stray = [name for name in sessions(home) if not (home / "sessions" / name / "meta.json").exists()]
+    assert stray == []
+    logged = [e["event"] for e in serve_log(home)]
+    assert logged.count("session_open") == logged.count("session_close")  # a discarded store was never opened
+    assert stopped["sessions_closed"] == logged.count("session_open") - sum(
+        1 for e in serve_log(home, "session_close") if e["reason"] != "shutdown")
 
 
 def test_the_missing_tools_warning_is_printed_once_per_session_however_often_it_reopens(make_service, home):
@@ -1546,9 +1780,16 @@ def test_the_missing_tools_warning_is_printed_once_per_session_however_often_it_
 class Framed(BaseHTTPRequestHandler):
     """Answers a Messages request with one tool call, framed as ``framing`` says: ``chunked`` (an SSE
     stream the proxy holds), ``length`` (an SSE body with a Content-Length), ``gzip`` (an SSE stream
-    upstream encoded although it was asked not to) or ``json``. No event carries ``usage`` unless
-    ``usage`` is set. A stream stops after the tool call's ``content_block_stop`` until ``gates[0]``
-    is set, and after ``message_delta`` until ``gates[1]`` is."""
+    upstream encoded although it was asked not to), ``json-chunked`` or ``json-length`` (a JSON body
+    followed by whitespace in parts of its own, so the body is valid JSON before its last bytes). No
+    event carries ``usage`` unless ``usage`` is set.
+
+    The response goes out in three parts. After the first (a stream's events up to the tool call's
+    ``content_block_stop``, or the whole JSON) upstream sets ``block_sent`` and waits for ``gates[0]``.
+    A JSON body's second part is followed by a wait for ``gates[1]``, at most ``end_wait`` seconds,
+    which a client that acts on the call opens once it has acted: so a client that has the whole body
+    before the response has ended asks resolve while upstream still holds the end. A stream needs no
+    such wait, since its call is complete at ``content_block_stop``."""
 
     protocol_version = "HTTP/1.1"
     framing = "chunked"
@@ -1556,6 +1797,7 @@ class Framed(BaseHTTPRequestHandler):
     tool_use_id = "toolu_01D70framed"
     gates = (threading.Event(), threading.Event())
     block_sent = threading.Event()
+    end_wait = 1.0
 
     def log_message(self, *args):
         pass
@@ -1566,45 +1808,43 @@ class Framed(BaseHTTPRequestHandler):
         answer = tool_response(cls.tool_use_id)
         if not cls.usage:
             del answer["usage"]
-        if cls.framing == "json":
-            data = json.dumps(answer).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
-        delta = {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}
-        if cls.usage:
-            delta["usage"] = {"output_tokens": 5}
-        parts = [b"".join(sse(event) for event in [
-                     {"type": "message_start", "message": {**answer, "content": [], "stop_reason": None}},
-                     {"type": "content_block_start", "index": 0, "content_block": answer["content"][0]},
-                     {"type": "content_block_delta", "index": 0,
-                      "delta": {"type": "input_json_delta", "partial_json": "{}"}},
-                     {"type": "content_block_stop", "index": 0}]),
-                 sse(delta), sse({"type": "message_stop"})]
+        if cls.framing.startswith("json"):
+            parts, content_type = [json.dumps(answer).encode(), b"\n", b" "], "application/json"
+        else:
+            delta = {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}
+            if cls.usage:
+                delta["usage"] = {"output_tokens": 5}
+            parts = [b"".join(sse(event) for event in [
+                         {"type": "message_start", "message": {**answer, "content": [], "stop_reason": None}},
+                         {"type": "content_block_start", "index": 0, "content_block": answer["content"][0]},
+                         {"type": "content_block_delta", "index": 0,
+                          "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+                         {"type": "content_block_stop", "index": 0}]),
+                     sse(delta), sse({"type": "message_stop"})]
+            content_type = "text/event-stream"
         compressor = __import__("zlib").compressobj(9, 8, 16 + 15) if cls.framing == "gzip" else None
         if compressor is not None:
             parts = [compressor.compress(part) + compressor.flush(2) for part in parts]  # Z_SYNC_FLUSH
             parts[-1] += compressor.flush()
+        length = cls.framing in ("length", "json-length")
         self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Type", content_type)
         if compressor is not None:
             self.send_header("Content-Encoding", "gzip")
-        if cls.framing == "length":
+        if length:
             self.send_header("Content-Length", str(sum(len(part) for part in parts)))
         else:
             self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
         for index, part in enumerate(parts):
-            self.wfile.write(part if cls.framing == "length" else b"%x\r\n%s\r\n" % (len(part), part))
+            self.wfile.write(part if length else b"%x\r\n%s\r\n" % (len(part), part))
             self.wfile.flush()
-            if index < 2:
-                if index == 0:
-                    cls.block_sent.set()
-                cls.gates[index].wait(30)
-        if cls.framing != "length":
+            if index == 0:
+                cls.block_sent.set()
+                cls.gates[0].wait(30)
+            elif index == 1 and content_type == "application/json":
+                cls.gates[1].wait(cls.end_wait)
+        if not length:
             self.wfile.write(b"0\r\n\r\n")
 
 
@@ -1622,55 +1862,70 @@ def framed():
     server.server_close()
 
 
+def open_gates() -> None:
+    """Let ``Framed`` send each response straight through, for a test about something else."""
+    for gate in Framed.gates:
+        gate.set()
+
+
+def has_call(seen: bytes, sse_body: bool) -> bool:
+    """Whether a client that has read ``seen`` has the whole tool call and would start it: a stream's
+    ``content_block_stop`` event with its blank line, or a JSON body that parses."""
+    if not sse_body:
+        try:
+            return isinstance(json.loads(seen), dict)
+        except ValueError:
+            return False
+    *complete, _ = seen.replace(b"\r\n", b"\n").split(b"\n\n")
+    return any(b'"type": "content_block_stop"' in event for event in complete)
+
+
 @pytest.mark.parametrize("framing, usage", [("chunked", False), ("chunked", True), ("length", False),
-                                            ("length", True), ("gzip", False)])
-def test_a_streamed_tool_call_resolves_when_the_client_has_it_with_or_without_usage(make_service, home, framed,
-                                                                                    framing, usage):
+                                            ("length", True), ("gzip", False), ("json-chunked", False),
+                                            ("json-chunked", True), ("json-length", False)])
+def test_a_tool_call_resolves_the_moment_the_client_has_it_in_every_framing(make_service, home, framed,
+                                                                            framing, usage):
+    """The client reads the response as a real one does and asks resolve, once and without waiting,
+    the moment it has the whole call; nothing in the test waits for the service to register the id.
+    Registration that lags the bytes the client has fails here: upstream is slow to end every
+    response, so an id registered only at the end of the response is not there yet."""
     Framed.framing, Framed.usage = framing, usage
     service = make_service(upstream=framed)
-    marker = b'"content_block_stop", "index": 0'
+    sse_body = not framing.startswith("json")
     seen = bytearray()
-    at_block: list = []
+    at_call: list = []
 
     def client():
         conn = http.client.HTTPConnection("127.0.0.1", service.port, timeout=60)
-        conn.request("POST", f"/{service.token}/v1/messages?beta=true", body(A, stream=True), headers(A))
+        conn.request("POST", f"/{service.token}/v1/messages?beta=true", body(A, stream=sse_body), headers(A))
         response = conn.getresponse()
         inflate = __import__("zlib").decompressobj(16 + 15) if framing == "gzip" else None
         while chunk := response.read1(65536):
             seen.extend(inflate.decompress(chunk) if inflate else chunk)
-            if not at_block and marker in seen:  # the client has the whole call: Claude Code would start it now
-                at_block.append(resolve(service, Framed.tool_use_id))
+            if not at_call and has_call(bytes(seen), sse_body):
+                at_call.append(resolve(service, Framed.tool_use_id))
+                Framed.gates[1].set()  # acted on: upstream may end the response now
         conn.close()
 
     thread = threading.Thread(target=client)
     thread.start()
     try:
         assert Framed.block_sent.wait(30)
-        # Registered as soon as the service has read the call, which is before it passes any of it on.
-        until(lambda: service.resolve(Framed.tool_use_id), "the service to read the tool call")
-        Framed.gates[0].set()  # upstream goes on; the response is still open when the client has the call
-        until(lambda: at_block, "the client to have the complete tool call")
-        assert at_block == [(200, {"session": served(home)[A]})]
+        Framed.gates[0].set()  # at once: the client gets whatever the proxy passes on
+        thread.join(60)
     finally:
         for gate in Framed.gates:
             gate.set()
         thread.join(30)
+    assert at_call == [(200, {"session": served(home)[A]})], bytes(seen[-300:])
     settle(service)
-    assert resolve(service, Framed.tool_use_id) == (200, {"session": served(home)[A]})
     logged = [e["event"] for e in session_log(home, served(home)[A])]
-    assert ("hold_skipped" in logged) == (framing != "chunked")
-
-
-def test_a_json_tool_call_without_usage_resolves(make_service, home, framed):
-    Framed.framing = "json"
-    service = make_service(upstream=framed)
-    assert post(service, A)[0].status == 200
-    assert resolve(service, Framed.tool_use_id) == (200, {"session": served(home)[A]})
+    assert ("hold_skipped" in logged) == (framing in ("length", "gzip"))
 
 
 def test_an_id_two_sessions_registered_is_ambiguous_and_resolves_as_unknown(make_service, home, framed):
-    Framed.framing = "json"  # an upstream that repeats its ids: every response carries the same one
+    Framed.framing = "json-length"  # an upstream that repeats its ids: every response carries the same one
+    open_gates()
     service = make_service(upstream=framed)
     turn(service, A)
     assert resolve(service, Framed.tool_use_id) == (200, {"session": served(home)[A]})
@@ -1710,7 +1965,8 @@ def test_the_mcp_clients_retry_covers_an_id_registered_after_its_first_try(make_
 
 
 def test_a_tool_call_in_a_response_to_an_unrouted_request_is_never_registered(make_service, home, framed):
-    Framed.framing = "json"
+    Framed.framing = "json-length"
+    open_gates()
     service = make_service(upstream=framed)
     assert call(service, "POST", "/v1/messages", body(None), headers())[0].status == 200  # no session id
     assert resolve(service, Framed.tool_use_id) == (404, {"error": "unknown_tool_use"})
@@ -1925,29 +2181,147 @@ def test_a_connection_that_passed_the_check_has_no_deadline(make_service, home, 
     stream.close()
 
 
-def test_the_cap_on_unchecked_connections_closes_the_newest_and_frees_at_the_deadline(make_service, home):
-    clock = Clock()
-    service = make_service(clock=clock, unchecked_deadline_s=0.5, max_unchecked=4)
-    waiting = [socket.create_connection(("127.0.0.1", service.port)) for _ in range(4)]
+def still_open(sock: socket.socket) -> bool:
+    """Whether the service has not closed ``sock``: nothing to read yet, and no end of stream."""
+    sock.setblocking(False)
     try:
-        until(lambda: len(service._unchecked) == 4, "the four silent connections to be counted")
-        # Over the cap: closed at once and unanswered, whoever it is; no handler thread is started for it.
-        threads = threading.active_count()
-        for _ in range(20):
-            with socket.create_connection(("127.0.0.1", service.port)) as extra:
-                extra.sendall(b"GET /%s/contexto/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" % service.token.encode())
-                assert closed_within(extra) == b""
-        assert threading.active_count() <= threads and len(service._unchecked) == 4
-        # The slots free when the silent connections reach their deadline; a token holder is then served.
-        for sock in waiting:
-            assert closed_within(sock) == b""
-        response, data = call(service, "GET", "/contexto/health")
-        assert response.status == 200 and json.loads(data)["ok"] is True
+        return sock.recv(1, socket.MSG_PEEK) != b""
+    except BlockingIOError:
+        return True
+    except ConnectionResetError:
+        return False
     finally:
-        for sock in waiting:
+        sock.setblocking(True)
+
+
+def unchecked(service, count: int) -> socket.socket:
+    """A new silent connection, once the service counts ``count`` unchecked ones: opened one at a time,
+    so their order is the order the service saw them in."""
+    sock = socket.create_connection(("127.0.0.1", service.port), timeout=30)
+    until(lambda: len(service._unchecked) == count, f"{count} unchecked connections")
+    return sock
+
+
+def health_request(service) -> bytes:
+    return b"GET /%s/contexto/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" % service.token.encode()
+
+
+def test_at_the_cap_the_oldest_unchecked_connection_is_closed_to_admit_a_new_one(make_service, home):
+    service = make_service(unchecked_deadline_s=60, max_unchecked=4)  # no deadline comes in this test
+    silent = [unchecked(service, n + 1) for n in range(4)]
+    try:
+        with socket.create_connection(("127.0.0.1", service.port), timeout=30) as holder:
+            holder.sendall(health_request(service))
+            assert one_response(holder).startswith(b"HTTP/1.1 200 ")
+        assert closed_within(silent[0]) == b""  # the oldest made room, unanswered
+        assert [still_open(sock) for sock in silent[1:]] == [True, True, True]
+        # Once the cap is full again, the next connection takes the place of the oldest one left.
+        fill = unchecked(service, 4)
+        with socket.create_connection(("127.0.0.1", service.port), timeout=30):
+            assert closed_within(silent[1]) == b""
+        assert [still_open(sock) for sock in (*silent[2:], fill)] == [True, True, True]
+        fill.close()
+    finally:
+        for sock in silent:
             sock.close()
-    refused = serve_log(home, "request_refused")
-    assert len(refused) == 1 and refused[0]["reason"] == "connection_cap"  # the clock stands still: one line
+    assert {e["reason"] for e in serve_log(home, "request_refused")} == {"connection_cap"}
+
+
+def test_a_connection_whose_request_line_carries_the_token_is_not_the_one_closed(make_service, home):
+    """The oldest unchecked connection is closed only when it has not shown the token: a client whose
+    request line has arrived and carries it keeps its place, even while the rest of its head is on the
+    way, and the oldest silent one goes instead."""
+    service = make_service(unchecked_deadline_s=60, max_unchecked=3)
+    holder = socket.create_connection(("127.0.0.1", service.port), timeout=30)
+    holder.sendall(b"GET /%s/contexto/health HTTP/1.1\r\n" % service.token.encode())  # the head is not over
+    until(lambda: len(service._unchecked) == 1, "the token holder to be counted")
+    silent = [unchecked(service, 2), unchecked(service, 3)]
+    try:
+        with socket.create_connection(("127.0.0.1", service.port), timeout=30) as newer:
+            assert closed_within(silent[0]) == b""
+            assert still_open(holder) and still_open(silent[1]) and still_open(newer)
+        holder.sendall(b"Host: 127.0.0.1\r\n\r\n")
+        assert one_response(holder).startswith(b"HTTP/1.1 200 ")
+    finally:
+        holder.close()
+        for sock in silent:
+            sock.close()
+
+
+def test_when_every_unchecked_connection_carries_the_token_a_new_one_is_closed(make_service, home):
+    service = make_service(unchecked_deadline_s=60, max_unchecked=2)
+    holders = []
+    try:
+        for n in range(2):
+            holders.append(socket.create_connection(("127.0.0.1", service.port), timeout=30))
+            holders[-1].sendall(b"GET /%s/contexto/health HTTP/1.1\r\n" % service.token.encode())
+            until(lambda count=n + 1: len(service._unchecked) == count, "the token holders to be counted")
+        with socket.create_connection(("127.0.0.1", service.port), timeout=30) as extra:
+            assert closed_within(extra) == b""
+        for holder in holders:
+            holder.sendall(b"Host: 127.0.0.1\r\n\r\n")
+            assert one_response(holder).startswith(b"HTTP/1.1 200 ")
+    finally:
+        for holder in holders:
+            holder.close()
+
+
+def flood(port: int, stop: threading.Event, opened: list[int], *, keep: int, burst: bool) -> None:
+    """A local process without the token. It keeps ``keep`` silent connections open and reopens each
+    one the service closes; with ``burst`` it also opens new ones as fast as it can, closing its own
+    oldest past ``4 * keep`` so its descriptors stay bounded."""
+    held: list[socket.socket] = []
+    try:
+        while not stop.is_set():
+            for sock in [sock for sock in held if not still_open(sock)]:
+                held.remove(sock)
+                sock.close()
+            if burst or len(held) < keep:
+                try:
+                    held.append(socket.create_connection(("127.0.0.1", port), timeout=5))
+                    opened[0] += 1
+                except OSError:
+                    pass
+            else:
+                time.sleep(0.005)  # the cap is full and nothing was closed: look again shortly
+            while len(held) > 4 * keep:
+                held.pop(0).close()
+    finally:
+        for sock in held:
+            sock.close()
+
+
+@pytest.mark.parametrize("burst", [False, True], ids=["refill", "burst"])
+def test_a_process_without_the_token_cannot_keep_a_token_holder_out(make_service, home, burst):
+    """Round-2 review: with the service's own limits (64 unchecked connections, 5 s each), a process that
+    holds the cap full and reopens every connection the service closes, or opens connections as fast
+    as it can, must not keep a token holder out. Each of 20 health requests, on a new connection
+    each, is answered, and within 2.5 s: half the 5 s a silent connection is given, which a client
+    that had to wait for a free place would need."""
+    answer_bound_s = 2.5
+    service = make_service()
+    assert (service.max_unchecked, service.unchecked_deadline_s) == (64, 5.0)
+    stop, opened = threading.Event(), [0]
+    flooders = [threading.Thread(target=flood, args=(service.port, stop, opened),
+                                 kwargs={"keep": 70, "burst": burst}, daemon=True) for _ in range(2 if burst else 1)]
+    for flooder in flooders:
+        flooder.start()
+    took: list[float] = []
+    try:
+        until(lambda: len(service._unchecked) >= service.max_unchecked, "the flood to fill the cap")
+        for _ in range(20):
+            started = time.monotonic()
+            with socket.create_connection(("127.0.0.1", service.port), timeout=30) as holder:
+                holder.sendall(health_request(service))
+                answer = one_response(holder)
+            took.append(time.monotonic() - started)
+            assert answer.startswith(b"HTTP/1.1 200 ")
+    finally:
+        stop.set()
+        for flooder in flooders:
+            flooder.join(30)
+    assert max(took) < answer_bound_s, f"slowest answer {max(took):.3f} s; {opened[0]} connections opened"
+    assert StubUpstream.received == [] and sessions(home) == []
 
 
 def test_a_request_header_that_holds_the_token_is_not_forwarded(make_service, home):
@@ -1965,6 +2339,20 @@ def test_a_request_header_that_holds_the_token_is_not_forwarded(make_service, ho
     assert len(dropped) == 1 and set(dropped[0]) == {"ts", "event", "count"} and dropped[0]["count"] == 2
     log = (home / "serve.log").read_text()
     assert service.token not in log and "Referer" not in log
+
+
+def test_a_request_header_whose_name_holds_the_token_is_not_forwarded(make_service, home):
+    service = make_service()
+    response, _ = call(service, "POST", "/v1/messages?beta=true", body(A),
+                       {**headers(A), f"X-{service.token}": "1", f"{service.token}-Trace": "on", "X-Kept": "plain"})
+    assert response.status == 200
+    settle(service)
+    _, _, sent, _ = StubUpstream.received[0]
+    assert not any(service.token in name or service.token in value for name, value in sent.items())
+    assert sent["X-Kept"] == "plain" and sent["X-Claude-Code-Session-Id"] == A
+    dropped = serve_log(home, "token_header_dropped")
+    assert len(dropped) == 1 and set(dropped[0]) == {"ts", "event", "count"} and dropped[0]["count"] == 2
+    assert service.token not in (home / "serve.log").read_text()
 
 
 # Recognising the service's own address
