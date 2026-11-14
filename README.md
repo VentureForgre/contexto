@@ -48,7 +48,7 @@ contexto run claude
 contexto run --bound 120000 claude --model claude-haiku-5-5
 ```
 
-<img src="docs/assets/demo.svg" width="800" alt="Terminal recording of a synthetic session. contexto run starts a stub CLI with a bound of 60,000 tokens. Over turns 0 to 7 the history the CLI sends grows from 13,216 to 99,426 tokens, while the request that reaches the fake upstream never exceeds 38,434. contexto sessions show then lists 6 paged-out turns and 0 over-bound turns. Turn 8 asks for a release codename stated in turn 1, and a contexto_search call returns that line, amber-kestrel-17, from the paged-out turn.">
+<img src="docs/assets/demo.svg" width="800" alt="Terminal recording of a synthetic session. contexto run starts a stub CLI with a bound of 60,000 tokens. Over turns 0 to 7 the history the CLI sends grows from 13,240 to 99,451 tokens, while the request that reaches the fake upstream never exceeds 38,458. contexto sessions show then lists 6 paged-out turns and 0 over-bound turns. Turn 8 asks for a release codename stated in turn 1, and a contexto_search call returns that line, amber-kestrel-17, from the paged-out turn.">
 
 A synthetic session: a stub CLI and a fake upstream on `127.0.0.1`, no model, with one token counted
 per 3.5 bytes. `contexto`, its proxy, store and search are the real code ([transcript](docs/assets/demo.txt)).
@@ -84,7 +84,8 @@ Your upstream must be the vendor's API with an API key, or a CLIProxyAPI instanc
 - **Claude Code set to a cloud provider** (Amazon Bedrock, Google Vertex AI, Microsoft Foundry or
   Claude Platform on AWS). Claude Code then sends its requests to that provider, not through
   Contexto, so nothing is bounded. The v0.5.24 release installed above does not check for this and
-  starts a session anyway; the code on `main` refuses to start.
+  starts a session anyway; a build from the unreleased code on `main` refuses to
+  start the session.
 - **Sessions that end before the compaction point, when a large request is fine for you.** They do
   not compact, with or without Contexto. The exception: by default Claude Code compacts a
   conversation of 200,000 tokens or more after it sits idle for about an hour on the one-hour
@@ -227,8 +228,9 @@ The full list, with sources, is in [docs/limitations.md](docs/limitations.md).
   counted high, 4,568 tokens a page, so a large PDF can page out the earlier conversation.
 - **New CLI versions** come out every week and can change the text Contexto recognises in their
   requests. Until a version is tested, the launch warns ([CLI updates](docs/cli-updates.md)).
-- **Search** matches words, not meaning: it finds turns that hold every word of the query
-  ([MCP tools](docs/mcp-tools.md)).
+- **Search** matches words, not meaning, with no synonyms and no stemming. It lists the turns that
+  hold every word of the query; when none does, the unreleased code on `main` (not v0.5.24) falls
+  back to approximate matches ([Search](docs/search.md), [MCP tools](docs/mcp-tools.md)).
 
 ## How it is built
 
@@ -241,7 +243,7 @@ requests come from that process ([docs/maintainer-process.md](docs/maintainer-pr
 [docs/README.md](docs/README.md) indexes everything under `docs/`. Setup: [Install](docs/install.md),
 [Claude Code](docs/claude-code.md), [Codex](docs/codex.md), [CLIProxyAPI](docs/cliproxyapi.md),
 [`contexto run`](docs/run-reference.md). Use: [Sessions](docs/sessions.md), [MCP tools](docs/mcp-tools.md),
-[Rules you give once](docs/standing-rules.md), [FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
+[Search](docs/search.md), [Rules you give once](docs/standing-rules.md), [FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
 Evidence: [Results](docs/results.md), [Limitations](docs/limitations.md), [CLI updates](docs/cli-updates.md),
 [changelog](CHANGELOG.md).
 
