@@ -101,7 +101,8 @@ def test_memory_store_returns_a_copy():
 
 
 def test_the_validated_fields_are_exactly_the_contracts():
-    assert set(EPOCH_FIELDS) == set(RECORD) and set(EPOCH_OPTIONAL_FIELDS) == {"head_rule"}
+    # D69 added start_text (rule 19), optional like head_rule; test_project_start covers its shape and resume.
+    assert set(EPOCH_FIELDS) == set(RECORD) and set(EPOCH_OPTIONAL_FIELDS) == {"head_rule", "start_text", "untrusted"}
 
 
 @pytest.mark.parametrize("value", ["2", 2.0, True, -1])

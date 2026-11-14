@@ -104,6 +104,12 @@ FAULT_EVENTS = {
     "watchdog_unavailable": "the watchdog that cleans up after a killed launch could not start",
     "affinity_salt_unavailable": "the cache-affinity key could not be read, so requests carried no affinity header",
     "tool_calls_hook_error": "a response's tool calls could not be registered for contexto serve's MCP server",
+    # D69, project memory: each means a record may not be carried, or a carried one may be lost.
+    "project_unavailable": "the project's earlier sessions could not be read, so nothing was carried",
+    "project_session_skipped": "an earlier session of the project could not be read, so its records were not carried",
+    "start_text_unavailable": "the records carried from earlier sessions could not be read for a request",
+    "main_records_unavailable": "a pin of the main conversation could not be recorded, so it may not be carried",
+    "trusted_conversations_unavailable": "the list of trusted main conversations could not be written",
 }
 # Deliberately not faults. The first group are the log's ordinary records, most with a number of their
 # own; the second happen in normal use; docs/stats.md gives the reason for each.
@@ -115,7 +121,7 @@ NOT_FAULT_EVENTS = frozenset({
     "epoch_not_resumed", "head_changed", "window_minimal", "side_room_expired", "hold_skipped", "upstream_retry",
     "stale_temp_removed", "estimate_error", "pdf_allowance", "pdf_pages_uncertain", "cli_version_untested",
     "proxy_stop_incomplete", "carried_text_growing", "sizing_not_restored", "window_budget_warning",
-    "hint_mismatch",
+    "hint_mismatch", "start_text", "start_text_changed", "project_memory", "main_record_unmatched",
     # contexto serve: its session records, then the events it writes to serve.log, which stats never reads.
     "serve_open", "serve_close",
     "serve_start", "serve_stop", "serve_error", "session_open", "session_open_failed", "session_close",

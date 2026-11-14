@@ -246,7 +246,8 @@ requests come from that process ([docs/maintainer-process.md](docs/maintainer-pr
 [Claude Code](docs/claude-code.md), [Codex](docs/codex.md), [CLIProxyAPI](docs/cliproxyapi.md),
 [`contexto run`](docs/run-reference.md), [`contexto serve`](docs/serve.md) (IDE extensions, the Agent
 SDK, CI). Use: [Sessions](docs/sessions.md), [MCP tools](docs/mcp-tools.md), [Search](docs/search.md),
-[Rules you give once](docs/standing-rules.md), [FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
+[Rules you give once](docs/standing-rules.md), [Project memory](docs/project-memory.md),
+[FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
 Evidence: [Results](docs/results.md), [Limitations](docs/limitations.md), [CLI updates](docs/cli-updates.md),
 [changelog](CHANGELOG.md).
 
