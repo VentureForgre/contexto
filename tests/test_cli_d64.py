@@ -226,6 +226,13 @@ def test_search_json_approximate_matches_the_text_output(home, capsys):
     assert [h["line"] for h in data["hits"]] == [line for line in text.splitlines() if line.startswith("pg_")]
     shown = [f"  {'>' if m['match'] else ' '} {m['offset']}: {m['text']}" for h in data["hits"] for m in h["matches"]]
     assert shown == [line for line in text.splitlines() if line.startswith("  ") and not line.startswith("  [")]
+    labels = [line.strip() for line in text.splitlines() if line.startswith("  [matched: ")]
+    as_json = []
+    for h in data["hits"]:
+        label = "matched: " + ", ".join(m["word"] if m["how"] == "exact" else f"{m['word']} as {m['form']}"
+                                        for m in h["matched"])
+        as_json.append(f"[{label}; not matched: {', '.join(h['missing'])}]" if h["missing"] else f"[{label}]")
+    assert labels == as_json  # the words line and the JSON name the same words
 
 
 def test_search_json_approximate_limit_cuts_hits_and_total_counts_every_match(home, capsys):
