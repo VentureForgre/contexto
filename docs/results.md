@@ -37,7 +37,7 @@ Read these scores as no worse than full context on a scripted recall test, not a
 
 ## Tokens and cost
 
-In the claude-haiku-5-5 run, Contexto used 46.6% fewer input tokens than plain Claude Code would have
+In run 3 (Claude Code 2.1.301, claude-haiku-5-5), Contexto used 46.6% fewer input tokens than plain Claude Code would have
 for the same session, and cost 49.7% less. The plain Claude Code figures are modeled from measured
 requests, not run end to end ([M2-usage-savings-run3.md](research/M2-usage-savings-run3.md)).
 

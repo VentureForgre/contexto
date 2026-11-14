@@ -7,8 +7,11 @@ has the short list; this is the full one.
 
 - **Tool loops.** Contexto never rotates inside a tool loop. A turn that grows past the bound inside
   one very long tool loop is sent as is and logged `over_bound` with `in_tool_loop: true`. The next
-  turn start rotates. A turn start goes over only when the bound is too small for the fixed overhead
-  and the new prompt together, logged `bound_too_small` ([Troubleshooting](troubleshooting.md)).
+  turn start rotates. A turn start can also go over: when the bound is too small for the fixed
+  overhead and the new prompt together (logged `bound_too_small`, or `pdf_allowance` when a PDF
+  counted high is the reason), while the store cannot be read or written (no rotation until it
+  recovers), or when the estimate runs low before the first token count (below)
+  ([Troubleshooting](troubleshooting.md)).
 - **Recall is a search the model must run.** Once a turn is paged out, the model sees its opening in
   the page index and the rest only through a search it chooses to run. Each search is one more
   request: in acceptance run 3 the six probe turns took 26 requests through Contexto against 6 for
@@ -18,7 +21,7 @@ has the short list; this is the full one.
   ([Results](results.md#tokens-and-cost)).
 - **Latency.** The time the proxy adds to each request grows with the history: 0.056 s per turn
   start at 0.5 million tokens of history and 0.86 s at 30 million, as medians of 3 runs of synthetic
-  sessions against a local fake upstream ([M2-scale-30m.md](research/M2-scale-30m.md)).
+  sessions against a local fake upstream, measured on v0.2.7 code on 2026-10-17 ([M2-scale-30m.md](research/M2-scale-30m.md)).
 - **Subscription logins.** Running Contexto with a claude.ai subscription login is not a supported
   setup ([FAQ](faq.md)).
 - **Tested scope.** Claude Code acceptance ran on two models (claude-haiku-5-5 and

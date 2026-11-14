@@ -51,7 +51,7 @@ compaction never fires, and accuracy equals full context.
   to, is on.
 - CLIProxyAPI compatibility (D35, PR #210) and upstream affinity (D36, PR #212, deployed on the
   owner's proxy and verified for cache reuse). Guide: `docs/cliproxyapi.md`.
-- README and docs (2026-11-12, D68): the README was 772 lines and is 225. Its reference sections are
+- README and docs (2026-11-12, D68): the README was 772 lines and is 244. Its reference sections are
   in `docs/*.md` (index `docs/README.md`), the Results table in `docs/results.md` and the full
   limitations list in `docs/limitations.md`. `tests/test_docs_links.py` checks every relative link
   and heading anchor in the tracked Markdown files. The README states recall as no worse than full
@@ -350,7 +350,8 @@ still cross it. Decision: no default change and no live run (the owner's seats r
 which has no price step); `docs/run-reference.md` gives `--bound 125000` as a Haiku tip with those caveats. Limits: one synthetic session, one
 run, one model. The saving in money is Haiku 5.5's price step: the same token counts at flat rates
 cost more through Contexto (modeled: 34 percent more at Haiku 5.5 base rates, 66 percent more at
-Opus 5.5 rates; section added to the record 2026-11-12, D68).
+Opus 5.5 rates) when every plain request hits the cache; with the baseline arm's two measured
+misses plain costs more in both (section added to the record 2026-11-12, D68).
 
 ## Usage against plain Codex (Codex acceptance run, zero-spend analysis)
 
