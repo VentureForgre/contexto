@@ -58,30 +58,41 @@ FAILURE_EVENTS = (
 # test), held at its default for the length of a replay whatever the user's environment says, so a
 # setting such as CONTEXTO_RECALL_VARIANT=legacy cannot change what the pinned trace measures. The
 # default of each is "not set". Any other CONTEXTO_ variable is held unset too, so a knob added later is
-# covered before anyone lists it. HOME and PATH are read as well, but only to find a CLI or a memory
-# file's ``@~/`` import, and a replay has neither, so they are left as they are.
+# covered before anyone lists it, and so is any other CLAUDE_CODE_USE_ variable: the package reads that
+# prefix as a prefix, for Claude Code's cloud-provider switches (contexto.upstream.PROVIDER_PREFIX, D70).
+# The cloud-provider switches and CLAUDE_CODE_GATEWAY_HINT_HEADERS are read only by what ``contexto run
+# claude`` decides before it starts Claude Code (``launcher.claude_launch_settings``), which a replay does
+# not call; they are held all the same, so that what a replay measures cannot depend on them as the
+# package changes. HOME and PATH are read as well, but only to find a CLI or a memory file's ``@~/``
+# import, and a replay has neither, so they are left as they are.
 ENVIRONMENT = (
-    "ANTHROPIC_BASE_URL", "CLAUDE_CODE_CUSTOM_OAUTH_URL", "CLAUDE_CODE_IGNORE_PERSISTED_TRUST", "CLAUDE_CONFIG_DIR",
+    "ANTHROPIC_BASE_URL", "CLAUDE_CODE_CUSTOM_OAUTH_URL", "CLAUDE_CODE_GATEWAY_HINT_HEADERS",
+    "CLAUDE_CODE_IGNORE_PERSISTED_TRUST", "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CONFIG_DIR",
     "CODEX_HOME", "CONTEXTO_CODEX_KEY_HELPER", "CONTEXTO_CODEX_UPSTREAM", "CONTEXTO_HOME", "CONTEXTO_NO_VERSION_CHECK",
     "CONTEXTO_RECALL_VARIANT", "CONTEXTO_SEARCH_CACHE_MB", "CONTEXTO_SESSION", "OPENRIG_SESSION_NAME",
 )
-ENVIRONMENT_PREFIX = "CONTEXTO_"
+ENVIRONMENT_PREFIXES = ("CONTEXTO_", "CLAUDE_CODE_USE_")
+
+
+def _pinned(name: str) -> bool:
+    return name in ENVIRONMENT or name.startswith(ENVIRONMENT_PREFIXES)
 
 
 @contextlib.contextmanager
 def pinned_environment() -> Iterator[dict[str, Any]]:
-    """Unset every variable of ``ENVIRONMENT`` and every ``CONTEXTO_`` variable for the block, and put
-    the user's values back after it. Yields what goes in ``manifest.replay``: the variables pinned,
-    and the names (never the values) of those the user's environment had set."""
-    held = {name: os.environ[name] for name in os.environ
-            if name in ENVIRONMENT or name.startswith(ENVIRONMENT_PREFIX)}
+    """Unset every variable of ``ENVIRONMENT`` and every variable starting with one of
+    ``ENVIRONMENT_PREFIXES`` for the block, and put the user's values back after it. Yields what goes
+    in ``manifest.replay``: the variables pinned, and the names (never the values) of those the user's
+    environment had set."""
+    held = {name: os.environ[name] for name in os.environ if _pinned(name)}
     for name in held:
         del os.environ[name]
     try:
-        yield {"pinned": [*ENVIRONMENT, ENVIRONMENT_PREFIX + "*"], "value": "not set (each one's default)",
-               "set_by_the_user_and_ignored": sorted(held)}
+        yield {"pinned": [*ENVIRONMENT, *(prefix + "*" for prefix in ENVIRONMENT_PREFIXES)],
+               "value": "not set (each one's default)", "set_by_the_user_and_ignored": sorted(held)}
     finally:
-        for name in [n for n in os.environ if n in ENVIRONMENT or n.startswith(ENVIRONMENT_PREFIX)]:
+        for name in [n for n in os.environ if _pinned(n)]:
             del os.environ[name]
         os.environ.update(held)
 

@@ -1094,7 +1094,7 @@ def test_failure_events_are_found_wherever_the_log_carries_them(spike):
 def test_every_environment_variable_the_package_reads_is_pinned():
     """Every name a module of the package reads from the environment is held at its default in a replay.
     The names are the string constants of the modules that read ``os.environ``; a new knob that is not a
-    ``CONTEXTO_`` variable fails here until it is added to ``session.ENVIRONMENT``."""
+    ``CONTEXTO_`` or ``CLAUDE_CODE_USE_`` variable fails here until it is added to ``session.ENVIRONMENT``."""
     import ast
     import re
 
@@ -1110,22 +1110,32 @@ def test_every_environment_variable_the_package_reads_is_pinned():
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and re.fullmatch(
                     r"(?:CONTEXTO|ANTHROPIC|CLAUDE|CODEX|OPENRIG)_[A-Z0-9_]+", node.value):
                 found.setdefault(node.value, path.name)
-    assert {"CONTEXTO_RECALL_VARIANT", "CONTEXTO_SEARCH_CACHE_MB", "OPENRIG_SESSION_NAME"} <= set(found)
+    assert {"CONTEXTO_RECALL_VARIANT", "CONTEXTO_SEARCH_CACHE_MB", "OPENRIG_SESSION_NAME",
+            "CLAUDE_CODE_GATEWAY_HINT_HEADERS", "CLAUDE_CODE_USE_BEDROCK"} <= set(found)
     missing = {name: where for name, where in found.items()
-               if name not in session.ENVIRONMENT and not name.startswith(session.ENVIRONMENT_PREFIX)}
+               if name not in session.ENVIRONMENT and not name.startswith(session.ENVIRONMENT_PREFIXES)}
     assert missing == {}
+    # A prefix the package reads as a prefix (the cloud-provider switches, D70) is pinned as one.
+    assert "CLAUDE_CODE_USE_" in found and "CLAUDE_CODE_USE_" in session.ENVIRONMENT_PREFIXES
 
 
 def test_the_pinned_environment_is_put_back(monkeypatch):
     import os
 
     monkeypatch.setenv("CONTEXTO_RECALL_VARIANT", "legacy")
+    monkeypatch.setenv("CLAUDE_CODE_USE_A_PROVIDER_ADDED_LATER", "1")
     monkeypatch.delenv("CONTEXTO_HOME", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_USE_BEDROCK", raising=False)
     with session.pinned_environment() as held:
         assert "CONTEXTO_RECALL_VARIANT" not in os.environ
-        assert "CONTEXTO_RECALL_VARIANT" in held["set_by_the_user_and_ignored"]
+        assert "CLAUDE_CODE_USE_A_PROVIDER_ADDED_LATER" not in os.environ
+        assert {"CONTEXTO_RECALL_VARIANT", "CLAUDE_CODE_USE_A_PROVIDER_ADDED_LATER"} <= set(
+            held["set_by_the_user_and_ignored"])
+        assert {"CONTEXTO_*", "CLAUDE_CODE_USE_*"} <= set(held["pinned"])
         os.environ["CONTEXTO_HOME"] = "set inside"  # nothing set inside the block leaks out of it
+        os.environ["CLAUDE_CODE_USE_BEDROCK"] = "1"
     assert os.environ["CONTEXTO_RECALL_VARIANT"] == "legacy" and "CONTEXTO_HOME" not in os.environ
+    assert os.environ["CLAUDE_CODE_USE_A_PROVIDER_ADDED_LATER"] == "1" and "CLAUDE_CODE_USE_BEDROCK" not in os.environ
 
 
 def test_the_log_reader_skips_a_torn_line(tmp_path):

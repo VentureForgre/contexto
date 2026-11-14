@@ -260,7 +260,7 @@ def check_manifest(run):
     assert added["rates"] == trace.RATES == {"log_bytes_per_token": 1.8, "other_bytes_per_token": 3.0,
                                              "log_text_min_bytes": 5_000, "tool_result_text_is_log_text": True}
     assert added["modelled"]["summary_tokens"] == 7_920 and added["modelled"]["trigger"] == 150_000
-    assert set(added["environment"]["pinned"]) == {*session.ENVIRONMENT, "CONTEXTO_*"}
+    assert set(added["environment"]["pinned"]) == {*session.ENVIRONMENT, "CONTEXTO_*", "CLAUDE_CODE_USE_*"}
     assert set(manifest) == {*listed, "started", "finished", "units", "replay"}
 
 
@@ -687,7 +687,9 @@ def test_the_users_environment_does_not_change_the_pinned_replay(monkeypatch, tm
     settings = {"CONTEXTO_RECALL_VARIANT": variant, "CONTEXTO_SEARCH_CACHE_MB": "not-a-number",
                 "OPENRIG_SESSION_NAME": "canary-session", "CONTEXTO_HOME": str(tmp_path / "canary-home"),
                 "CONTEXTO_SESSION": "canary", "ANTHROPIC_BASE_URL": "http://canary.invalid",
-                "CLAUDE_CONFIG_DIR": str(tmp_path / "canary-config"), "CONTEXTO_A_KNOB_ADDED_LATER": "1"}
+                "CLAUDE_CONFIG_DIR": str(tmp_path / "canary-config"), "CONTEXTO_A_KNOB_ADDED_LATER": "1",
+                "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_A_PROVIDER_ADDED_LATER": "1",
+                "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"}
     for name, value in settings.items():
         monkeypatch.setenv(name, value)
     out = tmp_path / "out"
@@ -695,7 +697,7 @@ def test_the_users_environment_does_not_change_the_pinned_replay(monkeypatch, tm
     assert code == 0 and err == "", text + err
     assert "Pinned expectations: every measurement equals the trace." in text
     environment = _load(out)["manifest"]["replay"]["environment"]
-    assert set(session.ENVIRONMENT) | {"CONTEXTO_*"} == set(environment["pinned"])
+    assert set(session.ENVIRONMENT) | {"CONTEXTO_*", "CLAUDE_CODE_USE_*"} == set(environment["pinned"])
     assert set(settings) <= set(environment["set_by_the_user_and_ignored"])
     for path in out.rglob("*"):
         if path.is_file():
