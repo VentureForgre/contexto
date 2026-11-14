@@ -30,9 +30,9 @@ import io
 import json
 import os
 import re
-import unicodedata
 import statistics
 import tempfile
+import unicodedata
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
