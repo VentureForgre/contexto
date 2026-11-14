@@ -118,7 +118,8 @@ loaded Mac.
 Replay options: `--replay-turns N` replays a session of another length (it then says it is not the
 pinned trace), `--dump-trace DIR` writes the regenerated session's texts without replaying, and
 `--record-trace FILE` (with `--force`) is for maintainers who re-record the shipped trace after a
-proxy change.
+proxy change. `--out` refuses a directory that already holds a replay's or a live run's output
+files, a live run's reservation journal `reservations.jsonl` among them.
 
 ### `--dry-run`
 
@@ -161,8 +162,28 @@ turn size or first seed for that directory is refused. Every attempt's requests 
 records, because they were billed. A run killed in the middle of writing a record can leave a last
 line with no newline. On resume, a whole record only gets its newline back; a torn one is set aside
 in `<file>.torn-<n>` and cut from the file, so the next record starts a line of its own, and the
-manifest's `torn_lines` says what was done. A request whose record was torn is not counted in the
-spend, since its usage cannot be read.
+manifest's `torn_lines` says what was done.
+
+A request killed in flight, or whose record was torn, still counts in the spend at its reservation,
+so a resumed run's budget guard includes it. Before the meter forwards a billed request, it appends
+a line to the reservation journal, `reservations.jsonl` in `--out` (`arm`, `seed`, `repeat`,
+`attempt`, `n` and `reserved_tokens`), and closes the file; a request that gets no response gets a
+second line (`"unanswered": true` and `kept_tokens`). The line survives a killed process, not a
+power loss: it is not synced to disk. If the line cannot be written, the request is not sent: the
+meter answers it with a local 500 error, `contexto bench: the reservation journal could not be
+written`. On resume, every journal entry with neither a whole record nor a second line counts in
+`spent_tokens` at its reservation; the manifest lists these in `in_flight` and sums them in
+`requests_in_flight` and `in_flight_tokens`, recomputed from the files at each start, so a second
+resume counts nothing twice. A torn request record that the journal has (`counted_from:
+"journal"`) is counted once, by the journal. Every request record carries `reserved_tokens` near
+the start of its line, so a torn record the journal does not have is counted at the reservation its
+fragment names (`"reservation"`), or else at the largest reservation of the file's whole records
+(`"largest_in_file"`, which can be lower than the lost request's own). When neither exists (the
+directory's first record, cut before its reservation, with no journal), it counts 0 tokens
+(`"nothing_in_file"`, `counted_tokens` null), and the resumed run warns, for one such record:
+`contexto bench: warning: a killed run cut short 1 request record(s) before its reservation, and no
+other record can stand in for it; the spend counts it at 0 tokens and the report's cost is a lower
+bound`.
 
 A unit ends `complete`, `not_run` (the full arm's request does not fit the model's window) or
 `stopped` with the reason, among them: `desync` (Claude Code printed a `result` that answers no
@@ -182,7 +203,8 @@ contexto bench --report bench-haiku --prices my-prices.json
 Reads the records strictly (a damaged line is an error naming the file, line and field) and writes
 `results.json`, `results.md` and `charts/` into the directory, or into `--out`; several directories
 need `--out`. Either every file is written or the earlier report is left as it was. `--prices FILE`
-replaces the shipped price table.
+replaces the shipped price table. `results.md` lists the plain arm's compactions sorted by seed and
+repeat.
 
 ### `--chart`
 
@@ -195,7 +217,9 @@ Draws `charts/accuracy.svg` (accuracy by arm with Wilson 95% intervals) and
 `charts/request-size.svg` (request size against history length) beside the results file, or in
 `DIR/charts/`. The SVG is written by the standard library, with no plotting dependency, and is the
 same bytes for the same input. For a replay it draws only the request-size chart and says why there
-is no accuracy chart.
+is no accuracy chart. Notes under a chart are wrapped by an estimate of their width that counts a
+wide emoji (at or above U+1F000, or one of the Emoji_Presentation characters below it, such as ✅) as
+three narrow characters, so a note full of emoji stays inside the chart.
 
 ## The three arms
 
@@ -249,6 +273,14 @@ Every way the arms differ is written into the manifest's `arm_differences`. In s
 
 Every billed request of every arm goes through one pass-through meter on 127.0.0.1, which records
 counts only: tokens by class from the response, the status, the turn, and main or side request.
+
+The benchmark runs `claude --version` itself to record the version, with the arms' isolation: the
+same environment variables dropped and kept (the caller's `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`
+among those kept), `DISABLE_AUTOUPDATER=1`, and a temporary working directory and
+`CLAUDE_CONFIG_DIR`, both removed afterwards. The tests that run a real `claude` when one is on
+`PATH` (`tests/test_bench_live_real.py`) run it the same way, from a temporary directory with a
+temporary `HOME` and `CLAUDE_CONFIG_DIR`, a fake key and a stub upstream on 127.0.0.1, so neither
+reads the user's Claude Code configuration or a checkout's settings.
 
 ## What the benchmark does not show
 
@@ -322,7 +354,7 @@ whitespace, quotes, backticks, markdown emphasis `*` and `_`, and the punctuatio
 answer when its ids are the expected ids in any order. A wrong `value` answer that equals an older
 value of the same fact, or a planted decoy, is also counted stale.
 
-Three deliberate differences from the spike's scoring (`spikes/m0/fidelity/l2f.py::score`, with
+Four deliberate differences from the spike's scoring (`spikes/m0/fidelity/l2f.py::score`, with
 `normalize` and `parse_answers` from `spikes/m0/fidelity/scoring.py`), applied to every arm alike:
 
 1. A probe with no answer line, or an empty answer, is never correct. The spike read a missing
@@ -335,7 +367,16 @@ Three deliberate differences from the spike's scoring (`spikes/m0/fidelity/l2f.p
 3. A line in a fenced code block is read, but an answer for the same id on a line outside any fence
    wins over it wherever the two stand, so a note or file the reply quotes in a fence after its
    answers cannot override them. A reply that writes all its answers in a fence is still scored.
-   The spike read fenced lines like any other.
+   The spike read fenced lines like any other. The rule protects answers written outside a fence,
+   not answers written in one: among fenced lines, the last one for an id still wins.
+4. A line whose answer is the probe's own question, word for word (`q_a_016: What was ...?`), is
+   the reply restating the question, not an answer. Scoring skips it and reads the next line for
+   that id; with no other line, the probe has no answer. In the test of this rule (#286), six reply
+   layouts on 9 `v2` probes, such as the questions in a fence and then the answers, or the answers
+   and then the questions, five scored 0 of 9 before the rule and all six score 9 of 9 with it. A
+   restatement that is not word for word (one with the question's closing sentence left off, for
+   example) still overrides an answer
+   ([#291](https://github.com/VentureForgre/contexto/issues/291)).
 
 Every other line the spike read is read the same, and a line the spike did not read stays unread:
 as in the spike, a line in a blockquote (`> q_a_01: x`) is never read. Table rows and headings are
@@ -399,10 +440,21 @@ https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-12. USD p
 The Haiku size step counts all input tokens, cache reads and writes included, per request. That the
 higher row then applies to the whole request, output included, is a reading of the page, not its
 wording; the table's `size_rule` holds that reading as data, so another reading is a JSON edit.
-Cache writes are priced at the run's cache lifetime (`--cache-ttl`). A response whose usage could
-not be read gives a cost range: its upper bound prices the tokens reserved for that request at the
-model's highest rate. When a unit was retried, the tokens and cost of every attempt count, because
-every attempt was billed; accuracy uses the completed attempt. No row is a bill.
+Cache writes are priced at the run's cache lifetime (`--cache-ttl`), which the manifest records; a
+request record does not carry its own. A response whose usage could not be read gives a cost range:
+its upper bound prices the tokens reserved for that request at the model's highest rate. Requests
+that have no record are in the upper bound the same way, at their reservations: those that got no
+response (`unanswered_tokens`), those whose record a kill cut short (the torn record's
+`counted_tokens`), and those in flight when a run was killed (`in_flight`). `results.md` says how
+many there were, per arm and in the total. A torn record that nothing bounds (`nothing_in_file`)
+leaves only a lower bound, and the report says so. When a unit was retried, the tokens and cost of
+every attempt count, because every attempt was billed; accuracy uses the completed attempt. No row
+is a bill.
+
+In `results.json`, each arm and `all_requests` carry `no_record`: the counts `unanswered`, `torn`
+and `in_flight`, their `reserved_tokens`, and `without_reservation` (torn records with no
+reservation to count), and every `cost_upper` includes those reservations. Each `unchecked` entry,
+a session whose manifest gives no count of its request records, names its `last_attempt`.
 
 ## Spend guards
 
@@ -414,7 +466,10 @@ A live run spends your money, so it stops itself:
   response whose usage cannot be read counts as its reservation. A request sent that got no response
   (the connection failed or closed before a status line) may still have been billed, so its
   reservation is kept as spent; each unit counts these in `requests_unanswered` and
-  `unanswered_tokens`. One whose connection was never made counts 0.
+  `unanswered_tokens`. One whose connection was never made counts 0. A request in flight when the
+  run was killed, or whose record a kill cut short, counts at its reservation on resume, from the
+  reservation journal ([the live run](#the-live-run)); a request the journal could not note is not
+  sent.
 - The first 401 or 403 stops the run.
 - Per unit: more than 60 answered requests in one script turn (`--max-turn-requests`; the recorded
   runs needed at most 6, the tool-loop turn needs 11), more than 200 failed responses in one turn
@@ -434,6 +489,7 @@ A live run spends your money, so it stops itself:
   scripts/seed-<seed>.json      the generated script of each seed
   probes.jsonl                  live: one line per arm, seed, repeat and probe, for complete units
   requests.jsonl                live and replay: one line per request the upstream answered
+  reservations.jsonl            live: the reservation journal, one line before each billed request
   *.torn-<n>                    live, after a resume: a torn last line set aside
   reach.jsonl                   replay: the search reachability of each planted fact
   results.json, results.md      the report
@@ -636,4 +692,6 @@ run of that benchmark or only probes taken from it.
 - `spikes/m2/acceptance/`: the harness of runs #1 to #4, kept as their frozen record. The package
   imports nothing from it; the generator was ported and tests prove the port identical.
 - `spikes/m2/scale/proxy/`: the scale harness, repaired under D66, whose 200-turn version runs in CI
-  ([README](../spikes/m2/scale/proxy/README.md)).
+  ([README](../spikes/m2/scale/proxy/README.md)). The waits for a free local port in a burst share
+  one 30-second window of wall-clock time. The 41 ms wait it measures on Linux is the proxy's, not
+  the harness's ([#284](https://github.com/VentureForgre/contexto/issues/284)).
