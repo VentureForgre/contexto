@@ -19,20 +19,32 @@ the scripts are a pure function of their parameters.
 | Claude Code shapes | 2.1.318, `claude-opus-5-5`, Messages API (`/v1/messages`, `/v1/messages/count_tokens`) |
 | Codex shapes | codex-cli 0.166.0, `gpt-6-astra`, Responses API (`/v1/responses`), code mode |
 | Upstream | `spikes/m2/inturn/upstream.py`, in-process; its tokenizer and rules are described below |
-| Run | 2026-11-12, Python 3.13.14, macOS on an Apple M5 Pro |
+| Run | 2026-11-13, Python 3.13.14, macOS on an Apple M5 Pro, a shared machine at load average 8 to 10 |
 
 Reproduce, from the checkout's root:
 
 ```sh
 uv run python spikes/m2/inturn/replay.py --scenario all --json out.json   # every scenario, small at 260 rounds
 uv run python spikes/m2/inturn/replay.py --scenario small --full          # small at 1,500 rounds
+uv run python spikes/m2/inturn/replay.py --engine toy                     # the toy pager at the same sizes
 uv run --with pytest pytest -q spikes/m2/inturn
 ```
 
-The first command takes about 30 seconds of CPU. `small` at 1,500 rounds takes about 2 minutes 40 seconds
-of CPU for the two dialects: the engine's work for one request grows with the number of messages in
-it, so a loop's cost grows with the square of its rounds. The tests run `small` at 260 rounds for
-that reason; every other scenario runs at full size everywhere.
+Measured on this machine at load average 8 to 10:
+
+| command | wall | CPU (user + sys) |
+|---|---|---|
+| `--scenario all` | 10.7 s | 10.5 s |
+| `--scenario small --full` (both dialects) | 76.9 s | 75.5 s |
+| `--engine toy` | 9.4 s | 9.2 s |
+| the tests (`pytest -q spikes/m2/inturn`, 240 passed, 13 xfailed) | 29.9 s | 29.0 s |
+
+The tests' 13 runs at full size use `check_wire`, which adds 3.8 s of CPU to them (14.5 s against
+10.7 s).
+
+At 1,500 rounds `small` is slow because the engine's work for one request grows with the number of
+messages in it, so a loop's cost grows with the square of its rounds. The tests run `small` at 260
+rounds for that reason; every other scenario runs at full size everywhere.
 
 ## The scenarios
 
@@ -51,7 +63,7 @@ without the probe rounds described next.
 | `subagent` | main, in a tool loop, launches a background subagent; the subagent runs 150 rounds of 5,000 in its own conversation while main sends one request for every three of its | 214 | 208 | 826,216 | 5,037 | main 97,916; subagent 795,349 | not run |
 | `images` | a pasted 2,560 x 1,600 image in the prompt, then 100 rounds of 2,500; 67 of them also return a screenshot | 105 | 100 | 360,787 | 5,313 | 400,251 | 398,864 |
 | `multiturn` | three turns of two 1,500 rounds, a 100-round loop of 5,000 in turn 4, two more short turns | 120 | 110 | 519,070 | 5,037 | 558,219 | 558,140 |
-| `mixed` | 45 rounds: 15 make three calls of 2,400 each, answered together; 30 make one call of 4,000 | 50 | 45 | 230,775 | 4,037 | 257,772 | 256,043 |
+| `mixed` | 45 rounds: 15 make three calls of 2,400 each, answered together; 30 make one call of 4,000 | 50 | 45 | 230,775 | 4,037 | 257,772 | 256,085 |
 
 The request, round and result columns are Claude Code's; Codex's results are within 0.3% (its output
 item's wrapper is a few bytes longer). The head is 15,101 tokens for Claude Code's main conversation
@@ -71,7 +83,17 @@ the calls go through code mode's `exec`, a `custom_tool_call`.
 **Shapes.** `mixed` holds the round shapes the other loops lack: three calls answered in one user
 message (Codex: three calls, then three outputs), a `<system-reminder>` text block after the results
 in their message (11 rounds, Claude Code only), and Codex's `custom_tool_call` with its
-`custom_tool_call_output` (6 rounds; the same command through Bash on Claude Code).
+`custom_tool_call_output` (6 rounds; the same command through Bash on Claude Code). Code mode returns
+an `exec` output in two forms, a string and a list of `input_text` parts
+(`tests/test_own_tool_echo.py`); 3 of the 6 rounds use each.
+
+**Cache breakpoints.** Claude Code's requests carry `cache_control` where Claude Code puts it: on both
+`system` blocks and on the last block of the newest message, whatever its role. That is what
+`docs/research/M0-interception.md` records ("two system blocks and one message block"), what
+`tests/fixtures/subagent_shapes_2_1_31x.json` shows (a role `system` notice that is the newest message
+carries it), and the breakpoint on `messages[1]` at the session start in
+`docs/research/M0-proxy-measurements.md`. That makes three breakpoints of the API's four. Codex
+sends none: OpenAI caches prefixes on its own.
 
 `subagent` is Claude Code only: the engine tells a subagent by `X-Claude-Code-Agent-Id`, and Codex
 has no measured subagent shape. The subagent has its own `system`, its own tool list (Contexto's five
@@ -95,21 +117,21 @@ pre-send estimate of it, the upstream's token count, and its bytes as the proxy 
 
 | scenario | dialect | requests | over_bound (estimate) | over_bound (real) | largest estimate | largest tokens | largest bytes | pages | rotations | violations |
 |---|---|---|---|---|---|---|---|---|---|---|
-| loop120 | claude | 125 | 104 | 104 | 812,189 | 812,301 | 1,826,922 | 0 | 0 | 0 |
+| loop120 | claude | 125 | 104 | 104 | 812,189 | 812,301 | 1,826,959 | 0 | 0 | 0 |
 | loop120 | codex | 125 | 104 | 104 | 812,074 | 812,164 | 1,817,051 | 0 | 0 | 0 |
-| large | claude | 15 | 9 | 9 | 406,441 | 406,397 | 911,443 | 0 | 0 | 0 |
+| large | claude | 15 | 9 | 9 | 406,441 | 406,397 | 911,480 | 0 | 0 | 0 |
 | large | codex | 15 | 9 | 9 | 404,718 | 404,686 | 904,904 | 0 | 0 | 0 |
-| small (1,500) | claude | 1,505 | 1,274 | 1,274 | 891,359 | 891,375 | 2,227,051 | 0 | 0 | 0 |
-| small (260) | claude | 265 | 33 | 33 | 168,818 | 168,850 | 430,218 | 0 | 0 | 0 |
+| small (1,500) | claude | 1,505 | 1,274 | 1,274 | 891,359 | 891,375 | 2,227,088 | 0 | 0 | 0 |
+| small (260) | claude | 265 | 33 | 33 | 168,817 | 168,850 | 430,255 | 0 | 0 | 0 |
 | small (1,500) | codex | 1,505 | 1,270 | 1,270 | 888,568 | 888,575 | 2,106,320 | 0 | 0 | 0 |
 | small (260) | codex | 265 | 30 | 30 | 166,804 | 166,830 | 404,157 | 0 | 0 | 0 |
-| subagent | claude | 214 | 128 | 128 | 796,575 | 796,678 | 1,794,826 | 0 | 0 | 0 |
-| images | claude | 105 | 71 | 71 | 401,613 | 401,622 | 792,055 | 0 | 0 | 0 |
+| subagent | claude | 214 | 128 | 128 | 796,575 | 796,678 | 1,794,863 | 0 | 0 | 0 |
+| images | claude | 105 | 71 | 71 | 401,613 | 401,622 | 792,092 | 0 | 0 | 0 |
 | images | codex | 105 | 70 | 70 | 400,204 | 400,264 | 778,400 | 0 | 0 | 0 |
-| multiturn | claude | 120 | 81 | 81 | 551,525 | 551,674 | 1,252,089 | 4 | 1 | 0 |
+| multiturn | claude | 120 | 81 | 81 | 551,524 | 551,674 | 1,252,126 | 4 | 1 | 0 |
 | multiturn | codex | 120 | 81 | 81 | 551,367 | 551,486 | 1,242,916 | 5 | 1 | 0 |
-| mixed | claude | 50 | 25 | 25 | 258,955 | 259,143 | 596,918 | 0 | 0 | 0 |
-| mixed | codex | 50 | 24 | 25 | 257,285 | 257,443 | 587,047 | 0 | 0 | 0 |
+| mixed | claude | 50 | 25 | 25 | 258,955 | 259,143 | 596,955 | 0 | 0 | 0 |
+| mixed | codex | 50 | 24 | 25 | 257,327 | 257,485 | 587,140 | 0 | 0 | 0 |
 
 Inside a loop the engine pages nothing: the last request of every loop is the CLI's whole history.
 The only pages are `multiturn`'s, written at the turn start after its loop. No request broke a rule
@@ -122,26 +144,29 @@ only), "rooms at response" those it published from the response's real usage (`s
 main, `set_side_room` for the subagent); min, median and "at 0" are of the latter. The last four
 columns count requests sent after the turn's own items passed 50,000 tokens: how many there were, and
 on how many the request-time room was under `min_turn_room` (12,000), the response-time room was 0,
-and the response-time room was under half of `min_turn_room` (6,000).
+and the response-time room was under half of `min_turn_room` (6,000). "Over the truth" counts rooms,
+over every request of the conversation, larger than what the upstream's count allows (rule 8 below):
+a request-time room over `bound - headroom_floor - 0.9 x` the request's tokens, a response-time room
+over `bound - (input + output) - headroom_floor`.
 
-| scenario | dialect | conversation | requests | rooms at request | rooms at response | room min | room median | at 0 | past 50,000 | request room under 12,000 | response room 0 | response room under 6,000 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| loop120 | claude | main | 125 | 125 | 125 | 0 | 0 | 108 | 117 | 110 | 108 | 109 |
-| loop120 | codex | main | 125 | 125 | 125 | 0 | 0 | 108 | 117 | 109 | 108 | 109 |
-| large | claude | main | 15 | 15 | 15 | 0 | 0 | 9 | 12 | 9 | 9 | 9 |
-| large | codex | main | 15 | 15 | 15 | 0 | 0 | 9 | 12 | 9 | 9 | 9 |
-| small (1,500) | claude | main | 1,505 | 1,505 | 1,505 | 0 | 0 | 1,317 | 1,420 | 1,337 | 1,317 | 1,327 |
-| small (260) | claude | main | 265 | 265 | 265 | 0 | 32,286 | 77 | 180 | 97 | 77 | 87 |
-| small (1,500) | codex | main | 1,505 | 1,505 | 1,505 | 0 | 0 | 1,314 | 1,419 | 1,334 | 1,314 | 1,324 |
-| small (260) | codex | main | 265 | 265 | 265 | 0 | 34,266 | 73 | 179 | 93 | 73 | 83 |
-| subagent | claude | main | 59 | 59 | 59 | 27,088 | 68,677 | 0 | 23 | 0 | 0 | 0 |
-| subagent | claude | subagent | 155 | 0 | 154 | 0 | 0 | 132 | 145 | 0 | 132 | 133 |
-| images | claude | main | 105 | 105 | 105 | 0 | 0 | 77 | 93 | 80 | 77 | 79 |
-| images | codex | main | 105 | 105 | 105 | 0 | 0 | 77 | 93 | 80 | 77 | 78 |
-| multiturn | claude | main | 120 | 120 | 120 | 0 | 0 | 86 | 95 | 88 | 86 | 87 |
-| multiturn | codex | main | 120 | 120 | 120 | 0 | 0 | 86 | 95 | 88 | 86 | 87 |
-| mixed | claude | main | 50 | 50 | 50 | 0 | 0 | 29 | 40 | 31 | 29 | 31 |
-| mixed | codex | main | 50 | 50 | 50 | 0 | 0 | 29 | 40 | 31 | 29 | 30 |
+| scenario | dialect | conversation | requests | rooms at request | rooms at response | room min | room median | at 0 | past 50,000 | request room under 12,000 | response room 0 | response room under 6,000 | request room over the truth | response room over the truth |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| loop120 | claude | main | 125 | 125 | 125 | 0 | 0 | 108 | 117 | 110 | 108 | 109 | 1 | 0 |
+| loop120 | codex | main | 125 | 125 | 125 | 0 | 0 | 108 | 117 | 109 | 108 | 109 | 1 | 0 |
+| large | claude | main | 15 | 15 | 15 | 0 | 0 | 9 | 12 | 9 | 9 | 9 | 2 | 0 |
+| large | codex | main | 15 | 15 | 15 | 0 | 0 | 9 | 12 | 9 | 9 | 9 | 2 | 0 |
+| small (1,500) | claude | main | 1,505 | 1,505 | 1,505 | 0 | 0 | 1,317 | 1,420 | 1,337 | 1,317 | 1,327 | 1 | 0 |
+| small (260) | claude | main | 265 | 265 | 265 | 0 | 32,286 | 77 | 180 | 97 | 77 | 87 | 1 | 0 |
+| small (1,500) | codex | main | 1,505 | 1,505 | 1,505 | 0 | 0 | 1,314 | 1,419 | 1,334 | 1,314 | 1,324 | 1 | 0 |
+| small (260) | codex | main | 265 | 265 | 265 | 0 | 34,266 | 73 | 179 | 93 | 73 | 83 | 1 | 0 |
+| subagent | claude | main | 59 | 59 | 59 | 27,088 | 68,677 | 0 | 23 | 0 | 0 | 0 | 1 | 0 |
+| subagent | claude | subagent | 155 | 0 | 154 | 0 | 0 | 132 | 145 | 0 | 132 | 133 | 0 | 0 |
+| images | claude | main | 105 | 105 | 105 | 0 | 0 | 77 | 93 | 80 | 77 | 79 | 0 | 0 |
+| images | codex | main | 105 | 105 | 105 | 0 | 0 | 77 | 93 | 80 | 77 | 78 | 0 | 0 |
+| multiturn | claude | main | 120 | 120 | 120 | 0 | 0 | 86 | 95 | 88 | 86 | 87 | 1 | 0 |
+| multiturn | codex | main | 120 | 120 | 120 | 0 | 0 | 86 | 95 | 88 | 86 | 87 | 1 | 0 |
+| mixed | claude | main | 50 | 50 | 50 | 0 | 0 | 29 | 40 | 31 | 29 | 31 | 1 | 0 |
+| mixed | codex | main | 50 | 50 | 50 | 0 | 0 | 29 | 40 | 31 | 29 | 30 | 2 | 0 |
 
 The room is `bound - (input + output) - 25,000`, so it reaches 0 at about 125,000 tokens, a few
 requests before the first `over_bound`. The median is the lower of the two middle values. The
@@ -150,6 +175,19 @@ subagent's last response has no tool call, which closes its side room and publis
 In `subagent` main's own room is never under 27,088, but a tool call is charged against the smallest
 live room (D40), and the subagent's side room is 0 on 132 of its 154 publishes. A recall made by main
 during those requests had no room.
+
+The response-time rooms are exact: they come from real usage. The request-time room comes from the
+pre-send estimate, and is over the truth line where the estimate runs more than 10% under the
+upstream's count:
+
+- the first request of each main conversation, before any usage (Claude Code: estimate 13,901,
+  counted 15,669, so the room is 202 tokens over; Codex: 12,180 and 13,763, 207 over); `images` is
+  not, because its pasted image is priced by the same rule on both sides;
+- `large` request 4, which brings the 60,000 result (60,724 against 77,943: 9,425 over; Codex 9,294);
+- `mixed` request 2 on Codex, three tool outputs estimated at the ratio learned from head text (19,237
+  against 21,415: 37 over).
+
+An engine that publishes request-time rooms the same way fails rule 8 on these requests.
 
 ### Tokens sent, cache, rewrites and thinking
 
@@ -160,34 +198,43 @@ request of the same conversation at a position both have. Two numbers describe i
   can no longer be read from the cache;
 - **re-sent tokens**: what the rewrite cost, the request's uncached tokens less the tokens of the
   items the CLI added since its previous request (an added item counts as it was forwarded, when that
-  is smaller). The re-sent share is their share of all input tokens sent.
+  is smaller; a new prompt the engine merged into another message counts in full). The re-sent share
+  is their share of all input tokens sent.
+
+On Messages "cache read" and "re-sent" use the breakpoint model below: the headline figures. "Any
+prefix" is what a cache that kept every prefix sent would give: on Messages an upper bound on the read
+and a lower bound on the re-sent tokens. On Codex the two are one figure. "Loops' own tokens" adds up,
+over the scenario's loops, the CLI's items since each turn's prompt at the turn's last request.
 
 "Newest thinking missing" counts requests where the newest response of the turn in flight came back
 without its thinking. "Thinking kept around a strip" counts requests that hold thinking both before
 and after thinking that is missing (on Codex, reasoning items).
 
-| scenario | dialect | input tokens sent | cache read | rewrites | in a loop | cache invalidated | re-sent tokens | mean re-sent | re-sent share | newest thinking missing | thinking kept around a strip |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| loop120 | claude | 52,567,369 | 98.5% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| loop120 | codex | 52,440,285 | 98.5% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| large | claude | 3,317,868 | 87.8% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| large | codex | 3,290,830 | 87.7% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| small (1,500) | claude | 682,821,272 | 99.9% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| small (260) | claude | 24,495,254 | 99.3% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| small (1,500) | codex | 679,264,448 | 99.9% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| small (260) | codex | 23,971,580 | 99.3% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| subagent | claude | 66,738,251 | 98.7% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| images | claude | 22,642,903 | 98.2% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| images | codex | 22,470,669 | 98.2% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| multiturn | claude | 31,253,082 | 98.2% | 1 | 0 | 536,573 | 1,716 | 1,716 | 0.0% | 0 | 0 |
-| multiturn | codex | 31,126,696 | 98.2% | 1 | 0 | 537,948 | 1,327 | 1,327 | 0.0% | 0 | 0 |
-| mixed | claude | 7,173,132 | 96.4% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
-| mixed | codex | 7,083,116 | 96.4% | 0 | 0 | 0 | 0 | 0 | 0.0% | 0 | 0 |
+| scenario | dialect | input tokens sent | cache read | cache read, any prefix | rewrites | in a loop | cache invalidated | re-sent | mean re-sent | largest re-sent | re-sent, any prefix | loops' own tokens | re-sent share | newest thinking missing | thinking kept around a strip |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| loop120 | claude | 52,567,369 | 98.5% | 98.5% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 797,200 | 0.0% | 0 | 0 |
+| loop120 | codex | 52,440,285 | 98.5% | 98.5% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 798,626 | 0.0% | 0 | 0 |
+| large | claude | 3,317,868 | 87.8% | 87.8% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 391,296 | 0.0% | 0 | 0 |
+| large | codex | 3,290,830 | 87.7% | 87.7% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 391,148 | 0.0% | 0 | 0 |
+| small (1,500) | claude | 682,821,272 | 99.9% | 99.9% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 876,274 | 0.0% | 0 | 0 |
+| small (260) | claude | 24,495,254 | 99.3% | 99.3% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 153,749 | 0.0% | 0 | 0 |
+| small (1,500) | codex | 679,264,448 | 99.9% | 99.9% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 875,037 | 0.0% | 0 | 0 |
+| small (260) | codex | 23,971,580 | 99.3% | 99.3% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 153,292 | 0.0% | 0 | 0 |
+| subagent | claude | 66,738,251 | 98.7% | 98.7% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 868,541 | 0.0% | 0 | 0 |
+| images | claude | 22,642,903 | 98.2% | 98.2% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 386,521 | 0.0% | 0 | 0 |
+| images | codex | 22,470,669 | 98.2% | 98.2% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 386,726 | 0.0% | 0 | 0 |
+| multiturn | claude | 31,253,082 | 98.2% | 98.2% | 1 | 0 | 536,573 | 1,507 | 1,507 | 1,507 | 1,507 | 542,999 | 0.0% | 0 | 0 |
+| multiturn | codex | 31,126,696 | 98.2% | 98.2% | 1 | 0 | 537,948 | 1,102 | 1,102 | 1,102 | 1,102 | 544,418 | 0.0% | 0 | 0 |
+| mixed | claude | 7,173,132 | 96.4% | 96.4% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 244,042 | 0.0% | 0 | 0 |
+| mixed | codex | 7,084,054 | 96.4% | 96.4% | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 243,947 | 0.0% | 0 | 0 |
 
 Today every loop request is an append, so nothing is invalidated or re-sent and no thinking is
-removed in flight. The one rewrite is `multiturn`'s turn start after the loop: it invalidates the
-whole loop and re-sends 1,716 tokens on Claude Code (1,327 on Codex), because the request it sends is
-16,817 tokens of which 15,101, the head, are read from the cache.
+removed in flight, and the two cache models agree: each request's newest breakpoint is a few blocks
+after the previous request's. The one rewrite is `multiturn`'s turn start after the loop: it
+invalidates the whole loop and re-sends 1,507 tokens on Claude Code (1,102 on Codex). The request it
+sends is 16,817 tokens; 15,101, the head, are read from the cache through the system breakpoint, and
+209 are the new prompt, which the engine joins to its index message (Codex: 14,865, the head 13,538,
+the prompt 225).
 
 ### Search and recall late in a loop
 
@@ -195,30 +242,35 @@ What the probes got. `refused`: the reply was "Recall budget for this turn is us
 the search returned the line from the request in view. `nothing`: "No paged-out turn contains every
 word of that query". `not_called`: the search named no page, so the model made no recall. "Results
 lost" counts scripted results that were, after the last request, neither whole in it nor byte for
-byte in a store page.
+byte in a store page. "Requests leaving a result unnamed" counts requests that left out a result the
+CLI had delivered in that conversation without a stub or fold note in the request naming it (rule 3).
 
-| scenario | dialect | conversation | searches | recalls | stubbed on arrival | results lost | count_tokens |
-|---|---|---|---|---|---|---|---|
-| loop120 | claude | main | refused 2 | not_called 2 | 0 | 0 | 8 sent, 0 different |
-| loop120 | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 sent, 0 different |
-| large | claude | main | refused 1 | not_called 1 | 0 | 0 | 1 sent, 0 different |
-| large | codex | main | refused 1 | not_called 1 | 0 | 0 | 0 sent, 0 different |
-| small (1,500) | claude | main | refused 2 | not_called 2 | 0 | 0 | 94 sent, 0 different |
-| small (260) | claude | main | in_view 1, refused 1 | not_called 2 | 0 | 0 | 17 sent, 0 different |
-| small (1,500) | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 sent, 0 different |
-| small (260) | codex | main | in_view 1, refused 1 | not_called 2 | 0 | 0 | 0 sent, 0 different |
-| subagent | claude | subagent | nothing 2 | not_called 2 | 0 | 0 | 14 sent, 0 different |
-| images | claude | main | refused 2 | not_called 2 | 0 | 0 | 7 sent, 0 different |
-| images | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 sent, 0 different |
-| multiturn | claude | main | refused 2 | not_called 2 | 0 | 0 | 7 sent, 0 different |
-| multiturn | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 sent, 0 different |
-| mixed | claude | main | refused 2 | not_called 2 | 0 | 0 | 3 sent, 0 different |
-| mixed | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 sent, 0 different |
+| scenario | dialect | conversation | searches | recalls | stubbed on arrival | results lost | requests leaving a result unnamed | count_tokens |
+|---|---|---|---|---|---|---|---|---|
+| loop120 | claude | main | refused 2 | not_called 2 | 0 | 0 | 0 | 8 sent, 0 different |
+| loop120 | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 | 0 sent, 0 different |
+| large | claude | main | refused 1 | not_called 1 | 0 | 0 | 0 | 1 sent, 0 different |
+| large | codex | main | refused 1 | not_called 1 | 0 | 0 | 0 | 0 sent, 0 different |
+| small (1,500) | claude | main | refused 2 | not_called 2 | 0 | 0 | 0 | 94 sent, 0 different |
+| small (260) | claude | main | in_view 1, refused 1 | not_called 2 | 0 | 0 | 0 | 17 sent, 0 different |
+| small (1,500) | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 | 0 sent, 0 different |
+| small (260) | codex | main | in_view 1, refused 1 | not_called 2 | 0 | 0 | 0 | 0 sent, 0 different |
+| subagent | claude | subagent | nothing 2 | not_called 2 | 0 | 0 | 0 | 14 sent, 0 different |
+| images | claude | main | refused 2 | not_called 2 | 0 | 0 | 0 | 7 sent, 0 different |
+| images | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 | 0 sent, 0 different |
+| multiturn | claude | main | refused 2 | not_called 2 | 0 | 0 | 6 | 7 sent, 0 different |
+| multiturn | codex | main | refused 2 | not_called 2 | 0 | 0 | 6 | 0 sent, 0 different |
+| mixed | claude | main | refused 2 | not_called 2 | 0 | 0 | 0 | 3 sent, 0 different |
+| mixed | codex | main | refused 2 | not_called 2 | 0 | 0 | 0 | 0 sent, 0 different |
 
 On the baseline no probe reached a stored result: nothing is paged inside a loop. Every search in a
 main conversation made after the room reached 0 was refused, although the line it asked for was in
 the request in view. The `small` probe at request 157 of the 260-round run came while the room was
 still open and was answered from the view.
+
+The 6 `multiturn` requests are turns 5 and 6, after the turn-start rotation paged the loop: each
+leaves out 110 results, all in pages byte for byte, and the index message the engine puts first names
+pages, not calls. `stubs.find_stubs` at v0.5.24 finds nothing, so none of them is named.
 
 Both of the subagent's searches found nothing, and that is not the room: search reads the retained
 snapshot, which only the main conversation publishes (contract PR #125), so a subagent's search never
@@ -243,29 +295,30 @@ sends the same history to `/v1/messages/count_tokens`. Every one got the same `s
 | multiturn | claude | main | request 29 | request 34 | 152,936 |
 | multiturn | codex | main | request 29 | request 34 | 151,587 |
 | mixed | claude | main | request 22 | request 26 | 152,240 |
-| mixed | codex | main | request 22 | request 26 | 150,457 |
+| mixed | codex | main | request 22 | request 26 | 150,471 |
 
 ### Estimate against the upstream's count
 
 After the first response the pre-send estimate is the last real input plus the added items at the
-session's measured ratio. In the loops of even-sized results the estimate is never more than 2,178
-tokens from the upstream's count (`mixed`, at request 2; 1,910 in `loop120`, 1,779 in `images`, 1,772
-in `subagent`). A large result arrives while the ratio is still mostly learned from head text, and is
-estimated low (`large`, Claude Code):
+session's measured ratio. From the second request on, in the loops of even-sized results, the
+estimate is never more than 2,178 tokens from the upstream's count (`mixed` on Codex, at request 2;
+2,173 in `mixed` on Claude Code, 1,911 in `loop120`, 1,188 in `images`, 1,365 in the subagent's loop,
+all at request 2 or 3). A large result arrives while the ratio is still mostly learned from head
+text, and is estimated low (`large`, Claude Code):
 
 | request | brings | estimate | upstream's count | estimate low by |
 |---|---|---|---|---|
-| 4 | the 60,000 result | 60,748 | 77,943 | 17,195 |
-| 7 | the 120,000 result | 185,247 | 200,217 | 14,970 |
-| 10 | the 200,000 result | 389,379 | 402,492 | 13,113 |
+| 4 | the 60,000 result | 60,724 | 77,943 | 17,219 |
+| 7 | the 120,000 result | 185,218 | 200,217 | 14,999 |
+| 10 | the 200,000 result | 389,351 | 402,492 | 13,141 |
 
 The engine logs `estimate_error` when real usage is more than 10% over the estimate. Each `large` run
-logged 2: at request 1 (15,669 against 13,897, before any ratio is measured) and at request 4.
+logged 2: at request 1 (15,669 against 13,901, before any ratio is measured) and at request 4.
 Requests 7 and 10 are within 10% and logged none. Request 1 is the event in most other runs too
 (`loop120` 1 on Claude Code and 2 on Codex, `subagent` 1, `multiturn` 1, `mixed` 2, `images` 0).
 
 The largest relative gap of any run is the other way, at `multiturn`'s turn start after the loop:
-the estimate of the rotated request was 22,712 and the upstream counted 16,817 (Codex: 20,202 and
+the estimate of the rotated request was 22,727 and the upstream counted 16,817 (Codex: 20,202 and
 14,865).
 
 ### The turn start after a long loop (`multiturn`)
@@ -277,10 +330,11 @@ the estimate of the rotated request was 22,712 and the upstream counted 16,817 (
 | Items forwarded at turn 5's start | 2 of 230 | 5 of 347 |
 | First request of turn 5 | 16,817 | 14,865 |
 | Cache invalidated by that rewrite | 536,573 | 537,948 |
-| Re-sent tokens at that rewrite | 1,716 | 1,327 |
+| Re-sent tokens at that rewrite | 1,507 | 1,102 |
 | Largest request of turns 5 and 6 | 24,226 | 22,378 |
-| Room at turn 5's start, before the send and after the response | 102,288 and 108,012 | 104,798 and 109,936 |
+| Room at turn 5's start, before the send and after the response | 102,273 and 108,012 | 104,798 and 109,936 |
 | Scripted results in the last request / in pages byte for byte / lost | 4 / 106 / 0 | 4 / 106 / 0 |
+| Results left out and named by nothing, per request of turns 5 and 6 | 110 | 110 |
 
 On Codex the items before the first prompt make one more page. Turns 1 to 3 are forwarded whole.
 
@@ -305,17 +359,33 @@ size in its own header, taken from the engine's own `contexto.tokens.image_token
 of the engine's estimate agrees with the upstream by construction.
 
 **Usage.** Messages: `input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` (the
-uncached part up to the last cache breakpoint) and `output_tokens`. Responses: `input_tokens` with
-`input_tokens_details.cached_tokens`, and `output_tokens`.
+tokens from the read up to the request's last breakpoint) and `output_tokens`. Responses:
+`input_tokens` with `input_tokens_details.cached_tokens`, and `output_tokens`.
 
-**Cache.** `cache_read` is the longest prefix an earlier request of the same conversation began
-with: the head (`tools` and `system`, or `instructions` and `tools`), then item by item, compared on
-the JSON with `cache_control` ignored and a string `content` read as one text block.
+**Cache.** Prefixes are compared on the JSON with `cache_control` ignored and a string `content` read
+as one text block.
+
+- Messages, by breakpoints, as the API caches (`docs/research/M0-interception.md`, "Prompt caching":
+  at most 4 breakpoints, a 20-block lookback). A request writes one entry at each block that carries
+  `cache_control`: the prefix up to and including that block, in the order `tools`, `system`, then
+  each message's top-level content blocks. It reads, at each of its own breakpoints, the longest
+  stored prefix that ends at that block or at one of the 20 blocks before it. A prefix no earlier
+  request marked is never read, however often it was sent. On an append Claude Code's newest-message
+  breakpoint finds the previous one a few blocks back, so the whole previous request is read. After a
+  rewrite more than 20 blocks behind the newest breakpoint, only a breakpoint whose prefix was written
+  before and is still intact reads anything: in Claude Code's requests that is the system breakpoint,
+  the head.
+- Responses: the longest prefix, the head (`instructions` and `tools`) then item by item, that an
+  earlier request of the same conversation began with, as OpenAI's automatic caching does.
+- On both APIs the harness also reports the any-prefix read (the Responses rule): on Messages an upper
+  bound on what is read, and so a lower bound on what a rewrite re-sends.
 
 **Reading a request.** Each request is read from its JSON as it arrives. The upstream remembers
 nothing about an engine's object by its identity, so a message the engine edits in place between two
 requests is judged as it is sent. The CLI's own history and head are read once; the harness digests
-them again at the end of a run and fails the run if the engine changed any of them.
+them again at the end of a run and fails the run if the engine changed any of them. With
+`check_wire`, which the target tests run with, it also digests them right after every call of the
+engine, so an edit made for the send and undone before the next request fails the run too.
 
 **Rules.** Each violation is counted by kind, per request; none raises.
 
@@ -327,6 +397,7 @@ them again at the end of a run and fails the run if the engine changed any of th
 | Messages | `duplicate_tool_use`, `duplicate_tool_result` | no id twice | the API's request validation; not measured in this repository |
 | Messages | `first_message_not_user` | the first message that is not a role `system` one is a user message | the API's request validation; not measured in this repository |
 | Messages | `empty_content` | no user or assistant message without content, no text block without text | the API's request validation; not measured in this repository |
+| Messages | `too_many_breakpoints` | at most 4 blocks carry `cache_control` (`tools`, `system` and the messages together) | M0-interception.md (vendor-documented) |
 | Messages | `system_before_first_user` | no role `system` message before the first user message | contract rule 1 (measured 400) |
 | Messages | `thinking_binding` | nothing before a kept thinking block changed: `system`, `tools`, earlier messages, and the blocks ahead of it in its own message | M0-interception.md, M0-paging-policy.md |
 | Messages | `thinking_modified` | a kept thinking block's text and signature are as emitted | M0-interception.md |
@@ -373,11 +444,14 @@ every baseline run.
 - Images are priced by the engine's own rule, so the harness cannot show an error in it. On Codex
   OpenAI prices by tiles (85 tokens at low detail, `contexto.codex`), so the Codex image counts err
   high [inferred].
-- The cache has no minimum prefix length, no expiry and no limit on breakpoints, and it ignores the
-  20-block lookback `docs/research/M0-interception.md` records: a prefix is read wherever it matches.
-  After a rewrite more than 20 blocks before a request's last breakpoint, the real Messages cache
-  reads back only to an explicit breakpoint, so the harness cannot tell an engine that places one at
-  the last unchanged block from one that does not. The cache-read share is an upper bound.
+- The cache has no minimum prefix length and no expiry, and every request of a conversation is
+  served by one cache (no replica or identity misses). On Messages it reads only at breakpoints, with
+  the 20-block lookback; the API may count block positions a little differently ("approximately 20").
+  An engine that wants a read after a rewrite needs a breakpoint at a stable position, such as where
+  its stubbed region ends, on the requests before the rewrite: those requests write that prefix, and
+  the rewrite request reads it back. A breakpoint placed only on the rewrite request writes its prefix
+  and reads nothing new. The breakpoint figures are the headline ones; the any-prefix figures bound
+  them.
 - The thinking check is the documented prefix rule alone. It does not model the per-identity binding
   the M0 probe saw on one route, `prefix_mismatch_behavior`, or `drop_block`.
 - Thinking kept both before and after a stripped range is what a rewrite in the middle of a loop
@@ -403,42 +477,60 @@ every baseline run.
 ## What D63 has to change
 
 `spikes/m2/inturn/tests/test_inturn_targets.py` holds one test per scenario and dialect (13), each
-marked `xfail(strict=True, raises=AssertionError)` and failing at v0.5.24. `targets.unmet(run)` is
-empty when a run keeps every rule below; `spikes/m2/inturn/targets.py` has one function per rule.
+marked `xfail(strict=True, raises=AssertionError)` and failing at v0.5.24. The runs behind them use
+`check_wire`. `targets.unmet(run)` is empty when a run keeps every rule below;
+`spikes/m2/inturn/targets.py` has one function per rule.
 
 A loop is one turn of one conversation after its first request. The turn's own items are the CLI's
-items since the turn's prompt, in the upstream's tokens.
+items since the turn's prompt, in the upstream's tokens. The room line is `bound - headroom_floor -
+min_turn_room`, 113,000 at the defaults.
 
 1. **Bound.** No request is over the bound: no `over_bound` event from the estimate or from real
    usage, and the largest forwarded request is at or under 150,000 by the estimate and by the
    upstream's count.
 2. **Violations.** The upstream counts no violation of any kind.
-3. **Byte-exact storage.** On every request, each tool result delivered so far is either whole in the
-   forwarded request or in a store page byte for byte: a `tool_result` block (Codex: an `*_output`
-   item) with that call's id whose content is the original's, compared as canonical JSON.
-4. **Stubs.** Every stub names the calls it stands for, and for each of them the page it names holds
-   the original byte for byte, or holds a stub for that call which leads, through at most 8 pages, to
-   a page that does. A stub may name no page only for the result of one of Contexto's own search,
-   recall or state calls. At least one stub has to be found.
+3. **Every result accounted for.** On every request, each tool result the CLI has delivered so far in
+   that conversation is either whole in that request or named in that same request by a stub or a
+   fold note that `stubs.find_stubs` returns. A fold note is a `StubRef` whose `call_ids` are the
+   calls of the rounds it folded and whose page is the page of those rounds. A result that is left
+   out with nothing in the request naming it fails. This holds for the turns a turn-start rotation
+   pages as well: the index message has to name their calls.
+4. **Stubs.** A stub or fold note names a call only when the page it names holds that call's original
+   result byte for byte (a `tool_result` block, on Codex an `*_output` item, with that call's id and
+   the original's content as canonical JSON), or holds a stub for that call that leads, through at
+   most 8 pages, to a page that does. A reference may name no page only for the result of one of
+   Contexto's own search, recall or state calls. Every stub found has to lead to its originals, and at
+   least one stub has to be found.
 5. **Thinking.** In a loop, the newest response comes back without its thinking on no more requests
    than the loop has prefix rewrites; thinking missing anywhere a rewrite does not cover is a
    violation (rule 2). Stripping all thinking on every request fails both.
 6. **Seen before stubbed.** A result is whole in the request that first carries it, unless the head,
    the turn's prompt and that request's new results together come to at least 90,400 tokens, which is
-   0.8 of `bound - headroom_floor - min_turn_room` (113,000); the 0.8 allows for the engine's estimate
-   differing from the upstream's count. In `large` on Claude Code that sum is 75,347 for the request
-   that brings the 60,000 result, so the model has to be shown it once; it is 135,347 and 215,347 for
-   the 120,000 and the 200,000 results, which may be stubbed on arrival.
-7. **Cache cost.** A loop has at most 2 prefix rewrites plus one for each 25,000 tokens (`bound / 6`)
-   of its own items, and no request in a loop is a rewrite right after another rewrite unless the
-   previous forwarded request plus the items added since is over 113,000 (`bound - headroom_floor -
-   min_turn_room`), where the room rule would fail without one. The re-sent share is
-   reported per scenario and has no ceiling: in a short run such as `large` it is dominated by the
-   number of requests.
+   0.8 of the room line; the 0.8 allows for the engine's estimate differing from the upstream's
+   count. In `large` on Claude Code that sum is 75,347 for the request that brings the 60,000 result,
+   so the model has to be shown it once; it is 135,347 and 215,347 for the 120,000 and the 200,000
+   results, which may be stubbed on arrival.
+7. **Cache cost.** Four limits, all on the loop's prefix rewrites:
+   - A loop request may rewrite its prefix only when the previous forwarded request plus what the CLI
+     added since is over 67,800 tokens (0.6 of the room line), by the upstream's count. A stub put on
+     a result that arrives in that request, with nothing before it changed, is not a rewrite.
+   - A loop has at most 2 prefix rewrites plus one for each 25,000 tokens (`bound / 6`) of its own
+     items.
+   - The tokens a loop's rewrites re-send, by the breakpoint model on Messages, are at most the loop's
+     own tokens or the bound, whichever is larger: in-turn paging may cost one extra send of the turn.
+   - A loop request is not a rewrite right after another rewrite unless the engine's own pre-send
+     estimate of it without the rewrite (`estimate` in its `request` event) is over 110,000, the room
+     line less 2% of the bound. The room rule reads the room the engine publishes from the same
+     estimate, so an engine whose estimate runs a little high is not made to break one rule to keep
+     the other. When the engine publishes no `estimate`, the upstream's count of the previous request
+     plus the items added is used.
 8. **Room.** Every main request in a loop publishes a room before the send and after the response,
    and every subagent response with a tool call publishes a side room. Once the turn's own items pass
    50,000 tokens the request-time room is never under 12,000 (`min_turn_room`), and the
-   response-time room is never 0 and is at least 6,000 on 95% of those requests.
+   response-time room is never 0 and is at least 6,000 on 95% of those requests. Every room tells the
+   truth by the upstream's count, on every request: a response-time room (main's or a side room) is at
+   most `bound - (input + output) - headroom_floor` from that response's usage, and a request-time
+   room at most `bound - headroom_floor - 0.9 x` the request's tokens.
 9. **Search and recall.** Late in a loop, the search for a line of an early result returns that line,
    from the request in view or from a page; when the result is no longer whole in the request the
    search names a page, and recalling that page at the offset the search gave returns the line and
@@ -446,39 +538,64 @@ items since the turn's prompt, in the upstream's tokens.
    request may be told that no page holds the line (see Limits).
 10. **`count_tokens`.** A `count_tokens` request with the same history gets the transform that was
     just forwarded and publishes no room (contract rule 11).
+11. **The CLI's objects are not touched.** The engine never edits the CLI's own history or head, not
+    even for one send: the target runs digest them right after every call of the engine.
 
 Rule 8 follows from the numbers: a request-time room of 12,000 means the estimate of every loop
-request past 50,000 tokens is at most 113,000.
+request past 50,000 tokens is at most 113,000. At v0.5.24 the request-time room is over the truth line
+on the first request of 9 of the 11 conversations and on `large` request 4 (above), so an engine that
+keeps today's estimate has to publish its request-time room from a more careful count.
 
-Each rule has an engine that breaks it and fails (`spikes/m2/inturn/tests/test_inturn_engines.py`):
-one whose stubs name a page that holds none of the results, one that strips all thinking on every
-request, one that stubs every result on arrival, one that rewrites the prefix on every request, one
-that publishes no room, one whose rooms are 1 token, and one that answers `count_tokens` with the
-CLI's own request.
+### Engines that break a rule
+
+Each rule has an engine that breaks it and fails (`spikes/m2/inturn/tests/test_inturn_engines.py`).
+All but the last two are `toy.py`'s pager (below) with one defect; the numbers are `loop120` on Claude
+Code at the target tests' size (120 rounds), where the quick build in the tests also fails.
+
+| engine | what it does | rules it fails | its numbers |
+|---|---|---|---|
+| `junk_page` | every stub names one page that holds none of the results | storage, recall | |
+| `no_stub_text` (reviewer A) | after the first page, a stubbed result becomes `[result removed]`; the pages are written | storage | 112 requests leave out up to 121 results named by nothing; search and recall still work |
+| `strip_all` | strips all thinking on every request | violations, thinking | |
+| `stub_on_arrival` | stubs every result in the request that first carries it | seen_first | |
+| `rewrite_always` | every request is a batch | cache | |
+| `show_once` (reviewer A) | every 4th request pages every result it is not the first to carry | cache (pressure) | 31 rewrites, all at 67,386 tokens or less; largest request 60,751 |
+| `trickle` (reviewer A) | batches from 100,000 down to 75,000 | cache (cost) | 23 rewrites re-send 1,132,587 against 803,268 of its own (Codex 955,462 against 804,674); passes the quick build |
+| batches from 112,500 to 87,500 (reviewer B) | | cache (cost) | 23 rewrites re-send 1,427,929 against 803,245 (Codex 1,223,177) |
+| `no_room` | publishes no room | room | |
+| `room_one` | every room is 1 token | room, recall | |
+| `lying_room` (reviewer A) | every room is 100,000 | room (truth) | 123 rooms over the line at request and 123 at response |
+| `in_place` (reviewer A) | clears the CLI's own oldest whole result for the send, restores it when the usage arrives | the run fails (rule 11) | passes every rule without `check_wire` |
+| a stub with no call | the `StubRef` names a page and no call | storage | |
+| `count_tokens` answered with the CLI's request | | count_tokens | |
 
 ### The rules can be kept together
 
 `spikes/m2/inturn/toy.py` is a pager written for the harness's tests. It is not the D63 design: it
-sizes requests with the upstream's own tokenizer, never removes a round, and keeps no state across a
-restart. It stubs a result on arrival when rule 6 allows it, and otherwise stubs the oldest results
-in a batch when a request would pass 100,000 tokens, down to 38,000. It meets every rule on every
-scenario and dialect at the sizes the target tests run:
+sizes requests with the upstream's own tokenizer, never removes a round, adds no breakpoint of its
+own, and keeps no state across a restart. It stubs a result on arrival when rule 6 allows it, and
+otherwise stubs the oldest results in a batch when a request would pass 100,000 tokens, down to
+38,000. Run at the target tests' sizes with `check_wire` (`replay.py --engine toy`, which exits 1 if
+any target is missed), it meets every rule on every scenario and dialect:
 
-| scenario | dialect | largest request | pages | rewrites in a loop | re-sent share | cache read |
-|---|---|---|---|---|---|---|
-| loop120 | claude | 98,501 | 118 | 11 | 0.5% | 89.3% |
-| loop120 | codex | 99,583 | 118 | 11 | 0.7% | 89.1% |
-| large | claude | 86,527 | 2 | 0 | 0.0% | 91.7% |
-| large | codex | 84,816 | 2 | 0 | 0.0% | 91.6% |
-| small (260) | claude | 99,672 | 250 | 2 | 0.2% | 98.7% |
-| small (260) | codex | 99,906 | 254 | 2 | 0.3% | 98.7% |
-| subagent | claude | 99,471 | 149 | 11 | 0.6% | 92.6% |
-| images | claude | 99,278 | 92 | 5 | 0.4% | 93.6% |
-| images | codex | 99,216 | 94 | 5 | 0.4% | 93.4% |
-| multiturn | claude | 99,952 | 99 | 7 | 0.6% | 92.0% |
-| multiturn | codex | 99,203 | 99 | 7 | 0.7% | 91.8% |
-| mixed | claude | 97,795 | 42 | 3 | 0.7% | 90.5% |
-| mixed | codex | 99,876 | 68 | 3 | 1.1% | 90.3% |
+| scenario | dialect | largest request | pages | rewrites in a loop | mean re-sent | largest re-sent | re-sent | re-sent, any prefix | loops' own tokens | re-sent share | cache read |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| loop120 | claude | 98,501 | 118 | 11 | 13,292 | 19,288 | 146,208 | 43,995 | 803,268 | 1.8% | 88.0% |
+| loop120 | codex | 99,583 | 118 | 11 | 5,289 | 14,627 | 58,177 | 58,177 | 804,674 | 0.7% | 89.1% |
+| large | claude | 86,527 | 2 | 0 | 0 | 0 | 0 | 0 | 391,304 | 0.0% | 91.7% |
+| large | codex | 84,816 | 2 | 0 | 0 | 0 | 0 | 0 | 391,156 | 0.0% | 91.6% |
+| small (260) | claude | 99,672 | 250 | 2 | 31,706 | 40,051 | 63,412 | 39,303 | 153,773 | 0.4% | 98.6% |
+| small (260) | codex | 99,906 | 254 | 2 | 21,290 | 24,804 | 42,581 | 42,581 | 153,296 | 0.3% | 98.7% |
+| subagent | claude | 99,471 | 149 | 11 | 19,119 | 24,293 | 210,305 | 84,022 | 873,208 | 1.6% | 91.6% |
+| images | claude | 99,278 | 92 | 5 | 16,807 | 19,930 | 84,034 | 27,512 | 388,688 | 1.2% | 92.8% |
+| images | codex | 99,216 | 94 | 5 | 5,526 | 10,889 | 27,629 | 27,629 | 388,865 | 0.4% | 93.4% |
+| multiturn | claude | 99,952 | 99 | 7 | 14,705 | 17,454 | 102,938 | 41,862 | 547,655 | 1.4% | 91.1% |
+| multiturn | codex | 99,203 | 99 | 7 | 6,876 | 14,461 | 48,132 | 48,132 | 549,054 | 0.7% | 91.8% |
+| mixed | claude | 97,795 | 42 | 3 | 11,994 | 12,808 | 35,981 | 22,183 | 247,817 | 1.2% | 90.1% |
+| mixed | codex | 99,890 | 68 | 3 | 11,136 | 14,218 | 33,409 | 33,409 | 247,595 | 1.1% | 90.3% |
 
 Every probe in these runs was answered: the searches returned the line from a page (`large`: from the
-view) and the recalls returned the original lines.
+view) and the recalls returned the original lines. On Claude Code the breakpoint model makes the toy's
+re-sent tokens 1.6 to 3.3 times the any-prefix figure, because the toy keeps no breakpoint behind its
+batches: each rewrite reads back only the head. Its re-sent tokens are at most 41% of a loop's own
+tokens (`small` on Claude Code, 63,412 of 153,773), within rule 7's ceiling of one extra send.
