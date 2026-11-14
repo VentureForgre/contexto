@@ -39,7 +39,8 @@ def _seconds(text: str) -> float:
     return value
 
 
-def add(parser: Any) -> None:
+def add_shared(parser: Any) -> None:
+    """The options the live run and ``--dry-run`` both take, added with ``add_option`` by both."""
     add_option(parser, "--model", default=None, metavar="M",
                help="the model every arm runs, for example claude-haiku-5-5 (the live run needs it)")
     add_option(parser, "--arms", type=_arms, default=ARMS, metavar="LIST",
@@ -48,37 +49,41 @@ def add(parser: Any) -> None:
                help="the most tokens the run may use, input and output of every arm together, counting what an "
                     "earlier run already recorded in OUT. The live run refuses to start without it or when the "
                     "plan's worst case is above it, and stops before passing it; --dry-run prints the figure to pass")
-    add_option(parser, "--upstream", default=None, metavar="URL",
+
+
+def add_live(parser: Any) -> None:
+    """The live run's own options (``contexto.bench.modes.live.OWN_OPTIONS``), added by that mode alone."""
+    parser.add_argument("--upstream", default=None, metavar="URL",
                help=f"the model API's base URL (default $ANTHROPIC_BASE_URL when it is set, else {DEFAULT_UPSTREAM}; "
                     "inside a Claude Code or Contexto session that variable may name a local proxy). The manifest "
                     "records only its kind and where it came from, never the host; a run against 127.0.0.1 is "
                     "labelled a stub run")
-    add_option(parser, "--key-helper", default=None, metavar="COMMAND",
+    parser.add_argument("--key-helper", default=None, metavar="COMMAND",
                help="a command that prints your API key, run with /bin/sh -c when a key is needed, as Claude Code "
                     "runs an apiKeyHelper. Without it and without --settings the key is $ANTHROPIC_API_KEY. A key "
                     "is never given on the command line")
-    add_option(parser, "--settings", type=Path, default=None, metavar="FILE",
+    parser.add_argument("--settings", type=Path, default=None, metavar="FILE",
                help="a Claude Code settings file whose apiKeyHelper prints your API key")
-    add_option(parser, "--allow-git-out", action="store_true",
+    parser.add_argument("--allow-git-out", action="store_true",
                help="allow OUT inside a git work tree (refused by default, so results are not committed by accident)")
-    add_option(parser, "--work", type=Path, default=None, metavar="DIR",
+    parser.add_argument("--work", type=Path, default=None, metavar="DIR",
                help="where the units' working directories are made: Claude Code's and Contexto's session files, "
                     "removed after each unit (default: a new temporary directory). It must be outside any git "
                     "work tree")
-    add_option(parser, "--keep-work", action="store_true", help="keep the units' working directories")
-    add_option(parser, "--cache-ttl", choices=("5m", "1h"), default="5m",
+    parser.add_argument("--keep-work", action="store_true", help="keep the units' working directories")
+    parser.add_argument("--cache-ttl", choices=("5m", "1h"), default="5m",
                help="the prompt cache lifetime both Claude Code arms are told to use "
                     "(CLAUDE_CODE_PROMPT_CACHE_TTL) and the full arm marks its history with (default 5m)")
-    add_option(parser, "--turn-timeout", type=_seconds, default=1_800.0, metavar="SECONDS",
+    parser.add_argument("--turn-timeout", type=_seconds, default=1_800.0, metavar="SECONDS",
                help="stop a unit when a turn has no result for this long (default 1800)")
-    add_option(parser, "--max-turn-requests", type=_tokens, default=TURN_REQUEST_CAP, metavar="N",
+    parser.add_argument("--max-turn-requests", type=_tokens, default=TURN_REQUEST_CAP, metavar="N",
                help="stop a unit as runaway when one script turn asks for more than N billed requests (default "
                     f"{TURN_REQUEST_CAP}; the recorded runs needed at most 6, the tool-loop turn needs 11); the run "
                     "goes on with the next unit")
-    add_option(parser, "--max-unit-tokens", type=_tokens, default=None, metavar="T",
+    parser.add_argument("--max-unit-tokens", type=_tokens, default=None, metavar="T",
                help="stop a unit as runaway when it would pass T tokens (default: twice the unit's planned worst "
                     "case); the run goes on with the next unit")
-    add_option(parser, "--context-window", type=_tokens, default=None, metavar="TOKENS",
+    parser.add_argument("--context-window", type=_tokens, default=None, metavar="TOKENS",
                help="the model's context window, for the full arm's fit check (default: the published window of "
                     "a model the benchmark knows, else 200,000)")
 

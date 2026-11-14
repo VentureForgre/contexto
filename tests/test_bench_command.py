@@ -344,6 +344,7 @@ THIEF_MODE = (
 ])
 def test_a_mode_that_lists_an_option_it_did_not_add_is_a_mode_bug(tmp_path, monkeypatch, capsys, name, listed,
                                                                     says):
+    _only_script_only(tmp_path, monkeypatch)
     _mode(tmp_path, monkeypatch, "t_live", OWN_DEFAULT_MODE)
     (tmp_path / "t_replay.py").write_text(OWN_FLAG_MODE, encoding="utf-8")
     (tmp_path / f"{name}.py").write_text(THIEF_MODE.replace("LISTED", repr(listed)), encoding="utf-8")

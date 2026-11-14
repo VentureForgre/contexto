@@ -24,7 +24,7 @@ from contexto.bench import script as bench_script
 from contexto.bench.arms import ARMS
 from contexto.bench.arms import full as full_arm
 from contexto.bench.arms import plain as plain_arm
-from contexto.cli import main
+from contexto.cli import build_parser, main
 
 KEY = "sk-ant-api03-UNIT-test-key-55aa"
 
@@ -727,3 +727,15 @@ def test_starting_any_contexto_command_does_not_import_the_benchmarks_machinery(
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert "HEAVY []" in proc.stderr, proc.stderr
     assert "--budget-tokens" in proc.stdout and "--dry-run" in proc.stdout and "--key-helper" in proc.stdout
+
+
+def test_this_builds_modes_pass_the_mode_bug_check():
+    # The contract's check (contexto.commands.bench): every option in a mode's OWN_OPTIONS is one that mode
+    # adds itself; the options the live run shares with --dry-run are added by both with add_option.
+    from contexto.bench.modes import dry_run, live
+
+    args = build_parser().parse_args(["bench"])
+    assert args._bench_bugs == []
+    own = {option for module, option, _dest, _default in args._bench_own if module is live}
+    assert own == set(live.OWN_OPTIONS)
+    assert not getattr(dry_run, "OWN_OPTIONS", ())
