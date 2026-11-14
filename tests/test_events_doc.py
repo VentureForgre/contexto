@@ -26,6 +26,9 @@ What they guarantee:
   - a key unpacked into the event with ``**``, from a dict display written in place (either branch of
     a conditional expression) or from a local variable that the same function assigns only dict
     displays to;
+  - a key of the dict a function of the same file returns, when the event unpacks a call to it, by
+    bare name or on ``self`` or ``cls``, with ``**`` (``**self._sizes()``): read from that function's
+    ``return`` statements in the forms ``RETURNED_FIELDS`` reads (below);
   - a key stored later on the same local variable (``v["key"] = ...``, ``v.update(key=...)``,
     ``v.update({"key": ...})``, ``v.update(**local)``, ``v.setdefault("key", ...)``) when that
     variable holds one event name in its function and is bound to nothing else there;
@@ -246,6 +249,7 @@ class Site:
     reference: str | None = None  # the variable the value is, when it is a bare name
     callee: str | None = None  # for ``event=`` in a call that builds no dict: what is called, as written
     built: tuple[int, int] | None = None  # where the dict assigned to ``variable`` starts: (line, column)
+    spread_calls: tuple[tuple[str, bool, int], ...] = ()  # the calls unpacked into it with ``**``
 
     @property
     def where(self) -> str:
@@ -365,32 +369,43 @@ def _builds_dict(value: ast.AST | None) -> bool:
                                            and value.func.id == "dict")
 
 
-def _display_keys(node: ast.Dict, fields: list[tuple[str, int]], spreads: list[str]) -> None:
+Calls = list[tuple[str, bool, int]]  # calls unpacked with ``**``: (the function, on ``self`` or ``cls``, line)
+
+
+def _display_keys(node: ast.Dict, fields: list[tuple[str, int]], spreads: list[str],
+                  calls: Calls | None = None) -> None:
     """The literal keys of a dict display other than ``event``, and what it unpacks with ``**``."""
     for key, value in zip(node.keys, node.values):
         if key is None:
-            _spread(value, fields, spreads)
+            _spread(value, fields, spreads, calls)
         elif (text := _string(key)) is not None and text != "event":
             fields.append((text, value.lineno))
 
 
-def _spread(value: ast.AST, fields: list[tuple[str, int]], spreads: list[str]) -> None:
+def _spread(value: ast.AST, fields: list[tuple[str, int]], spreads: list[str], calls: Calls | None = None) -> None:
     """What ``**value`` adds: the keys of a dict display written in place (either branch of a conditional
-    expression), or the name of a local variable, resolved once its function has been scanned."""
+    expression), the name of a local variable, resolved once its function has been scanned, and, when
+    ``calls`` is given, a call by bare name or on ``self`` or ``cls``, resolved once the module has been."""
     if isinstance(value, ast.Dict):
-        _display_keys(value, fields, spreads)
+        _display_keys(value, fields, spreads, calls)
     elif isinstance(value, ast.IfExp):
-        _spread(value.body, fields, spreads)
-        _spread(value.orelse, fields, spreads)
+        _spread(value.body, fields, spreads, calls)
+        _spread(value.orelse, fields, spreads, calls)
     elif isinstance(value, ast.Name):
         spreads.append(value.id)
+    elif isinstance(value, ast.Call) and calls is not None:
+        func = value.func
+        if isinstance(func, ast.Name):
+            calls.append((func.id, False, value.lineno))
+        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in ("self", "cls"):
+            calls.append((func.attr, True, value.lineno))
 
 
-def _call_keys(node: ast.Call, fields: list[tuple[str, int]], spreads: list[str]) -> None:
+def _call_keys(node: ast.Call, fields: list[tuple[str, int]], spreads: list[str], calls: Calls | None = None) -> None:
     """The keyword arguments of a call other than ``event``, and what it unpacks with ``**``."""
     for kw in node.keywords:
         if kw.arg is None:
-            _spread(kw.value, fields, spreads)
+            _spread(kw.value, fields, spreads, calls)
         elif kw.arg != "event":
             fields.append((kw.arg, kw.value.lineno))
 
@@ -406,12 +421,13 @@ class _Scan(ast.NodeVisitor):
         return ".".join(self._scope) or "<module>"
 
     def _site(self, value: ast.AST, fields: list[tuple[str, int]], built: ast.AST | None = None,
-              spreads: list[str] | None = None, callee: str | None = None) -> None:
+              spreads: list[str] | None = None, callee: str | None = None, calls: Calls | None = None) -> None:
         variable = self._assigned.get(id(built)) if built is not None else None
         self.module.sites.append(Site(self.module.path, value.lineno, self.scope, _names(value), ast.unparse(value),
                                       tuple(fields), variable, tuple(spreads or ()),
                                       value.id if isinstance(value, ast.Name) else None, callee,
-                                      (built.lineno, built.col_offset) if variable is not None else None))
+                                      (built.lineno, built.col_offset) if variable is not None else None,
+                                      tuple(calls or ())))
 
     def _bind(self, name: str, line: int, value: ast.AST | None = None) -> None:
         """``name`` is bound in this scope other than as a parameter; ``value`` is a dict it is assigned."""
@@ -482,9 +498,10 @@ class _Scan(ast.NodeVisitor):
         if events:
             fields: list[tuple[str, int]] = []
             spreads: list[str] = []
-            _display_keys(node, fields, spreads)
+            calls: Calls = []
+            _display_keys(node, fields, spreads, calls)
             for value in events:
-                self._site(value, fields, node, spreads)
+                self._site(value, fields, node, spreads, calls=calls)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -493,11 +510,12 @@ class _Scan(ast.NodeVisitor):
         method = func.attr if isinstance(func, ast.Attribute) else None
         fields: list[tuple[str, int]] = []
         spreads: list[str] = []
-        _call_keys(node, fields, spreads)
+        calls: Calls = []
+        _call_keys(node, fields, spreads, calls)
         for kw in node.keywords:
             if kw.arg == "event":  # dict(event=...), x.update(event=...), or a function that takes ``event``
-                self._site(kw.value, fields if builds else [], node,
-                           spreads if builds else None, None if builds or method == "update" else ast.unparse(func))
+                self._site(kw.value, fields if builds else [], node, spreads if builds else None,
+                           None if builds or method == "update" else ast.unparse(func), calls if builds else None)
         if method == "setdefault" and len(node.args) >= 2 and (key := _string(node.args[0])) is not None:
             if key == "event":
                 self._site(node.args[1], [])
@@ -813,6 +831,19 @@ def returned_keys(module: Module, scope: str, value: ast.expr, index: int | None
     return fields
 
 
+def _spread_call_keys(module: Module, site: Site) -> list[tuple[str, str]]:
+    """The keys a function of the module returns, for each call to it that ``site`` unpacks with ``**``, as
+    far as ``returned_keys`` reads them; each with how the test knows of it."""
+    out = []
+    for name, on_self, line in site.spread_calls:
+        for function in _callees(module, Call(site.scope, line, name, on_self, (), ())):
+            for scope, value in module.returns:
+                for key, at in returned_keys(module, scope, value, None) if scope == function.scope else ():
+                    out.append((key, f"returned at {module.path}:{at} by {scope}, whose result {site.scope} "
+                                     f"unpacks into the event with ** at {module.path}:{line}"))
+    return out
+
+
 @dataclass(frozen=True)
 class Known:
     """How the test knows of a field. ``how`` completes the sentence "the entry does not list the field `x`,
@@ -837,6 +868,8 @@ def written_fields(modules: list[Module], tables: Tables) -> dict[tuple[str, str
                 for name in site.names:
                     for key, line in [*site.fields, *unpacked]:
                         add(name, key, module.path, Known(f"written at {module.path}:{line}"))
+                    for key, how in _spread_call_keys(module, site):
+                        add(name, key, module.path, Known(how))
         held = held_names(module, tables)
         carrying = carried(module, tables)
         stores = [*module.stores, *((scope, variable, key, line) for scope, variable, spread in module.spread_stores
@@ -1965,6 +1998,27 @@ def test_fields_a_named_function_returns_are_read_and_a_stale_name_is_reported()
         "RETURNED_FIELDS in tests/test_events_doc.py names the function `Tools.gone` in tools.py for the event "
         "`called`, but tools.py has no function of that name; correct it to the function whose return value becomes "
         "fields of `called` now, or remove it and list those fields in HELPER_FIELDS"]
+
+
+def test_a_call_unpacked_into_an_event_gives_the_keys_its_function_returns():
+    source = '''
+class Server:
+    def start(self, log, other):
+        log({"event": "started", "port": 1, **self._pages(), **sizes(), **other.pages()})
+
+    def _pages(self):
+        count = 1
+        return {} if count is None else {"pages": count}
+
+def sizes():
+    found = {"budget": 1}
+    found["room"] = 2
+    return found
+'''
+    fields = written_fields([scan_source(source, "server.py")], NONE)[("started", "server.py")]
+    assert set(fields) == {"port", "pages", "budget", "room"}  # not what a call on another object returns
+    assert fields["pages"].how == ("returned at server.py:8 by Server._pages, whose result Server.start unpacks "
+                                   "into the event with ** at server.py:4")
 
 
 def test_a_key_stored_on_a_variable_that_holds_two_events_must_be_named_in_helper_fields():
