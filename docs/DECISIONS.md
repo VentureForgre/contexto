@@ -3525,6 +3525,272 @@ the owner's delegation. Open decisions are listed at the end with the options an
     short words falsely.
   - **General stemming:** rejected by D34.
 
+- **D66. `contexto bench`: a benchmark an outsider can run, with plain Claude Code as an arm.**
+  Claude, 2026-11-14, under D0; no contract change (the proxy and the launcher are unchanged). An
+  audit on 2026-11-12 found that the evidence for "accuracy equals full context" (D2) could not
+  carry more: run #4's 52 of 54 against 47 is exact McNemar p = 0.18 with disjoint misses (2 and
+  7), runs #3, #4 and the Opus run share one seed (20261016), the session is generated log text
+  with facts planted under unique keys, the baseline is a raw API replay answering with
+  `tool_choice: none`, plain Claude Code with its own compaction was never run, and only someone
+  with the owner's key helper and private transcripts could rerun or audit the scoring. The owner
+  asked for one command anyone can run. Built in PRs #255 (foundation, merged as f826c464), #262
+  (scale harness, c46de5b4), #264 (report and charts, 6e4e6b12), #273 (live runner, 66336669) and
+  #269 (replay, c476834f), then #289 (the replay's head and trace after D69, 93b40c1d) and #286
+  (the reviewers' follow-ups, f5c8f29a), each with two reviewer agents, at zero model spend: every
+  test runs against stub CLIs and fake upstreams on 127.0.0.1. Docs in #282. The guide is
+  [docs/bench.md](bench.md).
+  - **In the package.** `src/contexto/bench/` and `contexto bench`, standard library only, no new
+    runtime dependency. Reason: an outsider who installed a release runs `contexto bench --replay`
+    with no clone, and the live arms drive the same `contexto run claude` the user has. `spikes/`
+    stays the frozen record of runs #1 to #4; the package imports nothing from it (the wheel has no
+    spikes), so the generator was ported and tests prove the port identical.
+  - **Modes of one command**, discovered from `contexto.bench.modes`: the live run (no mode flag),
+    `--dry-run`, `--script-only`, `--replay`, `--report DIR...` and `--chart RESULTS`. A mode's own
+    options are refused without its mode, so `contexto bench --dump-trace DIR` can never start a
+    live run. Reason: one command with one set of shared options (seed, seeds, bound, protocol)
+    keeps the keyless modes and the live run on the same script, and a mode found by discovery
+    needs no edit to the command to add.
+  - **Protocols.** Reason for two: `d27` keeps continuity with runs #3 and #4, and `v2` adds
+    questions that do not name their key, which the audit said suits word search. `d27`: the 54
+    probes of runs #3 and #4, turn texts and probe fields
+    byte-identical to `spikes/m2/acceptance/run.py::build_script` for any seed, bound and turn size
+    (216 scripts compared by a reviewer, 280 by the builder). `v2` (default): every `d27` turn and
+    probe unchanged plus 18 probes, 72 in all, whose questions name no key: `paraphrase` (the
+    attribute in other words, the service named in words, 3 decoy `cfg` lines per service so a
+    search by service name shows 4 candidates), `concluded` (the fact exists only as the
+    assistant's own `DECISION <label>: <value>` reply; mean lexical overlap with the plant 0.00
+    words) and `toolloop` (facts in 10 generated files read one at a time with the file-read tool;
+    the same decoy rule). Measured with the real store search on generated pages, 4,560 probes per
+    class: the plant's page comes first for `paraphrase` 50.0% with the hyphenated service name and
+    16.4% with two words, for `toolloop` 96.3% and 79.5%, and is always in the top 3 with the
+    hyphenated name, with at least 2 decoys shown. So these classes test picking the right line
+    among 3 or 4 shown; `paged_only` is the keyed control of the same age. Seeds are `--seed BASE`
+    and `--seeds N`; `--repeats R` repeats the first seed.
+  - **Scoring**: exact match after normalisation, no model judge. Reason: a reader can rerun it and
+    get the same score; a judge would add a second model's errors. Accepted cost: a right answer in
+    another form counts as wrong, in every arm alike. Four deliberate differences from the spike's
+    scoring are under "Departures from the brief".
+  - **Three arms on the same script per seed**, arm order rotated by seed: `contexto` (one
+    long-lived `contexto run --bound B claude -p --input-format stream-json ...`); `full` (direct
+    Messages API requests built from the script alone, scripted replies and file reads,
+    `tool_choice: none`, one request per probe turn carrying earlier probe turns with its own
+    answers, `not_run` with a reason when it does not fit); `plain` (the same headless Claude Code
+    with no Contexto, its auto-compact window set so that compaction fires near the bound, at
+    bound + 33,000; at its defaults it would compact near 967,000 tokens and not at all in this
+    session). Reason: `full` is the earlier baseline, so results stay comparable with runs #3 and
+    #4, and `plain` is the comparison users care about, which had never been run. Every difference
+    is listed in the manifest's `arm_differences`. Both Claude Code arms run with
+    `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`; on 2.1.322 it removes `run_in_background` and about
+    771 characters from the Agent and Bash tool definitions, in both arms alike. It does not cover
+    the Monitor tool or MCP background tasks; a `result` from either, or any `result` that answers
+    no turn, stops the unit as `desync`.
+  - **Plain arm's compaction.** Every documented control sets the auto-compact window (100,000 to
+    1,000,000 tokens, capped at the model's window), and Claude Code compacts 33,000 below it. The
+    33,000 was read in the installed 2.1.322 bundle, not documented, and is not confirmed live. The
+    arm sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to bound + 33,000 (183,000 at 150,000), valid for
+    bounds 67,000 to 967,000. Not exact: Claude Code checks the last usage plus a local estimate,
+    so a large turn lands first. Stub runs with the real 2.1.322 at bound 150,000: `pre_tokens`
+    148,159, 167,202, 168,178 and 147,140; largest plain request 158,168. The manifest records the
+    setting and every `pre_tokens`. At its defaults Claude Code on these models (1,000,000-token
+    windows) would compact near 967,000 tokens and would not compact at all in the default `v2`
+    session (467,012 estimated tokens). Reason for moving the trigger: the owner asked for plain
+    Claude Code with its compaction set to the same bound, so that both Claude Code arms work under
+    one limit; the docs say it is a choice, not Claude Code's default.
+  - **Metering and spend guards.** One pass-through meter on 127.0.0.1 for every arm records counts
+    only (tokens by class, status, turn, main or side), never content. Each request reserves its
+    bytes / 1.5 plus its `max_tokens` before it leaves; unreadable usage counts as the reservation;
+    `--budget-tokens` is required and covers the output directory; the first 401 or 403 stops the
+    run. Per unit: 60 answered requests per script turn (recorded runs needed at most 6, the
+    tool-loop turn needs 11), `--max-turn-failures` (default 200) and twice the unit's planned worst
+    case; a turn with no metered request stops the unit as `unmetered`. A unit stops as `desync`,
+    `runaway`, `api_error` or `unmetered` (among others) when it must, and writes no probe lines. A
+    request sent that got no upstream response is counted (`requests_unanswered`,
+    `unanswered_tokens`) and keeps its reservation as spent, since it may have been billed. On
+    resume, a torn last line is set aside in `<file>.torn-<n>`. A reservation journal (#286):
+    before forwarding a billed request the meter appends `{arm, seed, repeat, attempt, n,
+    reserved_tokens}` to `reservations.jsonl` in `--out` and closes the file, and a request that
+    gets no response gets a second line (`unanswered`, `kept_tokens`); a request whose line cannot
+    be written is not sent (a local 500, "the reservation journal could not be written"). On
+    resume, every entry with neither a whole record nor a second line counts in `spent_tokens` at
+    its reservation (manifest `in_flight`, `requests_in_flight`, `in_flight_tokens`, recomputed at
+    each start). Every request record carries `reserved_tokens` near the start of its line, so a
+    torn record the journal does not have counts at the reservation its fragment names, or at the
+    file's largest (`counted_from`); one with neither counts 0 and the resumed run warns that the
+    report's cost is a lower bound. Reason: a kill must not leave a billed request out of the
+    budget guard. The line survives a killed process, not a power loss; an `fsync` per request
+    would add a disk wait to each one. A watchdog stops a unit's
+    processes if the runner dies (all gone within 1.7 s of SIGKILL). Managed Claude Code settings
+    that would change routing, compaction, permissions, the model, MCP servers, hooks or the system
+    prompt refuse the run. Outputs record the upstream only as `anthropic`, `custom` or `local`; no
+    key, helper command, hostname or home path reaches an output (planted-secret tests). Reason:
+    the output directory is meant to be published as it is.
+  - **Statistics**: Wilson 95% intervals; exact McNemar; Tango's score interval for paired
+    differences; `significant` only when the interval excludes zero and McNemar p < 0.05 (4 against
+    0 of 72 gives an interval excluding zero and p = 0.125). Seed level: exact sign-flip permutation
+    test (Monte Carlo above 20 seeds) and a Student t interval on per-seed differences, none below 3
+    seeds or when every seed has the same difference. Reason for the seed level: probes in one
+    session are not independent. Simulated coverage of the t interval (4,000 benchmarks of 72
+    probes): 94.7% to 95.7% at 3 to 20 seeds with the discordance rates fixed across seeds at (0.10,
+    0.04), (0.13, 0.04) or (0.06, 0.06); 92.1% at 3 seeds at (0.03, 0), where one arm almost never
+    wins alone; 75.6% to 89.7% at 3 to 20 seeds at (0.03, 0) when the rates vary between seeds; a
+    percentile bootstrap, tried first, covered 49%, 75% and 83% at 2, 3 and 5 seeds and was
+    replaced.
+  - **Verdict rule.** A direction between two arms is named only when the pooled result is
+    significant, the seed-level sign-flip p < 0.05, and both point the same way. With fewer than 6
+    seeds the seed-level test cannot reach 0.05 (2 / 2^5 = 0.0625), and a seed whose difference is
+    exactly 0 carries no sign. Run-to-run noise from repeats of the first seed is reported beside
+    each pair, not used as a gate, because one session's range is not comparable with a mean over
+    seeds.
+  - **Cost** at every model in a published price table with its source and access date
+    (`src/contexto/bench/data/prices.json`, platform.claude.com pricing page, read 2026-11-12),
+    applied per request. Reason: fewer tokens is not always less money (claude-haiku-5-5's price
+    steps up on a prompt over 100,000 tokens, and cache reads cost a tenth or less of a write), so
+    each arm is priced as billed, request by request. USD per million tokens, input / 5-minute write
+    / 1-hour write / cache read / output: claude-haiku-5-5 0.10 / 0.125 / 0.20 / 0.01 / 0.50 up to
+    100,000 input tokens and 0.50 / 0.625 / 1.00 / 0.05 / 2.50 above (applied to the whole request,
+    output included: a reading of the page, stated as such and held as data); claude-sonnet-5-5 2.00
+    / 2.50 / 4.00 / 0.10 / 10.00; claude-opus-5-5 4.00 / 5.00 / 8.00 / 0.20 / 20.00;
+    claude-fable-5-2 8.00 / 10.00 / 16.00 / 0.20 / 40.00. Unreadable usage gives a cost range; its
+    upper bound also counts, at their reservations and the model's highest rate, the requests with
+    no record: unanswered, torn and in flight at a kill (`results.json`: `no_record` per arm and in
+    `all_requests`, inside every `cost_upper`; #286). Retried units: every attempt's tokens and cost
+    count; accuracy uses the completed attempt.
+  - **Replay** (`contexto bench --replay`, keyless). Reason: anyone can check the bound and search
+    reach with no key and no spend, and a change to the proxy that moves a measurement fails it. A
+    pinned 11,208-byte trace whose turn texts are regenerated from the seed and checked against
+    pinned hashes; the real proxy over HTTP with a synthetic Claude Code-shaped client and a fake
+    upstream that checks every request against the Messages API's structural rules; every
+    environment variable the package reads held at its default; the store's real search for each
+    planted fact. Pinned session (seed 20261016, `v2`, bound 150,000, 48 content and 8 probe turns,
+    952,971 estimated tokens of history, 6.35 times the bound, 956,104 with the probe turns;
+    synthetic head 21,377): 138 requests, the first 44,373 estimated tokens and the largest 116,067,
+    0 over the bound by both counts, 14 rotations, 46 pages, no failure event, no compaction marker.
+    Search reach under mechanical queries, counted with the store's strict search
+    (`SessionStore.search`), not the search tool's reply: 43 of 72 by the fixed rule, all 43 in the
+    top 3 (54 with facts still in view), 55 of 72 by the best query from the question's own words
+    (whole-word matches, top 3); 59 paged; `paraphrase` 0 and 6, `concluded` 0 and 0, `toolloop` 0
+    and 6, every `d27` class equal in both columns (`chain` paged 21, found 23; `multihop` paged 6,
+    found 6). Since D65 the tool's fallback also answers 1 of the 18 queries the strict rule misses
+    (`q_r_02`, `paraphrase`): its reply shows the plant on the second of the three pages it shows in
+    detail, beside two decoy lines. Modelled, not run: full context's last request 977,481 estimated
+    tokens; plain Claude Code compacting 8 times with a largest request of 140,512 (summary 7,920
+    tokens from `docs/research/M0-proxy-measurements.md`; what survives a compaction is assumed,
+    erring toward plain Claude Code). A replay cannot show answer accuracy, cache reads, real token
+    counts, or what a real CLI or model does, and says so.
+  - **The replay's head carries fixed synthetic tool text** (#289, 93b40c1d). D69 (#279) lengthened
+    the `contexto_pin` tool description by 213 bytes (+71 estimated tokens on every request) and the
+    preamble's pin rule by 100 bytes (+34 estimated tokens a request from the first rotation, +56
+    from the third, where the fake upstream prices the preamble as log text); together they moved
+    each rotation from turn 33 on one turn earlier, so turn 46 was no longer paged before the
+    probes, and the pinned replay failed on `main`. Decision: the synthetic head sends Contexto's
+    five tools under their real names with fixed, plainly synthetic descriptions and schemas
+    (`contexto.bench.replay.client.CONTEXTO_TOOLS`, 3,290 bytes of JSON against 3,291 for the
+    shipped tools, real parameter names), and the trace was recorded again. The preamble, page
+    index, pinned state and the search server's replies stay measured. Reason: the proxy reads the
+    tool list only by name (`contexto.toolcheck`), as a hash (the head fingerprint) and as a size,
+    never a description's words, so rewording a tool must not move a pinned value; a change to what
+    the proxy itself injects still must, which is what the trace is for. Moved by the re-record:
+    head 21,306 to 21,377, largest 116,306 to 116,067, pages 47 to 46, paged 66 to 59, strict reach
+    48 to 43, best query 60 to 55; covered stays 54 and the bound holds.
+  - **Charts**: standard-library SVG, the same bytes for the same input: accuracy by arm with Wilson
+    intervals, and request size against history length (synthetic and modelled lines labelled so).
+    The replay's chart carries a note that its Contexto drops are rotations (old turns moved to the
+    store, nothing summarised) and its plain drops modelled compactions, with the run's three peaks
+    (#286). Reason: the package has no runtime dependency and keeps none, and the same bytes for the
+    same input let a reader check a published chart by making it again.
+  - **Scale harness** (#262): `spikes/m2/scale/proxy` had stopped running at v0.5.24 (it
+    instrumented `SessionStore._pages`, gone since the store split, and seven more drifts). It is
+    repaired, has drift tests, and a 200-turn run (634 requests, 913,084 tokens of history, six
+    times the bound) is in the required `ci` check with budgets: added time per request median 200
+    ms and p95 800 ms, growth 300 ms per million tokens, startup 3,000 ms, peak RSS 300 MB, RSS
+    growth 150 MB per MB of body growth, 40 live objects gained per turn, throughput floor 5 req/s.
+    They catch a slowdown from about 7 to 10 times on a typical CI runner (not one under about 7
+    times, so not a doubling) and a quadratic pass at about 200 ns a step. Reason: the audit's
+    performance figures could not be re-measured while the harness was broken, and a run in CI
+    keeps it from breaking again. Against the audit (Apple M5 Pro, loaded machine; medians of 15
+    runs, smallest to largest in brackets, from `spikes/m2/scale/proxy/README.md` and
+    `results/short_2026-11-13.jsonl`): added time 3.2 ms (2.5 to 4.7) for a Claude Code-sized first
+    request (audit about 2); growth with history depends on turn size, 16.7, 18.6, 15.3, 12.5 and
+    9.2 ms per million tokens at 3,000, 4,000, 5,000, 8,000 and 26,000-token turns (the audit's
+    about 13 matches 8,000-token turns); throughput at 100 concurrent 318 req/s (248 to 417; audit
+    768, with what it sent unknown); startup 57.2 ms (49.6 to 73.1; audit 60).
+  - **The minimum run** (the owner starts it; no agent does): `contexto bench --model
+    claude-haiku-5-5 --seeds 10 --repeats 3 --budget-tokens 598290000 --out <dir>` (36 units,
+    180,251,043 tokens expected, 598,285,396 worst case) and `contexto bench --model claude-opus-5-5
+    --seeds 5 --budget-tokens 250500000 --out <dir>` (15 units, 97,122,711 expected, 250,490,244
+    worst). The Haiku run gives 720 pooled paired probes per pair of arms; the Opus run 360, and
+    with 5 seeds it alone can name no direction. The Opus expected figure scales the recorded runs'
+    ratio, 1.381, and applies it to the plain arm too [assumed]. Worst case is a planning figure;
+    the ceiling is `--budget-tokens`. Estimated cost: Haiku about $14 expected and about $456 worst
+    case ($602 with a 1-hour cache); Opus about $90 and about $2,025 ($2,622). Method: every request
+    the plan simulates (`contexto.bench.plan`) split into the plan's token classes and priced on its
+    own with `contexto.bench.prices.request_cost`, so Haiku's size step applies per request as the
+    report applies it (524 of the Haiku plan's 1,606 expected requests are over 100,000 input
+    tokens); the token totals equal the dry run's. These are estimates: the run is paid by whoever
+    runs it, at their account's prices, and `--budget-tokens` is the ceiling. Reason for the
+    figures: the audit suggested 10 seeds on Haiku with 3 repeats and 5 seeds on Opus; 10 seeds is
+    past the six-seed floor.
+  - **Departures from the brief.** (1) The `d27` script's JSON digest changed, though every turn
+    text and probe field is the spike's: each probe's stored `overlap` annotation now follows the
+    one overlap rule. (2) Scoring differs from the spike's in four ways, in every arm: an unanswered
+    probe is never correct (the spike scored an unanswered `set` probe whose answer is `none` as
+    correct); more answer lines written in markdown are read (bold or backticked ids, numbered and
+    `+` items; the spike already read plain `-` and `*` items); and a line in a fenced code block
+    yields to an answer for the same id outside any fence (#273); and a line whose answer is the
+    probe's own question, word for word, is the reply restating it and not an answer (#286). A
+    blockquote line stays unread, as in the spike. The brief named only the first. (3) Both Claude
+    Code arms run with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: a background subagent's second
+    `result` desynchronised scoring, 0 of 72 answers counted while the unit said complete. Any extra
+    result now stops the unit as `desync`. (4) Merge rule: the ruleset does not require branches to
+    be up to date (`strict=false`) and CI tests each pull request merged onto `main`, so a `main`
+    commit that touched none of a pull request's files and merged cleanly did not start a new review
+    round; a merge of `main` into a pull request branch got two short merge-check verdicts. That
+    rule let two pull requests that each passed alone turn `main` red together: #279 (D69) changed
+    text the proxy sends and #269 pinned it, and `main` failed 8 replay tests until #289 merged.
+    Requiring branches to be up to date before merging, or a merge queue, would have caught it; that
+    is the owner's call, not taken here.
+  - **Product findings, open (not fixed in D66).** (a) On Linux each proxy response on a kept-open
+    connection waits about 41 ms for a delayed ACK, because the proxy leaves Nagle on and writes
+    headers and chunks separately: CI measured 41.3 to 41.5 ms for a 104-byte request, and 0.6 to
+    1.5 ms with Nagle off in the proxy as a harness-only experiment; macOS has no wait. Whether a
+    real streamed response waits per chunk was not tested [inferred: Claude Code users on Linux see
+    it on each request]. (b) The proxy opens a new upstream connection for every request (914 in one
+    short scale run); on an HTTPS upstream each also pays a TCP connect, a TLS handshake and about
+    2.5 ms to build the SSL context [the SSL context measured; the handshake not]. Issues: (a)
+    [#284](https://github.com/VentureForgre/contexto/issues/284), (b)
+    [#285](https://github.com/VentureForgre/contexto/issues/285).
+  - **Follow-ups done in #286** (f5c8f29a), the reviewers' lows and nits on the five pull requests:
+    the fourth scoring difference above; the reservation journal, `reserved_tokens` and the upper
+    cost bound above; the chart note on rotations and compactions; the replay validator checks the
+    first turn with system messages set aside; the bench's own `claude --version` runs with the
+    arms' isolation (`DISABLE_AUTOUPDATER=1`, a temporary working and configuration directory) and
+    the real-CLI tests run from a temporary directory with a temporary `HOME`; report wording;
+    the scale harness's lows (the port waits of a burst share one 30 s window of wall-clock time,
+    the `TCP_NODELAY` test fails without the driver's line, and the docstrings and README say the
+    Linux wait is the proxy's); emoji below U+1F000 counted wide in the chart's note wrapping.
+  - **Open follow-ups.** [#291](https://github.com/VentureForgre/contexto/issues/291) lists what
+    the reviews left on purpose, each needing its own tests: a restatement of the question that is
+    not word for word still overrides an answer (v2 scores 330 of 360 when the `concluded` probes'
+    closing sentence is left off); the replay's 10 to 20 ms signal window after it ends; refusals
+    for hand-damaged scripts; the journal line not synced to disk; a zoomed chart panel; the
+    search-reach paragraph printed under a chart that plots no search. The product findings are
+    [#284](https://github.com/VentureForgre/contexto/issues/284) and
+    [#285](https://github.com/VentureForgre/contexto/issues/285). A reach column on the
+    `contexto_search` tool's own reply, beside the strict search's, is not built; it is listed in
+    #291. The owner's minimum live run has not been made; it would also confirm the plain arm's
+    33,000-token reserve live.
+  - **Public benchmarks as a later arm** (not built). Compact-Bench (arXiv 2610.31710) scores a
+    compactor's summary on histories of 13 to 53 KB: it does not fit. LongMemEval (arXiv
+    2410.10813, ICLR 2025, MIT): 500 questions, S variant about 115,000 tokens per history (below
+    the bound), LLM judge: it fits only with a custom length and a subset. BEAM (arXiv 2510.27246):
+    conversations of about 100,000 to 10 million tokens with 20 probes each, LLM judge; its
+    500,000-token tier is the closest fit; data to be downloaded at run time. Any conversation
+    benchmark meets the problem that a headless CLI writes its own replies, so recorded assistant
+    turns become quoted text in user turns.
+  - **What the benchmark does not show**: real coding tasks; a real user's session shape; plain
+    Claude Code at its default compaction threshold; other CLIs (Codex is not an arm); models other
+    than those run; other Claude Code versions; LLM-judged answers.
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.
