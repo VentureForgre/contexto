@@ -344,9 +344,11 @@ the check is outside both limits for the rest of its life, so a long streamed re
 
 ## Limits
 
-- No status line. `contexto statusline` shows nothing for a session the service has open (see
-  [Status line](statusline.md#calling-it-from-your-own-status-line)); `contexto stats` reads the
-  session's numbers.
+- No status line. Called by Claude Code, `contexto statusline` shows nothing for a session the
+  service has open. Given the session with `--session`, it prints its numbers with the last
+  `contexto run` launch's bound, not the service's (see
+  [Status line](statusline.md#calling-it-from-your-own-status-line)). `contexto stats` reads the
+  session's numbers, with the same bound.
 - Loopback only, for one user. The service is not meant to be shared between accounts on a machine
   or reached from another machine.
 - Claude Code's Messages API only. A Codex `/responses` request, a Chat Completions request, and
