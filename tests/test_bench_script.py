@@ -955,6 +955,59 @@ def test_answers_written_only_inside_a_code_fence_are_read():
     assert d27.parse_answers("```\n> q_a_01: POISON\n```") == {}
 
 
+def _restated(probes, layout: str) -> str:
+    """A reply to a probe turn in one of the layouts the live review saw with the real ``claude``: the
+    probe turn's own ``q_<id>: <question>`` lines restated next to the answers."""
+    questions = "\n".join(f"{p.id}: {p.question}" for p in probes)
+    answers = "\n".join(f"{p.id}: {p.answer}" for p in probes)
+    return {
+        "questions, then answers in a fence": f"The questions were:\n{questions}\n\n```\n{answers}\n```",
+        "answers, then the questions": f"{answers}\n\nYou asked:\n{questions}",
+        "answers in a fence, then the questions": f"```\n{answers}\n```\nThe questions were:\n{questions}",
+        "answers in a fence, then the questions in a fence": f"```\n{answers}\n```\nYou asked:\n```\n{questions}\n```",
+        "questions as a list, then answers in a fence":
+            "\n".join(f"- **{p.id}**: {p.question}" for p in probes) + f"\n\n~~~text\n{answers}\n~~~",
+        "questions, then answers": f"{questions}\n\n{answers}",
+    }[layout]
+
+
+RESTATED_LAYOUTS = ["questions, then answers in a fence", "answers, then the questions",
+                    "answers in a fence, then the questions", "answers in a fence, then the questions in a fence",
+                    "questions as a list, then answers in a fence", "questions, then answers"]
+
+
+@pytest.mark.parametrize("layout", RESTATED_LAYOUTS)
+def test_a_restated_question_is_never_an_answer(v2, layout):
+    """The fourth deliberate difference from the spike's scoring (``script.score``): a line whose answer
+    is that probe's own question text is the reply restating the question, not answering it, so the
+    next line for that id is read. The probe turns are the only text a reply can quote that holds
+    ``q_`` lines, so without this rule the layout, not recall, decided the score."""
+    probes = [p for p in v2.probes if p.kind == "value"][:9]
+    result = script.score(probes, _restated(probes, layout))
+    assert result["correct"] == 9, [(r["id"], r["given"]) for r in result["rows"] if not r["correct"]]
+    assert all(r["given"] == r["expected"] for r in result["rows"])
+
+
+def test_a_restated_question_with_no_answer_is_no_answer(v2):
+    probe = next(p for p in v2.probes if p.kind == "value")
+    row = script.score([probe], f"The question was:\n{probe.id}: {probe.question}")["rows"][0]
+    assert row["given"] is None and row["correct"] is False
+    # Only the probe's own question is set aside: another probe's question is an answer, a wrong one.
+    other = next(p for p in v2.probes if p.kind == "value" and p.id != probe.id)
+    row = script.score([probe], f"{probe.id}: {probe.answer}\n{probe.id}: {other.question}")["rows"][0]
+    assert row["given"] == other.question and row["correct"] is False
+
+
+def test_a_later_fence_still_overrides_answers_written_in_a_fence(v2):
+    """What the fence rule does not handle, stated in ``d27.parse_answers``: when the answers are in a
+    fence, a later fence that quotes other answer-shaped lines wins over them (last line wins). No
+    content turn holds a ``q_`` line, so in this benchmark only a restated question can be such a line,
+    and that is set aside by the rule above."""
+    probe = next(p for p in v2.probes if p.kind == "value")
+    text = f"```\n{probe.id}: {probe.answer}\n```\nFor reference, notes.md held:\n```\n{probe.id}: POISON-1\n```"
+    assert script.score([probe], text)["rows"][0]["given"] == "POISON-1"
+
+
 def test_a_quoted_line_after_the_answer_does_not_override_it():
     from contexto.bench import d27
 
@@ -963,7 +1016,7 @@ def test_a_quoted_line_after_the_answer_does_not_override_it():
 
 
 def test_score_never_counts_a_missing_answer_correct(spike):
-    # The one deliberate difference from the spike's scoring: seed 11 at the small size has a set
+    # The first deliberate difference from the spike's scoring: seed 11 at the small size has a set
     # probe whose expected answer is "none", which the spike scores correct when nothing is answered.
     s = script.build(11, "d27", bound=4_000, turn_bytes=2_000)
     p = next(p for p in s.probes if p.id == "q_a_044")
