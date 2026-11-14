@@ -129,10 +129,21 @@ AMBIGUOUS_SHOWN = 5  # matching ids an ambiguous-prefix error names
 
 
 def check_home(home: Path) -> None:
-    """SessionNotFoundError when the data directory exists but is not a directory: one message for every
-    reader (D57), rather than "no sessions under <file>/sessions" or a raw ``[Errno 20]``."""
-    if Path(home).exists() and not Path(home).is_dir():
-        raise SessionNotFoundError(f"{home} is not a directory (check $CONTEXTO_HOME)")
+    """SessionNotFoundError when the data directory, or its ``sessions`` entry, exists but is not a
+    directory: one message for every reader (D57), rather than "no sessions under <file>/sessions", a raw
+    ``[Errno 20]``, or the first-run hint where ``contexto run`` could not create a session either (D64)."""
+    for path in (Path(home), Path(home) / "sessions"):
+        if path.exists() and not path.is_dir():
+            raise SessionNotFoundError(f"{path} is not a directory (check $CONTEXTO_HOME)")
+
+
+FIRST_RUN_HINT = "run `contexto run claude` (or `contexto run codex`) first"
+
+
+def no_sessions_yet(home: Path) -> str:
+    """What every reader says when the store holds no session at all (D64): a fresh install, where the
+    next step is a first ``contexto run``, not a different id."""
+    return f"no sessions yet under {Path(home) / 'sessions'}: {FIRST_RUN_HINT}"
 
 
 def starting_with(home: Path, prefix: str) -> list[str]:
@@ -141,11 +152,13 @@ def starting_with(home: Path, prefix: str) -> list[str]:
 
 
 def named(ids: list[str]) -> str:
-    """``session <id>``, or ``<n> sessions: <id>, <id>, ...`` (at most ``AMBIGUOUS_SHOWN`` ids)."""
+    """``session <id>``, or ``<n> sessions: <id>, <id>, ...`` (at most ``AMBIGUOUS_SHOWN`` ids). An id
+    with a character that does not print (a directory name can hold a newline) is shown as its ``repr``,
+    so it cannot start a line of its own in an error message (D64)."""
+    shown = [i if i.isprintable() else repr(i) for i in ids[:AMBIGUOUS_SHOWN]]
     if len(ids) == 1:
-        return f"session {ids[0]}"
-    return (f"{len(ids)} sessions: " + ", ".join(ids[:AMBIGUOUS_SHOWN])
-            + (", ..." if len(ids) > AMBIGUOUS_SHOWN else ""))
+        return f"session {shown[0]}"
+    return f"{len(ids)} sessions: " + ", ".join(shown) + (", ..." if len(ids) > AMBIGUOUS_SHOWN else "")
 
 
 def resolve_session(home: Path, given: str, how: str | None = None) -> str:
@@ -166,8 +179,10 @@ def resolve_session(home: Path, given: str, how: str | None = None) -> str:
         return matches[0]
     if matches:
         raise SessionNotFoundError(f"session id prefix {given!r} matches {named(matches)}; give more characters")
-    raise SessionNotFoundError(f"no session {given!r} under {Path(home) / 'sessions'}"
-                               + (f" (from {how})" if how else ""))
+    origin = f" (from {how})" if how else ""
+    if not session_ids(home):
+        raise SessionNotFoundError(f"no session {given!r}{origin}: {no_sessions_yet(home)}")
+    raise SessionNotFoundError(f"no session {given!r} under {Path(home) / 'sessions'}{origin}")
 
 
 def is_empty(info: SessionInfo) -> bool:
@@ -206,7 +221,7 @@ def select_session(home: Path, explicit: str | None) -> tuple[str, str]:
     else:
         sessions = list_sessions(home)
         if not sessions:
-            raise SessionNotFoundError(f"no sessions under {Path(home) / 'sessions'}")
+            raise SessionNotFoundError(no_sessions_yet(home))
         chosen = next((i for i, s in enumerate(sessions) if not is_empty(s) or in_use(home, s.id)), 0)
         return sessions[chosen].id, "most recent" if chosen == 0 else "most recent with pages or pins, or in use"
     return resolve_session(home, sid, how), how

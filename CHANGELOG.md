@@ -11,6 +11,24 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
+- `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
+  described in the command's `--help`; an error is still one line on stderr with the usual exit
+  code.
+- `contexto version` and `contexto -V` print the same line as `--version`. `contexto sessions`
+  with no command lists the sessions.
+- On a fresh install, `state`, `search`, `recall` and `sessions` say to run `contexto run claude`
+  first.
+- When `claude` or `codex` is not on `PATH`, the error gives the vendor's install command. Every
+  `contexto run claude` launch error now starts with `contexto:`, as `run codex` errors did.
+- The Codex "no key helper" error gives a whole command that works with an OpenAI key in
+  `OPENAI_API_KEY`:
+
+  ```sh
+  contexto run --codex-upstream https://api.openai.com/v1 \
+    --codex-key-helper 'printenv OPENAI_API_KEY' codex
+  ```
+
+- The MCP server reports the package version in `serverInfo` (it said `0.1.0`).
 - `contexto run codex` with a session id that starts with `-` no longer starts Codex without
   Contexto's tools: the MCP server now gets the id as one `--session=<id>` argument, as Claude Code's
   already did.
