@@ -2708,7 +2708,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
 
 - **D67. Contexto goes to PyPI as `contexto-proxy`, releases are cut by hand, and there is a
   one-line install.** Owner request, 2026-11-12; design and calls by Claude, 2026-11-13, each PR
-  with two reviewer agents (#253, #256, #260, #270, #278, @@DOCSPR@@). The owner asked for a PyPI
+  with two reviewer agents (#253, #256, #260, #270, #278, #280). The owner asked for a PyPI
   release under a free name. That supersedes "nothing goes to a package registry" in D0, D14 and
   D42, for PyPI only: there is still no npm package and no Homebrew tap. Nothing was published and
   no account was created; what only the owner can do is listed at the end.

@@ -46,7 +46,7 @@ compaction never fires, and accuracy equals full context.
   hostname; their commits stay on `main`. Old commits, pull request diffs and pull request comments
   still hold it (D42).
 - Install, PyPI and release cadence (D67, 2026-11-13 to 2026-11-14; PRs #253, #256, #260, #270,
-  #278, @@DOCSPR@@):
+  #278, #280):
   - The distribution is `contexto-proxy` (the PyPI project `contexto` is unrelated); the command
     and import name stay `contexto`. Nothing is on PyPI yet. The `pypi` job of `release.yml`
     publishes by trusted publishing, with no token, once the owner has registered the pending
