@@ -117,7 +117,9 @@ received less than the stub sent (it reads that from the reply's usage), because
 point of the recording.
 
 `--no-version-check` is in the command because the stub is not a Claude Code version. The stub sends
-no `X-Claude-Code-Session-Id`, so `contexto run` prints no resume hint at exit.
+no `X-Claude-Code-Session-Id`, so `contexto run` prints no resume hint at exit. The session runs with
+`CONTEXTO_QUIET=1`, so it prints no run summary at exit either: the summary's run time differs at
+every recording, so a committed recording that held it could not match a fresh one.
 
 ### What is and is not deterministic
 

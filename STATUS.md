@@ -1,10 +1,12 @@
 # Contexto status
 
-Updated 2026-11-14 by claude (D63: in-turn paging, the replay harness PR #268 and the engine PR
-#274, merged and not released, recorded in the docs PR #295), and the same day (D70: `contexto
-serve` for clients Contexto does not launch, PRs #271, #272, #275 and #277, with the recipes in its
-follow-up), and (D66: the benchmark `contexto bench`, PRs #255, #262, #264, #269, #273, #289 and
-#286, recorded in the docs PR #282). Before that, 2026-11-13 (D69, project memory: PR #279,
+Updated 2026-11-14 by claude (D64: let the user see Contexto working, PRs #257, #258, #263, #276,
+#261, #283 and #290, and the D64 entry in `docs/DECISIONS.md`), and earlier the same day (D63:
+in-turn paging, the replay harness PR #268 and the engine PR #274, merged and not released,
+recorded in the docs PR #295), (D70: `contexto serve` for clients Contexto does not launch, PRs
+#271, #272, #275 and #277, with the recipes in its follow-up), and (D66: the benchmark
+`contexto bench`, PRs #255, #262, #264, #269, #273, #289 and #286, recorded in the docs PR #282).
+Before that, 2026-11-13 (D69, project memory: PR #279,
 the first of its two pull requests, unreleased), and 2026-11-12 (v0.5.24: the 2026-11-05 QA run and
 the fix round, PRs #232 to #250, D48 to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0
 releases, D62, and the README rewrite, D68). Decisions taken and still open, with reasons:
@@ -102,6 +104,21 @@ compaction never fires, and accuracy equals full context.
   forwarding. `contexto run claude` refuses a launch Claude Code would send to a cloud provider. The
   recipes for the Python Agent SDK and headless `claude -p` ran with the real binary against a fake
   upstream; the VS Code recipe was not run in an IDE. Guides: `docs/serve.md`, `docs/dialect.md`.
+- Seeing Contexto work (D64, PRs #257, #258, #263, #276, #261, #283, #290, unreleased):
+  `contexto stats` (the peak prompt against the bound, pages, recalls and searches, store faults;
+  `--last-run`, `--json`) and a short summary of the run when the CLI exits (`--quiet` or
+  `CONTEXTO_QUIET=1` drops it); degraded mode and other store faults shown at exit and in
+  `contexto state`; `contexto doctor`, eleven checks with no network request, whose `provider` check
+  fails with the launcher's own cloud-provider refusal (D70); a Claude Code status line,
+  `contexto statusline`, added by `contexto run claude` only when no settings file has one
+  (`ctx 112k/150k · 41 paged · 3 recalls · 5 searches`; on a 2.9 MB log, 68 ms median and 91 ms at
+  worst per call at load average 32, 165 ms median and 663 ms at worst at load average 50, from
+  `docs/statusline.md`); `docs/events.md`, every `log.jsonl` event, held to the source by
+  `tests/test_events_doc.py`; and `--json` on `state`, `search` and `recall`, `contexto version`,
+  and clearer launch errors. `main`'s CI at 2401cf56 (#290), 2026-11-14, the latest finished run when this was written:
+  6,950 to 6,952 passed, 36 to 38 skipped and 7 xfailed in each of the six test jobs (Python 3.12
+  to 3.15 on Ubuntu, 3.12 and 3.15 on macOS). Guides: `docs/stats.md`,
+  `docs/doctor.md`, `docs/statusline.md`, `docs/events.md`.
 
 ## Benchmark (D66)
 
@@ -744,6 +761,11 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   has a changed prefix; Codex is off behind `Dialect.in_turn`. The rule follows the vendor's
   enforced rule and gives up its unenforced "pass thinking back within a tool-use turn", which has
   not been checked live.
+- D64: let the user see Contexto working: `contexto stats` and an exit summary that take the store
+  as the truth for pages, store faults shown, `contexto doctor` following D70's refusal with one
+  settings reader, a status line added only when it replaces none of the user's, and an event
+  reference checked against the source. Codex's mid-run notices are now held until it exits,
+  reversing part of D55. A merge policy for a `main` that moves faster than a review round.
 - D65: when strict search finds nothing, search returns approximate matches, labelled as such with
   the words each page matched; deterministic, no embeddings or model call. Its one-letter typo
   step is the one exception to the owner's ruling against fuzzy matching that D34 records.
@@ -818,6 +840,19 @@ Still open:
   or run count. `contexto run codex` does not apply the serve-upstream refusal that
   `contexto run claude` and `contexto doctor` do. Out of scope: listening beyond loopback,
   several users, Chat Completions, Bedrock and Vertex request paths, other agents.
+- D64, left open (each checked on `main` at 26663b16): `commands/run.py`'s `register()` imports
+  `contexto.codex` catching only `ImportError`, so a codex module that is broken, not missing, makes
+  every command fail; the resume command printed at exit keeps `--no-project-memory` but drops
+  `--no-statusline` and `--quiet`; the status line's own settings reader is not D70's
+  `read_settings_file` (they disagree only in the safe direction: it may leave its line off); a
+  clock stepped back by more than the gap between a launch's `proxy_start` and a conversation's
+  first request hides a user script's line for that run; the cloud-provider refusal says "in any of
+  these places" with no list of them (#271's text, D70's to change); a settings file that holds
+  `NaN` and names a switch, even at `"0"`, refuses a launch Claude Code would allow (accepted: it
+  only adds refusals). Not built: a status line for Codex, which has no such setting. Unconfirmed:
+  interactive Claude Code for the provider switches, `/statusline` writing the user's settings,
+  managed settings, whether a custom status line hides Claude Code's footer hints, Claude Code
+  other than 2.1.318 and 2.1.322, Linux except CI.
 - D63 follow-ups, not started: in-turn paging for Codex (implementing `contexto.inturn.MessagesInTurn`'s
   methods for Responses items, so `ResponsesDialect.in_turn` is no longer None); a stable engine
   `cache_control` breakpoint after the paged prefix (the API allows 4 and Claude Code uses 3), which
@@ -844,6 +879,10 @@ first-time users and release checksums (#233, v0.5.13), D52 (#237, v0.5.14), D50
 D53 (#239, v0.5.16), D57 (#241, v0.5.17), D58 (#235, v0.5.19), D54 (#236, v0.5.20), D48 (#234) and
 the replay fix (#247) in v0.5.21, D59 (#246, v0.5.22), D60 (#248, v0.5.23), the docs pass (#249) and
 D61 (#250, v0.5.24). Live acceptance run #4 passed on v0.5.20. Left: the open follow-ups above.
+
+D64 (seeing Contexto work): merged in PRs #257, #258, #263, #276, #261, #283 and #290, unreleased;
+recorded in `docs/DECISIONS.md`. Left: the open items listed under "Open follow-ups", and a release,
+which is the maintainer's call.
 
 D69 (project memory): the first pull request, #279 (carry-over, rule 19, the off switch, the start
 line, `contexto project show|forget`), is under review, unreleased. Left: the second pull request, search

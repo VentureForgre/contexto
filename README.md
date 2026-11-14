@@ -183,11 +183,15 @@ those files.
 ## What you see
 
 **When it is working.** At start Contexto prints one line on stderr that begins `contexto: session`
-and names the bound, and `/mcp` in Claude Code lists the `contexto` server as connected. Claude
+and names the bound (in a project with earlier sessions, a `contexto: project memory:` line
+follows), and `/mcp` in Claude Code lists the `contexto` server as connected. Claude
 Code's status line shows `ctx bound 150k`, then the prompt against the bound after each reply
 (`ctx 61k/150k`), unless you have a status line of your own ([Status line](docs/statusline.md)). Paging starts when the prompt nears the bound, from
 about 113,000 to 125,000 tokens with the defaults. After the first rotation, `contexto sessions list` shows a PAGES count above 0, and
 `contexto sessions show <id>` should count 0 over-bound turns ([Is it working?](docs/sessions.md#is-it-working)).
+When Claude Code exits, Contexto prints a short summary of the run; `contexto stats` shows the whole
+session ([Stats](docs/stats.md)), and `contexto doctor` checks the setup with no network request
+([Doctor](docs/doctor.md)).
 
 **What it adds.** The proxy adds time to each request, more as the history grows:
 
@@ -266,7 +270,8 @@ requests come from that process ([docs/maintainer-process.md](docs/maintainer-pr
 [`contexto run`](docs/run-reference.md), [`contexto serve`](docs/serve.md) (IDE extensions, the Agent
 SDK, CI). Use: [Sessions](docs/sessions.md), [MCP tools](docs/mcp-tools.md), [Search](docs/search.md),
 [Rules you give once](docs/standing-rules.md), [Project memory](docs/project-memory.md),
-[FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
+[Stats](docs/stats.md), [Status line](docs/statusline.md), [Doctor](docs/doctor.md),
+[Log events](docs/events.md), [FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
 Evidence: [Results](docs/results.md), [Benchmark](docs/bench.md), [Limitations](docs/limitations.md),
 [CLI updates](docs/cli-updates.md),
 [changelog](CHANGELOG.md).
