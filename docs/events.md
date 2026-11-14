@@ -783,9 +783,9 @@ A `count_tokens` request has a [`count_tokens`](#count_tokens) event in its plac
   folds rounds marks a stretch, from the first message it changed to the end of the request. A batch
   that only pages earlier turns marks none. A rotation clears the stretches, and that includes a
   batch's own `in_turn` rotation. So a batch with `results_stubbed` and `rounds_folded` both 0 leaves
-  the field off its request and the rest of the loop. A batch that pages turns after stubbing can do
-  the same. Counts of the thinking blocks
-  in the messages from `k` on, with no content: `kept_before` (before the first stretch), `stripped`
+  the field off its request and the loop's later requests, until a batch stubs results or folds
+  rounds. A batch that pages turns after stubbing can do the same. Counts of the thinking blocks in
+  the messages from `k` on, with no content: `kept_before` (before the first stretch), `stripped`
   (removed: in a stretch, or in a message that already existed when the epoch began, as rule 2
   strips), `kept_between` (between two stretches) and `kept_after` (after the last one). All four
   are 0 when those messages hold no thinking. Messages folded into a page are not counted.

@@ -34,8 +34,10 @@ For Claude Code, the launcher:
 
 1. resolves the upstream Claude Code would otherwise use (see [Troubleshooting](troubleshooting.md));
 2. picks the session (`--session`, else the one a `--resume <id>` or `--continue` names, else a new
-   one), opens it under `$CONTEXTO_HOME/sessions/<id>/` and starts the proxy on
-   `127.0.0.1:<free port>`;
+   one), opens it under `$CONTEXTO_HOME/sessions/<id>/`, starts the proxy on
+   `127.0.0.1:<free port>`, and prints the session line on stderr (`contexto: session …`), then, in
+   a project with earlier sessions, the project memory line (`contexto: project memory: …`; see
+   [Project memory](project-memory.md#the-start-line));
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets
    `env.ANTHROPIC_BASE_URL` to the proxy and the hint-header variables below (only
    `CONTEXTO_HINT_HEADERS` when you have turned hint headers off), allows Contexto's
@@ -65,7 +67,10 @@ after the session opens, exits 127, and leaves that empty session behind.
 needs it to route requests through the proxy. Put those settings in your Claude settings files
 instead. Details are under [Troubleshooting](troubleshooting.md).
 
-At start, `contexto run` warns on stderr when the bound leaves a window budget under 25,000 tokens
+At start, `contexto run` prints the session line on stderr and, in a project with earlier sessions,
+a second line, `contexto: project memory: …`, which counts what it carries
+([Project memory](project-memory.md#the-start-line)). It also warns when the bound leaves a window
+budget under 25,000 tokens
 and suggests a larger `--bound`. It assumes a fixed overhead of 28,000 tokens for Claude Code
 (measured 18,641 to 27,925 on 2.1.314 with tool search on) and 19,000 for Codex. It warns again,
 once, if the measured overhead does the same.
@@ -73,7 +78,9 @@ once, if the measured overhead does the same.
 **Tip for Haiku 5.5:** on Haiku 5.5, `--bound 125000` keeps requests at turn start below the 100K price
 tier, above which every rate is 5 times higher. Replaying a recorded acceptance session at that bound,
 with the model's behavior held fixed, every request stayed under it, for a modeled 45.7% lower
-cost. Long tool loops can still cross it, and accuracy at that bound is not yet measured. See
+cost. Inside a tool loop Contexto pages the running turn too ([In-turn paging](in-turn-paging.md)),
+so a loop crosses it only when nothing is left to page or in-turn paging is off. Accuracy at that
+bound is not yet measured. See
 [docs/research/M2-haiku-100k-tier.md](research/M2-haiku-100k-tier.md).
 The [Quickstart](../README.md#quickstart)'s `--bound 120000` is also below the tier at turn start: with the default headroom floor
 (25,000) and minimum turn room (12,000), any bound up to 125000 is.

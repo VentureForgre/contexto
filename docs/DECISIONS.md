@@ -4277,6 +4277,139 @@ the owner's delegation. Open decisions are listed at the end with the options an
   (rule 10) still keeps in-flight thinking after a prefix change. User guide:
   `docs/in-turn-paging.md`.
 
+- **D64. Let the user see Contexto working.** Claude, 2026-11-14, under D0 and the owner's brief for
+  the item; contract change (#258: the sixth cloud-provider switch and three settings-file rules).
+  An audit on 2026-11-12 found that a run printed one line at start and then nothing until the
+  prompt neared the bound, that the numbers proving Contexto's value were in each session's
+  `log.jsonl` and never shown, and that a full disk put the engine in degraded mode (requests grew
+  from 67 KB to 354 KB) with nothing on stderr. Five slices and two fixes, each built test first by
+  a builder agent and reviewed by two reviewer agents at its exact head, at zero model spend:
+  - **Command polish (#257, fdbb0b74).** `--json` on `state`, `search` and `recall`; `contexto
+    version` and `-V`, which print `version_line()` like `--version` (#256); `contexto sessions`
+    alone lists sessions; a first-run hint on an empty store; the vendor's install command in the
+    "not found on PATH" errors and one `contexto:` prefix; the Codex "no key helper" error gives a
+    whole working command (`--codex-upstream https://api.openai.com/v1 --codex-key-helper 'printenv
+    OPENAI_API_KEY'`): without the upstream, the example as first written sent the OpenAI key to
+    whatever host `ANTHROPIC_BASE_URL` named (review round 1). The MCP `serverInfo` reports the
+    package version. Session ids: read-only commands take a unique prefix (D57); `run`, `proxy`,
+    `mcp` and `sessions prune` keep the full id, because they create, serve or delete.
+  - **`contexto doctor` (#258, 7e8e32a0).** Eleven checks, one line each (`[ok]`, `[warn]`, `[FAIL]`
+    or `[skip]`) with what to do after each warning and failure, and `--json`; exit 0 when nothing
+    failed, 1 when a check did. No network request, no key helper run, no key printed, and the store
+    home left as it was found. Guide: [docs/doctor.md](doctor.md).
+    - **It follows D70's refusal.** The pull request first warned and still launched when a
+      cloud-provider switch was on. #271 (D70) merged first and refuses such a launch with exit 2,
+      and the two rules contradicted each other once both were on `main`, so #258 was reworked to
+      follow #271: `contexto run claude` does not warn and launch. The sixth switch,
+      `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` (in the 2.1.318 and 2.1.322 programs, named on no
+      documentation page), joined `upstream.CLOUD_PROVIDER_KEYS`: measured on 2.1.318 in `-p` mode
+      at zero spend, in the environment and in a project's `env` block, 0 requests at the proxy and
+      3 at the provider stub. Reason: a launch the proxy never sees runs with no bound, and the
+      refusal is the safer of the two rules.
+    - **One settings reader**, D70's `read_settings_file`, with three of #258's rules ported into
+      it, each matching Claude Code 2.1.322: an integer past Python's 4,300-digit limit is read (as
+      JavaScript's Infinity), `NaN` and `Infinity` make the file not valid JSON, and a file whose
+      `env` is not an object is unusable and holds no switch. The measurements are in
+      `spikes/m2/providers/README.md`. Reason: with two readers, doctor, the upstream and the
+      refusal could each read one file differently.
+    - **Doctor's `provider` check** calls the launcher's own check and fails with the launcher's
+      message, word for word (a test compares them). It runs whenever `claude` is on PATH, even one
+      that cannot start, because the launcher reaches its refusal with such a `claude`.
+    - Doctor judges a `sessions` directory by asking the running Python the launcher's first
+      question, because Python 3.14 changed `Path.exists()`.
+  - **`contexto stats` and the exit summary (#263, 14586393).** `contexto.stats.session_stats`
+    reads only the log and the store. Decisions, each from a review finding:
+    - The store is the truth for what is paged out. Summing `page_out.turns` counted a launch that
+      could not resume its epoch again (69 shown for 26 pages); the proxy now records the store's
+      page count on `proxy_start` and `proxy_stop`, and a run's gain is the difference.
+    - The peak is the API's count, and the largest estimate among requests without usage is shown
+      beside it when larger. The cache share covers only responses that reported a cache field.
+    - "Claude Code did not compact" is said only when the log could have shown a compaction: every
+      Messages request read by the engine, with Claude Code's session id, from a CLI version the
+      summary's wording was measured on, or (#290) with Claude Code's request-class hint header on
+      every request, whatever the version.
+    - The summary covers the latest run; `contexto stats` the whole session, `--last-run` the run.
+      `--quiet` or `CONTEXTO_QUIET=1` drops the summary and never a warning. Building it never
+      changes the exit code, never waits on a lock, and Ctrl+C keeps the exit code.
+    - Codex's mid-run notices are now held until Codex exits, as Claude Code's are (D55). This
+      reverses D55's "Codex keeps printing mid-run".
+    - Store faults (degraded mode, `store_error` with the errno's name, `page_conflict`) are shown
+      once per cause at exit, in `contexto stats`, and in `contexto state` (text and `--json`
+      `faults`), with what to do. A store still failing at exit is never called recovered.
+    - The README demo (#259) is recorded with `CONTEXTO_QUIET=1`: the summary's run time differs at
+      every recording, so the committed recording could not match a fresh one.
+  - **The status line (#276, 2b25c905).** `contexto statusline` prints one line such as
+    `ctx 112k/150k · 41 paged · 3 recalls · 5 searches`, or `PAGING STOPPED`, never a traceback and
+    never a non-zero exit. Claude Code's documentation says the `--settings` file outranks the
+    user's and `statusLine` is replaced, not merged (measured in a pty on 2.1.322 and 2.1.318: only
+    the `--settings` one ran), so `contexto run claude` adds one only when no settings file Claude
+    Code reads has a `statusLine`, none sets `disableAllHooks`, and every file could be read;
+    `--no-statusline` or `CONTEXTO_NO_STATUSLINE=1` turns it off. A prompt over the bound never
+    reads as equal to it (`1.09M/1M`). The line the launcher installs passes `--session` and shows
+    from the start. A user's own script that names no session, or names one through
+    `$CONTEXTO_SESSION`, is held to which conversation is asking: a conversation counts only when it
+    was recorded in the `contexto run` launch that has the session open, after that launch's
+    `proxy_start`. So the script shows nothing until a conversation's first request, at start and
+    after `/clear`, and a session reopened for another conversation shows nothing under the old
+    one. A session that `contexto serve` has opened since its last launch shows nothing when Claude
+    Code asks; named with `--session`, it shows the last launch's bound. Reason: a wrong session's
+    numbers are worse than none. Measured: the whole command 67 to 68 ms median (worst 108 ms) on a
+    6-hour synthetic log of 2.9 MB with 1,200 pages, at load averages of 32 and 54; the in-run check
+    6.5 ms median on a 17 MB log. Guide: [docs/statusline.md](statusline.md).
+  - **`docs/events.md` (#261, 26663b16).** A reference for every event in `log.jsonl`: its writer,
+    where it appears (own line, `transform_events` or `usage_events`), its kind and one bullet per
+    field. `tests/test_events_doc.py` scans every module under `src/contexto` with `ast` and fails,
+    with a message that says what to do, when the source can write an event or field the document
+    does not list, or the document lists an event the source cannot write; a documented field must
+    also appear in a module that writes the event. What the scan cannot read is in tables beside
+    it: `NOT_SESSION_LOG`, `CARRIED_EVENTS` (the proxy's `request` dict, filled across functions),
+    `SHARED_NAMES` (the proxy's `request` line and the engine's nested `request` event),
+    `RETURNED_FIELDS`, `LAST_EVENTS`, `HELPER_FIELDS`, `FIELDS_FROM` (fields whose names live in
+    another file: `request_class`, `context_compacted` and `compaction` from `hints.py`, D70) and
+    `DYNAMIC_SITES` (empty). The writers include `service`: `contexto serve` writes `serve_open` and
+    `serve_close` to the session's log, and most of its events (its start and stop, the sessions it
+    opens and closes, requests it refuses or cannot route) go to `$CONTEXTO_HOME/serve.log`, not a
+    session log, so they are listed in `NOT_SESSION_LOG`. Nine review rounds, at nine heads.
+  - **#283 (293b3478).** `commands/doctor.py` imported `contexto.codex` at its top, so with that
+    module missing every `contexto` command failed while the parser was built; the import moved
+    into the three functions that use it, and a test runs the CLI with the module blocked.
+  - **#290 (2401cf56).** The reviewers' lows on #257, #263, #258 and #283 that were still true on
+    `main`, each fixed or skipped with its reason in the pull request.
+  - **Merge policy.** `main` moved many times a day while each review round took 15 to 40 minutes,
+    so a pull request approved at one head was often behind `main` by the time it could merge.
+    Decision, extending D66's merge rule: (a) when `main` moved only with commits touching none of
+    the pull request's files, merge `main` into the approved head in a scratch worktree, run the
+    affected tests, and squash-merge the approved head unchanged; (b) the same when the overlap is
+    only in `CHANGELOG.md`, docs or test files, or in other functions of a shared file, with an
+    empty `git show --remerge-diff` and the affected tests passing (used for #263 with #273 and
+    #281, #283 with #269, #276 with #288, and #261 with #290); (c) a conflict, or an overlap in the
+    same code, gets a pushed merge and a confirmation from both reviewers. Reason: a new review
+    round for each move of `main` would never have caught up, and (a) and (b) leave the reviewed
+    code unchanged while (c) is where a merge can change it.
+  - **Incidents.** `main` was red for about two hours (07:48 to 09:52 UTC) after #269 (D66) and
+    #279 (D69) merged 28 minutes apart: #279 changed text the proxy sends and #269 pinned it in the
+    replay trace. #289 (D66) fixed it. D64's pull requests waited rather than merge on a red `ci`.
+    One reviewer's sandbox launch escaped its stub `HOME` (an unquoted variable in zsh) and created
+    one session directory in the real `~/.contexto`, with a fake `claude` and a stub upstream, so
+    nothing was spent; the reviewer deleted that directory, and the briefs since pass each variable
+    to `env -i` as a separate argument.
+  - **Not built:** a status line for Codex, which has no such setting. No release was cut; that is
+    the maintainer's call.
+  - **Unconfirmed:** interactive Claude Code for the provider switches (the probe ran `-p` only);
+    for the status line, that `/statusline` writes the user's settings file, managed settings, and
+    whether a custom line hides Claude Code's footer hints; any Claude Code version other than
+    2.1.318 and 2.1.322; Linux except through CI.
+  - **Left open** (each checked on `main` at 26663b16): `commands/run.py`'s `register()` imports
+    `contexto.codex` catching only `ImportError`, so a codex module that is broken, not missing,
+    makes every command fail; the resume command printed at exit keeps `--no-project-memory` but
+    drops `--no-statusline` and `--quiet`; the status line's own settings reader
+    (`statusline.read_settings`) is not D70's `read_settings_file`, and they disagree only in the
+    safe direction (it may leave its line off); a clock stepped back by more than the gap between a
+    launch's `proxy_start` and a conversation's first request hides a user script's line for that
+    run; the launcher's cloud-provider refusal says "in any of these places" with no list of the
+    places it means (#271's text, D70's to change); a settings file that holds `NaN` and names a
+    switch, even at `"0"`, refuses a launch Claude Code would allow, since Claude Code skips the
+    whole file (accepted: it only adds refusals).
 - **D66. `contexto bench`: a benchmark an outsider can run, with plain Claude Code as an arm.**
   Claude, 2026-11-14, under D0; no contract change (the proxy and the launcher are unchanged). An
   audit on 2026-11-12 found that the evidence for "accuracy equals full context" (D2) could not

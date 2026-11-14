@@ -358,7 +358,7 @@ the check is outside both limits for the rest of its life, so a long streamed re
 
 - No status line. Called by Claude Code, `contexto statusline` shows nothing for a session the
   service has open. Given the session with `--session`, it prints its numbers with the bound
-  `contexto stats` gives, which for a session a `contexto run` launch made is that launch's, not
+  `contexto stats` gives, which for a session a `contexto run` launch made is the last launch's, not
   the service's (see [Status line](statusline.md#calling-it-from-your-own-status-line)).
 - Loopback only, for one user. The service is not meant to be shared between accounts on a machine
   or reached from another machine.

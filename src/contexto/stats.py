@@ -417,7 +417,8 @@ def log_unwritable_message(error: BaseException) -> str:
     code = errno.errorcode.get(getattr(error, "errno", None) or 0, type(error).__name__)
     advice = (f"Free space on the disk that holds {HOME_HINT}." if code in DISK_FULL
               else f"Check the session directory under {HOME_HINT}.")
-    # No "summary below": none follows when the session directory itself is gone (PR #263 review A).
+    # The message says what is lost (`contexto stats` and the exit summary miss what follows) and names a
+    # session directory that is gone (ENOENT), since a gone directory, not the disk, is then the cause.
     gone = ": the session directory is gone" if code == "ENOENT" else ""
     return (f"the session log could not be written ({code}{gone}), so `contexto stats` and the exit summary of "
             f"`contexto run` miss what happened from here on. {advice}")
