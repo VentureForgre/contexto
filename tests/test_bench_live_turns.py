@@ -307,8 +307,12 @@ def test_the_lock_is_released_when_a_run_is_refused_or_fails(env, tmp_path, scri
 
 
 def test_two_runs_into_a_new_output_directory_never_both_run(env, tmp_path, script, monkeypatch):
-    """Both runs reach the point where --out is made before either has made it (a barrier there): the
-    one that takes the lock second is refused, and nothing in the directory is written twice."""
+    """Both runs find no --out and reach the point where it is made before either has made it, and the
+    run that takes the lock first holds it until the other run has returned: the other is refused, and
+    nothing in the directory is written twice. Each run waits at the mkdir only on its first call
+    (``Path.mkdir(parents=True)`` calls itself again after making the parent), and any wait that runs
+    out fails the test, so a trial in which the two runs did not overlap cannot pass or fail."""
+    import io
     import threading
 
     from contexto.bench import credentials as bench_credentials
@@ -316,8 +320,10 @@ def test_two_runs_into_a_new_output_directory_never_both_run(env, tmp_path, scri
     stub = stub_for(script)
     url = stub.start()
     out = tmp_path / "new" / "out"
-    barrier = threading.Barrier(2, timeout=5)
-    real_mkdir, codes, printed = runner.Path.mkdir, {}, {}
+    barrier = threading.Barrier(2, timeout=30)
+    gate = threading.Condition()
+    real_mkdir, real_prepare = runner.Path.mkdir, runner.prepare
+    codes, printed, waited, inside, problems = {}, {}, set(), [], []
 
     def config(name):
         return runner.Config(model="claude-haiku-5-5", bound=BOUND, protocol="v2", turn_kbytes=2, seed=3, seeds=[3],
@@ -326,21 +332,36 @@ def test_two_runs_into_a_new_output_directory_never_both_run(env, tmp_path, scri
                              work=tmp_path / f"work-{name}")
 
     def mkdir(path, *args, **kwargs):
-        if path == out:
+        if path == out and threading.get_ident() not in waited:
+            waited.add(threading.get_ident())
             try:
                 barrier.wait()
-            except threading.BrokenBarrierError:  # the other run never got here
-                pass
+            except threading.BrokenBarrierError:
+                problems.append("the runs never both reached the mkdir")
         return real_mkdir(path, *args, **kwargs)
 
+    def prepare(*args, **kwargs):
+        # Called with the lock held. The first run in waits here until the other run has returned
+        # (refused) or has come in too (the lock let both through), so the two always overlap.
+        with gate:
+            inside.append(threading.get_ident())
+            gate.notify_all()
+            if not gate.wait_for(lambda: len(inside) == 2 or len(codes) == 1, timeout=30):
+                problems.append("the other run neither returned nor came in")
+        return real_prepare(*args, **kwargs)
+
     monkeypatch.setattr(runner.Path, "mkdir", mkdir)
+    monkeypatch.setattr(runner, "prepare", prepare)
 
     def one(name):
-        import io
-
-        stream = io.StringIO()
-        codes[name] = runner.run(config(name), {3: script}, stdout=stream, stderr=stream)
-        printed[name] = stream.getvalue()
+        stream, code = io.StringIO(), None
+        try:
+            code = runner.run(config(name), {3: script}, stdout=stream, stderr=stream)
+        finally:
+            with gate:
+                codes[name] = code
+                printed[name] = stream.getvalue()
+                gate.notify_all()
 
     try:
         threads = [threading.Thread(target=one, args=(name,)) for name in ("a", "b")]
@@ -350,6 +371,8 @@ def test_two_runs_into_a_new_output_directory_never_both_run(env, tmp_path, scri
             thread.join(60)
     finally:
         stub.stop()
+    assert not problems, (problems, printed)
+    assert len(inside) == 1, printed  # only the run that held the lock read the manifest
     assert sorted(codes.values()) == [0, 2], printed
     loser = next(name for name, code in codes.items() if code == 2)
     assert "another contexto bench run is writing to this output directory" in printed[loser]
