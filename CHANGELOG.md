@@ -16,7 +16,26 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   `refresh_token` finds `refreshToken`, a turn holding most of the words is returned, and one
   one-letter typo is tolerated. Each match names the words it matched and the ones it did not. A
   query that some turn holds every word of gets the same result as before
-  ([docs/search.md](docs/search.md)).
+  ([docs/search.md](docs/search.md)). `contexto search --json` marks such a result `approximate`
+  and gives each hit's `matched` and `missing` words.
+- `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
+  described in the command's `--help`; an error is still one line on stderr with the usual exit
+  code.
+- `contexto version` and `contexto -V` print the same line as `--version`. `contexto sessions`
+  with no command lists the sessions.
+- On a fresh install, `state`, `search`, `recall` and `sessions` say to run `contexto run claude`
+  first.
+- When `claude` or `codex` is not on `PATH`, the error gives the vendor's install command. Every
+  `contexto run claude` launch error now starts with `contexto:`, as `run codex` errors did.
+- The Codex "no key helper" error gives a whole command that works with an OpenAI key in
+  `OPENAI_API_KEY`:
+
+  ```sh
+  contexto run --codex-upstream https://api.openai.com/v1 \
+    --codex-key-helper 'printenv OPENAI_API_KEY' codex
+  ```
+
+- The MCP server reports the package version in `serverInfo` (it said `0.1.0`).
 
 ## 0.5.24 (2026-11-06)
 

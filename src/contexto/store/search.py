@@ -875,17 +875,26 @@ def hit_view(hit: ApproxHit, text: str, plan: Plan | None = None) -> tuple[str, 
     zzqqxx]``, each word as typed and each form as the page writes it), and the query that picks the
     page's matching lines: the forms found on the page that ``text`` holds (None when it holds none, so
     the match is in the stub only)."""
+    matched, missing, q = hit_words(hit, text, plan)
+    label = "matched: " + ", ".join(name if how == EXACT else f"{name} as {written}" for name, how, written in matched)
+    if missing:
+        label += "; not matched: " + ", ".join(missing)
+    return f"[{label}]", q
+
+
+def hit_words(hit: ApproxHit, text: str, plan: Plan | None = None
+              ) -> tuple[list[tuple[str, str, str]], list[str], Query | None]:
+    """What ``hit_view`` shows, as data: each matched word as typed with ``how`` it matched and its form as
+    the page writes it (case-folded when ``text`` does not hold it, the match being in the stub), each
+    word not matched as typed, and the query that picks the page's matching lines (as ``hit_view``)."""
     typed = dict(zip(plan.words, plan.typed)) if plan is not None else {}
     low = fold(text)
-    parts, forms = [], []
+    matched, forms = [], []
     for m in hit.matched:
         at, size = next(((low.find(f), len(f)) for f in _forms(m.form) if f in low), (-1, 0))
         if at != -1:
             forms.append(m.form)
-        name = typed.get(m.word, m.word)
-        parts.append(name if m.how == EXACT else f"{name} as {text[at:at + size] if at != -1 else m.form}")
-    label = "matched: " + ", ".join(parts)
-    if hit.missing:
-        label += "; not matched: " + ", ".join(typed.get(w, w) for w in hit.missing)
+        matched.append((typed.get(m.word, m.word), m.how, text[at:at + size] if at != -1 else m.form))
     forms = list(dict.fromkeys(forms))
-    return f"[{label}]", (Query(" ".join(forms), tuple(forms)) if forms else None)
+    return (matched, [typed.get(w, w) for w in hit.missing],
+            Query(" ".join(forms), tuple(forms)) if forms else None)

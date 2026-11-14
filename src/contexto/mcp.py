@@ -29,6 +29,7 @@ import sys
 from collections.abc import Callable, Iterable
 from typing import IO, Any, Protocol
 
+from contexto import __version__
 from contexto.canonical import loads_bounded, utf8
 from contexto.store import LockFileDamagedError, PageUnreadableError
 from contexto.store.ledger import LedgerCorruptError
@@ -48,7 +49,7 @@ from contexto.store.render import (
 from contexto.store.search import FOLDED, SHOWN_IN_DETAIL, TYPO, ApproxHit, Plan, Query, hit_view, text_matches
 
 SERVER_NAME = "contexto"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = __version__  # the package's, as `contexto version` prints it (D64); it was a fixed 0.1.0
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
