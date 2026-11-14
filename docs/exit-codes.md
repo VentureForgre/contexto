@@ -22,4 +22,8 @@ The exit codes of the `contexto` commands. The Command column names the subcomma
 | `sessions`, `recall`, `search`, `state` | 1 | Unknown, ambiguous or invalid session id, pages that cannot be read, an unknown or malformed page id, an offset past the end of the page, an unreadable ledger, or a `CONTEXTO_HOME` that is not a directory |
 | `sessions prune` | 1 | A session could not be deleted, or the session named by `--session` was skipped (in use, active in the last 10 minutes, or unsafe to delete) |
 | `sessions prune` | 2 | `--session` is not a session but the start of existing ids (prune needs the full id) |
+| `project` | 0 | Success: `show`, or `forget` that did everything asked (a record or session already forgotten counts as done) |
+| `project` | 1 | `--dir` (or the current directory) is not an existing directory, `CONTEXTO_HOME` is not a directory, or `forget` did not do something it was asked: no terminal to confirm on without `--yes`, or an answer other than `y` or `yes` (nothing is forgotten), or a record id that is not carried, a session id that is not a session of the project, a session pruned meanwhile, or a file that cannot be written (the rest is still done) |
+| `project forget` | 2 | `--session` is not a session but the start of existing ids (forget needs the full id); nothing is forgotten |
+| `project forget` | 130 | Ctrl+C at the question; nothing was forgotten |
 | any | 2 | Unknown command or option, an invalid option value (for example `--bound abc`), or a missing argument (`contexto` with no command prints help and exits 2) |

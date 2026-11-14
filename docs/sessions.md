@@ -11,7 +11,9 @@ delete sessions.
   `contexto: session 7f3a... (bound 150,000, upstream default)` for Claude Code, or
   `contexto: session 7f3a... (bound 150,000, upstream codex-flag, codex auth apikey, engine rewrite)`
   for Codex. The upstream is named by where it came from (for Claude Code `flag`, `env`, `default`,
-  or a settings file; for Codex [the labels on the Codex page](codex.md)), never by its URL.
+  or a settings file; for Codex [the labels on the Codex page](codex.md)), never by its URL. When
+  the directory's project has earlier sessions, the next line says how many records the session
+  carries from them ([Project memory](project-memory.md#the-start-line)).
 - **In Claude Code**, `/mcp` lists the `contexto` server as connected.
 - **Nothing else is visible until the prompt nears the bound**, about 125,000 tokens with the
   defaults. Then the proxy rotates for the first time.
@@ -36,8 +38,11 @@ outputs, and any file contents or secrets that passed through the conversation. 
 are in `pages/`. The recent turns still in view are in `retained.json`, the page index and pinned
 state in `epoch.json`, and the pinned records in `ledger.jsonl`. For Codex sessions in API-key mode,
 `codex-home/` holds Codex's own transcripts. `meta.json` records the working directory the session
-started in and the Claude Code session ids it served. The session log, `log.jsonl`, holds event
-names, sizes and counts, never prompt or response text. Auth headers and keys are never stored.
+started in and the Claude Code session ids it served, and for [project memory](project-memory.md)
+the project's root directory (`project`, recorded once), whether the session is out of project
+memory (`project_memory`), the record ids its main conversation made (`main_records`) and the record
+ids forgotten from it (`forgotten`). The session log,
+`log.jsonl`, holds event names, sizes and counts, never prompt or response text. Auth headers and keys are never stored.
 
 `$CONTEXTO_HOME` must be a directory, and `contexto run` refuses one that contains `${`. An existing home keeps its
 permissions; Contexto creates `sessions/` as 0700. A session directory must be a real directory:
@@ -86,10 +91,19 @@ text. A mistyped `--session` is an error, never a new session.
   the proxy has recorded the window. When more remains, stderr says
   `[N more characters: rerun with --offset M; <how the chunk size was chosen>]`.
 - `contexto state [--session ID] [--raw]`: the decisions, open obligations, and verified facts the
-  model pinned, uncapped (or "No pinned records."), then how many turns are paged out. `--raw`
+  model pinned, uncapped, then the records the session carries from earlier sessions of its
+  project (or "No pinned records." when there are none of either), then how many turns are paged
+  out. `--raw`
   prints the exact text the MCP `contexto_state` tool gives the model, including its instructions to
-  the model. It hashes each file a record cites as provenance, inside the session's recorded working
+  the model, except that a character in a record that could move the cursor, end the line, or
+  reorder or hide text is shown as its backslash escape. It hashes each file a record cites as provenance, inside the session's recorded working
   directory, to mark changed files `STALE`. It never writes there.
+
+`contexto project show` lists the sessions of a project and the records a new session there would
+carry; `contexto project forget` takes records or sessions out of what later sessions carry by
+changing their `meta.json`, and deletes nothing. Both are described in [Project memory](project-memory.md).
+Pruning a session removes what it gave to project memory, and also its closures and replacements of
+other sessions' records, which are then open or active again.
 
 ### Removing old sessions
 

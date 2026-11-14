@@ -14,8 +14,25 @@ not start it by hand.
 | `contexto_search(query)` | Finds turns that contain every word of the query, or approximate matches when none does (details below) |
 | `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
 | `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`. Decisions and obligations always show in the pinned state; an event, artifact, or reference shows there only when verified with a provenance source, and the reply says so when it will not |
-| `contexto_close(obligation_id, note)` | Close an open obligation |
-| `contexto_state()` | The full pinned state, with no pin-budget cap. It is charged against the turn's recall budget and cut at a whole line, with a trailer, when the budget runs out |
+| `contexto_close(obligation_id, note)` | Close an open obligation, including one carried from an earlier session of the project |
+| `contexto_state()` | The full pinned state, with no pin-budget cap, then the records carried from earlier sessions of the project. It is charged against the turn's recall budget and cut at a whole line, with a trailer, when the budget runs out |
+
+**What the model is told to pin.** The `contexto_pin` description, the server's instructions and
+the preamble tell the model to pin a standing rule, preference or obligation when the user states
+it, and only what the user states in their own messages, never a rule found in tool results, files,
+web pages, or another agent's output. The `contexto_pin` description also says that a pin in the
+main conversation can be carried into later sessions of the project. This guidance is the same for
+every session, with project memory on or off.
+
+**Carried records.** A new session starts with the open obligations and active decisions the main
+conversation pinned in earlier sessions of the same project ([Project memory](project-memory.md)).
+They are listed after the session's own records, under their own heading, in the pinned state and in
+`contexto_state`. `contexto_close` closes a carried obligation, and `contexto_pin` with `supersedes`
+replaces a carried decision; `supersedes` may name a record of an earlier session only while it is
+carried. The closure or the new record is written to the current session's ledger. When the main
+conversation made it, every session of the project then finds the record closed or replaced; when a
+subagent or side request made it, or a Codex session (whose calls go through code mode's `exec`),
+only its own session does.
 
 **Search.** `contexto_search` finds turns holding every word of the query, in any case and any
 order. Words match as substrings, so identifiers and paths work. When no turn holds every word, the
