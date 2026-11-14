@@ -190,9 +190,18 @@ def endpoint(home: Path) -> tuple[int, str]:
     checked first, so with no service running nothing is read and the token goes nowhere:
     ``ServeFileError`` then names ``serve.lock`` with kind ``missing``, and otherwise the file that
     cannot be used."""
+    port, _, token = endpoint_record(home)
+    return port, token
+
+
+def endpoint_record(home: Path) -> tuple[int, int | None, str]:
+    """``endpoint`` with the process id ``serve.json`` records: ``(port, pid, token)``. A caller that
+    sends more than one request compares it before each later one, so a request goes only to the
+    service that answered the first."""
     if not service_running(home):
         raise ServeFileError(LOCK_FILE, "missing", "is not held: no contexto serve is running for this Contexto home")
-    return read_state(home)["port"], read_token(home)
+    state = read_state(home)
+    return state["port"], state["pid"], read_token(home)
 
 
 def base_url(port: int, token: str) -> str:

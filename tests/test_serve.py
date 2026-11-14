@@ -1213,6 +1213,52 @@ def test_after_a_stop_signal_whoever_binds_the_port_is_never_sent_the_token(home
     assert refused.value.kind == serveclient.NOT_RUNNING and "serve.json" in refused.value.reason
 
 
+def test_a_resolve_call_retrying_when_the_service_stops_never_reaches_the_ports_next_owner(make_service, home):
+    """Round-3 review (Reviewer B, minor 1): a call the service answered 404 is asked again for up to
+    2 s. When the service stops during a wait and another program binds the freed port, the retry must
+    not reach it: before each retry the client checks again, as before the first try, that the service
+    that answered still holds the lock and that its record still names the port."""
+    service = make_service()
+    port, waits, recorders = service.port, [], []
+
+    def stop_and_take_the_port(seconds: float) -> None:
+        waits.append(seconds)
+        if len(waits) == 2:  # the second wait: the first retry was answered by the service itself
+            service.stop()
+            recorders.append(Recorder(until(lambda: bind(port), "the service's port to be free", timeout=20)))
+
+    try:
+        with pytest.raises(serveclient.ResolveError) as refused:
+            serveclient.resolve(home, "toolu_01D70retrying", sleep=stop_and_take_the_port)
+    finally:
+        for recorder in recorders:
+            recorder.close()
+    assert len(waits) == 2 and len(recorders) == 1
+    assert recorders[0].received == []
+    assert refused.value.kind == serveclient.NOT_RUNNING
+
+
+@pytest.mark.parametrize("change", ["record removed", "another pid", "another port", "token replaced"])
+def test_a_retry_is_not_sent_once_the_services_record_changed(make_service, home, change):
+    service = make_service()
+    state = json.loads((home / serve.STATE_FILE).read_text())
+
+    def change_the_record(seconds: float) -> None:
+        if change == "record removed":  # the service is stopping: it removes its record before its port
+            (home / serve.STATE_FILE).unlink(missing_ok=True)
+        elif change == "token replaced":
+            serve.rotate_token(home)
+        else:
+            moved = {"another pid": {**state, "pid": state["pid"] + 1},
+                     "another port": {**state, "port": state["port"] + 1}}[change]
+            serve.write_atomic(home / serve.STATE_FILE, json.dumps(moved).encode())
+
+    with pytest.raises(serveclient.ResolveError) as refused:
+        serveclient.resolve(home, "toolu_01D70changed", sleep=change_the_record)
+    assert refused.value.kind == serveclient.NOT_RUNNING
+    assert service.health()["resolve"] == {"found": 0, "unknown": 1}  # the first try only
+
+
 def test_a_hangup_ignored_at_start_stays_ignored(home, running):
     """``nohup contexto serve &`` must outlive its terminal."""
     service = running(hangup=signal.SIG_IGN)

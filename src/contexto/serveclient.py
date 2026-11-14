@@ -20,15 +20,20 @@ made with ``http.client`` to ``127.0.0.1`` only: it reads no proxy setting from 
 A 404 is asked again a few times inside ``RETRY_WINDOW_S``. The service registers a tool call's id
 before it passes the call on wherever it reads the response as it relays it; the retry covers the
 responses where it cannot promise that order (``docs/serve.md``, "Endpoints of the service itself").
-Nothing else is retried.
+Nothing else is retried. Before each retry the service is looked for again, as before the first try:
+a service must hold the lock, and ``serve.json`` and ``serve.token`` must give the port, process id
+and token the first try used. Otherwise the call ends with ``NOT_RUNNING`` and nothing more is sent,
+so a service that stops during a wait, and whatever binds its port after it, get no retry (round-3
+review: the first version read the endpoint once and could send a retry to the port's next owner).
 
 Bounded in time: each try has ``TIMEOUT_S`` in total to connect, send and read the whole answer
 (at that deadline its socket is shut, however the answer was trickling in), and a retry is started
 only while its wait ends inside ``RETRY_WINDOW_S``. So a call ends within ``RETRY_WINDOW_S +
 TIMEOUT_S`` (4 s), with six tries at most.
 
-What is never sent or said: the token goes into the request path and nowhere else, and only to the
-port recorded by a service that holds the lock. ``ResolveError`` holds a kind and a fixed phrase,
+What is never sent or said: the token goes into the request path and nowhere else, and each request
+goes only to the port recorded by a service that holds the lock when that request is about to be
+sent. ``ResolveError`` holds a kind and a fixed phrase,
 never the token, the request path, a file's content, or the text of an exception that could quote
 one of them.
 """
@@ -48,6 +53,7 @@ from contexto.servecontract import (
     UNKNOWN_TOOL_USE,  # also this module's kind for a 404 that outlasts the retries
     ServeFileError,
     endpoint,
+    endpoint_record,
     found_session,
     is_unknown,
     local_target,
@@ -84,6 +90,14 @@ def read_endpoint(home: Path) -> tuple[int, str]:
     file, or does not hold what the service writes. The reason names the file, never its content."""
     try:
         return endpoint(home)
+    except ServeFileError as exc:
+        raise ResolveError(NOT_RUNNING, f"{exc.name} {exc.problem}") from None
+
+
+def _read_record(home: Path) -> tuple[int, int | None, str]:
+    """``read_endpoint`` with the recorded process id (``servecontract.endpoint_record``)."""
+    try:
+        return endpoint_record(home)
     except ServeFileError as exc:
         raise ResolveError(NOT_RUNNING, f"{exc.name} {exc.problem}") from None
 
@@ -149,7 +163,8 @@ def resolve(home: Path, tool_use_id: str, *, clock: Callable[[], float] = time.m
     The id is what the service answered and nothing more: the caller validates it and decides whether
     that session can be opened. ``clock`` (monotonic seconds) and ``sleep`` drive the retry after a
     404, so a test injects them and does not wait."""
-    port, token = read_endpoint(home)
+    record = _read_record(home)
+    port, _, token = record
     deadline = clock() + RETRY_WINDOW_S
     delays = iter(RETRY_DELAYS_S)
     while True:
@@ -167,3 +182,7 @@ def resolve(home: Path, tool_use_id: str, *, clock: Callable[[], float] = time.m
         if delay is None or clock() + delay > deadline:
             raise ResolveError(UNKNOWN_TOOL_USE, "the service answered 404")
         sleep(delay)
+        # The service may have stopped during the wait and another program bound its port: ask again
+        # only the service that answered, still holding the lock and still recording this port.
+        if _read_record(home) != record:
+            raise ResolveError(NOT_RUNNING, "the service stopped or changed while the call was asked again")
