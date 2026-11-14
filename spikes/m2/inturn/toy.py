@@ -45,8 +45,11 @@ CLEARED = "[cleared]"
 LYING_ROOM = 100_000
 INFLATED = 999_999
 OLDER = ("silent_older", "drop_older_stubs", "drop_older_rounds", "noted_older_rounds", "trim_older_prompts",
-         "split_older_prompts", "drop_older_turns", "fake_omission")  # Claude Code only
-ROUNDS_GONE = ("drop_older_rounds", "noted_older_rounds", "trim_older_prompts", "split_older_prompts", "fake_omission")
+         "split_older_prompts", "drop_older_turns", "fake_omission", "fake_omission_split",
+         "fake_omission_trim")  # Claude Code only
+ROUNDS_GONE = ("drop_older_rounds", "noted_older_rounds", "trim_older_prompts", "split_older_prompts", "fake_omission",
+               "fake_omission_split", "fake_omission_trim")
+FAKE_OMISSION = ("fake_omission", "fake_omission_split", "fake_omission_trim")
 DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "no_room", "room_one",
            "no_stub_text", "show_once", "lying_room", "in_place", "inflate", *OLDER)
 # What each defect does (the reviewers' wrong engines among them):
@@ -76,7 +79,8 @@ DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "n
 #   (reviewer A's wholeturns);
 # - fake_omission: drop_older_rounds, with the index's "(1 older pages omitted; use contexto_search ...)"
 #   line added where the page id would go, though the turns' prompts are still in view (reviewer A at
-#   9fe691ef).
+#   9fe691ef); fake_omission_split, fake_omission_trim: the same with each earlier prompt split into two
+#   blocks or trimmed by one character (reviewer B at 18d2e783: a changed prompt is not a turn that left).
 # The last four strip thinking where they rewrite: in each earlier turn, from the first item they change to
 # the next prompt.
 
@@ -300,7 +304,7 @@ class ToyPager:
                 continue
             if self.is_prompt(True, item):  # each turn was rewritten at its own turn start: its responses after that
                 first = None
-                if self.defect in ("trim_older_prompts", "split_older_prompts"):
+                if self.defect in ("trim_older_prompts", "split_older_prompts", "fake_omission_split", "fake_omission_trim"):
                     form = self.changed_prompt(form)
             blocks = item.get("content") if isinstance(item.get("content"), list) else []
             if self.defect in ROUNDS_GONE:
@@ -322,7 +326,7 @@ class ToyPager:
             out.append(form)
         earlier = len(out) - (len(items) - p)
         last = max((n for n in range(earlier) if out[n].get("role") == "assistant"), default=None)
-        if self.defect == "fake_omission" and last is not None:
+        if self.defect in FAKE_OMISSION and last is not None:
             note = {"type": "text", "text": "(1 older pages omitted; use contexto_search to find them)"}
             out[last] = {**out[last], "content": [*out[last]["content"], note]}
         if self.defect == "noted_older_rounds" and last is not None and p in self.older_pages:
@@ -337,7 +341,7 @@ class ToyPager:
         text = content if isinstance(content, str) else next(
             (b["text"] for b in content or [] if isinstance(b, dict) and b.get("type") == "text"), "")
         half = len(text) // 2
-        blocks = ([{"type": "text", "text": text[:-1]}] if self.defect == "trim_older_prompts"
+        blocks = ([{"type": "text", "text": text[:-1]}] if self.defect in ("trim_older_prompts", "fake_omission_trim")
                   else [{"type": "text", "text": text[:half]}, {"type": "text", "text": text[half:]}])
         return self.older_form(form, blocks)
 

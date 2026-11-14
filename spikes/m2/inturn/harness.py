@@ -357,6 +357,7 @@ class _Actor:
         self.results: dict[str, bytes] = {}  # every result delivered: call id -> digest of its content
         self.prompts: list[str] = []  # each turn's prompt text, in order
         self.call_turn: dict[str, int] = {}  # call id -> the turn (index into prompts) that delivered its result
+        self.answers: dict[int, list[str]] = {}  # turn -> the text of each of its assistant messages that has text
         self.result_tokens: dict[str, int] = {}
         self.scripted: dict[str, str] = {}  # the scripted ones: call id -> call key
         self.hit: tuple[str, int] | None = None  # the page and offset the last search named
@@ -480,6 +481,10 @@ class _Play:
                 actor.result_tokens[call_id] = block_tokens(blocks[n]) if blocks else item_tokens(item)
                 actor.fresh.append(call_id)
                 actor.call_turn[call_id] = len(actor.prompts) - 1
+            if item.get("role") == "assistant":
+                text = "".join(_read_texts(item))
+                if text.strip():
+                    actor.answers.setdefault(len(actor.prompts) - 1, []).append(text)
 
     def resolve(self, actor: _Actor, step: Step) -> Step:
         """A probe step as the model would answer it: a search, then a recall of the page it named."""
@@ -530,7 +535,8 @@ class _Play:
         how many are not accounted for. Only a result of an earlier turn whose call is gone from the
         request as well can be, and only when the text the model reads names where it went: a page id
         in the request's own text (a text part of a message, not a tool result and not another request
-        field) reaches it; or the whole turn left (its prompt is not in that text either), that text
+        field) reaches it; or the whole turn left (neither its prompt nor any of its answers is in the text
+        of any one message, that message's text parts joined as they are), that text
         carries the index's "(N older pages omitted; use contexto_search" line with N at least 1 and at
         most the number of store pages it does not name, and the result is stored byte for byte in some
         page. An index past its budget lists only the newest pages, so a correct long session needs the
@@ -550,9 +556,13 @@ class _Play:
         named = set(PAGE_ID.findall(texts))
         unlisted = sum(1 for name in self.page_names if name[:-5] not in named)
         omitted = any(1 <= int(n) <= unlisted for n in OMITTED.findall(texts))
+        messages = ["".join(_read_texts(item)) for item in forwarded.get(self.field) or []]
+
+        def left(turn: int) -> bool:  # neither the turn's prompt nor any of its answers is in any one message
+            return not any(text in m for text in (actor.prompts[turn], *actor.answers.get(turn, ())) for m in messages)
+
         accounted = sum(1 for call_id in gone if call_id in reached or (
-            omitted and actor.prompts[actor.call_turn[call_id]] not in texts
-            and actor.results[call_id] in self.paged.get(call_id, ())))
+            omitted and left(actor.call_turn[call_id]) and actor.results[call_id] in self.paged.get(call_id, ())))
         return len(missing) - accounted
 
     # One request ----------------------------------------------------------------------------------

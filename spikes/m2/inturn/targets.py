@@ -91,8 +91,10 @@ def storage(run: Run) -> list[str]:
       its page reaches it; a page that reaches nothing that is missing covers nothing;
     - or, for a result of an earlier turn only, its call is gone from the request too, and the text the
       model reads (text parts of messages, not tool results or other fields) names where it went: a page
-      id there reaches it, or that text carries the index's "older pages omitted" line and the result is
-      stored byte for byte.
+      id there reaches it, or the whole turn left (neither its prompt nor any of its answers is in the text
+      of any one message), that text carries the index's "(N older pages omitted; use contexto_search"
+      line with N at least 1 and at most the store pages it does not name, and the result is stored byte
+      for byte.
 
     Anything else fails. A result that is not whole in the request is also stored byte for byte in
     some page (a result of Contexto's own search, recall or state calls may be named by a reference with

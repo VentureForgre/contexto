@@ -121,7 +121,8 @@ TRICKLE = (100_000, 75_000)  # reviewer A
 NARROW = (112_500, 87_500)  # reviewer B
 HIGHER = (110_000, 70_000)  # a batch leaves the request over the pressure line, so a second one is held to the in-a-row rule
 OLDER = [("silent_older", 51), ("drop_older_stubs", 31), ("drop_older_rounds", 51), ("trim_older_prompts", 51),
-         ("split_older_prompts", 51), ("drop_older_turns", 51), ("fake_omission", 51)]  # requests failed, quick build
+         ("split_older_prompts", 51), ("drop_older_turns", 51), ("fake_omission", 51), ("fake_omission_split", 51),
+         ("fake_omission_trim", 51)]  # requests failed, quick build
 
 
 @pytest.mark.parametrize(("defect", "rules"), WRONG)
