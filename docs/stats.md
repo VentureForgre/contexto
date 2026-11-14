@@ -494,7 +494,8 @@ Events that are **not** counted, because they happen in normal use:
 - `pdf_allowance`, `pdf_pages_uncertain`: sizing notes about a PDF, which the launcher prints.
 - `hint_mismatch`: a signal for whoever updates Contexto for a new Claude Code (D70,
   docs/cli-updates.md): a hint header and the signature beside it disagree. Logged once per pair
-  and engine; the header decides how the request is handled, so it is not a fault of the session.
+  and engine; the header decides how the request is handled (except that an agent id outranks it),
+  so it is not a fault of the session.
 - `cli_version_untested`: a condition, not a failure. The launcher warns about an untested CLI
   version when the session starts.
 - `window_budget_warning`: the same kind: the bound leaves little room, and the launcher says so

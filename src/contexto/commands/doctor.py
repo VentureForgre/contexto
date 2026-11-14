@@ -473,11 +473,15 @@ def check_cli(cli: str, env: Mapping[str, str]) -> Check:
 
 def require_one_cli(clis: list[Check]) -> None:
     """Contexto needs one of the two CLIs: called with neither usable, it makes both checks fail."""
+    codex_missing = any(check.details.get("error") == "codex_support_missing" for check in clis)
     for check in clis:
         if check.status == WARN:
             check.status = FAIL
-            if check.details.get("error") != "codex_support_missing":  # installed: its own step stands
-                check.action = "Install Claude Code or Codex and put it on PATH: Contexto needs at least one of them"
+            if check.details.get("error") == "codex_support_missing":  # installed: its own step stands
+                continue
+            check.action = ("Install Claude Code and put it on PATH: Contexto needs at least one of the two CLIs, "
+                            "and this build has no Codex support" if codex_missing else
+                            "Install Claude Code or Codex and put it on PATH: Contexto needs at least one of them")
 
 
 # Settings files ---------------------------------------------------------------------------------------

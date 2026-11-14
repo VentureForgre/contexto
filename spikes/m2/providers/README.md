@@ -142,7 +142,8 @@ What it shows:
 
 Not measured: interactive mode (only `-p`), so not what interactive Claude Code does with a project
 file's provider variable once its trust dialog is accepted; a settings file other than the
-project's `.claude/settings.json`; two variables on at once; organization-managed settings; the
+project's `.claude/settings.json`, except the `env`-not-an-object case above, which was also run on
+the user file; two variables on at once; organization-managed settings; the
 other 18 cases of the first table on 2.1.322; and any Claude Code version but 2.1.318 and 2.1.322.
 The variable list, its order and the on/off rule were also read from the 2.1.318 and 2.1.322
 programs, which hold the same code for them.

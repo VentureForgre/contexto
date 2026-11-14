@@ -398,8 +398,8 @@ def _json_int(text: str) -> int | float:
 
 def _json_constant(name: str) -> float:
     """``NaN``, ``Infinity`` and ``-Infinity`` are not JSON. Python accepts them; Claude Code 2.1.322
-    loads nothing from a file that holds one (D70-serve-probes.md §3, spikes/m2/providers/README.md), so
-    the file is not valid JSON here either."""
+    loads nothing from a file that holds one (D70-serve-probes.md, "D70 review round" §3;
+    spikes/m2/providers/README.md), so the file is not valid JSON here either."""
     raise ValueError(f"{name} is not JSON")
 
 

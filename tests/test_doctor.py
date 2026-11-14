@@ -399,6 +399,15 @@ def test_without_codex_support_the_codex_checks_say_so_and_are_not_a_bug(both, c
     assert not any("Report it" in (c["action"] or "") for c in found.values())
     _, out, _ = run(capsys)
     assert "ModuleNotFoundError" not in out
+    # And with Claude Code unusable too, its step does not tell the user to install Codex, which is there
+    # (Reviewer B, PR #290).
+    (both.bin / "claude").unlink()
+    fake_cli(both, "claude", None, body="#!/nonexistent/interpreter\n")
+    code, found = checks(capsys)
+    assert code == 1 and found["claude"]["status"] == found["codex"]["status"] == "fail"
+    assert found["claude"]["action"].startswith("Install Claude Code and put it on PATH")
+    assert "no Codex support" in found["claude"]["action"] and "or Codex" not in found["claude"]["action"]
+    assert found["codex"]["action"] == "Reinstall Contexto to use `contexto run codex`; until then it exits 2"
 
 
 def test_without_codex_support_or_a_usable_claude_both_cli_checks_fail(world, capsys, fast_mcp, monkeypatch):
