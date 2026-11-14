@@ -34,10 +34,8 @@ For Claude Code, the launcher:
 
 1. resolves the upstream Claude Code would otherwise use (see [Troubleshooting](troubleshooting.md));
 2. picks the session (`--session`, else the one a `--resume <id>` or `--continue` names, else a new
-   one), opens it under `$CONTEXTO_HOME/sessions/<id>/`, starts the proxy on
-   `127.0.0.1:<free port>`, and prints the session line on stderr (`contexto: session …`), then, in
-   a project with earlier sessions, the project memory line (`contexto: project memory: …`; see
-   [Project memory](project-memory.md#the-start-line));
+   one), opens it under `$CONTEXTO_HOME/sessions/<id>/`, and starts the proxy on
+   `127.0.0.1:<free port>`;
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets
    `env.ANTHROPIC_BASE_URL` to the proxy and the hint-header variables below (only
    `CONTEXTO_HINT_HEADERS` when you have turned hint headers off), allows Contexto's
@@ -46,7 +44,9 @@ For Claude Code, the launcher:
    [Status line](statusline.md)), and an `--mcp-config` file that
    starts Contexto's MCP server (`python -P -m contexto mcp --session=<id>` with the same Python, and
    `CONTEXTO_HOME`, plus `CONTEXTO_SEARCH_CACHE_MB` when set, in its environment; `-P` keeps your
-   project directory off the import path);
+   project directory off the import path); then prints the session line on stderr
+   (`contexto: session …`) and, in a project with earlier sessions, the project memory line
+   (`contexto: project memory: …`; see [Project memory](project-memory.md#the-start-line));
 4. runs `claude --settings=<file> --mcp-config=<file> [your args]` in your terminal, with
    `CONTEXTO_SESSION=<id>` in its environment, and returns its exit code. Each flag and its file are
    one argument, so a prompt right after `claude` (`contexto run claude "fix the tests"`) stays a

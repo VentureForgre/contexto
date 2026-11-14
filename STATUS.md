@@ -101,11 +101,13 @@ compaction never fires, and accuracy equals full context.
   `contexto state`; `contexto doctor`, eleven checks with no network request, whose `provider` check
   fails with the launcher's own cloud-provider refusal (D70); a Claude Code status line,
   `contexto statusline`, added by `contexto run claude` only when no settings file has one
-  (`ctx 112k/150k · 41 paged · 3 recalls · 5 searches`; 67 to 68 ms median per call on a 2.9 MB log
-  under load); `docs/events.md`, every `log.jsonl` event, held to the source by
+  (`ctx 112k/150k · 41 paged · 3 recalls · 5 searches`; on a 2.9 MB log, 68 ms median and 91 ms at
+  worst per call at load average 32, 165 ms median and 663 ms at worst at load average 50, from
+  `docs/statusline.md`); `docs/events.md`, every `log.jsonl` event, held to the source by
   `tests/test_events_doc.py`; and `--json` on `state`, `search` and `recall`, `contexto version`,
-  and clearer launch errors. The last whole-suite run (#290, before #289 reached it): 6,009 passed,
-  15 skipped, 1 xfailed, and the 8 replay failures then on `main`. Guides: `docs/stats.md`,
+  and clearer launch errors. The last `main` CI run that passed, at 2401cf56 (#290) on 2026-11-14:
+  6,950 to 6,952 passed, 36 to 38 skipped and 7 xfailed in each of the six test jobs (Ubuntu and
+  macOS, Python 3.12 to 3.15). Guides: `docs/stats.md`,
   `docs/doctor.md`, `docs/statusline.md`, `docs/events.md`.
 
 ## Benchmark (D66)
@@ -780,7 +782,8 @@ Still open:
   `NaN` and names a switch, even at `"0"`, refuses a launch Claude Code would allow (accepted: it
   only adds refusals). Not built: a status line for Codex, which has no such setting. Unconfirmed:
   interactive Claude Code for the provider switches, `/statusline` writing the user's settings,
-  managed settings, Claude Code other than 2.1.318 and 2.1.322, Linux except CI.
+  managed settings, whether a custom status line hides Claude Code's footer hints, Claude Code
+  other than 2.1.318 and 2.1.322, Linux except CI.
 - Open from D49: a head too large for `min_turn_room` (bound 60,000, a 28,000-token head) leaves the
   minimum-room rotation (A12) nothing to restore, so later turn starts keep their window (about 34,200 real, room 806,
   `turn_room_low` logged once); PR #232 review B's finding 1.

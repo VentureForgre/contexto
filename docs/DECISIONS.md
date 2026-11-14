@@ -4343,8 +4343,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     never a non-zero exit. Claude Code's documentation says the `--settings` file outranks the
     user's and `statusLine` is replaced, not merged (measured in a pty on 2.1.322 and 2.1.318: only
     the `--settings` one ran), so `contexto run claude` adds one only when no settings file Claude
-    Code reads has a `statusLine`, none sets `disableAllHooks`, and every file could be read;
-    `--no-statusline` or `CONTEXTO_NO_STATUSLINE=1` turns it off. A prompt over the bound never
+    Code reads has a `statusLine`, none sets `disableAllHooks`, every file could be read, managed
+    settings do not set `allowManagedHooksOnly`, and the command holds no `${` (which Claude Code
+    would expand); `--no-statusline` or `CONTEXTO_NO_STATUSLINE=1` turns it off. A prompt over the bound never
     reads as equal to it (`1.09M/1M`). The line the launcher installs passes `--session` and shows
     from the start. A user's own script that names no session, or names one through
     `$CONTEXTO_SESSION`, is held to which conversation is asking: a conversation counts only when it
@@ -4353,9 +4354,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
     after `/clear`, and a session reopened for another conversation shows nothing under the old
     one. A session that `contexto serve` has opened since its last launch shows nothing when Claude
     Code asks; named with `--session`, it shows the last launch's bound. Reason: a wrong session's
-    numbers are worse than none. Measured: the whole command 67 to 68 ms median (worst 108 ms) on a
-    6-hour synthetic log of 2.9 MB with 1,200 pages, at load averages of 32 and 54; the in-run check
-    6.5 ms median on a 17 MB log. Guide: [docs/statusline.md](statusline.md).
+    numbers are worse than none. Measured (the guide's figures, process start included, on a 6-hour
+    synthetic log of 2.9 MB with 1,200 pages): the command as installed took 68 ms median and 91 ms
+    at worst at load average 32, against 32 ms for `python -c pass`, and 165 ms median and 663 ms at
+    worst at load average 50; the in-run check 6.5 ms median on a 17 MB log. Guide: [docs/statusline.md](statusline.md).
   - **`docs/events.md` (#261, 26663b16).** A reference for every event in `log.jsonl`: its writer,
     where it appears (own line, `transform_events` or `usage_events`), its kind and one bullet per
     field. `tests/test_events_doc.py` scans every module under `src/contexto` with `ast` and fails,
@@ -4369,30 +4371,53 @@ the owner's delegation. Open decisions are listed at the end with the options an
     `DYNAMIC_SITES` (empty). The writers include `service`: `contexto serve` writes `serve_open` and
     `serve_close` to the session's log, and most of its events (its start and stop, the sessions it
     opens and closes, requests it refuses or cannot route) go to `$CONTEXTO_HOME/serve.log`, not a
-    session log, so they are listed in `NOT_SESSION_LOG`. Nine review rounds, at nine heads.
+    session log, so they are listed in `NOT_SESSION_LOG`.
   - **#283 (293b3478).** `commands/doctor.py` imported `contexto.codex` at its top, so with that
     module missing every `contexto` command failed while the parser was built; the import moved
     into the three functions that use it, and a test runs the CLI with the module blocked.
   - **#290 (2401cf56).** The reviewers' lows on #257, #263, #258 and #283 that were still true on
     `main`, each fixed or skipped with its reason in the pull request.
-  - **Merge policy.** `main` moved many times a day while each review round took 15 to 40 minutes,
-    so a pull request approved at one head was often behind `main` by the time it could merge.
-    Decision, extending D66's merge rule: (a) when `main` moved only with commits touching none of
-    the pull request's files, merge `main` into the approved head in a scratch worktree, run the
-    affected tests, and squash-merge the approved head unchanged; (b) the same when the overlap is
-    only in `CHANGELOG.md`, docs or test files, or in other functions of a shared file, with an
-    empty `git show --remerge-diff` and the affected tests passing (used for #263 with #273 and
-    #281, #283 with #269, #276 with #288, and #261 with #290); (c) a conflict, or an overlap in the
-    same code, gets a pushed merge and a confirmation from both reviewers. Reason: a new review
-    round for each move of `main` would never have caught up, and (a) and (b) leave the reviewed
-    code unchanged while (c) is where a merge can change it.
-  - **Incidents.** `main` was red for about two hours (07:48 to 09:52 UTC) after #269 (D66) and
-    #279 (D69) merged 28 minutes apart: #279 changed text the proxy sends and #269 pinned it in the
-    replay trace. #289 (D66) fixed it. D64's pull requests waited rather than merge on a red `ci`.
-    One reviewer's sandbox launch escaped its stub `HOME` (an unquoted variable in zsh) and created
-    one session directory in the real `~/.contexto`, with a fake `claude` and a stub upstream, so
-    nothing was spent; the reviewer deleted that directory, and the briefs since pass each variable
-    to `env -i` as a separate argument.
+  - **Merge policy.** `main` moved many times a day, so a pull request approved at one head was
+    often behind `main` by the time it could merge. Decision, extending D66's merge rule (4), under
+    which two pull requests that each passed alone turned `main` red together; testing the merge
+    locally before the squash closes that gap. (a) When `main` moved only with commits touching none
+    of the pull request's files, merge `main` into the approved head in a scratch worktree, run the
+    tests below on the merge, and squash-merge the approved head unchanged. (b) The same when the
+    overlap is only in `CHANGELOG.md`, docs or test files, or in other functions of a shared file,
+    with an empty `git show --remerge-diff` as well. (c) A conflict, or an overlap in the same code,
+    gets a pushed merge and a confirmation from both reviewers. The tests for (a) and (b): the pull
+    request's own tests and the tests of every file both sides changed; the tests that hold numbers
+    recorded from a whole run (`tests/test_bench_replay*.py` and the others like them);
+    `tests/test_docs_links.py`; and `tests/test_events_doc.py`. Reason for the second group: #269 and
+    #279 shared no files and still turned `main` red through the pinned replay trace (Incidents).
+    Immediately before the merge command, check again that `main` is still the commit the merge was
+    tested with, and pass `gh pr merge --match-head-commit <approved head>`, which guards the pull
+    request's head, not `main`. Used: (a) for #263 with #273, #283 with #269 and #261 with #290; (b)
+    for #263 with #281 (`CHANGELOG.md`), #276 with #288 (`CHANGELOG.md`, and `launcher.py`, where
+    #288 changed `NoticeLog`, which #276 does not touch; 836 tests passed on the merge) and #261
+    with #293 (`docs/README.md` and `docs/serve.md`; `tests/test_events_doc.py` and
+    `tests/test_docs_links.py`, 43 passed). #290 with #293 was not checked; see Incidents. Reason:
+    a new review round for each move of `main` would never have caught up, and (a) and (b) leave
+    the reviewed code unchanged while (c) is where a merge can change it.
+  - **Incidents.**
+    - `main` was red for about two hours (07:48 to 09:52 UTC) after #269 (D66) and #279 (D69)
+      merged 28 minutes apart: #279 changed text the proxy sends and #269 pinned it in the replay
+      trace. #289 (D66) fixed it. D64's pull requests waited rather than merge while it was red.
+    - `main`'s CI failed at 2b25c905 (#276's merge): one D66 test in
+      `tests/test_bench_live_stops.py` (a request that got no response is counted per attempt)
+      failed on one of six test jobs (ubuntu, Python 3.12) and passed on the other five. It is not a
+      D64 change. The next runs, at 2c070158 and 2401cf56, passed.
+    - #290 was squash-merged at 15:00:33 UTC after a check that `main` was an ancestor of its
+      approved head. #293 (D70) had landed about 3 seconds earlier, so #290 went onto a `main` it
+      had not been tested with (they share `CHANGELOG.md` and other functions of `upstream.py`).
+      `main`'s CI at 2401cf56 then passed. The re-check and `--match-head-commit` in the merge
+      policy above are what close this.
+    - A reviewer's report on #276, in the round that checked the merge of `main` (with #279) into
+      that branch, said its sandbox launch had escaped its stub `HOME` (an unquoted variable in zsh)
+      and created one session directory in the real `~/.contexto`, with a fake `claude` and a stub
+      upstream, so nothing was spent. It is in no pull request's record. The reviewer deleted the
+      directory, the orchestrator checked that it was gone, and the briefs since pass each variable
+      to `env -i` as a separate argument.
   - **Not built:** a status line for Codex, which has no such setting. No release was cut; that is
     the maintainer's call.
   - **Unconfirmed:** interactive Claude Code for the provider switches (the probe ran `-p` only);
@@ -4410,6 +4435,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     places it means (#271's text, D70's to change); a settings file that holds `NaN` and names a
     switch, even at `"0"`, refuses a launch Claude Code would allow, since Claude Code skips the
     whole file (accepted: it only adds refusals).
+
 - **D66. `contexto bench`: a benchmark an outsider can run, with plain Claude Code as an arm.**
   Claude, 2026-11-14, under D0; no contract change (the proxy and the launcher are unchanged). An
   audit on 2026-11-12 found that the evidence for "accuracy equals full context" (D2) could not

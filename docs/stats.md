@@ -192,7 +192,7 @@ twice: before sending, against its estimate, and after the response, against the
 | `over_bound.requests` | Model requests marked over the bound. |
 | `over_bound.measured` | Of those, the ones whose real prompt, as the API counted it, was above the bound. |
 | `over_bound.estimate_only` | Of those, the ones flagged only by the estimate before sending: the API then counted a prompt at or under the bound, or reported no usage. |
-| `over_bound.in_tool_loop` | Flagged before sending, inside a tool loop. Contexto also pages inside a running turn ([in-turn paging](in-turn-paging.md), contract rule 5), so this means the loop had nothing left to page (`in_turn_exhausted`), a result that had just arrived was denser than its estimate, or in-turn paging was off (`--no-in-turn-paging`, and Codex, whose tool loops are sent whole). |
+| `over_bound.in_tool_loop` | Flagged before sending, inside a tool loop. Contexto also pages inside a running turn ([in-turn paging](in-turn-paging.md), contract rule 5), so this means in-turn paging had nothing left to page (`in_turn_exhausted`), was off (`--no-in-turn-paging`), is not available (Codex, whose tool loops are sent whole), or the store had failed (also counted under `over_bound.degraded`). |
 | `over_bound.at_turn_start` | Flagged before sending, at a turn start. The rotation ran and the request still did not fit: the bound is too small for the fixed overhead plus the new turn (`bound_too_small`, usually with a launcher warning), the sizing did not hold, or paging was stopped. This one is worth acting on: use a larger `--bound`. |
 | `over_bound.degraded` | Marked over the bound while paging was stopped (see Faults). |
 
