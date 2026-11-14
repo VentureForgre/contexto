@@ -48,8 +48,9 @@ The same counts for parts of a class, both halves together. The off-page word is
 | typo, swap | 9 | 0 (0%) | 9 | 0 (0%) | 9 | 0 of 2 | 0 / 0 / 9 |
 | typo, the other words are the page's own | 15 | 0 (0%) | 15 | 0 (0%) | 15 | 0 of 3 | 0 / 0 / 15 |
 | typo, the misspelled word carries the query | 15 | 0 (0%) | 15 | 0 (0%) | 15 | 0 of 3 | 0 / 0 / 15 |
+| typo, the misspelled word carries the query, without identifier typos | 9 | 0 (0%) | 9 | 0 (0%) | 9 | 0 of 3 | 0 / 0 / 9 |
+| typo, the misspelled word carries the query, identifier typos only | 6 | 0 (0%) | 6 | 0 (0%) | 6 | - | 0 / 0 / 6 |
 | typo, typed word under 6 characters | 1 | 0 (0%) | 1 | 0 (0%) | 1 | 0 of 1 | 0 / 0 / 1 |
-| typo, off-page word on no page | 30 | 0 (0%) | 30 | 0 (0%) | 30 | 0 of 6 | 0 / 0 / 30 |
 | extra_word, off-page word on no page | 12 | 0 (0%) | 12 | 0 (0%) | 12 | 0 of 2 | 0 / 0 / 12 |
 | extra_word, off-page word on some page | 14 | 0 (0%) | 14 | 0 (0%) | 14 | 0 of 4 | 2 / 0 / 12 |
 | paraphrase, off-page word on no page | 22 | 0 (0%) | - | 0 (0%) | - | 0 of 6 | 0 / 0 / 22 |
@@ -102,15 +103,14 @@ Whether the reply shows every expected page in detail (the tool details 3 pages 
 - paraphrase probes whose expected page holds every word of the query: 0 of 42 (0 is right).
 - paraphrase and question probes that strict search answers, so a fallback never runs: 6 of 72; the expected page is among the pages returned for 0 of them.
 - question probes strict search finds once the question mark is removed: 3 at rank 1, 3 in the top 3, 3 in the top 10, of 30.
+- probes the fallback answered with a page id more than once: 0 of 0 (0 is right).
 
 ## Latency at 6,000 pages
 
-Seconds through an MCP child over stdio: the median of the calls per query per pass, then the median over queries and passes. `first` is the first search of a process, after a throwaway child's search has filled the OS file cache, by whether that side searched first or second in its pass. `miss_*` are queries strict search finds nothing for.
+Seconds through an MCP child over stdio: the median of the calls per query per pass, then the median over queries and passes. `miss_*` are queries strict search finds nothing for; `miss_typo_carried`, `miss_extra_word_common` and `miss_paraphrase_common` are fixed probes whose shape costs a fallback most.
 
 | kind | queries | tree, s | baseline, s | tree / baseline |
 |---|---:|---:|---:|---:|
-| first (searched first) | 1 | 11.119 | 10.467 | 1.06 |
-| first (searched second) | 1 | 9.321 | 8.864 | 1.05 |
 | rare | 3 | 0.983 | 0.999 | 0.98 |
 | common | 3 | 0.703 | 0.652 | 1.08 |
 | multi | 3 | 1.410 | 1.331 | 1.06 |
@@ -122,3 +122,21 @@ Seconds through an MCP child over stdio: the median of the calls per query per p
 
 1-minute load average at the start of each pass: 42.21, 48.39, 66.91, 28.81.
 Peak RSS of the MCP child, MB: tree 125, baseline 126.
+
+## First calls of a process at 6,000 pages
+
+Each pass starts a new child per side, so its first search and its first strict miss are one-time costs, which the medians above hide. The two sides are compared within a pass, under the same load. The side that goes first alternates by pass, so each odd pass is paired with the next even pass by geometric mean, which cancels the position. Paired: the geometric mean of those pairs. These rows rest on one call per side and pass, and are noisier than the rows above.
+
+| call | query | tree, s | baseline, s | tree / baseline, paired | each pair |
+|---|---|---:|---:|---:|---|
+| first search | E4127 | 11.119 | 9.063 | 1.09 | passes 1-2: 1.17; passes 3-4: 1.01 |
+| first strict miss | streamChunkedV3 | 0.850 | 0.746 | 1.08 | passes 1-2: 0.97; passes 3-4: 1.20 |
+
+Seconds are medians over passes. By pass:
+
+| pass | load | went first | first search: tree, s | baseline, s | tree / baseline | first strict miss: tree, s | baseline, s | tree / baseline |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| 1 | 42.21 | tree | 10.057 | 6.330 | 1.59 | 0.934 | 0.801 | 1.17 |
+| 2 | 48.39 | baseline | 12.200 | 14.205 | 0.86 | 0.413 | 0.514 | 0.80 |
+| 3 | 66.91 | tree | 12.181 | 11.399 | 1.07 | 0.766 | 0.692 | 1.11 |
+| 4 | 28.81 | baseline | 6.442 | 6.728 | 0.96 | 1.361 | 1.045 | 1.30 |
