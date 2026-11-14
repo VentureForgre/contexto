@@ -472,6 +472,27 @@ def test_a_failure_event_or_a_request_over_the_bound_fails_the_pinned_replay(mon
     assert "the session did not go as scripted: request 3 does not fit round 1 of turn 3" in text
 
 
+def test_a_proxy_that_breaks_the_tool_loop_stops_the_replay_with_the_rule_named(monkeypatch, capsys):
+    """Reviewer A's repro: the engine drops every assistant message that holds a tool call. The real API
+    refuses each request that then carries a tool result, and so does the fake upstream."""
+    from contexto import rewrite
+
+    real = rewrite.transform_messages
+
+    def broken(messages, state):
+        return [m for m in real(messages, state) if not (
+            m.get("role") == "assistant" and isinstance(m.get("content"), list)
+            and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in m["content"]))]
+
+    monkeypatch.setattr(rewrite, "transform_messages", broken)
+    for argv in (SHORT, ["--seed", "20261017", "--protocol", "d27", "--replay-turns", "8"]):
+        assert cli.main(["bench", "--replay", *argv]) == 1
+        err = capsys.readouterr().err
+        assert err.startswith("contexto bench: error: the replay stopped: the proxy answered 400 "
+                              "(invalid_request_error: messages."), err
+        assert "roles must alternate" in err or "unexpected `tool_use_id`" in err, err
+
+
 def test_a_session_that_stops_is_an_error(monkeypatch, capsys):
     def stop(script, home):
         raise session.ReplayError("the proxy answered 502: upstream unreachable")

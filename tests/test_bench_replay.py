@@ -287,6 +287,100 @@ def test_the_fake_upstream_cannot_forward():
     assert not any(name in vars(upstream) for name in ("socket", "urllib", "ssl", "subprocess"))
 
 
+def _valid_body():
+    """A request with a tool loop in it, in the shape the synthetic client sends: valid by every rule."""
+    messages = [
+        client.user_message("Next part of the working log.", first=True),
+        {"role": "assistant", "content": [{"type": "text", "text": "Reading it."},
+                                          {"type": "tool_use", "id": "toolu_a", "name": "read_file",
+                                           "input": {"file_path": "x"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_a", "content": "file text"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "OK"}]},
+        {"role": "user", "content": [{"type": "text", "text": "Next part."}]},
+    ]
+    return client.request_body(client.head("s"), messages)
+
+
+def _broken(change):
+    body = copy.deepcopy(_valid_body())
+    change(body)
+    return body
+
+
+def _drop_tool_use(body):
+    body["messages"][1]["content"] = body["messages"][1]["content"][:1]
+
+
+def _drop_assistant(body):
+    del body["messages"][1]
+
+
+@pytest.mark.parametrize("change, said", [
+    (lambda b: b.pop("model"), "model: Field required"),
+    (lambda b: b.update(max_tokens=0), "max_tokens: Field required"),
+    (lambda b: b.update(max_tokens="9"), "max_tokens: Field required"),
+    (lambda b: b.pop("max_tokens"), "max_tokens: Field required"),
+    (lambda b: b.update(system=7), "system: Input should be a valid string or a list of text blocks"),
+    (lambda b: b["system"].append({"type": "text", "text": ""}), "system.2: text content blocks must be non-empty"),
+    (lambda b: b["system"].append({"type": "image"}), "system: every block must be a text block"),
+    (lambda b: b.update(tools={}), "tools: Input should be a valid list"),
+    (lambda b: b["tools"].append(dict(b["tools"][0])), "tools: Tool names must be unique"),
+    (lambda b: b["tools"][0].update(name="read file"), "tools.0.name: String should match pattern"),
+    (lambda b: b["tools"][0].pop("input_schema"), "tools.0.input_schema: an input schema must be an object"),
+    (lambda b: b.update(tool_choice={"type": "sometimes"}), "tool_choice: the type must be one of auto, any, tool"),
+    (lambda b: b.update(tool_choice={"type": "tool", "name": "nope"}), "tool_choice.name: no tool named 'nope'"),
+    (lambda b: b.update(tools=[], tool_choice={"type": "any"}), "tool_choice: tool_choice of type any needs tools"),
+    (lambda b: b.update(messages=[]), "messages: at least one message is required"),
+    (lambda b: b["messages"].pop(0), "messages.0.role: the first message must use the user role"),
+    (lambda b: b["messages"][3].update(role="system"), "messages.3.role: Input should be 'user' or 'assistant'"),
+    (_drop_assistant, "messages.1.role: roles must alternate between user and assistant, and messages 0 and 1 are "
+                      "both user"),
+    (lambda b: b["messages"][3].update(content=[]), "messages.3: all messages must have non-empty content"),
+    (lambda b: b["messages"][4].update(content=""), "messages.4: all messages must have non-empty content"),
+    (lambda b: b["messages"][4].update(content="text"), None),  # a string is valid content
+    (lambda b: b["messages"][3]["content"][0].update(text=""), "messages.3.content.0: text content blocks must be "
+                                                               "non-empty"),
+    (_drop_tool_use, "messages.2.content: unexpected `tool_use_id` found in `tool_result` blocks: toolu_a. Each "
+                     "`tool_result` block must have a corresponding `tool_use` block in the previous message."),
+    (lambda b: b["messages"][2]["content"][0].update(tool_use_id="toolu_b"),
+     "messages.1: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_a."),
+    (lambda b: b["messages"][2].update(content=[{"type": "text", "text": "no result"}]),
+     "messages.1: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_a."),
+    (lambda b: b["messages"][3]["content"].append({"type": "tool_result", "tool_use_id": "toolu_a", "content": "x"}),
+     "messages.3: `tool_result` blocks can only be in user messages"),
+    (lambda b: b["messages"][4].update(content=[{"type": "tool_use", "id": "t", "name": "x", "input": {}}]),
+     "messages.4: `tool_use` blocks can only be in assistant messages"),
+    (lambda b: b.pop("tools"), "tools: requests which include `tool_use` or `tool_result` blocks must define tools"),
+])
+def test_the_fake_upstream_refuses_what_the_messages_api_refuses(change, said):
+    assert upstream.check_request(_valid_body()) is None
+    found = upstream.check_request(_broken(change))
+    assert found is None if said is None else said in found, found
+
+
+def test_repeated_tool_use_ids_are_refused():
+    body = _valid_body()
+    body["messages"] += [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_a", "name": "read_file", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_a", "content": "again"}]}]
+    assert upstream.check_request(body) == "messages: `tool_use` ids must be unique"
+
+
+def test_a_request_the_api_refuses_gets_its_400_and_is_recorded(small):
+    """The proxy broke the conversation: the reply is the API's 400, and the script does not advance."""
+    planned = scripted.steps(small)
+    server = upstream.FakeUpstream(small, planned)
+    body = _broken(_drop_tool_use)
+    status, kind, raw = server.answer("/v1/messages", json.dumps(body).encode())
+    assert (status, kind) == (400, "application/json")
+    error = json.loads(raw)
+    assert error["type"] == "error" and error["error"]["type"] == "invalid_request_error"
+    assert "unexpected `tool_use_id` found in `tool_result` blocks: toolu_a" in error["error"]["message"]
+    assert server.cursor == 0 and server.records[0]["status"] == 400
+    assert server.unexpected == [f"request 1 breaks a rule of the Messages API, which would refuse it with a 400: "
+                                 f"{error['error']['message']}"]
+
+
 def test_model_tokens_prices_log_text_and_the_rest_at_the_stated_rates(spike):
     log = "x line 0001 level=INFO latency_ms=12 shard=3 ok\n" * 200  # 9,600 bytes
     short = "Reply with exactly: OK"
@@ -357,7 +451,7 @@ def test_the_fake_upstream_replies_from_the_script_and_refuses_what_does_not_fit
     port = server.start()
     try:
         assert server._server.server_address[0] == "127.0.0.1" and server.url == f"http://127.0.0.1:{port}"
-        first = {"model": "m", "stream": True, "messages": [client.user_message(small.turns[0], first=True)]}
+        first = client.request_body(client.head("s"), [client.user_message(small.turns[0], first=True)])
         status, kind, raw = _post(port, "/v1/messages", first)
         assert (status, kind) == (200, "text/event-stream")
         content, stop = client.parse_stream(raw)
@@ -387,23 +481,31 @@ def test_a_tool_round_must_carry_the_result_of_the_call_before_it(small):
     server = upstream.FakeUpstream(small, planned)
     loop = small.toolloop_turn
     server.cursor = next(i for i, s in enumerate(planned) if s.turn == loop)
-    messages = [client.user_message(small.turns[loop], first=False)]
-    status, _, events = server.answer("/v1/messages", json.dumps({"messages": messages}).encode())
+    fields = client.head("s")
+
+    def body(messages):
+        return json.dumps(client.request_body(fields, messages)).encode()
+
+    messages = [client.user_message(small.turns[loop], first=True)]
+    status, _, events = server.answer("/v1/messages", body(messages))
     content, stop = client.parse_stream(b"".join(events))
     assert status == 200 and stop == "tool_use"
     assert content == [{"type": "tool_use", "id": f"toolu_bench_{loop:03d}_00", "name": "read_file",
                         "input": {"file_path": small.reads[0]}}]
     messages.append({"role": "assistant", "content": content})
-    wrong = [*messages, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_other",
-                                                      "content": "x"}]}]
-    assert server.answer("/v1/messages", json.dumps({"messages": wrong}).encode())[0] == 400
+    # A valid request that answers the call with another file's text in a text block: it does not fit.
+    wrong = [*messages, {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": content[0]["id"], "content": "x"}]}]
+    server.cursor += 1  # as if the script had moved on past this call
+    assert server.answer("/v1/messages", body(wrong))[0] == 400
     assert "does not hold the result of tool call" in server.unexpected[-1]
+    server.cursor -= 1
     right = [*messages, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": content[0]["id"],
                                                       "content": small.files[small.reads[0]]}]}]
-    status, _, events = server.answer("/v1/messages", json.dumps({"messages": right}).encode())
+    status, _, events = server.answer("/v1/messages", body(right))
     assert status == 200 and client.parse_stream(b"".join(events))[0][0]["input"] == {"file_path": small.reads[1]}
     server.cursor = len(planned)
-    assert server.answer("/v1/messages", json.dumps({"messages": right}).encode())[0] == 400
+    assert server.answer("/v1/messages", body(right))[0] == 400
     assert server.unexpected[-1].endswith("came after the last scripted round")
 
 

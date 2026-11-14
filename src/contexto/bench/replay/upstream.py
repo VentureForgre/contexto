@@ -13,7 +13,14 @@ For each ``POST /v1/messages`` it
    are the rates of ``spikes/m2/acceptance/stubrun.py``. There is no tokenizer here, so this is a
    modelled count, not a real one; the proxy's estimator learns from it as it would from real usage;
 2. looks for a compaction in the request (``compaction_markers``);
-3. replies with the next step of the scripted model (``contexto.bench.replay.scripted``), as the
+3. checks the request against the Messages API's rules that need no model (``check_request``): roles
+   alternating from the user, every tool result answering a tool call of the message before it and
+   every tool call answered in the next, no empty content, and well-formed ``model``, ``max_tokens``,
+   ``system``, ``tools`` and ``tool_choice``. A request that breaks one gets the 400
+   ``invalid_request_error`` the real API gives, the rule is recorded as unexpected, and the replay
+   stops with it named: a proxy that sent such a request to a real upstream would have broken the
+   session;
+4. replies with the next step of the scripted model (``contexto.bench.replay.scripted``), as the
    Messages API streams it, after checking that the request is the one that step answers: its last
    message holds the turn's text, or the result of the tool call the step before it made. A request
    that does not fit gets a 400 and is recorded as unexpected, and the script does not advance.
@@ -26,6 +33,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -121,6 +129,149 @@ def compaction_markers(body: dict[str, Any], raw: bytes) -> list[str]:
     if b"compact_boundary" in raw or b"isCompactSummary" in raw:
         found.append("transcript_marker")
     return found
+
+
+_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
+TOOL_CHOICES = ("auto", "any", "tool", "none")
+
+
+def _blocks(content: Any) -> list[dict[str, Any]]:
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def _check_text_blocks(where: str, blocks: list[Any]) -> str | None:
+    for k, block in enumerate(blocks):
+        if not isinstance(block, dict) or not isinstance(block.get("type"), str):
+            return f"{where}.{k}: a content block must be an object with a type"
+        if block["type"] == "text" and not (isinstance(block.get("text"), str) and block["text"]):
+            return f"{where}.{k}: text content blocks must be non-empty"
+    return None
+
+
+def _check_tools(body: dict[str, Any]) -> str | None:
+    tools = body.get("tools")
+    if tools is None:
+        return None
+    if not isinstance(tools, list):
+        return "tools: Input should be a valid list"
+    names: set[str] = set()
+    for k, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            return f"tools.{k}: Input should be an object"
+        if tool.get("type") not in (None, "custom"):  # a server tool (web search and the like) has no schema
+            continue
+        name = tool.get("name")
+        if not isinstance(name, str) or not _TOOL_NAME.fullmatch(name):
+            return f"tools.{k}.name: String should match pattern '^[a-zA-Z0-9_-]{{1,128}}$'"
+        if name in names:
+            return f"tools: Tool names must be unique, and {name} is given twice"
+        names.add(name)
+        schema = tool.get("input_schema")
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            return f"tools.{k}.input_schema: an input schema must be an object of type 'object'"
+    return None
+
+
+def _check_tool_choice(body: dict[str, Any]) -> str | None:
+    if "tool_choice" not in body:
+        return None
+    choice = body["tool_choice"]
+    if not isinstance(choice, dict) or choice.get("type") not in TOOL_CHOICES:
+        return f"tool_choice: the type must be one of {', '.join(TOOL_CHOICES)}"
+    names = {t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+    if choice["type"] in ("auto", "any", "tool") and not names:
+        return f"tool_choice: tool_choice of type {choice['type']} needs tools"
+    if choice["type"] == "tool" and choice.get("name") not in names:
+        return f"tool_choice.name: no tool named {choice.get('name')!r} is in tools"
+    return None
+
+
+def _check_messages(body: dict[str, Any]) -> str | None:
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return "messages: at least one message is required"
+    uses_tools = False
+    for i, message in enumerate(messages):
+        where = f"messages.{i}"
+        if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):
+            return f"{where}.role: Input should be 'user' or 'assistant'"
+        if i == 0 and message["role"] != "user":
+            return "messages.0.role: the first message must use the user role"
+        if i > 0 and message["role"] == messages[i - 1].get("role"):
+            return f"{where}.role: roles must alternate between user and assistant, and messages {i - 1} and {i} " \
+                   f"are both {message['role']}"
+        content = message.get("content")
+        if isinstance(content, str):
+            if not content:
+                return f"{where}: all messages must have non-empty content"
+            continue
+        if not isinstance(content, list) or not content:
+            return f"{where}: all messages must have non-empty content"
+        problem = _check_text_blocks(f"{where}.content", content)
+        if problem:
+            return problem
+        kinds = [b["type"] for b in content]
+        uses_tools = uses_tools or "tool_use" in kinds or "tool_result" in kinds
+        if message["role"] == "assistant" and "tool_result" in kinds:
+            return f"{where}: `tool_result` blocks can only be in user messages"
+        if message["role"] == "user" and "tool_use" in kinds:
+            return f"{where}: `tool_use` blocks can only be in assistant messages"
+        # Every tool_result answers a tool_use of the assistant message just before it.
+        asked = {b.get("id") for b in _blocks(messages[i - 1].get("content"))
+                 if b.get("type") == "tool_use"} if i > 0 and isinstance(messages[i - 1], dict) else set()
+        stray = [b.get("tool_use_id") for b in content if b["type"] == "tool_result" and b.get("tool_use_id") not in asked]
+        if stray:
+            return (f"{where}.content: unexpected `tool_use_id` found in `tool_result` blocks: {stray[0]}. Each "
+                    "`tool_result` block must have a corresponding `tool_use` block in the previous message.")
+        # Every tool_use is answered in the next message, which is a user message.
+        calls = [b.get("id") for b in content if b["type"] == "tool_use"]
+        if calls:
+            following = messages[i + 1] if i + 1 < len(messages) and isinstance(messages[i + 1], dict) else {}
+            answered = {b.get("tool_use_id") for b in _blocks(following.get("content")) if b.get("type") == "tool_result"}
+            missing = [c for c in calls if c not in answered]
+            if missing:
+                return (f"{where}: `tool_use` ids were found without `tool_result` blocks immediately after: "
+                        f"{missing[0]}. Each `tool_use` block must have a corresponding `tool_result` block in the "
+                        "next message.")
+    ids = [b.get("id") for m in messages if isinstance(m, dict) for b in _blocks(m.get("content"))
+           if b.get("type") == "tool_use"]
+    if len(ids) != len(set(ids)):
+        return "messages: `tool_use` ids must be unique"
+    if uses_tools and not body.get("tools"):
+        return "tools: requests which include `tool_use` or `tool_result` blocks must define tools"
+    return None
+
+
+def check_request(body: dict[str, Any]) -> str | None:
+    """The first rule of the Messages API that ``body`` breaks, in the API's words, or None.
+
+    Only rules that need no model are checked, the ones a proxy that rewrites the conversation can
+    break: ``model`` named and ``max_tokens`` a positive whole number; ``system`` a string or a list of
+    non-empty text blocks; ``tools`` well formed with unique names; ``tool_choice`` of a known type that
+    names a listed tool; at least one message, the first from the user, roles alternating, no empty
+    content or empty text block; every ``tool_result`` answering a ``tool_use`` of the assistant
+    message just before it, every ``tool_use`` answered in the next message, ids unique, and tools
+    defined when the messages use them. The real API refuses each of these with a 400
+    ``invalid_request_error``.
+    """
+    if not isinstance(body.get("model"), str) or not body["model"]:
+        return "model: Field required"
+    tokens = body.get("max_tokens")
+    if type(tokens) is not int or tokens < 1:
+        return "max_tokens: Field required, a whole number of 1 or more"
+    system = body.get("system")
+    if system is not None:
+        if isinstance(system, str):
+            pass
+        elif not isinstance(system, list):
+            return "system: Input should be a valid string or a list of text blocks"
+        else:
+            if any(not isinstance(b, dict) or b.get("type") != "text" for b in system):
+                return "system: every block must be a text block"
+            problem = _check_text_blocks("system", system)
+            if problem:
+                return problem
+    return _check_tools(body) or _check_tool_choice(body) or _check_messages(body)
 
 
 def _texts(content: Any) -> list[str]:
@@ -289,6 +440,11 @@ class FakeUpstream:
             record.update(model_tokens(body), messages=len(body.get("messages") or []),
                           markers=compaction_markers(body, raw))
             self.last_messages = json.dumps(body.get("messages") or [], ensure_ascii=False)
+            invalid = check_request(body)
+            if invalid:
+                self.unexpected.append(f"request {index + 1} breaks a rule of the Messages API, which would refuse "
+                                       f"it with a 400: {invalid}")
+                return self.error(400, "invalid_request_error", invalid)
             if self.cursor >= len(self.planned):
                 self.unexpected.append(f"request {index + 1} came after the last scripted round")
                 return self.error(400, "invalid_request_error", "the scripted model has no reply left")

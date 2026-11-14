@@ -162,6 +162,15 @@ def user_message(text: str, first: bool) -> dict[str, Any]:
     return {"role": "user", "content": [*content, {"type": "text", "text": text}]}
 
 
+def error_text(raw: bytes) -> str:
+    """An error reply in a few words: ``(type: message)`` for the API's error shape, else its start."""
+    try:
+        error = json.loads(raw).get("error")
+        return f"({error['type']}: {error['message']})"
+    except (ValueError, AttributeError, TypeError, KeyError):
+        return f"({raw[:300].decode('utf-8', 'replace')})"
+
+
 def parse_stream(raw: bytes) -> tuple[list[dict[str, Any]], str | None]:
     """The content blocks and the stop reason of a streamed Messages reply."""
     blocks: dict[int, dict[str, Any]] = {}
@@ -237,7 +246,7 @@ class Client:
         finally:
             connection.close()
         if response.status != 200:
-            raise ReplayError(f"the proxy answered {response.status}: {raw[:300].decode('utf-8', 'replace')}")
+            raise ReplayError(f"the proxy answered {response.status} {error_text(raw)}")
         content, _ = parse_stream(raw)
         if not content:
             raise ReplayError("the proxy's reply had no content")
