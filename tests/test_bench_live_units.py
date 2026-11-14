@@ -193,6 +193,8 @@ def test_the_meter_forwards_unchanged_and_records_counts_only(upstream, tmp_path
     status, headers, data = post(meter, "/v1/messages?beta=true", body, {
         "x-api-key": KEY, "anthropic-beta": "one,two", "accept-encoding": "gzip, br", "x-custom": "kept",
         "x-claude-code-request-class": "main", "x-claude-code-agent-type": "main",
+        "x-claude-code-prompt-id": "p-1", "x-claude-code-prev-tool-durations": "12",
+        "x-claude-code-session-id": "s-1",
         "x-session-affinity": "contexto-abc"})
     meter.stop()
     assert status == 200 and data == b"".join(USAGE_EVENTS) and headers["content-type"] == "text/event-stream"
@@ -205,6 +207,11 @@ def test_the_meter_forwards_unchanged_and_records_counts_only(upstream, tmp_path
     # To an upstream that is not a vendor's: the affinity header stays, the hint headers stop here.
     assert sent["x-session-affinity"] == "contexto-abc"
     assert "x-claude-code-request-class" not in sent and "x-claude-code-agent-type" not in sent
+    # Every header CLAUDE_CODE_GATEWAY_HINT_HEADERS turns on (contexto.hints, D70), and only those.
+    from contexto.hints import GATED_HINT_HEADERS
+
+    assert not GATED_HINT_HEADERS & set(sent) and sent["x-claude-code-session-id"] == "s-1"
+    assert bench_meter.HINT_HEADERS == GATED_HINT_HEADERS
     record = {"arm": "plain", "seed": 5, "repeat": 1, "model": "m", "n": 0, "turn": 1, "main": True,
               "history_tokens": 20, "uncached": 7, "cache_write": 100, "cache_read": 900, "output": 12, "status": 200,
               "compaction": False, "basis": "measured", "attempt": 2}

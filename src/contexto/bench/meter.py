@@ -93,6 +93,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from contexto.hints import GATED_HINT_HEADERS
+
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 RESERVE_BYTES_PER_TOKEN = 1.5
@@ -103,9 +105,9 @@ CLASS_HEADER = "x-claude-code-request-class"
 COMPACTION_HEADER = "x-claude-code-compaction"
 AGENT_HEADER = "x-claude-code-agent-id"
 AFFINITY_HEADER = "x-session-affinity"
-# What CLAUDE_CODE_GATEWAY_HINT_HEADERS adds (read in the Claude Code 2.1.322 bundle).
-HINT_HEADERS = frozenset({CLASS_HEADER, COMPACTION_HEADER, "x-claude-code-agent-type",
-                          "x-claude-code-context-compacted", "x-claude-code-prev-tool-durations"})
+# What CLAUDE_CODE_GATEWAY_HINT_HEADERS adds: the six headers contexto.hints lists (D70, read in the
+# Claude Code 2.1.322 bundle), x-claude-code-prompt-id among them.
+HINT_HEADERS = GATED_HINT_HEADERS
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 NO_BODY_STATUSES = (204, 304)
 TOKEN_CLASSES = ("uncached", "cache_write", "cache_read", "output")
