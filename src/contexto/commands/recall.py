@@ -12,7 +12,7 @@ import argparse
 import json
 import sys
 
-from contexto.commands._common import EXIT_OK, add_session_option, fail, say_session
+from contexto.commands._common import EXIT_OK, add_session_option, fail, safe_text, say_session
 from contexto.paths import contexto_home
 from contexto.store import PageUnreadableError, SessionNotFoundError, SessionStore, check_page_id
 from contexto.store.project import NotEarlierSessionError
@@ -39,7 +39,8 @@ def register(subparsers) -> None:
     parser.add_argument("--from", dest="origin", metavar="SESSION",
                         help="print the page from an earlier session of the session's project: its id, the "
                              "label `contexto search --project` shows, or any start of its id no other "
-                             "earlier session shares. That session is only read.")
+                             "earlier session shares. That session is only read, and its text is printed "
+                             "with control characters as escapes.")
     parser.add_argument("--offset", type=int, default=0, metavar="N",
                         help="character offset to continue from, or a matching line's offset from "
                              "`contexto search` (default 0)")
@@ -90,8 +91,12 @@ def run(args: argparse.Namespace) -> int:
                            "date": earlier.date} if earlier else None
         print(json.dumps(out, indent=2, sort_keys=True))
         return EXIT_OK
-    sys.stdout.write(chunk["text"])
-    if chunk["text"] and not chunk["text"].endswith("\n"):
+    # An earlier session's page is any text (tool output and web pages included): each line is printed
+    # through safe_text, so a terminal control or a line separator in it cannot act on the terminal or
+    # forge a line (review B on D69, finding 2). The session's own page is printed as before D69.
+    text = "\n".join(map(safe_text, chunk["text"].split("\n"))) if earlier else chunk["text"]
+    sys.stdout.write(text)
+    if text and not text.endswith("\n"):
         sys.stdout.write("\n")
     if chunk["next_offset"] is not None:
         rest = chunk["total_chars"] - chunk["next_offset"]
