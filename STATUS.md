@@ -1,7 +1,7 @@
 # Contexto status
 
 Updated 2026-11-14 by claude (D63: in-turn paging, the replay harness PR #268 and the engine PR
-#274, merged and not released, recorded in the D63 docs PR). Before that, 2026-11-14 (D66: the
+#274, merged and not released, recorded in the docs PR #295). Before that, 2026-11-14 (D66: the
 benchmark `contexto bench`, PRs #255, #262, #264, #269, #273, #289 and #286, recorded in the docs PR
 #282), and 2026-11-13 (D69, project memory: PR #279,
 the first of its two pull requests, unreleased), and 2026-11-12 (v0.5.24: the 2026-11-05 QA run and
