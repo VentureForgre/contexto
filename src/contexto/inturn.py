@@ -955,11 +955,12 @@ def note_room_low(messages: list[dict], state: Any, config: Any, used: int, even
     so the estimate is never corrected) a loop request's published room, ``bound - used - headroom_floor``,
     can fall under ``min_turn_room`` with nothing paged for it, since a batch rewrites the prefix only over
     the bound then. Logged as ``turn_room_low`` with ``reason: "usage_missing"``, once per turn (with the
-    small bound's own ``in_turn_small_bound``, whichever comes first)."""
+    small bound's own ``in_turn_small_bound``, whichever comes first). A degraded engine publishes no
+    room, so it logs none."""
     room = config.bound - used - config.headroom_floor
     start = _rw().turn_starts(messages)[-1]
-    if (state.pending_usage is None or room >= config.min_turn_room or start >= len(messages) - 1
-            or state.inturn.room_low == start + 1):
+    if (state.degraded or state.pending_usage is None or room >= config.min_turn_room
+            or start >= len(messages) - 1 or state.inturn.room_low == start + 1):
         return state
     events.append({"event": "turn_room_low", "epoch": state.epoch, "reason": "usage_missing",
                    "room": max(0, room), "min_turn_room": config.min_turn_room})
