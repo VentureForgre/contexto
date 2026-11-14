@@ -17,10 +17,12 @@ For each ``POST /v1/messages`` it
    is a modelled count, not a real one; the proxy's estimator learns from it as it would from real
    usage;
 2. looks for a compaction in the request (``compaction_markers``);
-3. checks the request against the Messages API's rules that need no model (``check_request``): roles
-   alternating from the user, every tool result answering a tool call of the message before it and
-   every tool call answered in the next, no empty content, and well-formed ``model``, ``max_tokens``,
-   ``system``, ``tools`` and ``tool_choice``. A request that breaks one gets the 400
+3. checks the request against the Messages API's rules that need no model (``check_request``): the
+   first message from the user, ``system`` messages inside ``messages`` where the API takes them,
+   every tool result answering a tool call of the turn before it and every tool call answered at the
+   start of the next turn (consecutive messages of one role are one turn, as the API combines them),
+   no empty content, and well-formed ``model``, ``max_tokens``, ``system``, ``tools`` and
+   ``tool_choice``. A request that breaks one gets the 400
    ``invalid_request_error`` the real API gives, the rule is recorded as unexpected, and the replay
    stops with it named: a proxy that sent such a request to a real upstream would have broken the
    session;
@@ -140,10 +142,6 @@ _TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
 TOOL_CHOICES = ("auto", "any", "tool", "none")
 
 
-def _blocks(content: Any) -> list[dict[str, Any]]:
-    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
-
-
 def _check_text_blocks(where: str, blocks: list[Any]) -> str | None:
     for k, block in enumerate(blocks):
         if not isinstance(block, dict) or not isinstance(block.get("type"), str):
@@ -191,57 +189,93 @@ def _check_tool_choice(body: dict[str, Any]) -> str | None:
     return None
 
 
+ROLES = ("user", "assistant", "system")
+
+
+def _check_content(where: str, content: Any) -> str | None:
+    if isinstance(content, str):
+        return None if content else f"{where}: all messages must have non-empty content"
+    if not isinstance(content, list) or not content:
+        return f"{where}: all messages must have non-empty content"
+    return _check_text_blocks(f"{where}.content", content)
+
+
+def _check_system_message(messages: list[dict[str, Any]], i: int) -> str | None:
+    """A ``system`` message inside ``messages`` (Claude Code on 5.x model ids sends them): never the
+    first message, after a user message, and the last message or followed by an assistant message."""
+    where = f"messages.{i}"
+    if i == 0:
+        return f"{where}.role: a system message cannot be the first message"
+    if messages[i - 1]["role"] != "user":
+        return f"{where}.role: a system message must follow a user message"
+    if i + 1 < len(messages) and messages[i + 1]["role"] != "assistant":
+        return f"{where}.role: a system message must be the last message or be followed by an assistant message"
+    return None
+
+
+def _turns(messages: list[dict[str, Any]]) -> list[tuple[int, str, list[dict[str, Any]]]]:
+    """The conversation as the API reads it: ``system`` messages set aside, and consecutive messages
+    of one role combined into one turn. Each turn is (index of its first message, role, blocks)."""
+    turns: list[tuple[int, str, list[dict[str, Any]]]] = []
+    for i, message in enumerate(messages):
+        if message["role"] == "system":
+            continue
+        content = message["content"]
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+        if turns and turns[-1][1] == message["role"]:
+            turns[-1][2].extend(blocks)
+        else:
+            turns.append((i, message["role"], blocks))
+    return turns
+
+
 def _check_messages(body: dict[str, Any]) -> str | None:
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         return "messages: at least one message is required"
-    uses_tools = False
     for i, message in enumerate(messages):
-        where = f"messages.{i}"
-        if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):
-            return f"{where}.role: Input should be 'user' or 'assistant'"
-        if i == 0 and message["role"] != "user":
+        if not isinstance(message, dict) or message.get("role") not in ROLES:
+            return f"messages.{i}.role: Input should be 'user', 'assistant' or 'system'"
+        if i == 0 and message["role"] == "assistant":
             return "messages.0.role: the first message must use the user role"
-        if i > 0 and message["role"] == messages[i - 1].get("role"):
-            return (f"{where}.role: roles must alternate between user and assistant, and messages {i - 1} and {i} "
-                    f"are both {message['role']}")
-        content = message.get("content")
-        if isinstance(content, str):
-            if not content:
-                return f"{where}: all messages must have non-empty content"
-            continue
-        if not isinstance(content, list) or not content:
-            return f"{where}: all messages must have non-empty content"
-        problem = _check_text_blocks(f"{where}.content", content)
+        problem = _check_content(f"messages.{i}", message.get("content"))
+        if not problem and message["role"] == "system":
+            problem = _check_system_message(messages, i)
         if problem:
             return problem
+    turns = _turns(messages)
+    uses_tools = False
+    for k, (i, role, content) in enumerate(turns):
+        where = f"messages.{i}"
         kinds = [b["type"] for b in content]
         uses_tools = uses_tools or "tool_use" in kinds or "tool_result" in kinds
-        if message["role"] == "assistant" and "tool_result" in kinds:
+        if role == "assistant" and "tool_result" in kinds:
             return f"{where}: `tool_result` blocks can only be in user messages"
-        if message["role"] == "user" and "tool_use" in kinds:
+        if role == "user" and "tool_use" in kinds:
             return f"{where}: `tool_use` blocks can only be in assistant messages"
-        # Every tool_result answers a tool_use of the assistant message just before it.
-        asked = {b.get("id") for b in _blocks(messages[i - 1].get("content"))
-                 if b.get("type") == "tool_use"} if i > 0 and isinstance(messages[i - 1], dict) else set()
+        # Every tool_result answers a tool_use of the assistant turn just before it.
+        asked = {b.get("id") for b in turns[k - 1][2] if b.get("type") == "tool_use"} if k else set()
         stray = [b.get("tool_use_id") for b in content
                  if b["type"] == "tool_result" and b.get("tool_use_id") not in asked]
         if stray:
             return (f"{where}.content: unexpected `tool_use_id` found in `tool_result` blocks: {stray[0]}. Each "
                     "`tool_result` block must have a corresponding `tool_use` block in the previous message.")
-        # Every tool_use is answered in the next message, which is a user message.
+        # Every tool_use is answered in the next turn, whose tool results come before anything else in it.
         calls = [b.get("id") for b in content if b["type"] == "tool_use"]
         if calls:
-            following = messages[i + 1] if i + 1 < len(messages) and isinstance(messages[i + 1], dict) else {}
-            answered = {b.get("tool_use_id") for b in _blocks(following.get("content"))
-                        if b.get("type") == "tool_result"}
-            missing = [c for c in calls if c not in answered]
+            following = turns[k + 1][2] if k + 1 < len(turns) else []
+            leading = []
+            for block in following:
+                if block.get("type") != "tool_result":
+                    break
+                leading.append(block.get("tool_use_id"))
+            missing = [c for c in calls if c not in leading]
             if missing:
+                late = any(b.get("type") == "tool_result" and b.get("tool_use_id") == missing[0] for b in following)
                 return (f"{where}: `tool_use` ids were found without `tool_result` blocks immediately after: "
                         f"{missing[0]}. Each `tool_use` block must have a corresponding `tool_result` block in the "
-                        "next message.")
-    ids = [b.get("id") for m in messages if isinstance(m, dict) for b in _blocks(m.get("content"))
-           if b.get("type") == "tool_use"]
+                        "next message" + (", before any other content in it." if late else "."))
+    ids = [b.get("id") for _, _, content in turns for b in content if b.get("type") == "tool_use"]
     if len(ids) != len(set(ids)):
         return "messages: `tool_use` ids must be unique"
     if uses_tools and not body.get("tools"):
@@ -255,11 +289,13 @@ def check_request(body: dict[str, Any]) -> str | None:
     Only rules that need no model are checked, the ones a proxy that rewrites the conversation can
     break: ``model`` named and ``max_tokens`` a positive whole number; ``system`` a string or a list of
     non-empty text blocks; ``tools`` well formed with unique names; ``tool_choice`` of a known type that
-    names a listed tool; at least one message, the first from the user, roles alternating, no empty
-    content or empty text block; every ``tool_result`` answering a ``tool_use`` of the assistant
-    message just before it, every ``tool_use`` answered in the next message, ids unique, and tools
-    defined when the messages use them. The real API refuses each of these with a 400
-    ``invalid_request_error``.
+    names a listed tool; at least one message, the first from the user, no empty content or empty
+    text block; a ``system`` message inside ``messages`` never first, after a user message, and last or
+    before an assistant message; every ``tool_result`` answering a ``tool_use`` of the assistant turn
+    just before it, every ``tool_use`` answered by a ``tool_result`` at the start of the next turn, ids
+    unique, and tools defined when the messages use them. The real API refuses each of these with a
+    400 ``invalid_request_error``. Consecutive messages of one role are not refused: the API combines
+    them into one turn, and the rules are checked on the combined turns.
     """
     if not isinstance(body.get("model"), str) or not body["model"]:
         return "model: Field required"
@@ -411,8 +447,8 @@ class FakeUpstream:
 
     def _fits(self, step: Step, body: dict[str, Any]) -> str | None:
         """None when the request is the one ``step`` answers, else what is wrong with it."""
-        messages = body.get("messages") or []
-        last = messages[-1] if messages and isinstance(messages[-1], dict) else {}
+        messages = [m for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") != "system"]
+        last = messages[-1] if messages else {}
         if last.get("role") != "user":
             return "its last message is not a user message"
         if step.round == 0:

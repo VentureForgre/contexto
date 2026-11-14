@@ -768,35 +768,33 @@ def test_options_a_replay_cannot_use_are_usage_errors(monkeypatch, capsys, tmp_p
     assert list(tmp_path.iterdir()) == []  # nothing dumped, nothing recorded
 
 
-@pytest.mark.parametrize("argv, option", [
-    (["--dump-trace", "d"], "--dump-trace"), (["--record-trace", "f"], "--record-trace"),
-    (["--replay-turns", "8"], "--replay-turns"), (["--force"], "--force"),
-    (["--script-only", "--dump-trace", "d"], "--dump-trace"),
-])
-def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path, argv, option):
-    """Reviewer B: without --replay these were ignored, so once the live mode merges `contexto bench
-    --dump-trace DIR` would have started a live run with the user's key. A stand-in live mode is installed
-    the way the live slice adds its module; it must never run."""
+LIVE_STUB = "FLAG = None\ndef add_arguments(parser):\n    pass\ndef run(args):\n    print('live run')\n    return 0\n"
+
+
+@pytest.mark.parametrize("argv", [["--dump-trace", "DIR"], ["--record-trace", "trace.json"], ["--replay-turns", "8"],
+                                  ["--force"]])
+def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path, argv):
+    """B's low: an option only a replay takes never runs another mode, above all the live run, which would
+    call the model with the user's key (the mode contract's OWN_OPTIONS)."""
     from contexto.bench import modes
 
-    live = tmp_path / "modes"
-    live.mkdir()
-    (live / "t_live.py").write_text("FLAG = None\ndef add_arguments(parser):\n    pass\n"
-                                    "def run(args):\n    raise AssertionError('the live run started')\n", "utf-8")
-    monkeypatch.setattr(modes, "__path__", [*modes.__path__, str(live)])
-    monkeypatch.delitem(sys.modules, "contexto.bench.modes.t_live", raising=False)
-    _no_replay(monkeypatch)
-    work = tmp_path / "work"
-    work.mkdir()
-    monkeypatch.chdir(work)
-    try:
-        assert cli.main(["bench", *argv, "--out", str(work / "out")]) == 2
-    finally:
-        sys.modules.pop("contexto.bench.modes.t_live", None)
-    err = capsys.readouterr().err
-    assert f"{option} belongs to the replay mode; give --replay with it, or leave it out" in err
-    assert list(work.iterdir()) == []
-    assert set(replay_mode.OWN_OPTIONS) == {"--replay-turns", "--dump-trace", "--record-trace", "--force"}
+    monkeypatch.chdir(tmp_path)
+    said = f"contexto bench: error: {argv[0]} belongs to the replay mode; give --replay with it, or leave it out"
+    assert argv[0] in replay_mode.OWN_OPTIONS
+    assert cli.main(["bench", *argv]) == 2  # this build has no live run: refused either way
+    capsys.readouterr()
+    # With a live run installed, as the live slice adds one.
+    (tmp_path / "t_live_stub.py").write_text(LIVE_STUB, encoding="utf-8")
+    monkeypatch.setattr(modes, "__path__", [*modes.__path__, str(tmp_path)])
+    monkeypatch.delitem(sys.modules, "contexto.bench.modes.t_live_stub", raising=False)
+    assert cli.main(["bench", *argv]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.strip() == said
+    assert cli.main(["bench", "--script-only", "--out", str(tmp_path / "scripts-out"), *argv]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.strip() == said
+    assert not any((tmp_path / name).exists() for name in ("DIR", "trace.json", "scripts-out"))  # nothing written
+    monkeypatch.delitem(sys.modules, "contexto.bench.modes.t_live_stub", raising=False)
 
 
 @pytest.mark.parametrize("bound", ["20000", "25000", "170001", "200000"])

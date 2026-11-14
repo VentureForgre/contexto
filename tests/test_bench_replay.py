@@ -113,10 +113,11 @@ def test_the_new_classes_search_the_questions_content_words(small):
 
 
 def test_content_words_are_in_order_once_each():
-    question = "Which build label is the billing core service running? The billing one."
-    in_order = [w for w in ("which", "build", "label", "billing", "core", "service", "running", "one")
-                if w in words(question)]
-    assert reach.content_words(question) == in_order and in_order.count("billing") == 1 and "billing" in in_order
+    text = "Which build label is the billing core service running? The billing one."
+    found = reach.content_words(text)
+    tokens = text.casefold().replace("?", " ").replace(".", " ").split()
+    assert found == [w for k, w in enumerate(tokens) if w in words(text) and w not in tokens[:k]]
+    assert set(found) == words(text) and "billing" in found and "the" not in found
     assert reach.content_words("What is it?") == []
 
 
@@ -383,6 +384,10 @@ def _drop_assistant(body):
     del body["messages"][1]
 
 
+def _system_before_a_user_message(body):
+    body["messages"] += [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}]
+
+
 @pytest.mark.parametrize("change, said", [
     (lambda b: b.pop("model"), "model: Field required"),
     (lambda b: b.update(max_tokens=0), "max_tokens: Field required"),
@@ -400,9 +405,24 @@ def _drop_assistant(body):
     (lambda b: b.update(tools=[], tool_choice={"type": "any"}), "tool_choice: tool_choice of type any needs tools"),
     (lambda b: b.update(messages=[]), "messages: at least one message is required"),
     (lambda b: b["messages"].pop(0), "messages.0.role: the first message must use the user role"),
-    (lambda b: b["messages"][3].update(role="system"), "messages.3.role: Input should be 'user' or 'assistant'"),
-    (_drop_assistant, "messages.1.role: roles must alternate between user and assistant, and messages 0 and 1 are "
-                      "both user"),
+    (lambda b: b["messages"][3].update(role="tool"), "messages.3.role: Input should be 'user', 'assistant' or "
+                                                    "'system'"),
+    (lambda b: b["messages"][0].update(role="assistant"), "messages.0.role: the first message must use the user role"),
+    # The API combines consecutive messages of one role into one turn; it refuses what the combined turns break.
+    (lambda b: b["messages"].insert(4, {"role": "assistant", "content": "More."}), None),
+    (lambda b: b["messages"].insert(1, {"role": "user", "content": "And this."}), None),
+    (_drop_assistant, "messages.0.content: unexpected `tool_use_id` found in `tool_result` blocks: toolu_a."),
+    # A system message inside messages, as Claude Code sends on 5.x model ids, where the API takes one.
+    (lambda b: b["messages"].append({"role": "system", "content": "Settings changed."}), None),
+    (lambda b: b["messages"].insert(3, {"role": "system", "content": "Settings changed."}), None),
+    (lambda b: b["messages"].insert(0, {"role": "system", "content": "x"}),
+     "messages.0.role: a system message cannot be the first message"),
+    (lambda b: b["messages"].insert(2, {"role": "system", "content": "x"}),
+     "messages.2.role: a system message must follow a user message"),
+    (_system_before_a_user_message,
+     "messages.5.role: a system message must be the last message or be followed by an assistant message"),
+    (lambda b: b["messages"].append({"role": "system", "content": ""}),
+     "messages.5: all messages must have non-empty content"),
     (lambda b: b["messages"][3].update(content=[]), "messages.3: all messages must have non-empty content"),
     (lambda b: b["messages"][4].update(content=""), "messages.4: all messages must have non-empty content"),
     (lambda b: b["messages"][4].update(content="text"), None),  # a string is valid content
@@ -414,6 +434,13 @@ def _drop_assistant(body):
      "messages.1: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_a."),
     (lambda b: b["messages"][2].update(content=[{"type": "text", "text": "no result"}]),
      "messages.1: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_a."),
+    (lambda b: b["messages"][2]["content"].insert(0, {"type": "text", "text": "first"}),
+     "messages.1: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_a. Each "
+     "`tool_use` block must have a corresponding `tool_result` block in the next message, before any other content "
+     "in it."),
+    (lambda b: b["messages"].insert(2, {"role": "user", "content": "first"}),
+     "before any other content in it."),
+    (lambda b: b["messages"][2]["content"].append({"type": "text", "text": "after the results"}), None),
     (lambda b: b["messages"][3]["content"].append({"type": "tool_result", "tool_use_id": "toolu_a", "content": "x"}),
      "messages.3: `tool_result` blocks can only be in user messages"),
     (lambda b: b["messages"][4].update(content=[{"type": "tool_use", "id": "t", "name": "x", "input": {}}]),

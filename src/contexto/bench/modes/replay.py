@@ -35,8 +35,10 @@ import tempfile
 from pathlib import Path
 
 FLAG = "--replay"
-# The replay's own options: given without --replay they are refused (exit 2) by contexto.commands.bench,
-# so `contexto bench --dump-trace DIR` cannot start the live run.
+# The options only a replay takes (the mode contract, ``contexto.bench.modes``): given without --replay,
+# contexto bench refuses them (exit 2) instead of running another mode, so ``contexto bench --dump-trace
+# DIR`` never starts the live run with the user's key. A mode that later needs --force too shares it
+# with ``modes.add_option`` and takes it out of this list.
 OWN_OPTIONS = ("--replay-turns", "--dump-trace", "--record-trace", "--force")
 MIN_TURNS = 4  # the generator's own minimum of d27 content turns
 # Everything a replay or a live run writes into --out (the shared output schema): a directory that holds
