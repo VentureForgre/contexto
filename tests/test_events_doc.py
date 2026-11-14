@@ -108,7 +108,8 @@ What they do not guarantee:
 - A call the scan does not resolve to one function of the file, by the rule above: a method that the
   calling class gets from a base in another file, or from a base reached after one; a method that a
   subclass in the file overrides, when the call is made in the base (``self`` may be the subclass); a
-  bare name the caller binds (a parameter, a local); a function of another file; and two hops
+  method only a subclass defines (a hook the base calls); a bare name the caller binds (a parameter, a
+  local) or a lambda or comprehension around the call binds; a function of another file; and two hops
   (``return self._inner()``). What such a function returns or stores is not read, except through the
   parameter-name rule for ``CARRIED_EVENTS`` below.
 - That ``HELPER_FIELDS`` is right about the source. It is a list kept by hand. It only makes sure the
@@ -461,6 +462,7 @@ class _Scan(ast.NodeVisitor):
         self.module = Module(path)
         self._scope: list[str] = []
         self._assigned: dict[int, str] = {}  # id(a dict display or dict() call) -> the local name it is assigned to
+        self._shadow: list[frozenset[str]] = []  # the names each enclosing lambda or comprehension binds
 
     @property
     def scope(self) -> str:
@@ -469,6 +471,7 @@ class _Scan(ast.NodeVisitor):
     def _site(self, value: ast.AST, fields: list[tuple[str, int]], built: ast.AST | None = None,
               spreads: list[str] | None = None, callee: str | None = None, calls: Calls | None = None) -> None:
         variable = self._assigned.get(id(built)) if built is not None else None
+        calls = [c for c in calls or () if c[1] or not self._shadowed(c[0])]  # a lambda's or comprehension's name
         self.module.sites.append(Site(self.module.path, value.lineno, self.scope, _names(value), ast.unparse(value),
                                       tuple(fields), variable, tuple(spreads or ()),
                                       value.id if isinstance(value, ast.Name) else None, callee,
@@ -589,6 +592,8 @@ class _Scan(ast.NodeVisitor):
                    and func.value.id in ("self", "cls"))
         if not on_self and not isinstance(func, ast.Name):
             return
+        if not on_self and self._shadowed(func.id):  # the lambda's or comprehension's value, not the module's
+            return
         positional: list[str | None] = []
         for arg in node.args:
             if isinstance(arg, ast.Starred):  # the arguments after it have no known position
@@ -599,6 +604,27 @@ class _Scan(ast.NodeVisitor):
         if keywords or any(positional):
             self.module.calls.append(Call(self.scope, node.lineno, func.attr if on_self else func.id, on_self,
                                           tuple(positional), keywords))
+
+    def _shadowed(self, name: str) -> bool:
+        """Whether an enclosing lambda or comprehension binds ``name``: a call to it then does not reach the
+        module's function of that name (Reviewer A, PR #261 round 5)."""
+        return any(name in names for names in self._shadow)
+
+    def _shadowing(self, node: ast.AST, names: frozenset[str]) -> None:
+        self._shadow.append(names)
+        self.generic_visit(node)
+        self._shadow.pop()
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        args = node.args
+        self._shadowing(node, frozenset(a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs,
+                                                        args.vararg, args.kwarg) if a is not None))
+
+    def _comprehension(self, node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp) -> None:
+        self._shadowing(node, frozenset(name.id for generator in node.generators
+                                        for name in ast.walk(generator.target) if isinstance(name, ast.Name)))
+
+    visit_ListComp = visit_SetComp = visit_GeneratorExp = visit_DictComp = _comprehension
 
     def visit_Return(self, node: ast.Return) -> None:
         if node.value is not None:
@@ -768,13 +794,20 @@ def _callees(module: Module, call: Call) -> list[Function]:
     """The function of the module that ``call`` reaches, if the scan knows it. ``self.name`` and ``cls.name`` are
     looked up in the calling class and then its bases, in method resolution order, as far as the module defines
     them: when the order reaches a base the module does not define, that base may define the method, so the call
-    reaches nothing the scan knows. A bare name is looked up in the calling function and those around it, then
-    at the top of the module, and reaches nothing when one of those functions binds the name itself (a
-    parameter, a local) before a function of that name is found."""
+    reaches nothing the scan knows; nor does it when a class of the module that inherits from the calling class
+    overrides the method, since ``self`` may be that class. A bare name a lambda or comprehension around the
+    call binds is not recorded as a call (``_Scan._shadowed``). A bare name is looked up in the calling function
+    and those around it, then at the top of the module, and reaches nothing when one of those functions binds
+    the name itself (a parameter, a local) before a function of that name is found."""
     parts = call.scope.split(".") if call.scope != "<module>" else []
     outer = [".".join(parts[:size]) for size in range(len(parts), 0, -1)]  # the enclosing scopes, innermost first
     if call.on_self:
         own = next((scope for scope in outer if scope in module.classes), None)
+        if own is not None and any(f"{other}.{call.name}" in module.functions for other in module.classes
+                                   if other != own and own in module.mro(other)):
+            # A class of the file that inherits from the calling one overrides it: ``self`` may be either,
+            # so the call reaches nothing the scan knows, as at a base from another file (round 5).
+            return []
         for scope in module.mro(own) if own is not None else ():
             if scope not in module.classes:
                 return []
@@ -2395,3 +2428,51 @@ def test_the_real_document_fails_when_a_field_an_index_row_or_an_entry_goes():
                        for problem in undocumented_events(written, gone)), (
                 f"with the heading at {DOC_NAME}:{entry.line} no longer a heading, the check for an undocumented "
                 f"event does not report `{entry.name}`. That {broken.format(check='undocumented_events')}")
+
+
+def test_a_call_on_self_in_a_base_reaches_nothing_known_when_a_subclass_of_the_file_overrides_it():
+    """Reviewer A, round 5: ``_Base.start`` unpacking ``**self._extra()`` read ``_Base._extra``'s key, though the
+    only class the file builds, ``Proxy(_Base)``, overrides it: the test asked for a bullet for a field that is
+    never in the log. The call can reach either, so it reaches nothing the scan knows, as at a base from
+    another file."""
+    source = '''
+class _Base:
+    def start(self, log):
+        log({"event": "started", "port": 1, **self._extra()})
+
+    def _extra(self):
+        return {"zz_base_default": 1}
+
+class Proxy(_Base):
+    def _extra(self):
+        return {"zz_real": 1}
+'''
+    fields = written_fields([scan_source(source, "spread.py")], Tables())[("started", "spread.py")]
+    assert set(fields) == {"port"}
+    # the same on the carried path: a subclass's override of the helper the dict is passed to
+    carried = INHERITED_SOURCE.replace("class Other(Base):", "class Sub(Handler):\n    def _note(self, item):\n"
+                                       "        item[\"sub\"] = 1\n\nclass Other(Base):")
+    assert set(written_fields([scan_source(carried, "line.py")], CARRIED)[("shared", "line.py")]) == {"size"}
+
+
+def test_a_name_a_comprehension_or_lambda_binds_is_not_the_module_s_function():
+    """Reviewer A, round 5: a bare call to a name a comprehension or lambda binds resolved to the module's
+    function of that name, so the test asked for its key, which the call never returns."""
+    for form in ("[log({'event': 'started', 'port': 1, **sizes()}) for sizes in fns]",
+                 "list(map(lambda sizes: log({'event': 'started', 'port': 1, **sizes()}), fns))",
+                 "{k: log({'event': 'started', 'port': 1, **sizes()}) for k, sizes in fns}"):
+        source = "\ndef sizes():\n    return {'budget': 1}\n\ndef run(fns, log):\n    " + form + "\n"
+        fields = written_fields([scan_source(source, "spread.py")], Tables())[("started", "spread.py")]
+        assert set(fields) == {"port"}, form
+    # and on the carried path: [fill(entry) for fill in fillers] does not run the module's fill
+    carried = '''
+def fill(rec):
+    rec["zz_phantom"] = 1
+
+class Handler:
+    def line(self, log, fillers):
+        entry = {"event": "shared", "size": 1}
+        [fill(entry) for fill in fillers]
+        log(entry)
+'''
+    assert set(written_fields([scan_source(carried, "line.py")], CARRIED)[("shared", "line.py")]) == {"size"}

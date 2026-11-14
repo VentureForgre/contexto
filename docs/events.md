@@ -310,8 +310,8 @@ conversation, and each run starts a new engine. So:
   from its first turn again (`first_turn` 0) and reports those turns again.
 - Every other conversation starts again at epoch 0 in a new run: the record holds the main
   conversation alone. Its first request has `epoch_not_resumed` only until the run has used the
-  record or found none. After that it has neither event, and its first rotation still has
-  `first_turn` 0. So the absence of `epoch_not_resumed` does not mean a conversation carried its
+  record or found none. After that it has neither event, and the `page_out` of its first rotation
+  still has `first_turn` 0. So the absence of `epoch_not_resumed` does not mean a conversation carried its
   counters over.
 - A [`resync`](#resync) with `paged_changed` pages everything before the current turn again within
   one run, and counts those turns again in `turns_paged`.
@@ -365,7 +365,7 @@ It can rely on this:
   have had is lost. After such a line the main conversation is unknown until the next of these
   events. A resume on that request is undone, not only unlogged: the engine used the record up on it
   and kept nothing, so the conversation starts again at epoch 0, and its next line has neither
-  `epoch_resumed` nor `epoch_not_resumed`. Its first rotation then has `first_turn` 0, with an
+  `epoch_resumed` nor `epoch_not_resumed`. The `page_out` of its first rotation then has `first_turn` 0, with an
   `epoch` that can equal the one before the restart although the counters were not continued.
 
 ### Reading an entry
