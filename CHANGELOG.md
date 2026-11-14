@@ -78,7 +78,8 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   when paging is stopped.
   `contexto statusline` prints the line, so a status line script of your own can include it. When
   Claude Code names its session on stdin, the script shows `$CONTEXTO_SESSION`'s numbers only while
-  that session is open and serving it, and nothing when two open launches serve it. See
+  that session is open and serving it in its current run, so nothing until a conversation's first
+  request; with no variable, nothing when two open launches serve the conversation. See
   docs/statusline.md.
 - New command: `contexto doctor` checks what `contexto run` needs from the directory you run it
   in, and prints one line per check with the next step under a warning or a failure. It checks

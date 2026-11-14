@@ -324,9 +324,13 @@ def claude_stdin(session_id: str = CLAUDE_ID) -> str:
                        "workspace": {"current_dir": "/synthetic", "project_dir": "/synthetic"}})
 
 
-def serving(home: Path, session: str, claude_session: str = CLAUDE_ID, seen_at: float | None = None) -> SessionStore:
-    """A session with a log that served ``claude_session``; while the returned store is alive the session is
-    in use, as it is while ``contexto run`` has it open."""
+# A time inside the runs the synthetic logs hold: test_stats.launch(0) starts its run at 1,800,000,000.
+IN_RUN = 1_800_000_010.0
+
+
+def serving(home: Path, session: str, claude_session: str = CLAUDE_ID, seen_at: float = IN_RUN) -> SessionStore:
+    """A session with a log that served ``claude_session`` in its latest run; while the returned store is
+    alive the session is in use, as it is while ``contexto run`` has it open."""
     store = SessionStore(home, session)
     store.record_cli_session("claude", claude_session, seen_at)
     write_log(home, session, [*launch(0), request(1, tokens=int(session[-2:]) * 1_000)])
@@ -391,7 +395,7 @@ def test_stdin_names_only_a_session_that_is_serving_now(tmp_path):
     assert command(tmp_path, stdin=claude_stdin()).stdout == ""
     # Two sessions served the conversation (a resume that got a new session): the one in use shows.
     old = serving(tmp_path, "bbbb22", seen_at=2_000_000_000.0)
-    new = serving(tmp_path, "cccc33", seen_at=1_000_000_000.0)
+    new = serving(tmp_path, "cccc33", seen_at=IN_RUN)
     # Both open (two launches on one conversation): either could be this window's, so neither is shown
     # (Reviewer B, PR #276: picking the last to see it showed one launch's numbers in the other's window).
     assert command(tmp_path, stdin=claude_stdin()).stdout == ""
@@ -427,6 +431,30 @@ def test_the_environment_s_session_counts_only_while_open_and_serving_the_claude
     # --session is the user's own choice: shown whatever stdin says.
     assert shown(claude_stdin(OTHER_ID), "aaaa11", "--session", "zzzz99") == "ctx 99k/150k\n"
     assert shown(claude_stdin(OTHER_ID), "", "--session=aaaa11") == "ctx 11k/150k\n"
+
+
+def test_a_session_reopened_for_another_conversation_does_not_serve_the_old_one(tmp_path):
+    """Reviewer A, PR #276: "has served" meant any run. Session aaaa11 served CLAUDE_ID in an earlier run, and
+    a new launch has it open for OTHER_ID; a plain `claude --resume CLAUDE_ID` elsewhere, whose own status line
+    calls `contexto statusline`, showed aaaa11's numbers, with and without $CONTEXTO_SESSION. A conversation
+    counts only when it was recorded in the open launch, after its proxy started."""
+    store = SessionStore(tmp_path, "aaaa11")
+    store.record_cli_session("claude", CLAUDE_ID, 1_799_999_000.0)  # the earlier run
+    store.record_cli_session("claude", OTHER_ID, IN_RUN)  # this run
+    write_log(tmp_path, "aaaa11", [*launch(-2_000), request(-1_999, tokens=5_000),
+                                   *launch(0), request(1, tokens=11_000)])
+    assert command(tmp_path, stdin=claude_stdin()).stdout == ""
+    assert command(tmp_path, stdin=claude_stdin(), env={"CONTEXTO_SESSION": "aaaa11"}).stdout == ""
+    assert command(tmp_path, stdin=claude_stdin(OTHER_ID)).stdout == "ctx 11k/150k\n"
+    assert statusline.serving_session(tmp_path, CLAUDE_ID) is None
+    assert statusline.serves_now(tmp_path, "aaaa11", OTHER_ID) is True
+    # The same conversation resumed in the new launch is recorded again at its first request there.
+    store.record_cli_session("claude", CLAUDE_ID, IN_RUN + 5)
+    assert command(tmp_path, stdin=claude_stdin()).stdout == "ctx 11k/150k\n"
+    # A log with no proxy start, or none that can be read, serves nothing.
+    write_log(tmp_path, "aaaa11", [request(1, tokens=11_000)])
+    assert statusline.serving_session(tmp_path, CLAUDE_ID) is None
+    del store
 
 
 def test_the_served_lookup_reads_what_the_launcher_records(tmp_path):
@@ -1025,7 +1053,10 @@ def test_the_version_comes_from_the_contexto_proxy_distribution_and_is_still_loo
     import contexto
 
     asked: list[str] = []
-    monkeypatch.delitem(contexto.__dict__, "__version__", raising=False)
+    # setitem first records an undo even when __version__ was never loaded, so the fake version below is
+    # not left in the module for the rest of the run (Reviewer A, PR #276: delitem alone records none).
+    monkeypatch.setitem(contexto.__dict__, "__version__", None)
+    monkeypatch.delitem(contexto.__dict__, "__version__")
     monkeypatch.setattr(importlib.metadata, "version", lambda name: asked.append(name) or "9.9.9")
     assert contexto.__version__ == "9.9.9" and asked == ["contexto-proxy"]
     assert contexto.version_line().startswith("contexto 9.9.9")

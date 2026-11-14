@@ -19,7 +19,7 @@ sent anywhere.
 | Part | Meaning |
 |---|---|
 | `ctx` | The line is Contexto's. |
-| `112k/150k` | The current prompt against the bound. The first number is the input of the main conversation's most recent model request, as the API counted it (`prompt.last_tokens` in [docs/stats.md](stats.md)). It is the latest request, not the session's peak, so it falls after a rotation. The second number is `--bound`. |
+| `112k/150k` | The current prompt against the bound. The first number is the input of the main conversation's most recent model request, as the API counted it (`prompt.last_tokens` in [docs/stats.md](stats.md)). It is the latest request, not the session's peak, so it falls after a rotation. After `/clear` it shows the last request's prompt until the next reply. The second number is `--bound`. |
 | `~77k/150k` | The same, when the API reported no usage for that request: `~` marks Contexto's own estimate. |
 | `bound 150k` | Shown alone before the first model request of a new session. A resumed session starts with the previous run's latest prompt instead (`61k/150k`), as `contexto stats` does. |
 | `41 paged` | The page files kept on disk for the whole session (`pages.count`), from every conversation in it, subagents' included, and every run. The model can read each of them back. It is not a count of your conversation's turns: a page usually holds one turn, but a page from the bounded fallback holds one carried message, and a subagent's request that pages adds to it while your prompt stays where it was. |
@@ -134,12 +134,14 @@ order:
 2. `$CONTEXTO_SESSION`. `contexto run` sets it for the CLI it runs, and Claude Code passes its
    environment to the status line command (measured), so inside `contexto run claude` no option is
    needed. When the JSON on stdin names a Claude Code session (`session_id`), the variable's session
-   counts only while a `contexto run` has it open and has served that Claude Code session; otherwise
-   nothing is printed. The variable can outlive the launch that set it, if you exported it in a shell
+   counts only while a `contexto run` has it open and has served that Claude Code session in that
+   run (since its proxy started); otherwise nothing is printed. The variable can outlive the launch that set it, if you exported it in a shell
    for `contexto stats`, and a plain `claude` started there would otherwise show that old session's
    numbers.
 3. The Contexto session that is serving the Claude Code session named by `session_id` in the JSON
-   on stdin. It counts only while a `contexto run` has that session open. If two open launches serve
+   on stdin. It counts only while a `contexto run` has that session open and has served that Claude
+   Code session in that run: a session reopened for another conversation does not count for the
+   one it served before. If two open launches serve
    the same Claude Code session, either could be the one asking, so nothing is printed.
 
 There is no fourth step. If none of the three names a session, nothing is printed. In a plain
@@ -250,7 +252,7 @@ Three things keep it short:
   launch, a proxy start or a tool call (found by searching the bytes), and from the end backwards
   the last requests: enough for the current prompt and for whether paging is stopped. The lines it
   parses are counted by the same code `contexto stats` uses, and the tests hold the two to the same
-  answers on twenty log shapes. When paging is stopped, or the log has no `launch` line, it reads
+  answers on every log shape in `LOG_SHAPES`. When paging is stopped, or the log has no `launch` line, it reads
   the whole log as `contexto stats` does.
 - Pages are counted from the directory listing; no page file is opened.
 

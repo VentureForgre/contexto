@@ -415,22 +415,58 @@ def session_live(home: Path, session_id: str) -> bool:
     return False
 
 
+def run_started(home: Path, session_id: str) -> float | None:
+    """When the latest run of ``session_id`` started: its newest ``proxy_start`` line's time, to the second
+    (the log's times are UTC, written to the second or finer). None when the log cannot be read or has
+    no such line."""
+    import calendar
+
+    try:
+        data = read_regular(session_dir(home, session_id) / "log.jsonl")
+    except OSError:
+        return None
+    for _, line in _lines_back(data):
+        if b"proxy_start" not in line:
+            continue
+        event = _event(line)
+        if event is None or event.get("event") != "proxy_start":
+            continue
+        try:
+            return float(calendar.timegm(time.strptime(str(event.get("ts", ""))[:19], "%Y-%m-%dT%H:%M:%S")))
+        except (ValueError, OverflowError):
+            return None
+    return None
+
+
+def serves_in_this_run(home: Path, session_id: str, seen_at: float) -> bool:
+    """Whether a time ``served_at`` gave falls within the launch that has the session open now. The
+    launcher records a Claude Code session at its first request in each launch (``SessionRecorder``), so
+    a conversation this launch serves is recorded after its proxy started. One served only in an earlier
+    run is not: a session reopened for another conversation would otherwise show its numbers under a
+    plain ``claude --resume`` of the old one (PR #276's review)."""
+    started = run_started(home, session_id)
+    return started is not None and seen_at >= started
+
+
 def serving_session(home: Path, claude_session: str) -> str | None:
     """The Contexto session that is serving ``claude_session`` now: the one whose records name it and that
     a launch has open. A session that served the conversation in an earlier run is not it: a plain
     ``claude --resume`` of that conversation does not go through Contexto, and the old numbers would
-    describe nothing on screen. Two open launches on one conversation give None: either could be the
+    describe nothing on screen, nor is one that served it only in an earlier run of a launch now open for
+    another conversation (``serves_in_this_run``). Two open launches on one conversation give None: either could be the
     window asking, and a guess showed one's numbers in the other's (PR #276's review)."""
-    live = [name for _, name in served_by(home, claude_session) if session_live(home, name)]
+    live = [name for seen_at, name in served_by(home, claude_session)
+            if session_live(home, name) and serves_in_this_run(home, name, seen_at)]
     return live[0] if len(live) == 1 else None
 
 
 def serves_now(home: Path, session_id: str, claude_session: str) -> bool:
-    """Whether ``session_id`` is open and its records say it served ``claude_session``: the test a session
+    """Whether ``session_id`` is open and its records say it served ``claude_session`` in this run: the test a session
     from ``$CONTEXTO_SESSION`` must pass when stdin names a Claude Code session. The variable outlives the
     launch that set it in a shell where the user exported it (the readers default to it), and there it
     would show an old session's numbers under a conversation that session never served."""
-    return served_at(home, session_id, claude_session) is not None and session_live(home, session_id)
+    seen_at = served_at(home, session_id, claude_session)
+    return seen_at is not None and session_live(home, session_id) and serves_in_this_run(home, session_id, seen_at)
 
 
 def stdin_object(stream: Any) -> dict[str, Any] | None:
