@@ -976,6 +976,7 @@ class _Candidate(NamedTuple):
     own: bool  # one of Contexto's search, recall or state results: no page
     saving: int  # estimated tokens a stub frees, a fresh result counted with its margin
     plain: int  # the same at the session's ratio alone
+    seed: int  # the same with a fresh result at the tool-output seed (1.5 bytes a token)
     document: bool  # the result holds a document: stubbed once seen, unread only when over the bound alone
     call: dict | None
     result: dict
@@ -983,9 +984,10 @@ class _Candidate(NamedTuple):
 
 _DENSE = TokenEstimator()  # counts at FRESH_BYTES_PER_TOKEN, whatever the session has measured
 _DENSE.observe(round(FRESH_BYTES_PER_TOKEN * 1_000_000), 1_000_000)
+_SEED = TokenEstimator()  # never observed: tool output at the seed's 1.5 bytes a token, other text at 3.5
 
 
-def fresh_margin(items: list[dict], estimator: Any, dialect: Any) -> int:
+def fresh_margin(items: list[dict], estimator: Any, dialect: Any, dense: Any = _DENSE) -> int:
     """What the estimate of tool results that arrived with this request may be short by. The session's
     ratio is a blend learned mostly from the head's text, and tool output is denser (measured in the
     replay harness: a 60,000-token result estimated 17,195 low). Until a response's usage has measured
@@ -995,7 +997,7 @@ def fresh_margin(items: list[dict], estimator: Any, dialect: Any) -> int:
     extra = 0
     for item in items:
         if item is not FOLDED and hooks.results(item):
-            extra += max(0, dialect.estimate_items(_DENSE, [item]) - dialect.estimate_items(estimator, [item]))
+            extra += max(0, dialect.estimate_items(dense, [item]) - dialect.estimate_items(estimator, [item]))
     return extra
 
 
@@ -1067,9 +1069,9 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         over, unknown = measured_documents(kept, costs)
         return rw.estimate_items(estimator, kept) - over - UNCERTAIN_DOCUMENT_TOKENS * unknown
 
-    def counted(i: int, item: dict) -> int:
+    def counted(i: int, item: dict, dense: Any = _DENSE) -> int:
         """A sent item's tokens for a decision: a fresh tool result with its margin."""
-        return tokens([item]) + (fresh_margin([item], estimator, dialect) if i >= previous_n else 0)
+        return tokens([item]) + (fresh_margin([item], estimator, dialect, dense) if i >= previous_n else 0)
 
     # What a stub would free, for every result not yet a stub, oldest first.
     own = own_call_ids(messages[state.k:])
@@ -1099,11 +1101,12 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             stubbed_item = hooks.with_stubs(sent[i], {j: text})
             plain = tokens([sent[i]]) - tokens([stubbed_item])
             saving = counted(i, sent[i]) - counted(i, stubbed_item)
+            seed = counted(i, sent[i], _SEED) - counted(i, stubbed_item, _SEED)
             if not certain:  # seen, usage missing: stubbed like any result, counted as freeing what is known
-                plain, saving = max(plain, 0), max(saving, 0)
+                plain, saving, seed = max(plain, 0), max(saving, 0), max(seed, 0)
             if plain > 0 or not certain:
                 (seen if i < last_assistant else unseen).append(
-                    _Candidate(i, j, is_own, saving, plain, hooks.has_document(result), call, result))
+                    _Candidate(i, j, is_own, saving, plain, seed, hooks.has_document(result), call, result))
 
     # What the whole ladder could free, and so what cannot be paged.
     rounds = [r for r in hooks.rounds(sent, start, n)[:-1] if r.foldable and r.removed]
@@ -1154,18 +1157,25 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
                        "room": max(0, config.bound - pressure - config.headroom_floor),
                        "min_turn_room": config.min_turn_room})
         state = replace(state, inturn=state.inturn._replace(room_low=start + 1))
+    seeded = dense_line = 0
     if tight:
-        # Under a tight bound the floor, not the 1.8 count, keeps the request under the bound: a result
-        # shown once is tested at the session's ratio, as the request is sent.
+        # Under a tight bound a result shown once is tested at the session's ratio against read_line, and
+        # also at the tool-output seed of 1.5 bytes a token against the bound less the output allowance
+        # (Reviewer B at 26cba5ad: a 60 KB result counted 1.5 bytes a token reached 61,718 of 60,000, a
+        # 100 KB one 161,318 of 150,000 over a 92,000 head). Results denser than the seed are D49's
+        # measured limit; the next usage corrects the ratio.
         least -= sum(c.saving - c.plain for c in unseen)
+        seeded = least + sum(c.seed - c.plain for c in unseen)
+        dense_line = config.bound - config.min_turn_room // OUTPUT_ALLOWANCE_SHARE
     huge: list[_Candidate] = []
     for c in sorted(unseen, key=lambda c: (-c.saving, c.i, c.j)):
-        if least <= read:
+        if least <= read and seeded <= dense_line:
             break
         if c.document and c.plain <= config.bound:
             continue  # a document is read whole unless it is over the bound on its own (Reviewer B, finding 8)
         huge.append(c)
         least -= c.plain if tight else c.saving
+        seeded -= c.seed
     # A batch that changes earlier messages rewrites the cached prefix. The request right after one starts
     # no other unless without it the request would publish less than min_turn_room (its estimate over
     # T, the room's own line) or be over the bound; and none starts for less than min_turn_room. Until a
@@ -1173,8 +1183,8 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     # (Reviewer B at 15293e9c, L2: with usage never arriving each new round stayed counted at the fresh
     # results' dense ratio, and 126 of 151 requests rewrote the prefix back to back).
     after_rewrite = state.inturn.rewrote == previous_n and state.inturn.rewrote > 0
-    unmeasured = state.batch_unmeasured
-    may_rewrite = over_bound or (not unmeasured and freeable >= config.min_turn_room
+    unmeasured_batch = state.batch_unmeasured
+    may_rewrite = over_bound or (not unmeasured_batch and freeable >= config.min_turn_room
                                  and (not after_rewrite or estimate - unknown > show))
     if not (huge or may_rewrite):
         return state, None
@@ -1237,7 +1247,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         unseen = [c for c in unseen if c not in huge]
         # Reviewer A at 7575c76f, finding 2: every later step is sized from the request as it stands after
         # step 0, not with the stubbed results still counted (which kept steps 1 to 3 from running).
-        may_rewrite = cur > config.bound or (not unmeasured and freeable >= config.min_turn_room
+        may_rewrite = cur > config.bound or (not unmeasured_batch and freeable >= config.min_turn_room
                                              and (not after_rewrite or measured(state) - unknown > show))
     target, escalate = sized(cur)
     # Steps 1 to 3 change messages the previous request had: a rewrite of the cached prefix.

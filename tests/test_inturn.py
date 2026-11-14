@@ -1709,6 +1709,40 @@ def test_at_a_tight_bound_each_result_is_read_once_past_the_show_line(bound, hea
     assert set(arrivals[:-2]) <= stubbed
 
 
+class DenseResults(Upstream):
+    """An upstream that counts a message holding a tool result at ``bpt`` bytes a token, other messages
+    at the fake tokenizer's 3.2."""
+
+    def __init__(self, bpt: float) -> None:
+        super().__init__()
+        self.bpt = bpt
+
+    def tokens(self, request: dict) -> int:
+        total = -(-self.head(request)[1] // BYTES)
+        for m in request["messages"]:
+            seen = self.measure(m)
+            dense = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks(m))
+            total += -(-seen.size // (self.bpt if dense else BYTES)) + seen.media
+        return int(total)
+
+
+@pytest.mark.parametrize("bound,head,size", [(60_000, 20_000, 60_000), (150_000, 92_000, 100_000)],
+                         ids=["60000-head-20000", "150000-head-92000"])
+def test_at_a_tight_bound_a_result_denser_than_the_session_is_stubbed_on_arrival(bound, head, size):
+    # Reviewer B at 26cba5ad: results the upstream counts at 1.5 bytes a token were shown once by the
+    # session's ratio; a 60 KB one reached 61,718 of 60,000 (estimated 39,670), a 100 KB one over a 92,000
+    # head 161,318 of 150,000. The read test now also counts a fresh result at the tool-output seed of
+    # 1.5 bytes a token against the bound less the output allowance.
+    config = Config(bound=bound)
+    cli = Cli(memory(), config, head_bytes=int(head * BYTES))
+    cli.upstream = DenseResults(1.5)
+    cli.prompt("Read every module.")
+    cli.loop(6, lambda r: output(f"m-{r}", size))
+    assert max(s.real for s in cli.sent) <= bound - config.min_turn_room // 4
+    assert not [e for e in cli.usage_events if e["event"] == "over_bound"] and not cli.events("over_bound")
+    assert sum(e["unseen_results_stubbed"] for e in batches(cli)) == 6
+
+
 def test_with_usage_never_arriving_no_batch_rewrites_right_after_another():
     # Reviewer B at 15293e9c, L2: at 150,000 with a 92,000 head and usage never arriving, 138 of 151
     # requests rewrote the prefix, 126 back to back: each new round stayed counted at the fresh results'
