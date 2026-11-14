@@ -3546,8 +3546,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **Modes of one command**, discovered from `contexto.bench.modes`: the live run (no mode flag),
     `--dry-run`, `--script-only`, `--replay`, `--report DIR...` and `--chart RESULTS`. A mode's own
     options are refused without its mode, so `contexto bench --dump-trace DIR` can never start a
-    live run.
-  - **Protocols.** `d27`: the 54 probes of runs #3 and #4, turn texts and probe fields
+    live run. Reason: one command with one set of shared options (seed, seeds, bound, protocol)
+    keeps the keyless modes and the live run on the same script, and a mode found by discovery
+    needs no edit to the command to add.
+  - **Protocols.** Reason for two: `d27` keeps continuity with runs #3 and #4, and `v2` adds
+    questions that do not name their key, which the audit said suits word search. `d27`: the 54
+    probes of runs #3 and #4, turn texts and probe fields
     byte-identical to `spikes/m2/acceptance/run.py::build_script` for any seed, bound and turn size
     (216 scripts compared by a reviewer, 280 by the builder). `v2` (default): every `d27` turn and
     probe unchanged plus 18 probes, 72 in all, whose questions name no key: `paraphrase` (the
@@ -3569,11 +3573,15 @@ the owner's delegation. Open decisions are listed at the end with the options an
     Messages API requests built from the script alone, scripted replies and file reads,
     `tool_choice: none`, one request per probe turn carrying earlier probe turns with its own
     answers, `not_run` with a reason when it does not fit); `plain` (the same headless Claude Code
-    with no Contexto). Every difference is listed in the manifest's `arm_differences`. Both Claude
-    Code arms run with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`; on 2.1.322 it removes
-    `run_in_background` and about 771 characters from the Agent and Bash tool definitions, in both
-    arms alike. It does not cover the Monitor tool or MCP background tasks; a `result` from either,
-    or any `result` that answers no turn, stops the unit as `desync`.
+    with no Contexto, its auto-compact window set so that compaction fires near the bound, at bound
+    + 33,000; at its defaults it would compact near 967,000 tokens and not at all in this session).
+    Reason: `full` is the earlier baseline, so results stay comparable with runs #3 and #4, and
+    `plain` is the comparison users care about, which had never been run. Every difference is
+    listed in the manifest's `arm_differences`. Both Claude Code arms run with
+    `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`; on 2.1.322 it removes `run_in_background` and about
+    771 characters from the Agent and Bash tool definitions, in both arms alike. It does not cover
+    the Monitor tool or MCP background tasks; a `result` from either, or any `result` that answers
+    no turn, stops the unit as `desync`.
   - **Plain arm's compaction.** Every documented control sets the auto-compact window (100,000 to
     1,000,000 tokens, capped at the model's window), and Claude Code compacts 33,000 below it. The
     33,000 was read in the installed 2.1.322 bundle, not documented, and is not confirmed live. The
@@ -3581,7 +3589,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
     bounds 67,000 to 967,000. Not exact: Claude Code checks the last usage plus a local estimate,
     so a large turn lands first. Stub runs with the real 2.1.322 at bound 150,000: `pre_tokens`
     148,159, 167,202, 168,178 and 147,140; largest plain request 158,168. The manifest records the
-    setting and every `pre_tokens`.
+    setting and every `pre_tokens`. At its defaults Claude Code on these models (1,000,000-token
+    windows) would compact near 967,000 tokens and would not compact at all in the default `v2`
+    session (467,012 estimated tokens). Reason for moving the trigger: the owner asked for plain
+    Claude Code with its compaction set to the same bound, so that both Claude Code arms work under
+    one limit; the docs say it is a choice, not Claude Code's default.
   - **Metering and spend guards.** One pass-through meter on 127.0.0.1 for every arm records counts
     only (tokens by class, status, turn, main or side), never content. Each request reserves its
     bytes / 1.5 plus its `max_tokens` before it leaves; unreadable usage counts as the reservation;
@@ -3603,9 +3615,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
     0 of 72 gives an interval excluding zero and p = 0.125). Seed level: exact sign-flip permutation
     test (Monte Carlo above 20 seeds) and a Student t interval on per-seed differences, none below 3
     seeds or when every seed has the same difference. Reason for the seed level: probes in one
-    session are not independent. Simulated coverage of the t interval: 94.7% to 95.7% at 3 to 20
-    seeds with fixed rates; 75.6% to 89.7% when rates vary between seeds and one arm rarely wins
-    alone; a percentile bootstrap, tried first, covered 49%, 75% and 83% at 2, 3 and 5 seeds and was
+    session are not independent. Simulated coverage of the t interval (4,000 benchmarks of 72
+    probes): 94.7% to 95.7% at 3 to 20 seeds with the discordance rates fixed across seeds at (0.10,
+    0.04), (0.13, 0.04) or (0.06, 0.06); 92.1% at 3 seeds at (0.03, 0), where one arm almost never
+    wins alone; 75.6% to 89.7% at 3 to 20 seeds at (0.03, 0) when the rates vary between seeds; a
+    percentile bootstrap, tried first, covered 49%, 75% and 83% at 2, 3 and 5 seeds and was
     replaced.
   - **Verdict rule.** A direction between two arms is named only when the pooled result is
     significant, the seed-level sign-flip p < 0.05, and both point the same way. With fewer than 6
@@ -3615,14 +3629,19 @@ the owner's delegation. Open decisions are listed at the end with the options an
     seeds.
   - **Cost** at every model in a published price table with its source and access date
     (`src/contexto/bench/data/prices.json`, platform.claude.com pricing page, read 2026-11-12),
-    applied per request. USD per million tokens, input / 5-minute write / 1-hour write / cache read
-    / output: claude-haiku-5-5 0.10 / 0.125 / 0.20 / 0.01 / 0.50 up to 100,000 input tokens and
-    0.50 / 0.625 / 1.00 / 0.05 / 2.50 above (applied to the whole request, output included: a
-    reading of the page, stated as such and held as data); claude-sonnet-5-5 2.00 / 2.50 / 4.00 /
-    0.10 / 10.00; claude-opus-5-5 4.00 / 5.00 / 8.00 / 0.20 / 20.00; claude-fable-5-2 8.00 / 10.00 /
-    16.00 / 0.20 / 40.00. Unreadable usage gives a cost range. Retried units: every attempt's tokens
-    and cost count; accuracy uses the completed attempt.
-  - **Replay** (`contexto bench --replay`, keyless): a pinned 11,175-byte trace whose turn texts are
+    applied per request. Reason: fewer tokens is not always less money (claude-haiku-5-5's price
+    steps up on a prompt over 100,000 tokens, and cache reads cost a tenth or less of a write), so
+    each arm is priced as billed, request by request. USD per million tokens, input / 5-minute
+    write / 1-hour write / cache read / output: claude-haiku-5-5 0.10 / 0.125 / 0.20 / 0.01 / 0.50
+    up to 100,000 input tokens and 0.50 / 0.625 / 1.00 / 0.05 / 2.50 above (applied to the whole
+    request, output included: a reading of the page, stated as such and held as data);
+    claude-sonnet-5-5 2.00 / 2.50 / 4.00 / 0.10 / 10.00; claude-opus-5-5 4.00 / 5.00 / 8.00 / 0.20 /
+    20.00; claude-fable-5-2 8.00 / 10.00 / 16.00 / 0.20 / 40.00. Unreadable usage gives a cost
+    range. Retried units: every attempt's tokens and cost count; accuracy uses the completed
+    attempt.
+  - **Replay** (`contexto bench --replay`, keyless). Reason: anyone can check the bound and search
+    reach with no key and no spend, and a change to the proxy that moves a measurement fails it. A
+    pinned 11,175-byte trace whose turn texts are
     regenerated from the seed and checked against pinned hashes; the real proxy over HTTP with a
     synthetic Claude Code-shaped client and a fake upstream that checks every request against the
     Messages API's structural rules; every environment variable the package reads held at its
@@ -3644,19 +3663,24 @@ the owner's delegation. Open decisions are listed at the end with the options an
     what a real CLI or model does, and says so.
   - **Charts**: standard-library SVG, the same bytes for the same input: accuracy by arm with
     Wilson intervals, and request size against history length (synthetic and modelled lines
-    labelled so).
+    labelled so). Reason: the package has no runtime dependency and keeps none, and the same bytes
+    for the same input let a reader check a published chart by making it again.
   - **Scale harness** (#262): `spikes/m2/scale/proxy` had stopped running at v0.5.24 (it
     instrumented `SessionStore._pages`, gone since the store split, and seven more drifts). It is
     repaired, has drift tests, and a 200-turn run (634 requests, 913,084 tokens of history, six
     times the bound) is in the required `ci` check with budgets: added time per request median 200
     ms and p95 800 ms, growth 300 ms per million tokens, startup 3,000 ms, peak RSS 300 MB, RSS
     growth 150 MB per MB of body growth, 40 live objects gained per turn, throughput floor 5 req/s.
-    They catch a slowdown of about 10 times on CI and a quadratic pass at about 200 ns a step, not
-    a doubling. Against the audit (Apple M5 Pro, loaded machine): added time 3.6 to 4.3 ms for a
-    Claude Code-sized first request (audit about 2); growth with history depends on turn size, 16.7,
-    18.6, 15.3, 12.5 and 9.2 ms per million tokens at 3,000, 4,000, 5,000, 8,000 and 26,000-token
-    turns (the audit's about 13 matches 8,000-token turns); throughput at 100 concurrent 232 to 382
-    req/s (audit 768, with what it sent unknown); startup 53.7 to 60.6 ms (audit 60).
+    They catch a slowdown from about 7 to 10 times on a typical CI runner (not one under about 7
+    times, so not a doubling) and a quadratic pass at about 200 ns a step. Reason: the audit's
+    performance figures could not be re-measured while the harness was broken, and a run in CI
+    keeps it from breaking again. Against the audit (Apple M5 Pro, loaded machine; medians of 15
+    runs, smallest to largest in brackets, from `spikes/m2/scale/proxy/README.md` and
+    `results/short_2026-11-13.jsonl`): added time 3.2 ms (2.5 to 4.7) for a Claude Code-sized first
+    request (audit about 2); growth with history depends on turn size, 16.7, 18.6, 15.3, 12.5 and
+    9.2 ms per million tokens at 3,000, 4,000, 5,000, 8,000 and 26,000-token turns (the audit's
+    about 13 matches 8,000-token turns); throughput at 100 concurrent 318 req/s (248 to 417; audit
+    768, with what it sent unknown); startup 57.2 ms (49.6 to 73.1; audit 60).
   - **The minimum run** (the owner starts it; no agent does): `contexto bench --model
     claude-haiku-5-5 --seeds 10 --repeats 3 --budget-tokens 598290000 --out <dir>` (36 units,
     180,251,043 tokens expected, 598,285,396 worst case) and `contexto bench --model claude-opus-5-5
@@ -3664,14 +3688,23 @@ the owner's delegation. Open decisions are listed at the end with the options an
     worst). The Haiku run gives 720 pooled paired probes per pair of arms; the Opus run 360, and
     with 5 seeds it alone can name no direction. The Opus expected figure scales the recorded runs'
     ratio, 1.381, and applies it to the plain arm too [assumed]. Worst case is a planning figure;
-    the ceiling is `--budget-tokens`.
+    the ceiling is `--budget-tokens`. Estimated cost: Haiku about $14 expected and about $456 worst
+    case ($602 with a 1-hour cache); Opus about $90 and about $2,025 ($2,622). Method: every request
+    the plan simulates (`contexto.bench.plan`) split into the plan's token classes and priced on its
+    own with `contexto.bench.prices.request_cost`, so Haiku's size step applies per request as the
+    report applies it (524 of the Haiku plan's 1,606 expected requests are over 100,000 input
+    tokens); the token totals equal the dry run's. These are estimates: the run is paid by whoever
+    runs it, at their account's prices, and `--budget-tokens` is the ceiling. Reason for the
+    figures: the audit suggested 10 seeds on Haiku with 3 repeats and 5 seeds on Opus; 10 seeds is
+    past the six-seed floor.
   - **Departures from the brief.** (1) The `d27` script's JSON digest changed, though every turn
     text and probe field is the spike's: each probe's stored `overlap` annotation now follows the
     one overlap rule. (2) Scoring differs from the spike's in three ways, in every arm: an
     unanswered probe is never correct (the spike scored an unanswered `set` probe whose answer is
-    `none` as correct); answer lines written in markdown (bold or backticked ids, numbered or
-    bulleted items) are read; a blockquote line is never read, and a line in a fenced code block
-    yields to an answer for the same id outside any fence (#273). The brief named only the first. (3) Both Claude Code arms run with
+    `none` as correct); more answer lines written in markdown are read (bold or backticked ids,
+    numbered and `+` items; the spike already read plain `-` and `*` items); and a line in a fenced
+    code block yields to an answer for the same id outside any fence (#273). A blockquote line stays
+    unread, as in the spike. The brief named only the first. (3) Both Claude Code arms run with
     `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: a background subagent's second `result` desynchronised
     scoring, 0 of 72 answers counted while the unit said complete. Any extra result now stops the
     unit as `desync`. (4) Merge rule: the ruleset does not require branches to be up to date
@@ -3688,7 +3721,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     2.5 ms to build the SSL context [the SSL context measured; the handshake not]. Issues: (a)
     [#284](https://github.com/VentureForgre/contexto/issues/284), (b)
     [#285](https://github.com/VentureForgre/contexto/issues/285).
-  - **Open follow-ups.** A follow-up code pull request is in progress for the reviewers' remaining
+  - **Open follow-ups.** A follow-up code pull request is planned for the reviewers' remaining
     low findings: notes on the request-size chart (Contexto's drops are rotations, not compactions;
     the full-context line squeezes the y axis); a reach column on the `contexto_search` tool's own
     reply beside the strict search's; wording nits in the report; the scale harness's lows (its
@@ -3704,9 +3737,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     500,000-token tier is the closest fit; data to be downloaded at run time. Any conversation
     benchmark meets the problem that a headless CLI writes its own replies, so recorded assistant
     turns become quoted text in user turns.
-  - **What the benchmark does not show**: real coding tasks; a real user's session shape; other
-    CLIs (Codex is not an arm); models other than those run; other Claude Code versions; LLM-judged
-    answers.
+  - **What the benchmark does not show**: real coding tasks; a real user's session shape; plain
+    Claude Code at its default compaction threshold; other CLIs (Codex is not an arm); models other
+    than those run; other Claude Code versions; LLM-judged answers.
 
 ## Open decisions
 
