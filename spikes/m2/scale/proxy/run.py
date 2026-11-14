@@ -257,8 +257,7 @@ class Client:
         conn.sock.settimeout(self.timeout if timeout is None else timeout)
         headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01",
                    "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14",
-                   "x-api-key": "sk-ant-scale-harness-not-a-key", "User-Agent": synth.USER_AGENT,
-                   "X-Claude-Code-Session-Id": synth.CLAUDE_CODE_SESSION,
+                   "x-api-key": "sk-ant-scale-harness-not-a-key", **synth.CLI_HEADERS,
                    "x-scale-id": request_id, "x-scale-reply": reply}
         t0 = time.monotonic()
         try:

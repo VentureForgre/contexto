@@ -8,8 +8,8 @@ methods of the store and its page catalog named in ``INSTRUMENTED``; nothing in 
 JSON-lines control channel on stdin/stdout returns per-request timings, ``ru_maxrss``, toggles cProfile,
 and on ``exit`` stops the proxy as the launcher does and pickles the engine for the next phase.
 
-``ff`` (fast-forward): the same engine, called directly at each turn start only, with the usage the fake
-upstream would report for the bytes the proxy would send (``ceil(len(serialize_request(upstream)) /
+``ff`` (fast-forward): the same engine, called directly at each turn start only, with the request headers
+the driver sends (``synth.CLI_HEADERS``; none before 2026-11-13), the usage the fake upstream would report for the bytes the proxy would send (``ceil(len(serialize_request(upstream)) /
 1.83)``), and a proxy-shaped entry in the session log. See README.md "How each checkpoint is reached".
 
 Run by run.py; not meant to be started by hand.
@@ -367,7 +367,7 @@ def fast_forward(args: argparse.Namespace) -> int:
             history_tokens = synth.tokens_of(history_bytes)
             METER.begin(f"ff{t}")
             t0 = time.perf_counter()
-            upstream, _, events = engine(request, {}, "/v1/messages")
+            upstream, _, events = engine(request, dict(synth.CLI_HEADERS), "/v1/messages")  # the driver's headers
             METER.add("engine", time.perf_counter() - t0)
             sent = len(proxy_mod.serialize_request(upstream))
             tokens = synth.tokens_of(sent)

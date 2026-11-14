@@ -9,6 +9,7 @@ tests name every place the harness depends on the package, so the next refactor 
 
 from __future__ import annotations
 
+import argparse
 import ast
 import inspect
 import io
@@ -22,7 +23,7 @@ for p in (ROOT / "spikes" / "m2", ROOT / "src"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from scale.proxy import cputime, fidelity, run, synth, worker  # noqa: E402
+from scale.proxy import cputime, fidelity, run, synth, upstream, worker  # noqa: E402
 
 from contexto import cliversions, launcher, mcp, rewrite, toolcheck  # noqa: E402
 from contexto import proxy as proxy_mod  # noqa: E402
@@ -204,6 +205,21 @@ def test_the_timed_engine_is_the_engine_to_the_proxy_and_the_launcher(tmp_path):
         worker.stop_proxy(proxy)
 
 
+def test_fast_forward_sends_the_headers_the_driver_sends(tmp_path, capsys):
+    """The engine reads the CLI version and the session id from the request headers. Fast-forward calls
+    it directly, and called it with none until 2026-11-13 (Reviewer A, nit 6): its session logged no
+    ``cli_version`` event, where the HTTP path logs one."""
+    assert synth.CLI_HEADERS == {"User-Agent": synth.USER_AGENT, "X-Claude-Code-Session-Id": synth.CLAUDE_CODE_SESSION}
+    shape = json.dumps({"head_tokens": 20_000, "turn_tokens": 3_000})
+    args = argparse.Namespace(home=str(tmp_path), session="ff", bound=150_000, engine_in=None, shape=shape,
+                              from_turn=0, to_turn=2, engine_out=str(tmp_path / "engine.pkl"),
+                              csv_out=str(tmp_path / "ff.csv"))
+    assert worker.fast_forward(args) == 0
+    capsys.readouterr()
+    counts, _ = run.log_events(tmp_path / "sessions" / "ff" / "log.jsonl")
+    assert counts["cli_version"] == 1 and counts["session_start_unrecognised"] == 0, counts
+
+
 def test_cputime_handles_requests_on_this_checkout(capsys):
     """cputime.py calls the handler's ``_transform`` and the engine without a server; a changed signature
     fails here."""
@@ -212,6 +228,9 @@ def test_cputime_handles_requests_on_this_checkout(capsys):
     assert rows and rows[0]["t"] == 2 and rows[0]["j"] == 0
     assert all(row["cpu_s"] >= row["transform_s"] >= 0 and 0 < row["upstream_tokens"] <= row["history_tokens"]
                for row in rows)
+    # observe_usage is told what the proxy tells it: the reply's output tokens and whether it called a tool.
+    assert all(row["observe_keywords"] == ["tool_call_ids", "tool_calls"] for row in rows), rows[0]
+    assert all(row["output_tokens"] == upstream.OUTPUT_TOKENS[row["reply"]] for row in rows), rows
 
 
 def test_the_engine_takes_the_synthetic_session_for_claude_code():

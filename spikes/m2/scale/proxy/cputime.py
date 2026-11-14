@@ -7,10 +7,17 @@
 For each tree and each history size, a child process reaches a turn the way fast-forward does (turn starts
 only, no HTTP), then handles every request of the next ``--measure`` turns. Each request goes through the
 proxy handler's ``_transform`` (parse, engine, serialize) and the engine's ``observe_usage``, and the
-process's CPU time for the two (``time.process_time``) is taken. The trees alternate, ``--reps`` times,
-and each request's smallest time over the repetitions is kept: a request is the same bytes every time, so
-the smallest is the repetition least disturbed by other work on the machine. That makes two trees
-comparable on a busy machine, where wall-clock medians are not.
+process's CPU time for the two (``time.process_time``) is taken. ``observe_usage`` gets what the proxy
+would give it after the fake upstream's reply: its output tokens (``upstream.OUTPUT_TOKENS``) and, when the
+tree's ``observe_usage`` takes them, ``tool_calls`` and ``tool_call_ids``. The trees alternate,
+``--reps`` times, and each request's smallest time over the repetitions is kept: a request is the same
+bytes every time, so the smallest is the repetition least disturbed by other work on the machine.
+
+CPU time is not independent of the load. On the 18-core M5 Pro the same tool loop at 0.55M tokens cost 7.4
+CPU-ms at a 1-minute load of 10 and 16.3 to 19.7 at loads of 32 to 51 (2026-11-12 and 13): [inference]
+the scheduler puts work on efficiency cores and lowers clock speeds when the machine is busy, which the
+smallest of a few repetitions does not remove. Two trees are comparable only within one invocation, which
+runs them alternately at the same load; a figure from one invocation is not comparable with another's.
 
 Every tree gets this checkout's synthetic session. Not measured: the HTTP read and relay, the session log
 write, and anything that waits. Nothing is written to results/.
@@ -41,9 +48,12 @@ def child(src: str, turns: int, measure: int) -> int:
     for p in (ROOT / "spikes" / "m2", Path(src).resolve()):
         sys.path.insert(0, str(p))
     # Imported here, not at the top: the tree is chosen at run time.
+    import inspect
+
     from contexto import launcher
     from contexto import proxy as proxy_mod
     from scale.proxy import synth
+    from scale.proxy.upstream import OUTPUT_TOKENS
 
     shape = synth.Shape()
     head = synth.head(shape)
@@ -56,12 +66,14 @@ def child(src: str, turns: int, measure: int) -> int:
         proxy = proxy_mod.ContextoProxy("http://127.0.0.1:9", launcher.NoticeLog(store, io.StringIO()), engine,
                                         observe_usage=observe)  # never started: nothing is sent anywhere
         handler = types.SimpleNamespace(owner=proxy, _log_transform_error=lambda *args, **kwargs: None)
-        headers = {"User-Agent": synth.USER_AGENT, "X-Claude-Code-Session-Id": synth.CLAUDE_CODE_SESSION}
+        headers = dict(synth.CLI_HEADERS)
+        # The keywords this tree's observe_usage takes of the two the proxy passes since D40 (older trees: none).
+        takes = sorted({"tool_calls", "tool_call_ids"} & set(inspect.signature(engine.observe_usage).parameters))
         history: list[dict[str, Any]] = []
         out = []
         for t in range(turns + measure):
             messages = synth.turn(shape, t)
-            for j, (end, _) in enumerate(synth.request_points(shape, t, messages)):
+            for j, (end, reply) in enumerate(synth.request_points(shape, t, messages)):
                 if t < turns and j > 0:
                     continue  # reaching the size: turn starts only, as worker.py ff does
                 body = synth.serialize(synth.request(head, history, messages[:end]))
@@ -73,13 +85,16 @@ def child(src: str, turns: int, measure: int) -> int:
                     raise SystemExit(f"the transform did not run at turn {t}: {entry}")
                 tokens = synth.tokens_of(len(sent))
                 usage = {"input_tokens": 2, "cache_creation_input_tokens": 0, "cache_read_input_tokens": tokens - 2,
-                         "output_tokens": 180}
-                engine.observe_usage(ENDPOINT, usage, original)
+                         "output_tokens": OUTPUT_TOKENS[reply]}
+                calls_tool = reply == "tool_use"
+                extra = {"tool_calls": calls_tool, "tool_call_ids": (f"toolu_cpu{t}_{j}",) if calls_tool else ()}
+                engine.observe_usage(ENDPOINT, usage, original, **{k: extra[k] for k in takes})
                 c2 = time.process_time()
                 if t >= turns:
                     events = entry.get("transform_events") or []
                     out.append({"t": t, "j": j, "history_tokens": synth.tokens_of(len(body)), "upstream_tokens": tokens,
-                                "cpu_s": c2 - c0, "transform_s": c1 - c0,
+                                "cpu_s": c2 - c0, "transform_s": c1 - c0, "reply": reply,
+                                "output_tokens": usage["output_tokens"], "observe_keywords": takes,
                                 "rotated": any(e.get("event") == "rotation" for e in events)})
             history.extend(messages)
         print(json.dumps(out))
@@ -138,6 +153,10 @@ def main(argv: list[str]) -> int:
                 runs[tree].append(run_child(tree, turns, args.measure))
         for tree in trees:
             rows = smallest(runs[tree])
+            if turns == sizes[0]:
+                given = rows[0]["observe_keywords"] if rows else []
+                print(f"{tree}: observe_usage given {', '.join(given) or 'neither tool_calls nor tool_call_ids'}",
+                      file=sys.stderr)
             tool = [r for r in rows if r["j"] > 0]
             history = statistics.median(r["history_tokens"] for r in rows) / 1e6
             if tool:
