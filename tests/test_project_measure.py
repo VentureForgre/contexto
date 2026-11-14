@@ -155,6 +155,8 @@ DECISIONS = (Decision("DECISION01Q", "the release codename is Obsidian"),
 CLOSED = ("RULE01Q", "RULE04Q")
 FACTS = facts("A", 12)
 TAIL = facts("T", 2)  # said in the first session's last turns, which are never paged out
+# The role a line in view names, by where the fact was said (review B on D69, finding 1).
+ROLE_OF = {"prompt": "user", "tool": "tool result", "answer": "assistant"}
 
 
 @dataclass
@@ -288,7 +290,7 @@ def test_two_sessions_a_fact_said_in_the_last_turns_of_the_first_session_is_reac
         call = by_key[fact.key]
         lines = call.text.splitlines()
         line = next(x for x in lines if fact.value in x)
-        assert line == f"> in view at its last request (turn {turn}): {fact.line}"
+        assert line == f"> in view at its last request (turn {turn}, {ROLE_OF[fact.where]}): {fact.line}"
         assert lines[lines.index(line) - 1].startswith(f"[session {first.label}, ")
         assert mcp.EARLIER_IN_VIEW_NOTE in lines and mcp.EARLIER_READ_ON not in lines  # no page to read on
         assert call.event["earlier_in_view_hits"] == 1 and call.event["earlier_hits"] == 0

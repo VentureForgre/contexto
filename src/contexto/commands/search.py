@@ -50,8 +50,9 @@ def register(subparsers) -> None:
                     "first_match_offset (null when only the index line matches). With --project too, "
                     "earlier: null when the session has no project view, else searched, skipped, "
                     "not_searched, in_view_skipped and sessions, each with session (its id), label (what "
-                    "--from takes), date, total (its matches), in_view (lines in view at its last request: turn "
-                    "and text; on no page, so not recallable) and hits (its best pages, as above).")
+                    "--from takes), date, total (its matches), in_view (lines in view at its last request: "
+                    "turn, role (user, assistant or tool_result) and text; on no page, so not recallable) and "
+                    "hits (its best pages, as above).")
     parser.add_argument("words", nargs="+", metavar="WORDS", help="words to find, in any order and case")
     add_session_option(parser)
     parser.add_argument("--limit", type=_limit, default=DEFAULT_LIMIT, metavar="N",
@@ -149,7 +150,7 @@ def search_earlier(store: SessionStore, query: str, after_hits: bool) -> None:
                                           else f", the best {count} of {total} matching pages")
         print(f"[session {hits.label}, {hits.date}{best}:]")
         for line in hits.in_view:
-            print(f"> in view at its last request (turn {shown_turn(line)}): {line.line}")
+            print(f"> in view at its last request (turn {shown_turn(line)}, {line.shown_role}): {line.line}")
         if hits.pages:
             if hits.in_view:
                 print()
@@ -187,7 +188,8 @@ def earlier_json(found: EarlierSearch | None, query: str) -> dict | None:
             "in_view_skipped": found.in_view_skipped,
             "sessions": [{"session": hits.session, "label": json.loads(f'"{hits.label}"'), "date": hits.date,
                           "total": hits.found + hits.in_view_found,
-                          "in_view": [{"turn": shown_turn(line), "text": line.line} for line in hits.in_view],
+                          "in_view": [{"turn": shown_turn(line), "role": line.role, "text": line.line}
+                                      for line in hits.in_view],
                           "hits": [hit_json(page_id, page, query) for page_id, page in hits.pages]}
                          for hits in found.hits]}
 

@@ -98,6 +98,12 @@ EARLIER_READ_ON = ('[Read on: contexto_recall {"page_id": ..., "offset": ..., "s
 NOT_EARLIER_SESSION = ('That "session" is not an earlier session of this project. Use the label on a [session ...] '
                        'line of a contexto_search with scope "project".')
 AMBIGUOUS_SESSION = 'That "session" is the start of {count} earlier sessions of this project; give more of the label.'
+# Review B on D69, finding 1: inside a row of an earlier session's text, each character str.splitlines() ends a
+# line at ("\n" aside: rows are split at it, so none holds one) is shown as its escape, so a stored line
+# cannot split a row or forge the next one for a reader that takes it for a line break.
+LINE_BREAK_ESCAPES = {"\r": "\\r", **{c: f"\\x{ord(c):02x}" for c in "\x0b\x0c\x1c\x1d\x1e\x85"},
+                      "\u2028": "\\u2028", "\u2029": "\\u2029"}
+_ONE_ROW = str.maketrans(LINE_BREAK_ESCAPES)
 SPECIFIC_WHY = "use a longer or more specific query"
 BUDGET_WHY = "the recall budget for this turn is used up"
 # Fixed control replies are protocol text, never charged, and returned even when the room is smaller than they
@@ -892,17 +898,23 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str, session: str | Non
     q = Query.parse(query)
     on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only
     shown, total = match_lines(text, q, last=True) if on_page else ([], 0)  # the LAST matching lines (B21)
-    rows += [(f"{'>' if is_match else ' '} {start}: {line}",
+    rows += [(f"{'>' if is_match else ' '} {start}: {_row(line, session)}",
               (page_id, start, end) if session is None else ("earlier", page_id, start, end))
              for start, end, is_match, line in shown if is_match or not _blanked(text, start, end)]
     if not shown:  # the match is in the stub only: show the stub line as the matching line
-        rows.append((f"> stub: {_stub_line(page.get('stub'))}", None))
+        rows.append((f"> stub: {_row(_stub_line(page.get('stub')), session)}", None))
     elif total > MATCHES_PER_PAGE:  # earlier statements stay reachable from the first match's offset
         first = matching_line_starts(text, q)[0]
         target = f"page_id {page_id}" if session is None else f"page_id {page_id}, session {session}"
         rows.append((f"  [{total - MATCHES_PER_PAGE} more matching lines in this page, the first at offset "
                      f"{first}; call contexto_recall with {target} and that offset to read them]", None))
     return rows
+
+
+def _row(text: str, session: str | None) -> str:
+    """``text`` as a row shows it: an earlier session's (``session``, its label) with its line breaks
+    escaped (``LINE_BREAK_ESCAPES``); this session's as it was before D69."""
+    return text if session is None else text.translate(_ONE_ROW)
 
 
 def _count(n: int, noun: str) -> str:
@@ -933,7 +945,8 @@ class _EarlierPart:
             count, total = len(hits.pages) + len(hits.in_view), hits.found + hits.in_view_found
             best = "" if total <= count else (f", the best {count} of {total} matches" if hits.in_view_found
                                               else f", the best {count} of {total} matching pages")
-            in_view = [[(f"> in view at its last request (turn {max(0, line.turn - 1)}): {line.line}",
+            in_view = [[(f"> in view at its last request (turn {max(0, line.turn - 1)}, {line.shown_role}): "
+                          f"{_row(line.line, hits.label)}",
                          ("earlier_in_view", line.turn, line.message_index, line.start, line.end))]
                        for line in hits.in_view]
             pages = _with_context_header([(_hit_rows(page_id, page, query, hits.label), page)
