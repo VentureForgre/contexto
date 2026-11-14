@@ -208,7 +208,8 @@ def pinned_fallback(code: Any = str) -> str:
     """What the search tool's approximate fallback (D65) answers on the pinned session."""
     return (f"On the pinned session the tool's fallback answers {FALLBACK_ANSWERED} of the {FALLBACK_EMPTY} queries "
             f"the strict search finds nothing for: for {code(FALLBACK_PROBE)} ({code(FALLBACK_CLASS)}) its reply "
-            "shows the plant's line on the second of three pages, beside two decoys.")
+            "shows the plant's line on the second of the three pages it shows in detail, beside two of the "
+            "service's decoy lines.")
 
 
 def _reach_table(totals: dict[str, Any]) -> list[tuple[str, ...]]:

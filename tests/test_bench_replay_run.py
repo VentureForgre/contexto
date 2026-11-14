@@ -462,7 +462,8 @@ def check_the_pinned_fallback_sentence_holds_in_the_run(run):
     assert sum(old in texts[1] for old in probe.older) == 2, said  # the two decoys beside it
     assert output.pinned_fallback() == (
         "On the pinned session the tool's fallback answers 1 of the 18 queries the strict search finds nothing for: "
-        "for q_r_02 (paraphrase) its reply shows the plant's line on the second of three pages, beside two decoys.")
+        "for q_r_02 (paraphrase) its reply shows the plant's line on the second of the three pages it shows in "
+        "detail, beside two of the service's decoy lines.")
 
 
 def check_the_chart_of_a_replay_names_each_basis_once(run):

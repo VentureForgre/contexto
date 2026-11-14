@@ -121,7 +121,9 @@ def _mismatch(differences: list[str], seed: int) -> str:
         "  1. request sizes grew or shrank only where the change was meant to act (expected.request_tokens);",
         "  2. the bound still holds: over_bound and over_bound_proxy are 0, failure_events and compaction_markers "
         "empty;",
-        "  3. reach did not fall (expected.reach, overall and by class), unless the change was to search.",
+        "  3. reach did not fall (expected.reach, overall and by class), unless the change was to search;",
+        "     a change to search can also move the fallback sentence (output.pinned_fallback), which the",
+        "     run checks against its own log and store.",
     ])
 
 
