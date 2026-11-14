@@ -8,9 +8,10 @@ object (D64).
 
 When no page holds every word, the command prints approximate matches instead, as the tool does
 (D65, ``contexto.store.search.rank_approximate``): a note on stderr says so, followed by the words that
-were searched when some were dropped, and under each page's index line a line names the words the
-page matched and the ones it did not. With ``--json`` the object then has ``approximate`` and
-``searched``, and each hit ``matched`` and ``missing``; a strict result's object is as D64 made it.
+were searched when not every word was (stop words dropped, or words past the most searched), and under
+each page's index line a line names the words the page matched and the ones it did not. With
+``--json`` the object then has ``approximate`` and ``searched``, and each hit ``matched`` and
+``missing``; a strict result's object is as D64 made it.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from contexto.paths import contexto_home
 from contexto.store import PageUnreadableError, SessionNotFoundError, SessionStore
 from contexto.store.pages import current_stub, index_line
 from contexto.store.render import MATCHES_PER_PAGE, match_lines, matching_line_starts, render_page
-from contexto.store.search import ApproxHit, Plan, Query, hit_view, hit_words, text_matches
+from contexto.store.search import APPROX_LIMIT, ApproxHit, Plan, Query, hit_view, hit_words, text_matches
 from contexto.store.sessions import select_session
 
 DEFAULT_LIMIT = 10
@@ -53,8 +54,10 @@ def register(subparsers) -> None:
                     "matching_lines (how many lines match in the whole turn) and "
                     "first_match_offset (null when only the index line matches). Approximate matches add "
                     "approximate (true) and searched (the words searched for), and to each hit matched "
-                    "(word as typed, how: exact, folded or typo, and form as the page writes it) and missing "
-                    "(the words it does not hold).")
+                    "(word as typed, how: exact, folded or typo, and form as the page writes it, lower-cased "
+                    "when only the index line holds it) and missing (the words it does not hold). At most "
+                    f"{APPROX_LIMIT} approximate matches are listed, so total can be more than any --limit "
+                    "shows: use more specific words.")
     parser.add_argument("words", nargs="+", metavar="WORDS", help="words to find, in any order and case")
     add_session_option(parser)
     parser.add_argument("--limit", type=_limit, default=DEFAULT_LIMIT, metavar="N",
@@ -88,7 +91,7 @@ def run(args: argparse.Namespace) -> int:
                 for page_id, page in readable(store, found, args.limit)]
         data = {"session": session_id, "query": query, "total": total if approximate else len(found), "hits": hits}
         if approximate:
-            data.update(approximate=True, searched=list(plan.typed) if plan is not None else [])
+            data.update(approximate=True, searched=list(plan.typed))  # a hit implies a plan
         print(json.dumps(data, indent=2, sort_keys=True))
         return EXIT_OK
     nothing = f"no paged-out turn in session {session_id} contains every word of {query!r}"
@@ -137,11 +140,9 @@ def readable(store: SessionStore, found: list[str], limit: int) -> Iterator[tupl
         yield page_id, page
 
 
-def _matching(text: str, query: str, approximate: tuple[ApproxHit, Plan | None] | None) -> Query | None:
-    """The query that picks a page's matching lines: the words as typed for a strict hit, the forms the page
-    holds for an approximate one (D65); None when the match is in the page's stub only."""
-    if approximate is not None:
-        return hit_words(approximate[0], text, approximate[1])[2]
+def _matching(text: str, query: str) -> Query | None:
+    """The query that picks a strict hit's matching lines: the words as typed; None when the match is in
+    the page's stub only. An approximate hit's are the forms the page holds (``hit_words``, D65)."""
     q = Query.parse(query)
     return q if q is not None and text_matches(text, q) else None
 
@@ -152,15 +153,15 @@ def hit_json(page_id: str, page: dict, query: str,
     ``contexto recall --offset`` starts to read every matching line, shown or not. An approximate hit
     (D65) also has ``matched`` and ``missing``, the words of ``hit_lines``' extra line."""
     text = render_page(page)
-    q = _matching(text, query, approximate)
+    words = hit_words(approximate[0], text, approximate[1]) if approximate is not None else None
+    q = words[2] if words is not None else _matching(text, query)
     rows, total = match_lines(text, q, last=True) if q is not None else ([], 0)
     hit = {"page_id": page_id, "turn": page.get("turn"), "line": index_line(current_stub(page)),
            "matches": [{"offset": start, "text": line, "match": is_match} for start, _, is_match, line in rows],
            "matching_lines": total, "first_match_offset": matching_line_starts(text, q)[0] if total else None}
-    if approximate is not None:
-        matched, missing, _ = hit_words(approximate[0], text, approximate[1])
-        hit.update(matched=[{"word": word, "how": how, "form": form} for word, how, form in matched],
-                   missing=missing)
+    if words is not None:
+        hit.update(matched=[{"word": word, "how": how, "form": form} for word, how, form in words[0]],
+                   missing=words[1])
     return hit
 
 

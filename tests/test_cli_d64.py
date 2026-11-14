@@ -228,6 +228,29 @@ def test_search_json_approximate_matches_the_text_output(home, capsys):
     assert shown == [line for line in text.splitlines() if line.startswith("  ") and not line.startswith("  [")]
 
 
+def test_search_json_approximate_limit_cuts_hits_and_total_counts_every_match(home, capsys):
+    make(home, "s1", prompts=[f"rotate the refreshToken, run {i}" for i in range(4)]
+         + [f"unrelated chatter {i}" for i in range(8)])
+    code, out, err = run(capsys, "search", "--json", "--limit", "2", "refresh_token", "zzqqxx")
+    data = json.loads(out)
+    assert code == 0 and data["approximate"] is True and len(data["hits"]) == 2 and data["total"] == 4
+    assert err == "session s1 (most recent)\n"  # the "more approximate matches" note is `total` here
+
+
+def test_search_json_typo_match_says_so(home, capsys):
+    make(home, "s1", prompts=("the keychain holds the token", "unrelated"))
+    hit = json.loads(run(capsys, "search", "--json", "kexchain", "token")[1])["hits"][0]
+    assert hit["matched"] == [{"word": "kexchain", "how": "typo", "form": "keychain"},
+                              {"word": "token", "how": "exact", "form": "token"}]
+    assert hit["missing"] == []
+
+
+def test_search_json_query_of_stop_words_only_is_strict_and_empty(home, capsys):
+    make(home, "s1", prompts=("hello there",))
+    data = json.loads(run(capsys, "search", "--json", "what", "is", "the")[1])
+    assert data == {"session": "s1", "query": "what is the", "total": 0, "hits": []}  # no fallback ran
+
+
 def test_recall_json_carries_the_text_and_where_to_read_on(home, capsys):
     store, pids = make(home, "s1", prompts=("x" * 30_000,))
     _, text, _ = run(capsys, "recall", pids[0])

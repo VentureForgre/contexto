@@ -241,6 +241,12 @@ pg_0767842a6270d008 turn 1: how does login work
   > 55: The login flow stores the refreshToken in the keychain and rotates it monthly.
 ```
 
+With `--json` the command prints one object instead. A strict result's object is unchanged; an
+approximate one also has `"approximate": true` and `searched` (the words searched for), and each hit
+has `matched` (each word as typed, `how` it matched: `exact`, `folded` or `typo`, and its `form` as the
+page writes it) and `missing`. At most 50 approximate matches are listed, so `total` can be more than
+any `--limit` shows.
+
 When nothing passes the floor, the reply is `No paged-out turn contains every word of that query.`
 as before, and the command prints its usual "no paged-out turn" line. The exit code is 0 in every
 case.
