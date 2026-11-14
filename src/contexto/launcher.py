@@ -123,6 +123,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from contexto.canonical import has_lone_surrogate
 from contexto.cliversions import launch_check
 from contexto.hints import HINT_HEADERS_KEY, HINT_MARKER_KEY, HINT_STATES, OFF, STRIPPED, hint_headers_state
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
@@ -275,12 +276,15 @@ def check_misplaced_options(cli: str, cli_args: list[str]) -> None:
 
 def check_upstream(upstream: Upstream) -> None:
     """A malformed upstream URL is a usage error naming where it came from, before any session is opened
-    (``http://[::1`` raised ValueError from ``urlsplit`` with a traceback and left an empty session)."""
+    (``http://[::1`` raised ValueError from ``urlsplit`` with a traceback and left an empty session).
+    A URL with a lone surrogate, which a settings file can hold, cannot go into a request either."""
     try:
         parts = urlsplit(upstream.url)
         _ = parts.port  # parsed on access; raises for a bad one
         ok = parts.scheme in ("http", "https") and bool(parts.hostname)
         problem = "upstream must be an http(s) base URL"
+        if ok and has_lone_surrogate(upstream.url):
+            ok, problem = False, "upstream holds a lone surrogate"
     except ValueError as exc:
         ok, problem = False, str(exc)
     if not ok:

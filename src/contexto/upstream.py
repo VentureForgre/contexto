@@ -33,8 +33,11 @@ header decision (D70, below) do read the managed settings file, and only the fil
 that reach Claude Code another way (a device-management profile, a server) are not seen.
 
 Every settings file is read through one reader (``read_settings_file``): a regular file only, at most
-``SETTINGS_FILE_LIMIT`` bytes, with a UTF-8 byte order mark accepted as Claude Code accepts it. A
-caller that needs several values passes one ``SettingsFiles``, which reads each file once.
+``SETTINGS_FILE_LIMIT`` bytes, read exactly when Claude Code 2.1.322 reads it (D70): UTF-8 with or
+without a byte order mark, and UTF-16LE after its byte order mark, malformed ones included, decoded as
+Claude Code decodes them. A settings file Claude Code does not load (one holding ``NaN`` or
+``Infinity``, a comment, a syntax error) is not read for any setting. A caller that needs several
+values passes one ``SettingsFiles``, which reads each file once.
 
 The result carries the winning source as a short label for the session log; the URL itself and
 any file path stay out of logs.
@@ -320,22 +323,25 @@ def read_settings_file(path: Path) -> SettingsFile:
     """One Claude Code settings file, read with a bound.
 
     Opened without blocking and checked to be a regular file before a byte is read, so a FIFO or a
-    device at that path is never read; at most ``SETTINGS_FILE_LIMIT`` bytes; decoded as UTF-8 with a
-    byte order mark accepted, as Claude Code accepts one, and UTF-16LE read when it starts with its own
-    byte order mark, as Claude Code reads it (both measured on 2.1.322, D70); parsed with
-    ``contexto.canonical.loads_bounded``.
+    device at that path is never read; at most ``SETTINGS_FILE_LIMIT`` bytes. Decoded as Claude Code
+    2.1.322 decodes it (measured, D70): UTF-16LE when it starts with that byte order mark, a final odd
+    byte dropped and a lone surrogate kept; otherwise UTF-8, a byte order mark dropped and a byte that
+    is not UTF-8 read as U+FFFD. Parsed with ``loads_settings``, which refuses ``NaN`` and ``Infinity``
+    as Claude Code does.
 
     ``data`` is the file's JSON object. An empty or blank file, and a document that is not an object,
     give an empty object: nothing can be set there. A file that does not exist, a directory, and a
     file this user cannot open give ``SettingsFile(None, None)``: Claude Code runs as the same user
     and cannot read them either. A file that is there and that Contexto did not read gives
     ``problem``: it is not a regular file, it is larger than the limit, it cannot be read, or it is
-    not valid JSON for Python (not UTF-8, a syntax error, nested too deep). Such a file is not
-    evidence that a setting is off, since Claude Code may read it differently; the cloud-provider
+    not valid JSON (a syntax error, ``NaN``, a wide encoding Claude Code does not load, nested too
+    deep). Such a file is not evidence that a setting is off, since Claude Code may read it
+    differently; the cloud-provider
     guard refuses on it (``cloud_provider``) unless it was read whole, is not valid JSON, and its text
     could not name a switch (``may_name_provider``): Claude Code does not load a file with a comment,
-    a trailing comma or another syntax error (measured on 2.1.322, D70), so such a file turns no
-    switch on."""
+    a trailing comma, ``NaN`` or another syntax error (measured on 2.1.322, D70), so such a file turns
+    no switch on. The NUL byte in that rule is the backstop for wide files that still do not parse:
+    UTF-16BE, UTF-16LE without the mark, UTF-32, and UTF-16LE with the mark and a syntax error."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except (OSError, ValueError):  # missing, not permitted, a symlink loop, a name the system rejects
@@ -362,14 +368,35 @@ def read_settings_file(path: Path) -> SettingsFile:
     raw = b"".join(chunks)
     try:
         # Claude Code 2.1.322 loads UTF-8, with or without a byte order mark, and UTF-16LE that starts
-        # with one (measured, D70); it does not load UTF-16BE, UTF-16LE without the mark, or UTF-32.
-        text = raw[2:].decode("utf-16-le") if raw.startswith(b"\xff\xfe") else raw.decode("utf-8-sig")
-        data = loads_bounded(text) if text.strip() else {}
+        # with one (measured, D70); it does not load UTF-16BE, UTF-16LE without the mark, or UTF-32. It
+        # also loads UTF-16LE with the mark that holds a lone surrogate or ends in one odd byte, and
+        # UTF-8 with a byte that is not UTF-8 (all measured), so they are decoded the same way: the odd
+        # byte dropped, lone surrogates kept, a bad UTF-8 byte read as U+FFFD.
+        if raw.startswith(b"\xff\xfe"):
+            text = raw[2:len(raw) - len(raw) % 2].decode("utf-16-le", "surrogatepass")
+        else:
+            text = raw.decode("utf-8-sig", "replace")
+        data = loads_settings(text) if text.strip() else {}
     except (ValueError, RecursionError):  # UnicodeDecodeError and JSONTooDeepError are ValueErrors
-        # A NUL byte: a wide encoding, in which the switch's name is not the UTF-8 bytes looked for.
+        # The backstop for a file that still does not parse: a NUL byte means a wide encoding, in which
+        # the switch's name is not the UTF-8 bytes looked for (UTF-16BE, UTF-16LE without the mark,
+        # UTF-32, or UTF-16LE with the mark and a syntax error).
         return SettingsFile(None, "is not valid JSON",
                             PROVIDER_PREFIX.encode() in raw or b"\\u" in raw or b"\x00" in raw)
     return SettingsFile(data if isinstance(data, dict) else {}, None)
+
+
+def _not_json(constant: str) -> object:
+    raise ValueError(f"{constant} is not JSON")
+
+
+def loads_settings(text: str) -> object:
+    """A settings file's text parsed as Claude Code parses it: ``loads_bounded``, except that ``NaN``,
+    ``Infinity`` and ``-Infinity``, which Python's parser accepts, make the text not valid JSON.
+    Claude Code does not load a settings file holding one (measured on 2.1.322, D70). The proxy's
+    own parsing of requests and responses is not changed. A lone surrogate in a string, from a
+    ``\\ud800`` escape or from a malformed UTF-16LE file, is kept, as JavaScript keeps it."""
+    return loads_bounded(text, parse_constant=_not_json)
 
 
 class SettingsFiles:
@@ -582,7 +609,7 @@ def cloud_provider(*, env: Mapping[str, str] | None = None, cwd: Path | None = N
     apply says off, or a file it ignores says on.
 
     A settings file that is there and that Contexto could not read (``read_settings_file``: not a
-    regular file, over the size limit, not valid JSON for Python) is reported in ``unread`` and also
+    regular file, over the size limit, not valid JSON) is reported in ``unread`` and also
     refuses the launch. It is not evidence that a switch is off: Claude Code has no such limit and
     may parse the file differently. A file that does not exist, and one this user cannot open, pass:
     Claude Code cannot read them either.
