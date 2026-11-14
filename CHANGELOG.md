@@ -11,6 +11,15 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
+- New: `contexto bench`, a benchmark you can run yourself. It runs one generated session through
+  Contexto, as full context sent straight to the model, and as plain Claude Code compacting on its
+  own, scores every answer by exact match, and reports accuracy with 95% intervals, paired tests,
+  tokens and cost at published prices ([docs/bench.md](docs/bench.md)). `contexto bench --replay`
+  needs no key, no `claude` and no network: it replays a pinned synthetic session through the real
+  proxy and shows that every request stayed under the bound. `contexto bench --dry-run` prints what
+  a live run would spend; a live run uses your own key and refuses to start without a
+  `--budget-tokens` ceiling. The output directory holds no key, hostname or home path, so it can be
+  published.
 - Search finds more. When no paged-out turn holds every word of a query, `contexto_search` and
   `contexto search` now give approximate matches and say so: question words are dropped,
   `refresh_token` finds `refreshToken`, a turn holding most of the words is returned, and one

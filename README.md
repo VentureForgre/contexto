@@ -63,6 +63,10 @@ In the claude-haiku-5-5 run, Contexto used 46.6% fewer input tokens than plain C
 for the same session, and cost 49.7% less. The plain Claude Code figures are modeled from measured
 requests, not run end to end ([M2-usage-savings-run3.md](docs/research/M2-usage-savings-run3.md)).
 
+Run #4's margin over the baseline is within noise (exact McNemar p = 0.18, one seed), and plain
+Claude Code with its own compaction was not run. `contexto bench` runs all three on seeds you choose
+with your own key, and its replay needs no key: [docs/bench.md](docs/bench.md).
+
 ## Install
 
 Contexto needs Python 3.12 or later, macOS or Linux, and has no runtime dependencies. Install the
