@@ -91,10 +91,9 @@ Claude Code with its auto-compact window set so that compaction fires near the b
 967,000 tokens and would not compact at all in this session (467,012 estimated tokens); the
 benchmark does not show plain Claude Code at its default compaction threshold. The session is
 generated log text with planted facts, not real coding work. Guide: `docs/bench.md`; decision:
-D66. Why: run
-#4's 52 of 54 against 47 is inside noise (exact McNemar p = 0.18), all runs used one seed, plain
-Claude Code was never run, and nobody outside could rerun the scoring. No model was called to build
-it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
+D66. Why: run #4's 52 of 54 against 47 is inside noise (exact McNemar p = 0.18), all runs used one
+seed, plain Claude Code was never run, and nobody outside could rerun the scoring. No model was
+called to build it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
 
 - Merged into `main`: #255 (script generator, statistics, `--script-only`) as f826c464, #262 (scale
   harness) as c46de5b4, #264 (`--report`, `--chart`, cost at published prices) as 6e4e6b12, #273
