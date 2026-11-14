@@ -129,7 +129,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -202,7 +202,15 @@ from contexto.servecontract import (
 )
 from contexto.store import SessionStore, redact
 from contexto.store.prune import SessionLiveError, SessionNotFoundError, remove_session
-from contexto.upstream import Upstream, resolve_upstream, untrusted_note
+from contexto.upstream import (
+    CloudProvider,
+    SettingsFiles,
+    Upstream,
+    cloud_provider,
+    cloud_provider_note,
+    resolve_upstream,
+    untrusted_note,
+)
 
 DEFAULT_PORT = 7837
 DEFAULT_MAX_SESSIONS = 64
@@ -315,16 +323,13 @@ def mcp_config_payload(home: Path) -> dict[str, Any]:
 # Guards
 
 
-def cloud_provider_variables(env: Mapping[str, str] | None = None) -> list[str]:
-    """The cloud-provider switches ``env`` (default the process environment) turns on
-    (``servecontract.cloud_provider_variables``)."""
-    return servecontract.cloud_provider_variables(os.environ if env is None else env)
-
-
-def cloud_provider_warning(names: list[str], what: str) -> str:
-    return (f"warning: {', '.join(names)} {'is' if len(names) == 1 else 'are'} set in {what}. Claude Code with a "
-            f"cloud-provider switch sends nothing to ANTHROPIC_BASE_URL, so a client started that way does not "
-            f"reach contexto serve and its prompt is not bounded.")
+def cloud_provider_warning(found: CloudProvider) -> str:
+    """The warning for what ``contexto.upstream.cloud_provider`` found: the check ``contexto run claude``
+    refuses a launch by, read from this process's environment and directory (D70). The service warns
+    and does not refuse: its clients are started elsewhere, with their own environment and directory,
+    and a Claude Code started here would bypass it."""
+    return (f"warning: {cloud_provider_note(found)}. A Claude Code client with a cloud-provider switch on does "
+            f"not reach contexto serve, and its prompt is not bounded.")
 
 
 def check_upstream_loop(upstream: Upstream, port: int, token: str) -> None:
@@ -1661,9 +1666,9 @@ def _chosen_port(args: Any, home: Path) -> int:
 
 def print_settings(args: Any, home: Path, stdout, stderr) -> int:
     token = ensure_token(home)
-    names = cloud_provider_variables()
-    if names:
-        print(f"contexto serve: {cloud_provider_warning(names, 'this environment')}", file=stderr)
+    found = cloud_provider(cwd=Path.cwd())
+    if found is not None:
+        print(f"contexto serve: {cloud_provider_warning(found)}", file=stderr)
     print(json.dumps(settings_payload(_chosen_port(args, home), token), indent=2), file=stdout)
     return 0
 
@@ -1756,7 +1761,9 @@ def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
         raise ServeError(f"--max-sessions must be at least 1, got {args.max_sessions}", EXIT_USAGE)
     if not args.idle_minutes > 0:
         raise ServeError(f"--idle-minutes must be above 0, got {args.idle_minutes}", EXIT_USAGE)
-    upstream = resolve_upstream(args.upstream, cwd=Path.cwd())
+    files = SettingsFiles()  # each settings file read once, for the provider check and the upstream
+    provider = cloud_provider(cwd=Path.cwd(), files=files)
+    upstream = resolve_upstream(args.upstream, cwd=Path.cwd(), files=files)
     token = ensure_token(home)
     port = DEFAULT_PORT if args.port is None else args.port
     check_upstream_loop(upstream, port, token)  # first: a malformed URL's error can quote part of it
@@ -1781,10 +1788,8 @@ def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
         if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: no project base URL (D52)
             note = untrusted_note("env.ANTHROPIC_BASE_URL", upstream.ignored, "Pass --upstream", os.environ)
             print(f"contexto serve: {note}", file=stderr, flush=True)
-        names = cloud_provider_variables()
-        if names:
-            print(f"contexto serve: {cloud_provider_warning(names, 'the environment of this service')}",
-                  file=stderr, flush=True)
+        if provider is not None:
+            print(f"contexto serve: {cloud_provider_warning(provider)}", file=stderr, flush=True)
         warning = start_warning(options.bound, options.headroom_floor, assumed_overhead())
         if warning:
             print(f"contexto serve: {warning}", file=stderr, flush=True)

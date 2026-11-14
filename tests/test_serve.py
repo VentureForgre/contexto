@@ -962,17 +962,6 @@ def test_an_upstream_that_is_the_service_itself_is_refused(url, loops):
     assert token not in message and "7837/" not in message  # never the URL
 
 
-@pytest.mark.parametrize("env, named", [
-    ({}, []), ({"CLAUDE_CODE_USE_BEDROCK": "1"}, ["CLAUDE_CODE_USE_BEDROCK"]),
-    ({"CLAUDE_CODE_USE_VERTEX": "true", "CLAUDE_CODE_USE_FOUNDRY": "0", "CLAUDE_CODE_USE_MANTLE": ""},
-     ["CLAUDE_CODE_USE_VERTEX"]),
-    ({"CLAUDE_CODE_USE_ANTHROPIC_AWS": " Yes ", "CLAUDE_CODE_USE_MANTLE": "on", "CLAUDE_CODE_USE_OTHER": "1"},
-     ["CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS"]),
-])
-def test_cloud_provider_variables_are_found(env, named):
-    assert serve.cloud_provider_variables(env) == named
-
-
 # The command
 
 
@@ -1319,6 +1308,42 @@ def test_print_settings_is_a_claude_code_settings_file(home):
     assert "CLAUDE_CODE_USE_BEDROCK" in warned.stderr and token not in warned.stderr
 
 
+def user_settings(home: Path, env: dict) -> Path:
+    """Claude Code's user settings file in the test's own user home (``child_env``'s ``HOME``)."""
+    path = home.parent / "user-home" / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"env": env}))
+    return path
+
+
+@pytest.mark.parametrize("value", ["1", 1.0, ["1"]])
+def test_print_settings_warns_about_a_switch_in_the_user_settings_file(home, value):
+    """D70: the launcher's provider check (``contexto.upstream.cloud_provider``), with its reading of a
+    settings file's value, decides the service's warning too."""
+    user_settings(home, {"CLAUDE_CODE_USE_BEDROCK": value})
+    warned = run_cli(home, "--print-settings")
+    assert warned.returncode == 0 and "ANTHROPIC_BASE_URL" in json.loads(warned.stdout)["env"]
+    assert "CLAUDE_CODE_USE_BEDROCK" in warned.stderr and "user settings" in warned.stderr
+    assert "does not reach contexto serve" in warned.stderr
+
+
+def test_print_settings_warns_about_a_switch_in_a_project_file_and_an_unreadable_file(home, tmp_path):
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.json").write_text(json.dumps({"env": {"CLAUDE_CODE_USE_VERTEX": "true"}}))
+    warned = run_cli(home, "--print-settings", cwd=project)
+    assert "CLAUDE_CODE_USE_VERTEX" in warned.stderr and ".claude/settings.json" in warned.stderr
+    user_settings(home, {})
+    (home.parent / "user-home" / ".claude" / "settings.json").write_text('{"env": {"CLAUDE_CODE_USE_MANTLE": 1,}}')
+    unread = run_cli(home, "--print-settings")
+    assert unread.returncode == 0 and "could not read" in unread.stderr
+
+
+def test_print_settings_is_quiet_when_a_settings_file_turns_the_switch_off(home):
+    user_settings(home, {"CLAUDE_CODE_USE_BEDROCK": "0"})
+    assert run_cli(home, "--print-settings").stderr == ""
+
+
 def test_print_settings_names_a_running_services_port(home, running):
     service = running()
     printed = run_cli(home, "--print-settings")
@@ -1408,6 +1433,15 @@ def test_status_without_a_service_makes_no_request(home, listener):
     with pytest.raises(serveclient.ResolveError):
         serveclient.resolve(home, "toolu_01D70stale")
     assert listener.connections() == 0
+
+
+def test_the_service_warns_about_a_switch_in_the_user_settings_file(home, running):
+    user_settings(home, {"CLAUDE_CODE_USE_FOUNDRY": True})
+    service = running()
+    text = until(lambda: (lambda lines: "CLAUDE_CODE_USE_FOUNDRY" in lines and lines)("\n".join(service.stderr_lines)),
+                 "the provider warning on the service's stderr")
+    assert "user settings" in text and "Microsoft Foundry" in text
+    assert service.stop() == 0
 
 
 def test_the_service_warns_about_a_cloud_provider_and_a_small_bound(home, running):

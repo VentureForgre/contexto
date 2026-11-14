@@ -26,11 +26,12 @@ import math
 import sys
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
 from typing import IO, Any, Protocol
 
 from contexto import __version__, serveclient
 from contexto.canonical import loads_bounded, utf8
-from contexto.servecontract import CLOUD_PROVIDER_VARIABLES, MAX_TOOL_USE_ID_CHARS, cloud_provider_variables
+from contexto.servecontract import MAX_TOOL_USE_ID_CHARS
 from contexto.store import LockFileDamagedError, PageUnreadableError
 from contexto.store.ledger import LedgerCorruptError
 from contexto.store.pages import is_context_page
@@ -47,6 +48,7 @@ from contexto.store.render import (
     render_page,
 )
 from contexto.store.search import SHOWN_IN_DETAIL, Query, text_matches
+from contexto.upstream import CLOUD_PROVIDER_KEYS, cloud_provider, cloud_provider_note
 
 SERVER_NAME = "contexto"
 SERVER_VERSION = __version__  # the package's, as `contexto version` prints it (D64); it was a fixed 0.1.0
@@ -905,8 +907,9 @@ META_TOOL_USE = "claudecode/toolUseId"  # in tools/call params._meta: the model 
 TOOL_USE_ID_MAX = MAX_TOOL_USE_ID_CHARS  # a longer value is not an id, and the service would refuse it
 STORE_CACHE = 8  # session stores kept open, most recently used
 # Each of these makes Claude Code send its model requests to that provider's own base URL and none to
-# ANTHROPIC_BASE_URL (2.1.322, docs/research/D70-serve-probes.md section 4).
-PROVIDER_SWITCHES = CLOUD_PROVIDER_VARIABLES
+# ANTHROPIC_BASE_URL (2.1.322, docs/research/D70-serve-probes.md section 4). Defined, and read, once:
+# contexto.upstream.cloud_provider, the check contexto run claude refuses a launch by.
+PROVIDER_SWITCHES = tuple(CLOUD_PROVIDER_KEYS)
 NOT_RUN = "{tool} was not run, and nothing was read or written: "
 NO_TOOL_USE_ID = (NOT_RUN + "this call carries no tool-use id, which `contexto mcp --serve` needs to find the "
                   "conversation's session. It needs a client that sends _meta[\"claudecode/toolUseId\"] with each "
@@ -918,8 +921,7 @@ UNKNOWN_TOOL_USE = (NOT_RUN + "the Contexto service has no record of this tool c
                     "model request that made the call may not have gone through the service: Claude Code's "
                     "ANTHROPIC_BASE_URL must point at the running `contexto serve`.{switch} Trying again will not "
                     "help until it does: go on without this tool, and tell the user.")
-SWITCH_SET = (" {name} is set in this server's environment: Claude Code then sends its model requests to that "
-              "provider and bypasses the service.")
+SWITCH_SET = " {note}. A Claude Code that runs so bypasses the service."
 TOKEN_REFUSED = (NOT_RUN + "the Contexto service refused this server's token. serve.token in the Contexto home may "
                  "be left from an earlier run of the service, or another program may hold the service's port. The "
                  "user restarts `contexto serve`; go on without this tool until then.")
@@ -962,13 +964,16 @@ class _NotRun(Exception):
         self.fields = fields
 
 
-def provider_switch(environ: Mapping[str, str]) -> str | None:
-    """The first of ``PROVIDER_SWITCHES`` that ``environ`` turns on, read as Claude Code and the service
-    read it (``servecontract.cloud_provider_variables``: ``1``, ``true``, ``yes`` or ``on``). Claude
-    Code passes its whole start environment to a stdio MCP server (2.1.322), so the server sees a
-    switch set there; one set only in a settings file's ``env`` block reaches it too."""
-    switches = cloud_provider_variables(environ)
-    return switches[0] if switches else None
+def provider_note(environ: Mapping[str, str], *, cwd: Path, home: Path) -> str | None:
+    """What may make Claude Code bypass the service, as sentences without the final full stop, or None
+    (D70). The check is the one ``contexto run claude`` refuses a launch by
+    (``contexto.upstream.cloud_provider``): a switch on in ``environ`` or in the ``env`` block of any
+    settings file Claude Code would read from ``cwd`` with ``home`` as the user's home, read as Claude
+    Code reads it, and a settings file there that cannot be read. Claude Code passes its whole start
+    environment to a stdio MCP server (2.1.322), and starts it in the project directory, so the server
+    sees what the client would have seen."""
+    found = cloud_provider(env=environ, cwd=cwd, home=home)
+    return cloud_provider_note(found) if found is not None else None
 
 
 class ServeServer(Server):
@@ -1027,11 +1032,11 @@ class ServeServer(Server):
     """
 
     def __init__(self, resolve: Callable[[str], str], sessions: Sessions, stdout: IO[str],
-                 stderr: IO[str] | None = None, *, switch: str | None = None) -> None:
+                 stderr: IO[str] | None = None, *, provider: str | None = None) -> None:
         super().__init__(None, stdout, stderr)  # type: ignore[arg-type]  # no store until a call is resolved
         self.resolve = resolve
         self.sessions = sessions
-        self.switch = switch  # provider_switch() of this server's environment
+        self.provider = provider  # provider_note() of this server's environment and directory
         self.servers: OrderedDict[str, Server] = OrderedDict()  # by session id, least recently used first
 
     def _tools_list(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1059,7 +1064,7 @@ class ServeServer(Server):
             session = self.resolve(tool_use_id)
         except serveclient.ResolveError as exc:
             raise _NotRun(_RESOLVE_REPLIES[exc.kind], str(exc), reason=exc.reason,
-                          switch=SWITCH_SET.format(name=self.switch) if self.switch else "") from None
+                          switch=SWITCH_SET.format(note=self.provider) if self.provider else "") from None
         try:
             server = self.servers.get(session)
             if server is not None:

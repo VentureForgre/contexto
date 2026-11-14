@@ -156,17 +156,22 @@ class ExistingSessions:
 
 
 def serve_server(home: Path, search_cache: int | None, stdout: IO[str], stderr: IO[str], *,
-                 environ: Mapping[str, str] | None = None, clock: Callable[[], float] = time.monotonic,
+                 environ: Mapping[str, str] | None = None, cwd: Path | None = None,
+                 clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep) -> ServeServer:
     """The ``--serve`` server for ``home``: it asks the service named by ``home``'s ``serve.json`` and
     ``serve.token`` (``contexto.serveclient``) and opens sessions under ``home``. ``environ`` (default
-    the process environment) is read only for the provider switches that make Claude Code bypass the
-    service; ``clock`` and ``sleep`` drive the retry, so a test does not wait."""
+    the process environment) and ``cwd`` (default the working directory) are read only for the
+    provider switches that make Claude Code bypass the service (``contexto.mcp.provider_note``; the
+    user's home is ``environ``'s ``HOME``); ``clock`` and ``sleep`` drive the retry, so a test does not
+    wait."""
     from contexto import serveclient
-    from contexto.mcp import ServeServer, provider_switch
+    from contexto.mcp import ServeServer, provider_note
 
     def resolve(tool_use_id: str) -> str:
         return serveclient.resolve(home, tool_use_id, clock=clock, sleep=sleep)
 
+    environ = os.environ if environ is None else environ
+    user_home = Path(environ["HOME"]) if environ.get("HOME") else Path.home()
     return ServeServer(resolve, ExistingSessions(home, search_cache), stdout, stderr,
-                       switch=provider_switch(os.environ if environ is None else environ))
+                       provider=provider_note(environ, cwd=cwd or Path.cwd(), home=user_home))

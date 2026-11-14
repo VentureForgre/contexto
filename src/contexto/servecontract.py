@@ -35,14 +35,12 @@ import secrets
 import socket
 import stat
 import time
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from contexto.canonical import loads_bounded
 from contexto.private import open_private, private_dir
-from contexto.upstream import JS_WHITESPACE, TRUTHY
 
 TOKEN_FILE = "serve.token"
 STATE_FILE = "serve.json"
@@ -58,19 +56,6 @@ MAX_LOCAL_BODY_BYTES = 64 * 1024
 MAX_TOOL_USE_ID_CHARS = 256  # Anthropic's ids are about 30 characters; a longer value is not an id
 UNKNOWN_TOOL_USE = "unknown_tool_use"
 RESOLVE_UNKNOWN = {"error": UNKNOWN_TOOL_USE}
-# Claude Code with one of these set sends nothing to ANTHROPIC_BASE_URL, not even HEAD /api/hello
-# (measured on 2.1.322, docs/research/D70-serve-probes.md section 4; each has its own base-URL variable).
-CLOUD_PROVIDER_VARIABLES = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-                            "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS")
-
-
-def cloud_provider_variables(env: Mapping[str, str]) -> list[str]:
-    """The cloud-provider switches (``CLOUD_PROVIDER_VARIABLES``) that ``env`` turns on, read as Claude
-    Code reads a boolean variable: ``1``, ``true``, ``yes`` or ``on``, any case, with whitespace trimmed.
-    The service and the MCP server both decide by this."""
-    return [name for name in CLOUD_PROVIDER_VARIABLES if env.get(name, "").lower().strip(JS_WHITESPACE) in TRUTHY]
-
-
 class ServeFileError(Exception):
     """One of the service's files cannot be used. ``name`` is the file's name, ``kind`` one of
     ``missing``, ``symlink``, ``not_regular``, ``unreadable``, ``owner``, ``mode`` and ``content``,
