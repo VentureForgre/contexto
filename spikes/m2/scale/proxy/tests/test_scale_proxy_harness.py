@@ -184,12 +184,15 @@ def test_a_connect_is_retried_only_while_no_local_port_is_free(monkeypatch):
         calls.append(1)
         if failures:
             raise failures.pop()
+        self.sock = socket.socket()  # unconnected: enough for the driver's TCP_NODELAY
 
     monkeypatch.setattr(http.client.HTTPConnection, "connect", connect)
     monkeypatch.setattr(run.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(run, "PATIENCE", run.ConnectPatience())
     client = run.Client(9)
     client.connect()
     assert len(calls) == 4 and client.connections == 1
+    client.close()
 
     def refused(self):
         calls.append(1)
@@ -200,6 +203,50 @@ def test_a_connect_is_retried_only_while_no_local_port_is_free(monkeypatch):
     with pytest.raises(ConnectionRefusedError):
         run.Client(9).connect()
     assert len(calls) == 1, "only EADDRNOTAVAIL is worth waiting out"
+
+
+def test_the_wait_for_a_free_port_is_a_total_for_the_run(monkeypatch):
+    """Every connect of a run spends one ``CONNECT_PATIENCE_S``. With a wait per connect, a machine whose
+    ports stayed used up took about 22 minutes to fail a short run (42 sequential connects of 31 s each)."""
+    slept: list[float] = []
+    calls = []
+
+    def no_port(self):
+        calls.append(1)
+        raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", no_port)
+    monkeypatch.setattr(run.time, "sleep", slept.append)
+    monkeypatch.setattr(run, "PATIENCE", run.ConnectPatience())
+    with pytest.raises(OSError):
+        run.Client(9).connect()
+    assert sum(slept) == pytest.approx(run.CONNECT_PATIENCE_S) and max(slept) <= 2.0
+    first = len(calls)
+    for _ in range(3):  # later connects of the same run find the patience spent and raise at once
+        with pytest.raises(OSError):
+            run.Client(9).connect()
+    assert len(calls) == first + 3 and sum(slept) == pytest.approx(run.CONNECT_PATIENCE_S)
+    run.PATIENCE.reset()  # a new run (``short.measure`` calls this) has the whole wait again
+    with pytest.raises(OSError):
+        run.Client(9).connect()
+    assert sum(slept) == pytest.approx(2 * run.CONNECT_PATIENCE_S)
+
+
+def test_the_driver_sends_without_waiting_for_acks():
+    """Python's http.client writes a request's headers and its body in two sends. With Nagle's algorithm on,
+    the body waits for the headers' ACK, which Linux delays by 40 ms on a connection kept open: every
+    request on GitHub's Ubuntu runners took about 41 ms more once the driver kept its connections open."""
+    server = _KeepAliveServer()
+    client = run.Client(server.port)
+    try:
+        client.send(b"{}", "n0", "end_turn")
+        assert client.conn.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+        client.close()  # and on a connection opened again
+        client.send(b"{}", "n1", "end_turn")
+        assert client.conn.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+    finally:
+        client.close()
+        server.stop()
 
 
 def test_the_fake_upstream_closes_each_connection_first():

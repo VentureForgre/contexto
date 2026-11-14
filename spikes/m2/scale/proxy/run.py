@@ -17,9 +17,11 @@ import json
 import os
 import pstats
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -52,7 +54,10 @@ COUNTED_EVENTS = ("rotation", "rotation_noop", "page_out", "window_minimal", "bo
                   "page_unreadable", "proxy_stop_incomplete", "session_start_unrecognised",
                   "unclassified_system_message", "cli_version_untested", "mcp_tools_missing", "toolcheck_error",
                   "cli_version_error", "cli_version", "epoch_not_resumed", "epoch_resumed")
-CONNECT_PATIENCE_S = 30.0  # macOS keeps a closed connection's local port for 2 x net.inet.tcp.msl (15 s)
+# How long all the connects of one run may wait, in all, for a free local port: the time macOS keeps a closed
+# connection's port (2 x net.inet.tcp.msl, 15 s). Until 2026-11-14 each connect had 30 s of its own, so a
+# short run on a machine whose ports stayed used up took about 22 minutes to fail.
+CONNECT_PATIENCE_S = 30.0
 REQUEST_FIELDS = ("label", "checkpoint_m", "phase", "round", "turn", "kind", "req_in_turn", "history_tokens",
                   "body_mb", "upstream_bytes", "upstream_tokens", "upstream_messages", "status", "e2e_s", "ttfb_s",
                   "pre_forward_s", "read_body_s", "proxy_transform_s", "engine_s", "observe_s", "index_text_s",
@@ -216,6 +221,31 @@ class Session:
         self.pending = None
 
 
+class ConnectPatience:
+    """The wait for a free local port that the connects of one run share (``CONNECT_PATIENCE_S`` in all).
+    A process starts with all of it (``run.py`` is one run per process), and ``short.measure`` calls
+    ``reset`` at the start of each run. The burst's clients take from it at once, so it holds a lock."""
+
+    def __init__(self, seconds: float = CONNECT_PATIENCE_S) -> None:
+        self.seconds = seconds
+        self.left = seconds
+        self.lock = threading.Lock()
+
+    def take(self, pause: float) -> float:
+        """Up to ``pause`` seconds of what is left (0 once it is spent), deducted before the caller sleeps."""
+        with self.lock:
+            pause = max(0.0, min(pause, self.left))
+            self.left -= pause
+            return pause
+
+    def reset(self) -> None:
+        with self.lock:
+            self.left = self.seconds
+
+
+PATIENCE = ConnectPatience()
+
+
 class Client:
     """One client of a proxy (or of the fake upstream) on one HTTP/1.1 connection kept open between
     requests, as Claude Code keeps its connection to the proxy open.
@@ -223,7 +253,11 @@ class Client:
     Until 2026-11-13 the driver opened a connection per request. Each short run then left about 850 of
     this machine's local ports in TIME_WAIT (30 s on macOS) on top of the proxy's own, and a few runs
     at once failed with EADDRNOTAVAIL (README.md, "Connections"). A connection the server has closed is
-    opened again before the next request's clock starts, so the clock never includes a connect."""
+    opened again before the next request's clock starts, so the clock never includes a connect.
+
+    Every connection has ``TCP_NODELAY`` set, so a request's headers and its body (two sends in
+    ``http.client``) never wait for an ACK. ``http.client`` sets it too (in ``HTTPConnection.connect``, on
+    every Python CI runs); the driver sets it itself so its timings do not rest on that."""
 
     def __init__(self, port: int, timeout: float = 900) -> None:
         self.port, self.timeout = port, timeout
@@ -231,22 +265,24 @@ class Client:
         self.connections = 0  # connections opened
 
     def connect(self) -> None:
-        """Open a new connection. EADDRNOTAVAIL (no free local port) is retried with a growing pause for
-        up to ``CONNECT_PATIENCE_S``, the time macOS holds a closed connection's port; any other error is
-        raised at once."""
+        """Open a new connection. EADDRNOTAVAIL (no free local port) is retried with a growing pause, out of
+        the run's ``PATIENCE`` (``CONNECT_PATIENCE_S`` for all its connects together); once that is spent, or
+        on any other error, the error is raised at once."""
         self.close()
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
-        pause, deadline = 0.05, time.monotonic() + CONNECT_PATIENCE_S
+        pause = 0.05
         while True:
             try:
                 conn.connect()
                 break
             except OSError as exc:
-                if exc.errno != errno.EADDRNOTAVAIL or time.monotonic() >= deadline:
+                wait = PATIENCE.take(pause) if exc.errno == errno.EADDRNOTAVAIL else 0.0
+                if wait <= 0:
                     conn.close()
                     raise
-                time.sleep(pause)
+                time.sleep(wait)
                 pause = min(pause * 2, 2.0)
+        conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.conn = conn
         self.connections += 1
 
