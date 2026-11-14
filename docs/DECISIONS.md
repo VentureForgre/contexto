@@ -4344,8 +4344,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     user's and `statusLine` is replaced, not merged (measured in a pty on 2.1.322 and 2.1.318: only
     the `--settings` one ran), so `contexto run claude` adds one only when no settings file Claude
     Code reads has a `statusLine`, none sets `disableAllHooks`, every file could be read, managed
-    settings do not set `allowManagedHooksOnly`, and the command holds no `${` (which Claude Code
-    would expand); `--no-statusline` or `CONTEXTO_NO_STATUSLINE=1` turns it off. A prompt over the bound never
+    settings do not set `allowManagedHooksOnly`, and the command holds no `${` (Claude Code
+    expands it in an MCP config, D55; it did not in a status line command on 2.1.318 and 2.1.322, and
+    a later version might); `--no-statusline` or `CONTEXTO_NO_STATUSLINE=1` turns it off. A prompt over the bound never
     reads as equal to it (`1.09M/1M`). The line the launcher installs passes `--session` and shows
     from the start. A user's own script that names no session, or names one through
     `$CONTEXTO_SESSION`, is held to which conversation is asking: a conversation counts only when it

@@ -105,7 +105,7 @@ compaction never fires, and accuracy equals full context.
   worst per call at load average 32, 165 ms median and 663 ms at worst at load average 50, from
   `docs/statusline.md`); `docs/events.md`, every `log.jsonl` event, held to the source by
   `tests/test_events_doc.py`; and `--json` on `state`, `search` and `recall`, `contexto version`,
-  and clearer launch errors. The last `main` CI run that passed, at 2401cf56 (#290) on 2026-11-14:
+  and clearer launch errors. `main`'s CI at 2401cf56 (#290), 2026-11-14, the latest finished run when this was written:
   6,950 to 6,952 passed, 36 to 38 skipped and 7 xfailed in each of the six test jobs (Python 3.12
   to 3.15 on Ubuntu, 3.12 and 3.15 on macOS). Guides: `docs/stats.md`,
   `docs/doctor.md`, `docs/statusline.md`, `docs/events.md`.
