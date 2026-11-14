@@ -336,6 +336,18 @@ def test_a_cli_that_cannot_be_started_counts_as_missing(world, capsys, fast_mcp)
     assert found["codex"]["status"] == "fail" and "not executable" in found["codex"]["summary"]
 
 
+def test_a_claude_that_cannot_be_started_still_gets_the_provider_check(world, capsys, fast_mcp, monkeypatch):
+    """Reviewer A, PR #258 round 5: the launcher stops early only for a `claude` that is not on PATH, so
+    one that is there but cannot start still meets the refusal. Doctor skipped the check and exited 0
+    while `contexto run claude` exited 2."""
+    fake_cli(world, "claude", None, body="#!/nonexistent/interpreter\n")
+    fake_cli(world, "codex", f"codex-cli {TESTED_CODEX}")
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    code, found = checks(capsys)
+    assert code == 1 and found["claude"]["status"] == "warn" and found["provider"]["status"] == "fail"
+    assert [found[i]["status"] for i in ("claude-upstream", "claude-key")] == ["skip"] * 2
+
+
 # The upstream ---------------------------------------------------------------------------------------
 
 

@@ -306,10 +306,12 @@ def iter_checks(context: Context | None = None) -> Iterator[Check]:
     yield guarded("python", "Python", check_python)
     clis: list[Check] = []
     usable: dict[str, bool] = {}
+    on_path: dict[str, bool] = {}
     shown = 0
     for cli in ("claude", "codex"):
         check = guarded(cli, CLI_NAMES[cli], lambda cli=cli: check_cli(cli, ctx.env))
         usable[cli] = bool(check.details.pop("usable", False))
+        on_path[cli] = check.details.get("path") is not None
         clis.append(check)
         if any(usable.values()):  # one CLI is enough, so no line changes from here on
             yield from clis[shown:]
@@ -328,8 +330,10 @@ def iter_checks(context: Context | None = None) -> Iterator[Check]:
         yield guarded(check_id, label, check) if usable[cli] else skipped(check_id, label, cli)
     yield guarded("store", "Store home", lambda: check_store(ctx.env, claude=usable["claude"]))
     yield guarded("mcp", "MCP server", lambda: check_mcp(ctx.env, ctx.cwd))
-    yield (guarded("provider", "Cloud provider", lambda: check_provider(ctx)) if usable["claude"]
-           else skipped("provider", "Cloud provider", "claude"))
+    # The launcher stops before this check only when `claude` is not on PATH; one that is there but cannot
+    # start still meets the refusal (reviewer A, PR #258 round 5), so only a missing one skips it.
+    yield (guarded("provider", "Cloud provider", lambda: check_provider(ctx)) if on_path["claude"]
+           else skipped("provider", "Cloud provider", "claude", "is not on PATH"))
 
 
 def guarded(check_id: str, label: str, check: Callable[[], Check]) -> Check:
@@ -344,8 +348,8 @@ def guarded(check_id: str, label: str, check: Callable[[], Check]) -> Check:
                      f"Report it at {REPORT_URL}", {"error": type(exc).__name__})
 
 
-def skipped(check_id: str, label: str, cli: str) -> Check:
-    return Check(check_id, SKIP, f"{label}: not checked, {cli} is not on PATH or cannot be run")
+def skipped(check_id: str, label: str, cli: str, why: str = "is not on PATH or cannot be run") -> Check:
+    return Check(check_id, SKIP, f"{label}: not checked, {cli} {why}")
 
 
 def report(checks: list[Check]) -> dict[str, Any]:

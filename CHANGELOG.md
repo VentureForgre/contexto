@@ -61,8 +61,8 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 - A Claude Code settings file is now read as Claude Code reads it in four more cases: a named
   pipe in its place is never opened for reading (`contexto run` waited on it for ever), a file
   holding `NaN` or `Infinity` is ignored, a file holding a number longer than 4,300 digits is read,
-  and a file whose `env` block is not a JSON object is ignored whole, so an `apiKeyHelper` or base
-  URL in it is no longer used (Claude Code loads nothing from it either). `contexto run claude`
+  and a file whose `env` block is not a JSON object is ignored whole, so an `apiKeyHelper` in it
+  is no longer used (Claude Code loads nothing from it either). `contexto run claude`
   refuses to launch while a named pipe, or a file it cannot parse that may name a cloud-provider
   switch, is in a settings file's place (D70).
 

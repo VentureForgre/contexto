@@ -83,6 +83,8 @@ missing:
 - a project setting skipped because the folder is not trusted.
 
 When a CLI is missing, the checks that only matter for that CLI are skipped, not warned about.
+`provider` is skipped only when `claude` is not on PATH: the launcher reaches its refusal with a
+`claude` that is there but cannot start.
 
 ## What doctor never does
 
