@@ -270,9 +270,22 @@ def check_mcp_values(session_id: str, home: Path, executable: str) -> None:
                               EXIT_USAGE)
 
 
+# How to install each CLI (D64): its name, the first command its own documentation gives for macOS and
+# Linux, and that page (read 2026-11-12: Claude Code's "Advanced setup", Codex's "Codex CLI", at the
+# address developers.openai.com/codex/cli permanently redirects to).
+CLI_INSTALL = {
+    "claude": ("Claude Code", "curl -fsSL https://claude.ai/install.sh | bash",
+               "https://code.claude.com/docs/en/setup"),
+    "codex": ("Codex", "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+              "https://learn.chatgpt.com/docs/codex/cli"),
+}
+
+
 def cli_not_found(name: str, path: str | None = None) -> str:
     """Why ``shutil.which`` found no usable ``name``: a non-executable file, a broken symlink or a
-    directory on PATH is named with what is wrong; otherwise "not found on PATH"."""
+    directory on PATH is named with what is wrong; otherwise "not found on PATH", and for ``claude`` and
+    ``codex`` how to install it (D64). The CLI may be installed outside PATH, which is not searched for
+    here, so the message names that case too."""
     candidates = [Path(name)] if os.sep in name else [
         Path(d or os.curdir) / name for d in (os.environ.get("PATH", "") if path is None else path).split(os.pathsep)]
     for candidate in candidates:
@@ -282,7 +295,11 @@ def cli_not_found(name: str, path: str | None = None) -> str:
             return f"'{name}' at {candidate} is a directory, not a program"
         if candidate.is_file() and not os.access(candidate, os.X_OK):
             return f"'{name}' at {candidate} is not executable (chmod +x it, or fix PATH)"
-    return f"'{name}' not found on PATH"
+    if name not in CLI_INSTALL:
+        return f"'{name}' not found on PATH"
+    product, command, page = CLI_INSTALL[name]
+    return (f"'{name}' not found on PATH. Install {product}: {command} (other ways: {page}). If it is installed, "
+            "add its directory to PATH.")
 
 
 def check_bound(bound: int, allow_large_bound: bool) -> None:
@@ -924,7 +941,7 @@ def run_claude(options: LaunchOptions, *, stderr=None) -> int:
         try:
             return _run(options, stderr, signals)
         except LaunchError as exc:
-            print(f"contexto run: {exc}", file=stderr)
+            print(f"contexto: {exc}", file=stderr)  # one prefix for claude and codex (D64)
             return exc.code
         except Terminated as exc:
             return 128 + exc.signum
