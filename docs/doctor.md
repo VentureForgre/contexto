@@ -2,8 +2,8 @@
 
 `contexto doctor` checks what `contexto run` needs from the directory you run it in, and prints one
 line per check. Run it in the project where you would run `contexto run claude` or
-`contexto run codex`, because the upstream, the key helper and the provider variables can come from
-that project's `.claude/` settings files.
+`contexto run codex`, because the upstream, the key helper and the cloud-provider switches can come
+from that project's `.claude/` settings files.
 
 ```sh
 contexto doctor          # one line per check
@@ -24,7 +24,7 @@ contexto doctor (contexto 0.5.24)
 [skip] Codex key helper: not checked, codex is not on PATH or cannot be run
 [ok]   Store home /home/me/.contexto is writable
 [ok]   MCP server started and listed its 5 tools
-[ok]   No provider variable (CLAUDE_CODE_USE_BEDROCK and the like) sends Claude Code's requests past the proxy
+[ok]   Cloud provider: no switch (CLAUDE_CODE_USE_BEDROCK and the like) is on, so Claude Code sends its requests through the proxy
 
 Ready: 8 passed, 1 warning, 2 skipped.
 ```
@@ -64,6 +64,8 @@ A check fails when `contexto run` could not work at all:
 - An upstream is not an `http://` or `https://` URL. `contexto run` refuses to start with it.
 - The store home is one `contexto run` cannot use (see [`store`](#store)).
 - The MCP server does not start, or does not list exactly Contexto's five tools.
+- A cloud-provider switch is on, or a settings file that may turn one on cannot be read:
+  `contexto run claude` refuses to launch (exit 2; see [`provider`](#provider)).
 - A check cannot be made at all: the working directory was deleted, there is no home directory, or
   no temporary directory can be created. The line names which, and what to set.
 
@@ -78,8 +80,7 @@ missing:
   one);
 - no upstream or no key helper for Codex (`--codex-upstream` and `--codex-key-helper` can supply
   them);
-- a project setting skipped because the folder is not trusted;
-- a variable that sends Claude Code's requests to another provider.
+- a project setting skipped because the folder is not trusted.
 
 When a CLI is missing, the checks that only matter for that CLI are skipped, not warned about.
 
@@ -122,18 +123,34 @@ missing `#!` interpreter) counts as missing, and the line says which.
 
 ### `settings`
 
-The Claude Code settings files `contexto run` reads from this directory: the main checkout's
+The Claude Code settings files `contexto run claude` reads from this directory: the main checkout's
 `.claude/settings.local.json`, this directory's `.claude/settings.local.json` and
-`.claude/settings.json`, and `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`).
-The line names the ones that were read.
+`.claude/settings.json`, `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`), and
+Claude Code's managed settings file (`/Library/Application Support/ClaudeCode/managed-settings.json`
+on macOS, `/etc/claude-code/managed-settings.json` on Linux), which only the
+[`provider`](#provider) check and the key check read. The line names the ones that were read. Each
+file is read as `contexto run claude` reads it, by the same reader, and the checks below use what
+it read.
 
-A file that is there and cannot be used is a warning that names it and says what is wrong: it
-cannot be read as JSON, it cannot be read (a permission), it is a directory, it is not a JSON object,
-or its `env` block is not one (Claude Code loads nothing from such a file). `contexto run` reads
-nothing from such a file, and neither do the checks below, so without this line a broken file that
-sets your upstream would show only as "nothing sets ANTHROPIC_BASE_URL". A named pipe, socket or
-device in place of a settings file is skipped, as Claude Code skips it, and named here. A file that
-starts with a UTF-8 byte order mark is read like any other, as Claude Code reads it.
+A file that is there and cannot be used is a warning that names it and says what is wrong:
+
+- it is not a regular file (a named pipe, a socket or a device, which is never opened for reading);
+- it is larger than 4 MiB, or it cannot be read;
+- it is not valid JSON: a syntax error, neither UTF-8 nor UTF-16LE with its byte order mark, nested
+  too deep, or holding `NaN` or `Infinity`, which Claude Code 2.1.322 rejects;
+- it has an `env` that is not a JSON object: Claude Code 2.1.322 loads nothing from such a file, not
+  even its `apiKeyHelper`.
+
+Contexto takes nothing from such a file, so without this line a broken file that sets your upstream
+would show only as "nothing sets ANTHROPIC_BASE_URL". It can also stop the launch: `contexto run
+claude` refuses while a file it could not read may turn on a cloud provider (see
+[`provider`](#provider)). A file with an `env` that is not an object, and one that was read whole and
+cannot name a switch, do not stop it.
+
+Read like any other file, as Claude Code reads it: a file that starts with a UTF-8 byte order mark,
+and one holding an integer longer than Python's 4,300-digit limit (JavaScript reads it as Infinity).
+A directory and a file you cannot open count as absent: Claude Code runs as you and cannot read them
+either. A JSON document that is not an object sets nothing.
 
 ### `claude-upstream` and `codex-upstream`
 
@@ -153,7 +170,7 @@ trusted. If Claude Code's upstream is Anthropic's API, Codex has no upstream and
 pass `--codex-upstream`. Doctor does not check `--codex-auth chatgpt`, which uses the ChatGPT
 backend and Codex's own login.
 
-Organization-managed Claude Code settings are not read, here or by `contexto run`.
+The base URL is not read from organization-managed Claude Code settings, here or by `contexto run`.
 
 ### `claude-key` and `codex-key`
 
@@ -161,8 +178,8 @@ Whether a key or key helper is configured, by name and place.
 
 Claude Code sends its own credential through the proxy; Contexto never reads or stores it. Doctor
 looks for `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in the
-environment and in the `env` blocks of the settings files above, and for an `apiKeyHelper` in those
-files. Finding none is a warning, not a failure: Claude Code may hold a login, which doctor does
+environment and in the `env` blocks of the settings files above (the managed file's first), and for
+an `apiKeyHelper` in the files other than the managed one. Finding none is a warning, not a failure: Claude Code may hold a login, which doctor does
 not look for.
 
 Codex gets its key from a helper command that `contexto run codex` hands to it:
@@ -206,66 +223,48 @@ that is importable only through `PYTHONPATH` passes here and fails under Codex.
 
 ### `provider`
 
-`contexto run claude` routes Claude Code through the proxy by setting `ANTHROPIC_BASE_URL`. Claude
-Code uses that variable only for Anthropic's API. When one of these variables is on, Claude Code
-sends its model requests to that provider instead, the proxy sees none of them, and the session is
-not kept under the bound:
+`contexto run claude` routes Claude Code through the proxy by setting `ANTHROPIC_BASE_URL`. With one
+of these switches on, Claude Code sends every request to that provider's own endpoint and none to
+`ANTHROPIC_BASE_URL`, so the proxy would see nothing and the session would run with no bound:
 
 | Variable | Provider |
 |---|---|
 | `CLAUDE_CODE_USE_BEDROCK` | Amazon Bedrock |
+| `CLAUDE_CODE_USE_VERTEX` | Google Vertex AI |
 | `CLAUDE_CODE_USE_FOUNDRY` | Microsoft Foundry |
+| `CLAUDE_CODE_USE_MANTLE` | Amazon Bedrock (Mantle) |
 | `CLAUDE_CODE_USE_ANTHROPIC_AWS` | Claude Platform on AWS |
 | `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` | Claude Platform on Google Cloud |
-| `CLAUDE_CODE_USE_MANTLE` | Amazon Bedrock (Mantle) |
-| `CLAUDE_CODE_USE_VERTEX` | Google Vertex AI |
 
-A variable is on when its value is `1`, `true`, `yes` or `on`, in any letter case. An empty value,
-`0`, `false` and any other text leave it off. When several are on, Claude Code uses the first in
-the table's order.
-
-Doctor looks in the environment and in the `env` blocks of the settings files listed under
-`claude-upstream`. The highest file that sets a variable decides it, and the environment decides
-only when no file sets it, so `"CLAUDE_CODE_USE_BEDROCK": "0"` in a settings file turns off a value
-exported in your shell. The line names each variable that is on and where it is set.
-
-With `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` set, Claude Code in `-p` mode ignores the `env` block of a
-project's settings files, so a provider variable set only there does not take effect (measured).
-Interactive Claude Code shows its trust dialog and applies a project's `env` block once you accept
-it. That was measured for `ANTHROPIC_BASE_URL` and not for a provider variable, so doctor and
-`contexto run claude` still warn, and say that Claude Code "may apply it once its trust dialog is
-accepted".
-
-`contexto run claude` prints the same warning on stderr before Claude Code starts, records a
-`provider_bypass` event in the session log, and still launches:
+`contexto run claude` refuses such a launch with exit 2, before it opens a session. That refusal is
+D70's: the rule, the places it looks and why it errs toward refusing are in the
+[`contexto run` reference](run-reference.md#environment-variables) and the
+[contract](milestones/M2-contexto-proxy.md#architecture) ("Cloud providers (D70)"). This check is
+the launcher's own, made with the same function and the same arguments, so doctor fails exactly
+when the launch would be refused. Its line is what the launcher prints first, and its next step is
+the rest of the launcher's message, word for word:
 
 ```
-contexto: warning: CLAUDE_CODE_USE_BEDROCK is set in the environment, so Claude Code sends model requests to Amazon Bedrock and not through Contexto: the proxy sees none of them and this session is not kept under the bound. Unset CLAUDE_CODE_USE_BEDROCK to send requests through Contexto, or run claude without Contexto to use Amazon Bedrock.
+[FAIL] CLAUDE_CODE_USE_BEDROCK is set in the process environment. With it on, Claude Code sends its requests to Amazon Bedrock and none to ANTHROPIC_BASE_URL: `contexto run claude` refuses to launch (exit 2)
+       -> Contexto's proxy would see no request and the session would run with no bound, so the launch is refused. Contexto refuses when a switch is on in any of these places, whichever of them Claude Code would apply. To run through Contexto: unset CLAUDE_CODE_USE_BEDROCK for this command (env -u CLAUDE_CODE_USE_BEDROCK contexto run ...); and give Contexto an upstream that speaks the Anthropic Messages API (--upstream or ANTHROPIC_BASE_URL). To keep using the provider, run claude without contexto.
 ```
 
-Where this comes from: the variable list, its order and the on/off rule were read from the Claude
-Code 2.1.318 and 2.1.322 programs on 2026-11-12. Claude Code's documentation (the env-vars,
-amazon-bedrock and llm-gateway pages on code.claude.com) names five of the six;
-`CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` is in both programs and not on those pages. The bypass
-itself was measured on Claude Code 2.1.318 in `-p` mode with no model call
-([spikes/m2/providers](../spikes/m2/providers/README.md)): with each of the six variables on, in
-the environment or in a project settings file's `env` block, no model request reached the proxy.
-On Claude Code 2.1.322 the same probe measured a control, `CLAUDE_CODE_USE_BEDROCK` in the
-environment, the same variable in a settings file that starts with a byte order mark (a bypass,
-like any other settings file), and in a project file with `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` set
-(no bypass in `-p` mode).
+In short: a switch counts when it is `1`, `true`, `yes` or `on` (any case; a JSON `true` or `1`
+too) in the environment or in the `env` block of any of the settings files under
+[`settings`](#settings), whichever of them Claude Code would apply, and with
+`CLAUDE_CODE_IGNORE_PERSISTED_TRUST` set or not. A settings file that is there, could not be read
+and may turn a switch on fails the check too, and the line names the file and what is wrong with it.
 
-`CLAUDE_CODE_USE_GATEWAY` is not in the table. Claude Code 2.1.322 has that variable, and it needs
+Where the sixth switch comes from: `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` is in the Claude Code
+2.1.318 and 2.1.322 programs, with the provider name above, and on no documentation page. On 2.1.318,
+in `-p` mode with no model call ([spikes/m2/providers](../spikes/m2/providers/README.md)), at `1` in
+the environment or in a project settings file's `env` block, it sent every model request to its own
+endpoint and none to the proxy, as the other five did there. D70 measured the other five on 2.1.322.
+
+`CLAUDE_CODE_USE_GATEWAY` is not a switch here. Claude Code 2.1.322 has that variable, and it needs
 `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. Measured on 2.1.322 in `-p` mode with both set, the
 variable in the environment and then in a project settings file: every model request went through
-the proxy, so it is not a bypass there.
-
-The check can never stop `contexto run claude`. If the lookup itself fails, the launcher prints
-one line saying that it could not check, records `provider_bypass_check_failed`, and launches.
-
-Not measured: interactive mode, two variables on at once, and Claude Code versions other than
-2.1.318 and 2.1.322. Not looked for: organization-managed settings, and a gateway that Claude Code
-is set up for by a login it holds, without a variable.
+the proxy.
 
 ## What doctor does not check
 
@@ -274,12 +273,13 @@ is set up for by a login it holds, without a variable.
 - A login that Claude Code or Codex holds.
 - `--upstream`, `--codex-upstream`, `--codex-key-helper` and `--codex-auth chatgpt`: it reports what
   `contexto run` does without them.
-- Organization-managed Claude Code settings.
+- Organization-managed Claude Code settings other than the managed settings file (a
+  device-management profile, a server), and the base URL in that file.
 - The type of every setting. Claude Code loads nothing from a settings file in which any setting has
   the wrong type. Contexto checks the `env` block's type only, so a file with another wrong-typed
   setting (for example `permissions` as a string) is read by doctor and `contexto run` though Claude
-  Code ignores it: an upstream, key helper or provider variable set there is reported, and acted on,
-  when Claude Code would not use it.
+  Code ignores it: an upstream or key helper set there is reported, and used, when Claude Code would
+  not use it, and a switch set there refuses the launch.
 
 ## JSON
 
@@ -328,11 +328,11 @@ the exception's type. A check that could not be made has `{"error": <fault>}`, o
 |---|---|
 | `python` | `version`, `executable` |
 | `claude`, `codex` | `cli`, `path` (or `null`), `version` (or `null`), `tested` (`true`, `false`, or `null` when the version is unknown), `tested_versions`; `error` when the CLI is missing (`not_found`) or its version could not be read (`timeout`, `exit_<code>`, `unparsed`, or an error type) |
-| `settings` | `files`: one `{"kind", "state"}` for each file looked for, highest precedence first, where `kind` is `main-checkout-local`, `local`, `project` or `user` and `state` is `read`, `absent` or `unusable`; an unusable file also has `problem`, what is wrong with it. Never a path. |
+| `settings` | `files`: one `{"kind", "state"}` for each file looked for, highest precedence first and the managed file last, where `kind` is `main-checkout-local`, `local`, `project`, `user` or `managed` and `state` is `read`, `absent` or `unusable`; an unusable file also has `problem`, what is wrong with it (the wording of the line). Never a path. |
 | `claude-upstream` | `origin` (`scheme://host[:port]`, or `null` when the URL is invalid), `source` (`default`, `env`, or `settings:<kind>` with kind `user`, `project`, `local` or `main-checkout-local`); `ignored` (the project file kinds skipped) when a base URL was skipped |
 | `codex-upstream` | `origin` and `source` (`codex-env` or `claude-<source>+/v1`), both `null` when there is none; `ignored` as above |
-| `claude-key` | `found`: a list of `{"name", "source"}`, where `name` is a variable or `apiKeyHelper` and `source` is `env` or `settings:<kind>`. Never a value. |
+| `claude-key` | `found`: a list of `{"name", "source"}`, where `name` is a variable or `apiKeyHelper` and `source` is `env` or `settings:<kind>` (`managed` included). Never a value. |
 | `codex-key` | `name` (`CONTEXTO_CODEX_KEY_HELPER`, `apiKeyHelper`, or `null`), `source` (`env`, `settings:<kind>`, or `null`); `ignored` when a project's helper was skipped as untrusted; `error` (`blank`) when `CONTEXTO_CODEX_KEY_HELPER` holds only spaces |
 | `store` | `path`, `exists` |
 | `mcp` | `tools` (the names listed, sorted), `missing`, `unexpected`, `seconds` (how long the check took) |
-| `provider` | `variables`: a list of `{"variable", "source"}` for each one that is on, with `"after_trust_dialog": true` for one that a project file sets while `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set; `provider` (the one Claude Code would use) when the list is not empty |
+| `provider` | `variables`: a list of `{"variable", "provider", "sources"}` for each switch that is on, where `sources` lists every place it is on (`env` or `settings:<kind>`); `unread`: a list of `{"source", "problem"}` for each settings file that could not be read and may turn a switch on. Both empty when the check passes. |

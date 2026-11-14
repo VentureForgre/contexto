@@ -36,20 +36,25 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   in, and prints one line per check with the next step under a warning or a failure. It checks
   Python, the `claude` and `codex` CLIs and their versions, the Claude Code settings files, the
   upstream and what sets it, whether a key or key helper is configured, the store home, the MCP
-  server, and the variables below. `--json` prints the same results for scripts. It makes no
-  network request, runs no key helper and prints no key. Details: [docs/doctor.md](docs/doctor.md).
-- `contexto run claude` warns when a variable sends Claude Code's model requests to another
-  provider (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and four more), in the environment
-  or in a settings file's `env` block. Claude Code then does not use the proxy, so the session is
-  not kept under the bound. The launch still starts, and the session log records `provider_bypass`.
+  server, and whether `contexto run claude` would refuse to launch because a cloud-provider switch
+  is on (a failure, with the launcher's own message). `--json` prints the same results for scripts.
+  It makes no network request, runs no key helper and prints no key. Details:
+  [docs/doctor.md](docs/doctor.md).
+- `contexto run claude` also refuses to launch (exit 2) when `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`
+  (Claude Platform on Google Cloud) is on, in the environment or in a settings file, as it does for
+  `CLAUDE_CODE_USE_BEDROCK` and the other cloud-provider switches (D70). With it on, Claude Code sends
+  its requests to that provider and none through the proxy, so the session would not be kept under
+  the bound.
 - A Claude Code settings file that starts with a UTF-8 byte order mark is read. Claude Code reads
   such a file, and Contexto treated it as absent, so `contexto run` missed an
   `ANTHROPIC_BASE_URL` or `apiKeyHelper` set there and used another upstream than Claude Code's own.
 - A Claude Code settings file is now read as Claude Code reads it in four more cases: a named
-  pipe in its place is skipped (`contexto run` waited on it for ever), a file holding `NaN` or
-  `Infinity` is ignored, a file holding a number longer than 4,300 digits is read, and a file whose
-  `env` block is not a JSON object is ignored whole, so an `apiKeyHelper` or base URL in it is no
-  longer used (Claude Code loads nothing from it either).
+  pipe in its place is never opened for reading (`contexto run` waited on it for ever), a file
+  holding `NaN` or `Infinity` is ignored, a file holding a number longer than 4,300 digits is read,
+  and a file whose `env` block is not a JSON object is ignored whole, so an `apiKeyHelper` or base
+  URL in it is no longer used (Claude Code loads nothing from it either). `contexto run claude`
+  refuses to launch while a named pipe, or a file it cannot parse that may name a cloud-provider
+  switch, is in a settings file's place (D70).
 
 ## 0.5.24 (2026-11-06)
 

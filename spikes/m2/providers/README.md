@@ -5,6 +5,13 @@ measures what Claude Code does with that when a provider variable (`CLAUDE_CODE_
 the like) is set: it runs `contexto run --upstream A claude -p` against two loopback stubs, A for
 Contexto's upstream and B for the provider's endpoint, and counts the requests each one got.
 
+Since PR #258 was reconciled with #271 (D70), `contexto run claude` no longer warns and launches:
+it refuses a launch with any of the six variables on (exit 2), before Claude Code starts, and logs
+no `provider_bypass` event. The launcher's warning and `provider_bypass` below describe the launcher
+as it was when these runs were made; the request counts are Claude Code's and still hold. Run
+against today's launcher, every case with a variable on exits 2 with no request at A or B, so the
+bypass itself can now be measured only with the `plain-...` cases' plain `claude -p`.
+
 ## Run
 
 macOS only: the probe uses `sandbox-exec` to deny every connection that is not to localhost, so a
@@ -91,7 +98,7 @@ What it adds:
 
 - A settings file that starts with a UTF-8 byte order mark is read like any other: for a provider
   variable, for `env.ANTHROPIC_BASE_URL` and for `apiKeyHelper`. Contexto read such a file as not
-  JSON, so as absent; `contexto.providers` and `contexto.upstream` now read through the mark.
+  JSON, so as absent; `contexto.upstream` now reads through the mark (one reader since D70).
 - `CLAUDE_CODE_USE_GATEWAY`, with the base URL and token it needs, is not a bypass in `-p` mode:
   every model request went through the proxy, from the environment and from a project file.
 - With `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` set, `-p` mode drops a project file's
