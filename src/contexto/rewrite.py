@@ -2369,6 +2369,8 @@ class RewriteEngine:
             self._trusted_before: frozenset[str] = frozenset(known()) if callable(known) else frozenset()
         except Exception:
             self._trusted_before = frozenset()
+        self._listed: set[str] = set()  # the keys this engine wrote to that list (or tried to), once each
+        self._trust_events: list[dict] = []  # a failed list write's event, for the request that made it
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -2404,6 +2406,8 @@ class RewriteEngine:
         resumed += mismatches
         previous = self._main
         main = self.publishes(key, request.get(dialect.field) or [], dialect)
+        resumed += self._trust_events  # D69: a failed list write, at _resume or here
+        self._trust_events.clear()
         self._idle[key] = False  # in flight until a response without a client tool call
         if previous is not None and previous != self._main:  # content-free: a reason and a count, no id
             resumed.append({"event": "main_changed", "reason": self._main_reason,
@@ -2609,18 +2613,21 @@ class RewriteEngine:
         return self._main_reason in TRUSTED_MAIN_REASONS or key in self._trusted_before
 
     def _trust(self, key: str) -> None:
-        """D69: trust ``key`` as the main conversation and record it for later engines on this store. A
-        failed write is not fatal: that conversation is then trusted again only by the other rules."""
+        """D69: trust ``key`` as the main conversation and record it for later engines on this store, once
+        per engine: a key already listed moves to the end, so the list keeps the conversations trusted
+        last (review A round 7, finding 6; review B round 7, N20). A failed write is not fatal: it is the
+        content-free ``trusted_conversations_unavailable`` with the error's class, and that conversation
+        is then trusted by a later engine only by the other rules."""
         self._trusted.add(key)
-        if key in self._trusted_before:
+        if key in self._listed:
             return
+        self._listed.add(key)
         writer = getattr(self.store, "add_trusted_conversation", None)
         try:
             if callable(writer):
                 writer(key)
-        except Exception:
-            pass
-        self._trusted_before = self._trusted_before | {key}
+        except Exception as error:
+            self._trust_events.append({"event": "trusted_conversations_unavailable", "error": type(error).__name__})
 
     def _confirm_main_records(self, key: str, messages: list, events: list[dict]) -> None:
         """D69: record in the store the ids of the records the main conversation's own history shows it

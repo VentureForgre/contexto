@@ -761,3 +761,73 @@ def test_a_resume_trusts_a_listed_conversation_whose_record_says_untrusted(home,
     events = send(resumed, MESSAGES, main_request([*child, user("go on"), *pin_pair("c1", reply), user("more")], OLD))
     assert any(e["event"] == "epoch_resumed" for e in events)
     assert first.main_records() == [rid] and carried_ids(new_session(home, "s2", root, 2)) == [rid]
+
+
+# Writing the list (review A round 7, finding 6; review B round 7, N20)
+
+
+def test_a_failed_list_write_is_one_content_free_event_and_the_pin_is_still_carried(home, tmp_path):
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    rid, reply = call_tool(first, "contexto_pin", kind="decision", text="x")
+    calls = []
+
+    def broken(key):
+        calls.append(key)
+        raise OSError("disk full at /secret/path")
+
+    first.add_trusted_conversation = broken
+    engine = RewriteEngine(first, config=ROOMY)
+    events = send(engine, MESSAGES, main_turn(MESSAGES, messages_call("c1", PIN_TOOL, {}, reply)))
+    assert {"event": "trusted_conversations_unavailable", "error": "OSError"} in events
+    assert events[-1]["event"] == "request" and "/secret/path" not in json.dumps(events)
+    assert first.main_records() == [rid] and carried_ids(new_session(home, "s2", root, 2)) == [rid]
+    events = send(engine, MESSAGES, main_turn(MESSAGES, messages_call("c1", PIN_TOOL, {}, reply)))
+    assert "trusted_conversations_unavailable" not in names_of(events) and len(calls) == 1
+
+
+def test_a_listed_conversation_trusted_again_moves_to_the_end_once_per_engine(home, tmp_path):
+    """The list is ordered by last trust, as "the newest 64" says: a later engine that trusts a listed
+    conversation (a ``--continue`` that resumes it, or one by the list) writes it again, once."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    first.record_cli_session("claude", OLD)
+    one = RewriteEngine(first, config=ROOMY)
+    a = conversation("conversation A", 3)
+    send(one, MESSAGES, main_request(a, OLD))
+    first.record_cli_session("claude", NEW)
+    b = [user("conversation B", context=True)]
+    send(one, MESSAGES, main_request(b, NEW), session=NEW)
+    assert first.trusted_conversations() == [key_of(a), key_of(b)]
+    real, calls = first.add_trusted_conversation, []
+
+    def counted(key):
+        calls.append(key)
+        real(key)
+
+    first.add_trusted_conversation = counted
+    two = RewriteEngine(first, config=ROOMY)
+    a = [*a, assistant("x"), user("A again")]
+    send(two, MESSAGES, main_request(a, OLD))
+    assert first.trusted_conversations() == [key_of(b), key_of(a)]
+    send(two, MESSAGES, main_request([*b, assistant("y"), user("B again")], NEW), session=NEW)
+    assert first.trusted_conversations() == [key_of(a), key_of(b)]
+    for turn in range(3):  # A and B take main from each other by the session rules
+        a = [*a, assistant(f"a{turn}"), user(f"A {turn}")]
+        send(two, MESSAGES, main_request(a, OLD))
+        send(two, MESSAGES, main_request([*b, assistant("y"), user(f"B {turn}")], NEW), session=NEW)
+    assert calls == [key_of(a), key_of(b)]
+
+
+def test_a_conversation_continued_in_every_launch_stays_on_the_list(home, tmp_path):
+    """Review A round 7, finding 6 (fifo): 64 other conversations trusted after A do not push A off the list
+    when every launch continues A."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    a = conversation("conversation A", 1)
+    for launch in range(TRUSTED_CONVERSATIONS_KEPT + 2):
+        engine = RewriteEngine(first, config=ROOMY)
+        a = [*a, assistant(f"a{launch}"), user(f"A {launch}")]
+        send(engine, MESSAGES, main_request(a, OLD))
+        first.add_trusted_conversation(f"anthropic:{launch:064x}")
+        assert key_of(a) in first.trusted_conversations(), launch
