@@ -11,7 +11,9 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
-Nothing yet.
+- `contexto run codex` with a session id that starts with `-` no longer starts Codex without
+  Contexto's tools: the MCP server now gets the id as one `--session=<id>` argument, as Claude Code's
+  already did.
 
 ## 0.5.24 (2026-11-06)
 

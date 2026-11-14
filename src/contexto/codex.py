@@ -376,9 +376,10 @@ MCP_APPROVAL_MODE = "approve"
 # left code mode's ALL_TOOLS with no contexto tool). The server is started as the Claude path starts it
 # (launcher.mcp_payload): this interpreter by absolute path, "-P -m contexto" (-P keeps the
 # project directory Codex starts it in off sys.path, so a project's own contexto package cannot
-# shadow the installed one).
+# shadow the installed one). The session is one "--session=<id>" argument, as mcp_payload passes it, so
+# an id starting with "-" is the option's value and not another option.
 def _mcp_server(session_id: str) -> tuple[str, list[str]]:
-    return sys.executable, ["-P", "-m", "contexto", "mcp", "--session", session_id]
+    return sys.executable, ["-P", "-m", "contexto", "mcp", f"--session={session_id}"]
 
 
 def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: Path,
