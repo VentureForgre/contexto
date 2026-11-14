@@ -208,10 +208,13 @@ def digest(run: list[tuple]) -> str:
 # rotates several times, with its usage fed back and, for Claude Code, a tool-less side request and a
 # count_tokens; and the hash of the epoch record the script leaves in the store. The page key is fixed,
 # so each kind of store gave the same two hashes.
-BEFORE_D69 = {MESSAGES: ("a60be926708cce3e3299873c19fca7959a67ebfe7911bf2b17b06490d9fb3c2b",
-                         "5b19ab66b6d9ce783f9e5eef91cac4e8bc0d0505b658a5cbc505358e6b68db1b"),
+# Again with D63 (PR #274), recorded from D63 merged with main 293b3478, the commit before D69, and the
+# same from the merge: D63's paging inside the script's tool loops changes the Claude Code requests and
+# its config field both records; the Codex requests are main's, byte for byte.
+BEFORE_D69 = {MESSAGES: ("f3ce67fee80060c63749d3016bf6ee1f7c1706cdb56c7175c643fe76e452c7a8",
+                         "7b7bed49ae2ddd199bbd502f5bd4a2bbd3450d307dec51c75694b2321e08686a"),
               RESPONSES: ("4c7ae60ad65681f5c86c390789ca93f6a899d0dc76f2c20c129cae0e650135f7",
-                          "a885834683122e1a67bf1f6b9e222d82765995eb6978089d29f19ed60d5cac5c")}
+                          "5009bfb3c9945449db2f1c40daabb23f6c90024a1e91954066777ac556d58bf3")}
 STORES = ("memory", "no_project", "nothing_carried", "memory_off")
 
 

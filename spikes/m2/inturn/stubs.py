@@ -1,9 +1,8 @@
 """The hook D63 fills in: how to recognise a stub in a forwarded request.
 
 In-turn paging takes a tool result out of the request and leaves a stub that names where the original
-is stored. At v0.5.24 the engine pages only whole turns at a turn start and leaves no stub, so the
-stub's format does not exist yet. ``find_stubs`` is the one place the harness needs it: the engine
-pull request replaces the body, and the harness then checks every stub it finds (``harness.Stubs``).
+is stored. ``find_stubs`` is the one place the harness needs the stub's format (D63:
+``contexto.inturn.stub_text`` and ``turn_note``); the harness checks every stub it finds (``harness.Stubs``).
 
 What the harness holds a stub to:
 
@@ -26,6 +25,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from contexto import inturn
+
 
 class StubRef(NamedTuple):
     # The store page the stub names (``SessionStore.get_page``). None: no copy was stored, which is
@@ -44,6 +45,36 @@ def find_stubs(dialect: str, request: dict) -> list[StubRef]:
     the harness follows a chain, ``{"messages": page["messages"]}`` (``claude``) or
     ``{"input": page["messages"]}`` (``codex``) for a store page: read only that one field.
 
-    D63: replace this body. Until then the harness reports the check as not run, and the target tests
-    fail on it."""
-    raise NotImplementedError("D63: the stub format does not exist yet")
+    D63, Messages: a ``tool_result`` whose content is ``contexto.inturn.stub_text``'s string names the
+    result page that holds its call and result. A stub of one of Contexto's own search, recall or state
+    results names no page (``page_id`` None): the result was a copy of stored pages, and the stub gives
+    the call's arguments. A turn's fold note in a user message (``contexto.inturn.turn_note``) names the
+    newest fold's rounds page, each earlier fold's rounds page, and the folds pages that list the oldest
+    folds; each is a reference to the page as a whole, and the ids the note lists for a page (the newest
+    folds' only, within its cap) are a reference to those calls as well. A rounds page holds its rounds
+    as sent (a result that was already a stub there is its stub); a folds page of level 0 holds each
+    listed fold's note with every call id, and one of a higher level a line in fold-note form for each
+    folds page it names, which this function reads the same way. Codex has no in-turn paging yet, so no
+    stubs."""
+    if dialect != "claude":
+        return []
+    found = []
+    for message in request.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if (isinstance(block, dict) and block.get("type") == "text" and message.get("role") == "user"
+                    and inturn.note_page(block.get("text")) is not None):
+                for page, ids in inturn.note_refs(block["text"]):
+                    found.append(StubRef(page, ()))
+                    if ids:
+                        found.append(StubRef(page, ids))
+                continue
+            if not (isinstance(block, dict) and block.get("type") == "tool_result"
+                    and isinstance(block.get("tool_use_id"), str)):
+                continue
+            page = inturn.stub_page(block.get("content"))
+            if page is not None:
+                found.append(StubRef(page, (block["tool_use_id"],)))
+            elif inturn.is_own_stub(block.get("content")):
+                found.append(StubRef(None, (block["tool_use_id"],)))
+    return found

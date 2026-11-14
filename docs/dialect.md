@@ -69,6 +69,7 @@ declares them. `ResponsesDialect` overrides every one of them.
 | `name` | attribute | yes |
 | `field` | attribute | yes |
 | `media_floor` | attribute | yes |
+| `in_turn` | attribute | yes |
 | `is_context_block` | method | yes |
 | `is_turn_start` | method | yes |
 | `is_assistant` | method | yes |
@@ -148,6 +149,27 @@ under-estimated.
 - Anthropic: `True`, "for Claude's pixel prices" (the comment on the attribute).
 - Responses: `False`, because "OpenAI prices images by tiles (85 tokens at low detail), under
   Claude's floor".
+
+### `in_turn`
+
+`in_turn: MessagesInTurn | None`. `contexto.inturn.MESSAGES` on the base class, `None` on
+`ResponsesDialect`. D63 (rule 5).
+
+The primitives in-turn paging needs from this API: where the running turn's tool results are and
+which call each answers, what a stub may stand for (`stubbable`) and what it says the result was
+(`size`, `describe`), how a result's content is replaced by a stub (`with_stubs`) and a fold note
+added after the turn-start message's own content (`with_note`), what the user wrote mid-turn
+(`user_authored`, never folded) and where whole tool rounds begin and end (`rounds`). The engine
+pages inside a running turn only when it is not `None` and `in_turn_paging` is on; with `None`, a
+tool loop is sent as before D63.
+
+- Anthropic: `MessagesInTurn` (`tool_use` and `tool_result` blocks, text, image and document
+  content).
+- Responses: `None`. Codex tool loops are not paged inside the turn yet; the replay harness keeps
+  its Codex targets marked `NOT_BUILT`.
+
+A new dialect starts with `None`. Writing one means the same primitives for its item shapes, and the
+replay harness's targets (`spikes/m2/inturn`) for its scripts.
 
 ### `is_context_block`
 

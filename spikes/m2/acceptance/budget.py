@@ -38,10 +38,14 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 # grew the contexto_search description by 85 bytes, to 3,070 in all, and the instructions by 6, to 747:
 # 47,600 + ceil(327 / 3.0) + ceil(321 / 3.0) = 47,816. D69 (only the user's own words are pinned; a pin
 # in the main conversation can be carried) grew them to 3,285 and 878: 47,600 + ceil(542 / 3.0) +
-# ceil(452 / 3.0) = 47,932. test_head_follows_contexto_tool_bytes fails when either changes without this.
+# ceil(452 / 3.0) = 47,932. D63 (search and recall cover tool results paged out of the running turn) grew
+# the definitions to 3,439: 47,600 + ceil(696 / 3.0) + ceil(452 / 3.0) = 47,983; naming the turn a page
+# was written in instead of "this turn" took them to 3,435: 47,600 + ceil(692 / 3.0) + ceil(452 / 3.0) =
+# 47,982.
+# test_head_follows_contexto_tool_bytes fails when either changes without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
-CONTEXTO_TOOL_BYTES = 3_285  # D65 3,070; D69 adds whose words are pinned and that pins can be carried
+CONTEXTO_TOOL_BYTES = 3_435  # D65 3,070; D69 3,285; D63 adds tool results paged out inside a turn
 CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE = 426  # main c8f0b08 (unchanged until D51)
 CONTEXTO_INSTRUCTIONS_BYTES = 878  # D65 747; D69 adds whose words are pinned
 HEAD = (HEAD_MEASURED
@@ -52,7 +56,7 @@ HEAD = (HEAD_MEASURED
 def fixed_preamble_tokens() -> int:
     """The pinned text's fixed opening lines (``contexto.store.recall.DEFAULT_LINES``) by the engine's
     estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it,
-    409 with D69's clause on whose words are pinned."""
+    409 with D69's clause on whose words are pinned, 446 with D63's on hits paged out inside a turn."""
     from contexto.store.recall import DEFAULT_LINES
     from contexto.tokens import estimate_tokens
 

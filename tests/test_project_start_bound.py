@@ -10,6 +10,7 @@ ratio, as ``test_head_measure_proxy`` does. The numbers the tests measure are pr
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import NamedTuple
 
 import pytest
@@ -59,6 +60,7 @@ class Row(NamedTuple):
     estimate: int  # the engine's estimate of what it sent
     room: int  # the recall room published before the send
     k: int
+    margin: int  # D63: what the request's fresh tool results may add to the estimate, taken off its room
 
 
 class Run(NamedTuple):
@@ -80,16 +82,19 @@ def run_session(store, endpoint: str, config: Config, turns: int, ratio: float) 
         event = events[-1]
         rotated = next((e for e in events if e["event"] == "rotation"), None)
         if rotated and not rotation:
-            rotation = {"index": len(rows), "F": rotated["fixed_overhead"], "W": rotated["window_budget"],
-                        "preamble": engine.estimator.estimate(pre), "reason": rotated["reason"]}
+            rotation = {"index": len(rows), "reason": rotated["reason"]}
+            if "fixed_overhead" in rotated:  # a rotation at a turn start sizes F and W; D63's in a tool loop does not
+                rotation.update({"F": rotated["fixed_overhead"], "W": rotated["window_budget"],
+                                 "preamble": engine.estimator.estimate(pre)})
         room = store.turn_room()[1]
+        margin = engine.states[next(iter(engine.states))].room_margin
         real = usage(upstream, ratio)
         usage_events = engine.observe_usage(endpoint, real, sent)
         state = engine.states[next(iter(engine.states))]
         if head is None:
             head = state.head_tokens
         rows.append(Row(upstream, events, usage_events, real["input_tokens"],
-                        event.get("sent_estimate", event["estimate"]), room, event["k"]))
+                        event.get("sent_estimate", event["estimate"]), room, event["k"], margin))
     return Run(engine, rows, head, rotation)
 
 
@@ -126,7 +131,8 @@ def test_every_request_of_a_long_session_stays_under_the_bound_and_its_estimate_
         assert marks(with_text.upstream) == 1 and with_text.k == 0
         counted = with_text.estimate - without.estimate
         assert 0.9 * real_start <= counted <= 1.1 * real_start
-        assert with_text.room == CONFIG.bound - with_text.estimate - CONFIG.headroom_floor
+        assert with_text.room == CONFIG.bound - with_text.estimate - CONFIG.headroom_floor - with_text.margin
+        assert with_text.margin == without.margin  # the same tool results in both
         assert without.room - with_text.room == counted
     assert all(marks(row.upstream) == 1 for row in carry.rows[first:])  # then the preamble holds it, once
     print(f"\n{endpoint} carried section {start} tokens ({len(text.encode())} bytes): first estimate "
@@ -143,8 +149,11 @@ def test_the_start_text_is_counted_once_in_f_and_w_at_the_first_rotation(endpoin
     store = project(home, tmp_path / "carry", tokens)
     text = store.carried_text(CONFIG.pin_budget)
     turns = TURNS[endpoint] // 2  # enough for the first rotation
-    carry = run_session(store, endpoint, CONFIG, turns, ratio)
-    control = run_session(project(home / "control", tmp_path / "control", tokens, carry=False), endpoint, CONFIG,
+    # Rule 4's F and W at a turn-start rotation. On Messages this script's tool rounds would have D63 page the
+    # earlier turns inside a turn first, a rotation that sizes neither, so paging inside the turn is off here.
+    config = replace(CONFIG, in_turn_paging=False) if endpoint == MESSAGES else CONFIG
+    carry = run_session(store, endpoint, config, turns, ratio)
+    control = run_session(project(home / "control", tmp_path / "control", tokens, carry=False), endpoint, config,
                           turns, ratio)
     with_text, without = carry.rotation, control.rotation
     assert with_text["reason"] == without["reason"] and with_text["index"] > 0

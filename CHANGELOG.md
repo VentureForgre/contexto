@@ -152,6 +152,13 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   is no longer used (Claude Code loads nothing from it either). `contexto run claude`
   refuses to launch while a named pipe, or a file it cannot parse that may name a cloud-provider
   switch, is in a settings file's place (D70).
+- On Claude Code a long tool loop, in the main conversation or a subagent, no longer goes over the
+  bound: Contexto now pages inside the running turn. Older tool results become stubs that name a
+  page, which `contexto_recall` returns word for word, and the oldest tool rounds of a very long
+  loop fold into one page with a note. What you type mid-turn stays in view. See
+  [docs/in-turn-paging.md](docs/in-turn-paging.md).
+- Codex tool loops are sent as before.
+- `contexto run --no-in-turn-paging` or `CONTEXTO_IN_TURN_PAGING=0` turns it off.
 - A Claude Code settings file in UTF-16LE with its byte order mark is now read even when it holds a
   lone surrogate or ends in one odd byte, and a UTF-8 file with a byte that is not UTF-8 is read
   with that byte as U+FFFD, as Claude Code 2.1.322 reads both. Before, `contexto run claude` called

@@ -157,6 +157,7 @@ from contexto.launcher import (
     claude_session,
     contexto_tool_rules,
     engine_config,
+    in_turn_paging,
     report_missing_tools,
     session_affinity_key,
     start_warning,
@@ -1762,10 +1763,17 @@ def serve(args: Any, home: Path, stderr) -> int:
         signals.restore()
 
 
+def serve_options(args: Any, env: dict[str, str] | None = None) -> LaunchOptions:
+    """The launch options every session of the service gets. D63's in-turn paging is on unless
+    ``--no-in-turn-paging`` is given or ``CONTEXTO_IN_TURN_PAGING`` turns it off, as for ``contexto run``."""
+    return LaunchOptions(bound=args.bound, upstream=args.upstream, observe_thinking=args.observe_thinking,
+                         allow_large_bound=args.allow_large_bound, window_fraction=args.window_fraction,
+                         headroom_floor=args.headroom_floor,
+                         in_turn_paging=in_turn_paging(getattr(args, "no_in_turn_paging", False), env))
+
+
 def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
-    options = LaunchOptions(bound=args.bound, upstream=args.upstream, observe_thinking=args.observe_thinking,
-                            allow_large_bound=args.allow_large_bound, window_fraction=args.window_fraction,
-                            headroom_floor=args.headroom_floor)
+    options = serve_options(args)
     check_options(options)
     if args.max_sessions < 1:
         raise ServeError(f"--max-sessions must be at least 1, got {args.max_sessions}", EXIT_USAGE)

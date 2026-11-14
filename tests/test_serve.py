@@ -2625,3 +2625,19 @@ def test_names_service_is_a_loopback_url_whose_first_segment_is_the_token(home, 
     assert servecontract.names_service(url.replace("TOKEN", token), home) is named
     (home / serve.TOKEN_FILE).chmod(0o644)  # a token file that cannot be used names nothing
     assert servecontract.names_service(url.replace("TOKEN", token), home) is False
+
+
+def test_in_turn_paging_is_on_for_the_service_and_its_off_switch_reaches_it():
+    """D63: contexto serve pages inside a running turn like contexto run, and --no-in-turn-paging or
+    CONTEXTO_IN_TURN_PAGING=0 turns it off for every session the service opens."""
+    from contexto.cli import build_parser
+    from contexto.launcher import engine_config
+
+    def config(argv, env):
+        return engine_config(serve.serve_options(build_parser().parse_args(["serve", *argv]), env))
+
+    assert "in_turn_paging" not in config([], {})  # the engine's default: on
+    assert config(["--no-in-turn-paging"], {})["in_turn_paging"] is False
+    for value in ("0", "false", "off", "no"):
+        assert config([], {"CONTEXTO_IN_TURN_PAGING": value})["in_turn_paging"] is False
+    assert "in_turn_paging" not in config([], {"CONTEXTO_IN_TURN_PAGING": "1"})
