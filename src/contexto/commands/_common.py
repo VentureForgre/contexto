@@ -90,7 +90,10 @@ def _selector_shown(n: int, before: str, after: str) -> bool:
 def _in_run(n: int, before: str, after: str) -> bool:
     """Whether the character ``n``, between ``before`` and ``after``, is part of a zero-width run."""
     if n in _ZERO_WIDTH:
-        word_final = n in _MONGOLIAN_SELECTORS and bool(before) and unicodedata.category(before)[0] in "LM"
+        # A Mongolian free variation selector that ends a Mongolian word before a space prints; after any
+        # other letter it would let each word of a line carry a hidden bit (review B on #288, N25).
+        word_final = (n in _MONGOLIAN_SELECTORS and bool(before) and 0x1800 <= ord(before) <= 0x18AF
+                      and unicodedata.category(before)[0] in "LM")
         return any(c and (ord(c) in _ZERO_WIDTH or ord(c) in _BLANK_CELLS
                           or (unicodedata.category(c) == "Zs" and not word_final))
                    for c in (before, after))

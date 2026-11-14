@@ -79,8 +79,9 @@ the main conversation by a restarted proxy or `contexto run --resume`, unless th
 restart did not trust it either). After a restart, another conversation that reaches the proxy
 first is trusted only when a proxy on this session trusted it before (a `--continue` or `--resume`
 of your own conversation) or it is a new Claude Code session; otherwise a restarted proxy may carry
-less, never more. A session that has served Claude Code counts as restarted even when its epoch
-record (`epoch.json`) is missing, damaged or from another Contexto version. The proxy keeps the keys of the last 64 conversations it trusted in the session's
+less, never more. A session that has served Claude Code, or whose proxy trusted a conversation
+before, counts as restarted even when its epoch record (`epoch.json`) is missing, damaged or from
+another Contexto version. The proxy keeps the keys of the last 64 conversations it trusted in the session's
 `meta.json` (`trusted_conversations`). A conversation of yours that is not among them, and is not
 the one the proxy last recorded for a resume, is not trusted after a restart and carries nothing in
 that launch or later ones. That happens at the first launch after upgrading from v0.5.24, which kept
@@ -262,8 +263,8 @@ U+1BCA3 and U+1D173 to U+1D17A), and a zero-width character next to a space, exc
 variation selector (U+180B to U+180D or U+180F) that ends a word before a space. A blank cell
 (U+2800, U+3164 or U+FFA0) prints on its own, so braille art and spaced Hangul read normally, and is
 an escape next to a zero-width character. One selector after a symbol or an ideograph, one
-zero-width character between two letters, or a Mongolian variation selector after a letter before a
-space, can
+zero-width character between two letters, or a Mongolian variation selector after a Mongolian
+letter before a space, can
 still carry a few bits that a terminal does not show. So can blank cells and spaces mixed in a run (U+3164
 or U+2800 with spaces, no-break spaces with spaces, en spaces with em spaces): the run shows as blank,
 but which kind is where cannot be seen, and at the end of a line it reads as trailing space. The model

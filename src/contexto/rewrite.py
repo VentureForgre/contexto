@@ -2602,7 +2602,10 @@ class RewriteEngine:
         child, while the user's conversation waits on it (review B round 5, N13); such a first main is not
         trusted until it takes main by a trusted rule, which costs a carry and never gains one."""
         record = self._record
-        if key in self._trusted_before or (record is None and not self._served_before):
+        # A store with no readable record counts as new only when it has served no Claude Code session and
+        # has no trusted list either: a list means an earlier engine ran (review B on #288, N24).
+        if key in self._trusted_before or (record is None and not self._served_before
+                                           and not self._trusted_before):
             return True
         if record is not None and record.get("conversation") == key:
             return record.get("untrusted") is not True

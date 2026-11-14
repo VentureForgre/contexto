@@ -593,6 +593,8 @@ def test_a_word_final_mongolian_variation_selector_before_a_space_prints(fvs):
     gaps = " ".join(MONGOLIAN_SELECTORS[int(bit)] for bit in "01101000") + " "
     assert safe_text("Use ISO dates. " + gaps).isascii()
     assert safe_text("᠎ ").isascii()  # the vowel separator is not a selector: next to a space, an escape
+    # Review B on #288, N25: only after a Mongolian letter; after a Latin one each word could carry a bit.
+    assert fvs not in safe_text(f"Use{fvs} ISO{fvs} dates.")
 
 
 def test_a_blank_cell_prints_on_its_own_and_is_an_escape_next_to_a_zero_width_character():

@@ -988,3 +988,20 @@ def test_a_conversation_continued_in_every_launch_stays_on_the_list(home, tmp_pa
         send(engine, MESSAGES, main_request(a, OLD))
         first.add_trusted_conversation(f"anthropic:{launch:064x}")
         assert key_of(a) in first.trusted_conversations(), launch
+
+
+def test_a_store_with_a_trusted_list_and_no_record_is_not_a_new_store(home, tmp_path):
+    """Review B on #288, N24: a store that recorded no Claude Code session (a Codex store, a client that
+    sends no session id) but holds a trusted list ran an engine before. With its record lost, a subagent
+    without its agent id that reaches a restarted engine first is not trusted."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    one = RewriteEngine(first, config=ROOMY)  # no SessionRecorder: no served ids, as for Codex
+    send(one, MESSAGES, main_request(conversation("the user's prompt", 3), OLD))
+    assert first.trusted_conversations() and not first.cli_sessions("claude")
+    _damage_record(first, "missing")
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="pinned by the subagent")
+    two = RewriteEngine(first, config=ROOMY)
+    send(two, MESSAGES, main_request([*conversation("SUB-TASK read the page", 2), *pin_pair("c1", reply),
+                                      user("next")], OLD))
+    assert first.main_records() == []
