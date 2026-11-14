@@ -48,6 +48,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--quiet", action="store_true",
                         help="do not print the summary when the CLI exits; warnings are still printed "
                              "(also CONTEXTO_QUIET=1)")
+    parser.add_argument("--no-statusline", action="store_true",
+                        help="claude only: do not add Contexto's status line to Claude Code (it is added only "
+                             "when no settings file has a statusLine; also CONTEXTO_NO_STATUSLINE=1)")
     parser.add_argument("--no-project-memory", action="store_true",
                         help="keep this session out of project memory: it carries nothing from the earlier "
                              "sessions of this directory's project (a resumed session stops sending what it "

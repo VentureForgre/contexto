@@ -18,7 +18,9 @@ Steps (M2 contract, Architecture):
    claude's exit code.
 
 The user's own settings, hooks, and MCP servers still load: a flag-level ``--settings`` only adds
-the base URL and the allow rules. Its base URL outranks the user, project, and local settings files.
+the base URL and the allow rules, and a ``statusLine`` when no settings file Claude Code would read has
+one (D64, ``contexto.statusline``: Claude Code replaces that key, so one the user has is never
+overridden). Its base URL outranks the user, project, and local settings files.
 Its allow rules join the user's permission rules rather than replacing them, and the user's ``deny``
 and ``ask`` rules still win over them (measured with zero spend on Claude Code 2.1.302: a deny takes
 the tool out of the request, an ask refuses it in ``-p`` mode). Without the rules, 2.1.302 refuses
@@ -145,6 +147,7 @@ from contexto.paths import PROJECT_MEMORY_ENV, contexto_home, mcp_env, project_m
 from contexto.private import affinity_salt, open_private, private_dir
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.stats import fault_notices, log_unwritable_message, print_exit_summary, quiet_from_env
+from contexto.statusline import launch_status_line
 from contexto.store import LIVE_LOCK, SessionStore
 from contexto.store.pinned import render_carried
 from contexto.store.project import project_root, read_meta, recorded_root
@@ -182,7 +185,7 @@ WATCHDOG_EXITED = b"exited\n"  # the child was reaped: its pid may be reused
 # after the CLI's name). The codex options are not listed: they only apply before 'codex'.
 RUN_OPTIONS = {"--bound": True, "--allow-large-bound": False, "--window-fraction": True, "--headroom-floor": True,
                "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False,
-               "--quiet": False, "--no-project-memory": False, "--no-in-turn-paging": False}
+               "--quiet": False, "--no-statusline": False, "--no-project-memory": False, "--no-in-turn-paging": False}
 ENV_VALUE_SHOWN = 40  # characters of an unrecognised variable's value quoted on stderr
 # D63: set to 0, false, off or no to turn in-turn paging off, like --no-in-turn-paging.
 IN_TURN_PAGING_ENV = "CONTEXTO_IN_TURN_PAGING"
@@ -255,6 +258,7 @@ class LaunchOptions:
     claude_bin: str = "claude"
     version_check: bool = True
     quiet: bool = False  # D64: no summary at exit; warnings are still printed
+    statusline: bool = True  # D64: add Contexto's status line when the user has none (contexto.statusline)
     project_memory: bool = True  # False: --no-project-memory (D69)
     in_turn_paging: bool = True  # D63: page inside a running turn (rule 5)
 
@@ -1271,6 +1275,7 @@ def options_from_args(args: Any) -> LaunchOptions:
         window_fraction=args.window_fraction, headroom_floor=args.headroom_floor,
         version_check=not getattr(args, "no_version_check", False),
         quiet=bool(getattr(args, "quiet", False)) or quiet_from_env(),
+        statusline=not getattr(args, "no_statusline", False),
         project_memory=not getattr(args, "no_project_memory", False),
         in_turn_paging=in_turn_paging(getattr(args, "no_in_turn_paging", False)))
 
@@ -1477,13 +1482,16 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     try:
         tmp = Path(tempfile.mkdtemp(prefix="contexto-run-"))  # mode 0700, removed on exit
         watchdog = Watchdog.start(tmp, store)
-        settings = write_private_json(tmp, "settings.json", settings_payload(proxy.url, hint_headers))
+        # D64: a statusLine only when it cannot replace one of the user's; the note says which it was.
+        status_line, status_note = launch_status_line(session_id, home, Path.cwd(), enabled=options.statusline)
+        settings = write_private_json(tmp, "settings.json",
+                                      {**settings_payload(proxy.url, hint_headers), **status_line})
         mcp = write_private_json(tmp, "mcp.json", mcp_payload(session_id, home))
         store.log({"event": "launch", "cli": "claude", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": upstream.source,
                    "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args),
                    "affinity_header": proxy.affinity_header is not None,
-                   "hint_headers": hint_headers})
+                   "hint_headers": hint_headers, "statusline": status_note})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
         project_memory_notice(store, stderr, engine_pin_budget(config))  # D69: what it carries, or nothing

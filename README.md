@@ -179,9 +179,10 @@ those files.
 ## What you see
 
 **When it is working.** At start Contexto prints one line on stderr that begins `contexto: session`
-and names the bound, and `/mcp` in Claude Code lists the `contexto` server as connected. Nothing
-else shows until the prompt nears the bound, from about 113,000 to 125,000 tokens with the
-defaults. After the first rotation, `contexto sessions list` shows a PAGES count above 0, and
+and names the bound, and `/mcp` in Claude Code lists the `contexto` server as connected. Claude
+Code's status line shows `ctx bound 150k`, then the prompt against the bound after each reply
+(`ctx 61k/150k`), unless you have a status line of your own ([Status line](docs/statusline.md)). Paging starts when the prompt nears the bound, from
+about 113,000 to 125,000 tokens with the defaults. After the first rotation, `contexto sessions list` shows a PAGES count above 0, and
 `contexto sessions show <id>` should count 0 over-bound turns ([Is it working?](docs/sessions.md#is-it-working)).
 
 **What it adds.** The proxy adds time to each request, more as the history grows:
