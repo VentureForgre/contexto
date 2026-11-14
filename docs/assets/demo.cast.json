@@ -1,0 +1,140 @@
+{
+ "version": 1,
+ "cols": 90,
+ "rows": 33,
+ "note": "Chunks of terminal output from spikes/readme/record_demo.py: [seconds, text].",
+ "events": [
+  [
+   0.001,
+   "# Synthetic session: a stub CLI and a fake upstream on 127.0.0.1. No model.\n"
+  ],
+  [
+   0.116,
+   "[fake upstream] listening on 127.0.0.1:8399, counting 1 token per 3.5 bytes received\n"
+  ],
+  [
+   1.87,
+   "$ contexto run --bound 60000 --headroom-floor 5000 --no-version-check \\\n    --upstream http://127.0.0.1:8399 claude\n"
+  ],
+  [
+   3.859,
+   "contexto: session 884be18dd5024fdfb49505a555faea96 (bound 60,000, upstream flag)\n"
+  ],
+  [
+   6.698,
+   "[stub claude] turn 0: history 13,216 tokens -> "
+  ],
+  [
+   6.718,
+   "[fake upstream] received 13,216 tokens\n"
+  ],
+  [
+   7.529,
+   "[stub claude] turn 1 ends with: \"The release codename is amber-kestrel-17.\"\n"
+  ],
+  [
+   7.532,
+   "[stub claude] turn 1: history 25,542 tokens -> "
+  ],
+  [
+   7.542,
+   "[fake upstream] received 25,542 tokens\n"
+  ],
+  [
+   8.35,
+   "[stub claude] turn 2: history 37,856 tokens -> "
+  ],
+  [
+   8.36,
+   "[fake upstream] received 37,856 tokens\n"
+  ],
+  [
+   9.176,
+   "[stub claude] turn 3: history 50,170 tokens -> "
+  ],
+  [
+   9.286,
+   "[fake upstream] received 13,806 tokens\n"
+  ],
+  [
+   11.303,
+   "[stub claude] turn 4: history 62,484 tokens -> "
+  ],
+  [
+   11.318,
+   "[fake upstream] received 26,120 tokens\n"
+  ],
+  [
+   12.135,
+   "[stub claude] turn 5: history 74,798 tokens -> "
+  ],
+  [
+   12.195,
+   "[fake upstream] received 38,434 tokens\n"
+  ],
+  [
+   13.003,
+   "[stub claude] turn 6: history 87,112 tokens -> "
+  ],
+  [
+   13.048,
+   "[fake upstream] received 14,003 tokens\n"
+  ],
+  [
+   13.87,
+   "[stub claude] turn 7: history 99,426 tokens -> "
+  ],
+  [
+   13.9,
+   "[fake upstream] received 26,317 tokens\n"
+  ],
+  [
+   15.511,
+   "[stub claude] runs (the turns now on disk): contexto sessions show $CONTEXTO_SESSION \\\n"
+  ],
+  [
+   15.511,
+   "[stub claude]     | grep -E 'Pages:|Over-bound|pg_' | cut -c1-74\n"
+  ],
+  [
+   16.419,
+   "Pages: 6\nOver-bound turns: 0\n  pg_943b3b63e3ba1170 turn 5: Build log for step 5. Keep it for reference.\n  pg_5414a49f71718017 turn 4: Build log for step 4. Keep it for reference.\n  pg_013c60e824b0e950 turn 3: Build log for step 3. Keep it for reference.\n  pg_5fa5d6d76a34f5d7 turn 2: Build log for step 2. Keep it for reference.\n  pg_80b44e3184b56aa3 turn 1: Build log for step 1. Keep it for reference.\n  pg_c75ba5c144e8fbf1 turn 0: Build log for step 0. Keep it for reference.\n"
+  ],
+  [
+   20.458,
+   "[stub claude] turn 8 asks: \"What is the release codename?\"\n"
+  ],
+  [
+   21.667,
+   "[stub claude] turn 8: history 99,468 tokens -> "
+  ],
+  [
+   21.733,
+   "[fake upstream] received 26,358 tokens\n"
+  ],
+  [
+   21.735,
+   "[fake upstream] scripted reply: call contexto_search {\"query\": \"release codename\"}\n"
+  ],
+  [
+   22.967,
+   "[stub claude] ran contexto_search on the contexto MCP server, which returns:\n"
+  ],
+  [
+   22.967,
+   "[best matching pages by relevance, shown newest first:]\npg_80b44e3184b56aa3 (turn 1)\n  42050: build 01.0904 linked module mod_164 in 335 ms\n> 42096: The release codename is amber-kestrel-17.\n  42138: [turn 1] assistant:\n[Paged hits come only from paged-out turns; the conversation in view is newer than any of them.]\n"
+  ],
+  [
+   26.172,
+   "[stub claude] turn 8: history 99,642 tokens -> "
+  ],
+  [
+   26.187,
+   "[fake upstream] received 26,533 tokens\n"
+  ],
+  [
+   26.191,
+   "[stub claude] scripted reply: \"The search result names it: amber-kestrel-17.\"\n"
+  ]
+ ]
+}

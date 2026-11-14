@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 418" width="800" height="418" role="img" aria-labelledby="t d">
+<title id="t">Largest request in each turn: Contexto against the full history, with a bound of 150,000 tokens</title>
+<desc id="d">Over 24 turns the largest Contexto request is 109,868 input tokens (measured), under the bound of 150,000. The full history without Contexto grows to 438,406 (modeled for turns 1 to 18, measured for turns 19 to 24). Acceptance run 3, one scripted session. Contexto measured; full history modeled for turns 1 to 18, measured for 19 to 24.</desc>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif;font-size:12px;fill:#59636e}.ink{fill:#1f2328}.title{font-size:15px;font-weight:600}.label{font-size:13px}.end{text-anchor:end}.mid{text-anchor:middle}.grid{stroke:#d1d9e0;stroke-width:1}.series{fill:none;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}.contexto{stroke:#2a78d6}.plain{stroke:#eb6834;stroke-dasharray:7 5}.bound{stroke:#59636e;stroke-width:1.5}.span{stroke:#59636e;stroke-width:1;fill:none}</style>
+<text class="ink title" x="52" y="22">Largest request in each turn</text>
+<text x="52" y="42">Input tokens</text>
+<path class="grid" d="M52 322H772"/>
+<text class="end" x="44" y="326">0</text>
+<path class="grid" d="M52 270H772"/>
+<text class="end" x="44" y="274">100K</text>
+<path class="grid" d="M52 218H772"/>
+<text class="end" x="44" y="222">200K</text>
+<path class="grid" d="M52 166H772"/>
+<text class="end" x="44" y="170">300K</text>
+<path class="grid" d="M52 114H772"/>
+<text class="end" x="44" y="118">400K</text>
+<path class="grid" d="M52 62H772"/>
+<text class="end" x="44" y="66">500K</text>
+<text class="mid" x="52" y="340">1</text>
+<text class="mid" x="145.9" y="340">4</text>
+<text class="mid" x="271.1" y="340">8</text>
+<text class="mid" x="396.3" y="340">12</text>
+<text class="mid" x="521.6" y="340">16</text>
+<text class="mid" x="646.8" y="340">20</text>
+<text class="mid" x="772" y="340">24</text>
+<path class="grid" d="M599.8 62V322"/>
+<path class="span" d="M52 348V352H595.1V348"/>
+<text class="mid" x="323.6" y="369">Content turns 1 to 18</text>
+<path class="span" d="M604.5 348V352H772V348"/>
+<text class="mid" x="688.3" y="369">Recall questions, turns 19 to 24</text>
+<path class="bound" d="M52 244H772"/>
+<text class="ink label end" x="772" y="237">Bound: 150,000 tokens</text>
+<path class="series plain" d="M52 295.5L83.3 283.6L114.6 271.8L145.9 260.7L177.2 248.8L208.5 237L239.8 226L271.1 214.2L302.4 202.4L333.7 190.9L365 179L396.3 167.3L427.7 155.7L459 143.8L490.3 132L521.6 120.1L552.9 108.3L584.2 96.5L615.5 95.5L646.8 95.2L678.1 94.9L709.4 94.6L740.7 94.3L772 94"/>
+<path class="series contexto" d="M52 295.5L83.3 283.6L114.6 271.8L145.9 295.2L177.2 283.4L208.5 271.6L239.8 295L271.1 283.2L302.4 271.4L333.7 294.8L365 282.9L396.3 271.2L427.7 294.5L459 282.7L490.3 270.9L521.6 294.3L552.9 282.5L584.2 270.7L615.5 267.3L646.8 264.9L678.1 284L709.4 279.7L740.7 275.2L772 270"/>
+<circle cx="615.5" cy="95.5" r="4" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="646.8" cy="95.2" r="4" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="678.1" cy="94.9" r="4" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="709.4" cy="94.6" r="4" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="740.7" cy="94.3" r="4" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<circle cx="772" cy="94" r="4" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<text class="ink end" x="777" y="83">438,406</text>
+<circle cx="646.8" cy="264.9" r="4.5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<text class="ink mid" x="646.8" y="254.9">109,868</text>
+<path class="span" d="M145.9 299.2V304.2"/>
+<text x="141.9" y="315.2">old turns moved to disk</text>
+<path class="series plain" d="M66 77.3h26"/>
+<circle cx="102" cy="77.3" r="4" fill="#eb6834" stroke="#ffffff" stroke-width="2"/>
+<text class="ink label" x="114" y="81.8">Full history without Contexto (turns 1 to 18 modeled, 19 to 24 measured)</text>
+<path class="series contexto" d="M365 310.7h26"/>
+<text class="ink label" x="399" y="315.2">Contexto (measured)</text>
+<text x="52" y="408">Acceptance run 3, one scripted session. Contexto measured; full history modeled for turns 1 to 18, measured for 19 to 24.</text>
+</svg>
