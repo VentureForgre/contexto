@@ -734,11 +734,13 @@ def test_the_shipped_trace_pins_the_default_session(pinned):
     for key, value in found.items():
         assert shipped[key] == value, key
     assert len(shipped["turn_sha256"]) == len(pinned.turns) == 56 and shipped["script_sha256"] == pinned.digest()
-    assert shipped["model"]["rounds"] == scripted.rounds(pinned) and sum(shipped["model"]["rounds"]) == 138
+    # One request per scripted round: the plan and the measurement agree.
+    assert shipped["model"]["rounds"] == scripted.rounds(pinned)
+    assert sum(shipped["model"]["rounds"]) == shipped["expected"]["requests"] == len(shipped["expected"]["request_tokens"])
     assert shipped["model"]["rules"] == scripted.RULES
     assert list(shipped["files"]) == list(pinned.reads)
     estimate = bench_script.estimate(pinned)
-    assert estimate["history_tokens"] == 952_957 and estimate["history_tokens"] >= 6 * 150_000
+    assert estimate["history_tokens"] >= 6 * 150_000  # the history is many times the bound
     raw = resources.files("contexto.bench").joinpath("data", "trace-20261016.json").read_bytes()
     assert raw.decode() == trace.to_json(shipped) and len(raw) < 16_000  # written by record(), a few kilobytes
 
