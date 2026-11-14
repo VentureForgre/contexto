@@ -384,10 +384,21 @@ def test_an_environment_key_goes_out_as_x_api_key_only_in_every_arm(env, tmp_pat
 
 
 def test_the_report_is_written_at_the_end_when_this_build_has_the_report_code(env, tmp_path, script, monkeypatch):
+    import json
     import sys
     import types
 
-    without = bench_stubs.run_bench(env, tmp_path / "a", [script], arms=("full",), bound=BOUND)
+    # This build has the report code: the run ends with the results, read from what it wrote.
+    real = bench_stubs.run_bench(env, tmp_path / "r", [script], arms=("full",), bound=BOUND)
+    assert real.code == 0 and "--report" not in real.printed and real.printed.count("\n") == 1
+    results = json.loads((real.out / "results.json").read_text(encoding="utf-8"))
+    assert results["kind"] == "live" and (real.out / "results.md").exists()
+    with monkeypatch.context() as patch:  # a build without it: importing it fails
+        import contexto.bench
+
+        patch.setitem(sys.modules, "contexto.bench.report", None)
+        patch.delattr(contexto.bench, "report", raising=False)
+        without = bench_stubs.run_bench(env, tmp_path / "a", [script], arms=("full",), bound=BOUND)
     assert "run 'contexto bench --report out'" in without.printed and without.printed.count("\n") == 2
     called = []
     report = types.ModuleType("contexto.bench.report")

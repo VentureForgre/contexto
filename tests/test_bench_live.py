@@ -115,7 +115,8 @@ def test_every_unit_completes_and_the_manifest_has_the_shared_fields(run, script
         assert unit["toolloop_requests"] == 11 and unit["over_bound"] == 0
     assert (run.out / "scripts" / f"seed-{SEED}.json").read_text(encoding="utf-8") == script.to_json()
     assert sorted(p.name for p in run.out.iterdir()) == [
-        ".lock", "manifest.json", "probes.jsonl", "requests.jsonl", "scripts"]
+        ".lock", "charts", "manifest.json", "probes.jsonl", "requests.jsonl", "results.json", "results.md",
+        "scripts"]  # results and charts: the report (contexto.bench.report) is written at the end of the run
     assert (run.out / ".lock").read_bytes() == b""  # the run's lock: an empty file
 
 
@@ -199,7 +200,9 @@ def test_the_meter_agrees_with_contextos_own_session_log(run):
 
 def test_nothing_private_is_written_printed_or_on_a_command_line(run):
     files = [p for p in run.out.rglob("*") if p.is_file()]
-    assert len(files) == 5  # manifest, probes, requests, one script, and the empty lock file
+    # manifest, probes, requests, one script, the empty lock file, and the report's results.json,
+    # results.md and two charts: all of them are searched.
+    assert len(files) == 9, sorted(p.name for p in files)
     haystacks = {f"file {p.relative_to(run.out)}": p.read_text(encoding="utf-8") for p in files}
     haystacks["printed"] = run.printed
     # The one process whose command line is the helper command is the helper itself (/bin/sh -c COMMAND).
