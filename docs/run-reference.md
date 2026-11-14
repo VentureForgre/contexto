@@ -25,6 +25,7 @@ contexto run [options] codex [codex arguments]
 | `--codex-key-helper CMD` | see [Codex](codex.md) | Command that prints the API key (Codex, API-key mode). |
 | `--codex-upstream URL` | see [Codex](codex.md) | Upstream for Codex requests, including its version path. |
 | `--no-version-check` | off | Skip the check of `claude --version` or `codex --version` against the versions Contexto was tested with. |
+| `--no-in-turn-paging` | off | Do not page inside a running turn: a tool loop that outgrows the bound is sent whole, as before v0.6.0 (see [In-turn paging](in-turn-paging.md)). |
 | `--no-project-memory` | off | Keep this session out of [project memory](project-memory.md): it carries nothing from the earlier sessions of its project (a resumed session stops sending what it carried: at once before its first rotation; after it, from its next rotation) and gives nothing to later ones. The session records it, so a resume stays off without the option. Put it before `claude` or `codex`: after `codex` it goes to Codex unchanged. |
 
 For Claude Code, the launcher:
@@ -99,6 +100,7 @@ request is in flight (Esc), the proxy stops the upstream response at once and lo
 | `ANTHROPIC_BASE_URL` | `run`, `proxy` | Upstream, when no settings file sets one (see [Troubleshooting](troubleshooting.md)). |
 | `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` | `run`, `proxy` | Read, never set, by Contexto: when truthy, no project `.claude/` settings file is used, as Claude Code does in `-p` mode (see [Troubleshooting](troubleshooting.md)). |
 | `CONTEXTO_NO_VERSION_CHECK` | `run` | `1` skips the CLI version check, like `--no-version-check`. |
+| `CONTEXTO_IN_TURN_PAGING` | `run` | `0`, `false`, `off` or `no` turns in-turn paging off, like `--no-in-turn-paging`. |
 | `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` | `run claude` | Read, never set: when one is on in the environment or in a Claude Code settings file (including the managed settings file), Claude Code sends nothing to Contexto, so `contexto run claude` refuses to start (exit 2). It also refuses when a settings file it cannot read (not a regular file, over 4 MiB, or not JSON) could set one. |
 | `CLAUDE_CODE_GATEWAY_HINT_HEADERS` | `run claude` | `contexto run claude` sets it to `1` for Claude Code so the engine can read Claude Code's request-class headers, and removes those headers before forwarding unless you had turned them on yourself. Set it to `0`, `false`, `no` or `off` in your environment or user settings to keep them off; the engine then uses its older text signatures. |
 | `CONTEXTO_HINT_HEADERS` | `run claude` | Set by `contexto run claude` for the CLI it runs (`stripped`, `forwarded` or `off`), so a `contexto run claude` started inside that session can tell Contexto's `1` from yours. Not meant to be set by hand. |

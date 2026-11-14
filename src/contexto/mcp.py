@@ -95,11 +95,33 @@ CONTROL_REPLIES = frozenset({BUDGET_SPENT, SEARCH_TOO_LONG, NO_HIT})
 # B19 (a): every search reply ends with this, as its own text block. Like the control replies it is fixed
 # protocol text and not charged. The live run showed answers taken from the newest search hit while a newer
 # statement sat in the conversation in view, which search cannot see.
-SEARCH_COVERAGE = ("[Paged hits come only from paged-out turns; the conversation in view is newer than any of "
-                   "them.]")  # contract PR #125
+# D63 (Reviewer B on PR #274): pages written inside a turn hold tool results, which can be newer than what
+# stays in view before them, so "newer than any hit" holds only for turns paged out whole. A page names the
+# turn it was written in, never "this turn": the server cannot tell the running turn for certain (Reviewer A
+# at 7575c76f, finding 4).
+SEARCH_COVERAGE = ("[Paged hits come from paged-out turns and from tool results paged out inside a turn (marked "
+                   "\"paged inside turn N\"). An unmarked hit is older than the conversation in view; a hit paged "
+                   "inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by "
+                   "position.]")  # contract PR #125, D63
 # B19 (b): when the retained-window snapshot is missing or not from the current room publish.
 SEARCH_COVERAGE_UNCHECKED = SEARCH_COVERAGE[:-1] + " In view not checked.]"
 IN_VIEW_LIMIT = 3  # matching lines from the conversation in view per search reply, newest first
+# D63: what an in-turn page holds, by its kind (contexto.store.pages).
+IN_TURN_LABELS = {"result": "tool result", "rounds": "folded rounds", "folds": "list of folds"}
+
+
+def _in_turn_label(page: dict) -> str | None:
+    """``paged inside turn N, <what it holds>`` for a page written inside a turn, from the page alone, so
+    the label is the same in every later turn (D63)."""
+    held = IN_TURN_LABELS.get(page.get("kind")) if isinstance(page.get("kind"), str) else None
+    return f"paged inside turn {page.get('turn')}, {held}" if held else None
+
+
+def _turn_label(page: dict) -> str:
+    """``turn N``, and for a page written inside a turn its label, after the parenthesis so that
+    ``<page id> (turn N)`` reads as before (D63)."""
+    label = _in_turn_label(page)
+    return f"turn {page.get('turn')}) [{label}]" if label else f"turn {page.get('turn')})"
 UNMEASURED_CHARS_PER_TOKEN = 1.0  # before the engine records bytes per token: charges more, never less
 # Modern-era cacheable results (server/discover, tools/list) must carry these; Claude Code 2.1.301
 # rejects a tools/list result without them (reviewer-2, real client, 2026-10-16). The tool list is
@@ -258,9 +280,11 @@ TOOLS: list[dict[str, Any]] = [
             f"For the best {SEARCH_LIMIT} pages, shown newest first, returns up to {MATCHES_PER_PAGE} matching lines "
             f"(marked >) with {_lines(MATCH_CONTEXT)} of context either side, each with its page offset; up to "
             f"{SEARCH_MORE_LIMIT} more are listed as page id, turn, @offsets. Answer from a "
-            "matching line, or call contexto_recall with its page id and offset to read on. Search covers only "
-            "paged-out turns: the conversation in view is newer than any hit. If no turn holds every word, the reply "
-            "gives approximate matches, marked as such, with the words each page matched."
+            "matching line, or call contexto_recall with its page id and offset to read on. Search covers "
+            "paged-out turns and tool results paged out inside a turn (marked \"paged inside turn N\"): the "
+            "conversation in view is newer than an unmarked hit, but a hit paged inside a turn can be newer "
+            "than an earlier copy in view. If no page holds every word, the reply gives approximate "
+            "matches, marked as such, with the words each page matched."
         ),
         "inputSchema": {
             "type": "object",
@@ -862,6 +886,9 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str,
     matched in its JSON-escaped form too, as ``render_page`` prints it (B18).
     """
     rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
+    label = _in_turn_label(page)
+    if label:  # D63: on its own line, so the header reads as before
+        rows.append((f"  [{label}]", None))
     # Search, recall, and state calls are blanked at their offsets, so no line of an earlier reply is shown (D51).
     text = render_page(page, searchable=True) if page.get("messages") is not None else ""
     if approximate is None:
@@ -903,10 +930,10 @@ def _more_row(page_id: str, page: dict[str, Any], query: str,
         starts = matching_line_starts(text, q) if q is not None else []
         words = " " + label
     if not starts:
-        return (f"{page_id} (turn {page.get('turn')}) @stub{words}", None)
+        return (f"{page_id} ({_turn_label(page)} @stub{words}", None)
     first, last = starts[0], starts[-1]
     where = str(first) if first == last else f"{first}..{last}"
-    return (f"{page_id} (turn {page.get('turn')}) @{where}{words}", None)
+    return (f"{page_id} ({_turn_label(page)} @{where}{words}", None)
 
 
 def _stub_line(stub: Any) -> str:

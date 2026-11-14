@@ -8,6 +8,7 @@ from contexto.store import SessionStore
 from contexto.store.memory import MemoryStore
 from contexto.store.pages import PINNED_FIRST_LINE
 from contexto.store.recall import DEFAULT_LINES
+from contexto.tokens import estimate_tokens
 
 
 @pytest.fixture(params=["session", "memory"])
@@ -94,7 +95,11 @@ def test_pinned_text_budget_and_omitted_count(store):
     ids = [store.pin("obligation", f"duty number {i} with some words") for i in range(40)]
     full = store.state_text().splitlines()
     assert len(full) == len(DEFAULT_LINES) + 1 + 40  # opening lines, the group heading, the items
-    capped = store.pinned_text(480).splitlines()  # the opening lines are about 380 tokens (D51)
+    # The opening lines and about 100 tokens of items. The budget was 480 when the opening lines were about
+    # 380 tokens (D51); D63's recall example line in DEFAULT_LINES takes them from 411 to 449, as
+    # _within_budget counts them (a line at a time), which left no room for an item.
+    opening = sum(estimate_tokens(line + "\n") for line in DEFAULT_LINES)
+    capped = store.pinned_text(opening + 100).splitlines()
     shown = [line for line in capped if line.startswith("- ")]
     assert capped[0] == PINNED_FIRST_LINE and 0 < len(shown) < 40
     assert capped[-1] == f"({40 - len(shown)} more pinned items omitted; call contexto_state for the full list)"

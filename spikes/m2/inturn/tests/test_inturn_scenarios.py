@@ -293,7 +293,10 @@ def test_the_turns_after_the_long_loop_start_under_the_bound(dialect):
     after = [s for s in run.sent if s.turn >= 4]
     assert len(after) == 6 and all(s.tokens <= run.scenario.bound and not s.over_real for s in after)
     assert run.pages >= 4 and run.originals["stored"] >= 100
-    assert after[0].rewrite and not after[0].in_loop and 0 < after[0].resent < 2_000 < after[0].invalidated
+    if dialect == "codex":  # no in-turn paging (D63 built it for Messages only): the turn start pages the loop
+        assert after[0].rewrite and not after[0].in_loop and 0 < after[0].resent < 2_000 < after[0].invalidated
+    else:  # D63: the loop paged itself in turn, so the turn start after it is under its trigger
+        assert any(s.rewrite and s.in_loop for s in run.sent if s.turn == 3) and not after[0].over_estimate
     before = [s for s in run.sent if s.turn < 3]
     assert all(s.forwarded_items == s.cli_items and not s.rewrite for s in before)
 

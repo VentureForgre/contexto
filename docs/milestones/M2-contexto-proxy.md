@@ -505,6 +505,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    redacted-thinking blocks deterministically on every request, so the transformed prefix is
    byte-identical across requests. An assistant message left with no content is given a single
    text block `[thinking omitted]`. Messages added after the rotation pass through untouched.
+   An in-turn edit (rule 5) strips the same way, from its first changed message to the end of the
+   request that made it.
 3. **Rotation trigger.** Rotate only at the start of a turn: the request's newest turn contains no
    assistant message yet (only its turn-start message and any system messages). Rotate when the
    estimated upstream input would exceed `bound - headroom`, or when the per-turn recall room that
@@ -638,11 +640,180 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
    from M0 numbers: a throwaway head near 54.5k with pins leaves `W` about 70k at a 150k bound; an
    OpenRig seat head near 92k leaves about 33k, so about 16.5k of growth room: rotations and
    thinking strips will be frequent at 150k for large heads (see O3).
-5. **Never rotate inside a tool loop** (D17). A turn that grows past the bound is sent as is and
-   recorded as over-bound in the session log; the next turn start rotates. Every request forwarded,
-   rotated or not, is checked before the send against the estimate of what is sent: over the bound,
-   it is logged `over_bound` with `source: "estimate"` and `in_tool_loop` (D49). Only
-   `in_tool_loop: true`, and degraded mode under rule 14, are the logged exception; at a turn start
+5. **In-turn paging** (D63, which supersedes D17's "never page inside a turn"). A rotation still
+   starts only at a turn start (rule 3). A turn that outgrows the bound inside a tool loop is paged
+   in place, in batches. A request is inside a tool loop when its history has a turn start and its
+   newest turn already holds an assistant message. Measured basis: at v0.5.24 one prompt followed by
+   120 tool rounds of about 6,400 tokens reached an estimate of 775,851 tokens at bound 150,000 with
+   0 pages and 96 `over_bound` events, a subagent (one turn start) never paged at all, and the
+   recall room (`bound - used - headroom_floor`) was 0 exactly when the turn was longest.
+   - **Thinking.** On 5.x models the API checks that nothing before a kept thinking block has
+     changed (O2). An in-turn edit whose first changed message is at index `p` therefore strips
+     every thinking and redacted-thinking block in messages `[p, n)`, where `n` is the request's
+     message count at that moment, on that request and on every later one, as rule 2 strips at a
+     rotation (`[thinking omitted]` for a message left empty). Thinking before `p`, and in messages
+     added afterwards, passes through byte for byte. No request carries a thinking block with
+     anything changed before it. Each edit costs the loop its thinking after `p` and a cache
+     rewrite, so edits are made in batches that are large and rare, and oldest first, so the
+     prefix before the previous batch's first changed message stays byte-identical.
+   - **Trigger.** In a tool loop, on a request that adds messages (in degraded mode too, as rule
+     14's retry), when the pre-send estimate exceeds the line `T - min_turn_room / 4`, where `T = bound - headroom_floor
+     - min_turn_room` (113,000 with the defaults, so the line is 110,000). `T` is the point where
+     the recall room the request publishes would fall under `min_turn_room` (rule 3's second
+     condition, applied inside the turn). The quarter of `min_turn_room` is an allowance for the
+     response's output: the room published when the response arrives is `bound - (input + output)
+     - headroom_floor`, so with the allowance an output of up to 9,000 tokens still leaves half
+     of `min_turn_room`. For the trigger and every decision of a batch, a tool result that arrived
+     with the request counts at 1.8 bytes a token (the density rule 3 cites for log-heavy tool
+     output) when that is more than the session's ratio gives, until a response's usage has
+     measured it: the ratio is learned mostly from the head's text and tool output is denser
+     (measured in the replay harness: a 60,000-token result estimated 17,195 low). The estimate
+     that is logged stays rule 3's; the request-time room is published from it plus that margin
+     (rule 3's room, counted as paging counts it), so a dense result never makes it look larger.
+     The count applies to the sum of the unread results of a request: never going over the bound
+     outranks reading every result once. Measured: two parallel 100 KB reads of prose, 81,854 real
+     tokens at bound 150,000, one stubbed unread (step 0 stubs only as many as needed, largest first).
+   - **Tight bound.** When `T - (head + fixed + the turn-start message) < 2 * min_turn_room`, where
+     `fixed` is what the engine adds that no batch can page (rule 19's carried records while `k = 0`,
+     the preamble after), the line is
+     `bound - headroom_floor - min_turn_room / 4` for the trigger, the batch and step 0, a fresh
+     result is tested at the session's ratio, and the room may fall under `min_turn_room`
+     (`turn_room_low`, `reason: "in_turn_small_bound"`, once per turn).
+   - **A batch** pages down to a target: `floor + 0.25 * (line - floor)` (D63's cost measurement:
+     deeper batches re-send less and run fewer), where `floor`
+     is the estimate less everything steps 1 to 3 could free, and at most `line - 2 *
+     min_turn_room` when that much can be paged, so the rounds that follow need no batch. In
+     order, stopping as soon as the target is met; a step that leaves the estimate at or under
+     `line - 2 * min_turn_room` is enough, and the next one does not run:
+     0. The model reads every result whole at least once unless it cannot fit. A result that has
+        just arrived (one after the last assistant message) is replaced by a stub only when the
+        head, the part of the messages that cannot be paged (the turn-start prompt, the newest
+        round) and the unread results could not be sent under `T` even with everything older
+        paged; then the largest go first, until the rest fits. Otherwise older content is paged
+        to make room, and the result is stubbed by a later batch once the model has read it. An
+        unread result sits after the last thinking block, so stubbing it strips nothing and
+        changes no earlier message. Steps 1 to 4 are sized from the request as step 0 leaves it:
+        `floor`, the target and the headway line are computed again after step 0 stubs a result.
+        Steps 0 to 4 use certain estimates only: a PDF whose pages are not certain (D60 counts it
+        as `PDF_MAX_PAGES`) counts as nothing in a batch, and while unread its D60 count is left
+        out of the batch's estimate, so it is sent whole once, as without in-turn paging
+        (`pdf_pages_uncertain` as before); once read, a later batch may stub it, counted as freeing
+        nothing. An `over_bound` the API's count then shows is logged from usage.
+     1. Older tool results are replaced by stubs, oldest first, across the retained window
+        (earlier retained turns included), never a result the model has not read. A text result is
+        stubbed only when its content is at least 2,048 bytes and at least twice its stub, a byte
+        rule, so the choice never depends on the measured ratio; a result holding an image or a
+        document whenever its stub frees something (media is priced by pixels and pages); and only
+        when its content is a string or text, image and document blocks (a tool reference is left
+        alone). A document result over the bound on its own, by a certain estimate, is stubbed on
+        arrival (step 0); other documents are read whole first. The
+        original goes to a result page (Store). The results of Contexto's own search, recall and
+        state calls (D51) are copies of pages: they get a stub that gives the call's arguments,
+        and no page.
+     2. If less than that headway is left: the whole earlier turns of the window are paged as a rotation
+        does (rule 4: one page per turn, carried content kept, pinned and index text rebuilt),
+        with `k` at the running turn's start; the `rotation` event has `reason: "in_turn"` and no
+        sizing fields. While the head is still unmeasured at `k = 0` (rule 4 measures it only
+        there, from the first usage), this step waits, so that the head can still be measured; it
+        runs after step 3 if the request is then still over the bound itself.
+     3. If still less: the oldest complete tool rounds of the running turn (an assistant
+        message and what follows it up to the next one) are folded into one rounds page and
+        removed from the request, whole rounds only. The turn-start message gets a note after its
+        own content, one note per turn however many folds, rebuilt at each fold: the newest fold
+        in detail (how many rounds, which tools, the first 40 calls with what each ran or read
+        within 1,600 characters, the rest counted, its call ids, its size in bytes, its page id),
+        then each earlier fold as its round numbers and page id. The note is at most 6,000 bytes,
+        call ids included: it lists ids within 1,200 bytes, the newest fold's first and then whole
+        folds before it, newest first, and names any other fold's rounds page as a whole, which
+        covers every call reachable from it. When the note would pass 6,000 bytes, the folds
+        since the previous folds page, but the newest, are written to a folds page (kind `folds`,
+        level 0) as their own notes, with every call id and its rounds page, and the note names
+        that page instead of each; each fold's note is stored once. When eight folds pages of one
+        level are named (`FOLDS_FANOUT`), a folds page of the next level names them instead, one
+        line each in fold-note form ("folded R earlier tool rounds of this turn (rounds a to b)
+        into K pages listed in page X", `listed under page` for a page of level 1 or more). Every
+        folded call of the running turn is so reachable from the request: through the index
+        levels (logarithmic in the number of folds pages, base 8), a folds page, the rounds page
+        and its result page. The note's last sentence says that without Contexto's tools only the
+        calls it lists can be run again. The page holds the rounds as sent (a stubbed result as its stub), except
+        that a result of Contexto's own tools, which has no page, is held whole.
+        A note goes on the turn-start message only, never into a results message, where the API
+        wants the `tool_result` blocks first. The turn-start message and the newest round always
+        stay. A carried system message inside a folded round stays in place, and a round with
+        carried content next to its results (nested memory, D46) is not folded. Nor is a round
+        whose user message holds content the user put there: a text block that is not a context
+        block (what is typed after Esc, `[Request interrupted by user ...` included), an image, a
+        document, any block other than a `tool_result`. Such a round stays in place, whole, and
+        folds run on both sides of it; its results may still be stubbed.
+     4. If the request is still over the bound itself: unread results are stubbed, largest
+        first, until it fits.
+     5. If it is still over the bound: `over_bound` as below, and `in_turn_exhausted` (the epoch,
+        the estimate, the bound).
+     Steps 1 to 3 change messages the previous request had, which rewrites the cached prefix and
+     costs the loop its thinking. They run only when together they could free at least
+     `min_turn_room`, and never on the request right after a batch that ran one of them, unless
+     the request's estimate is over `T` (its room would fall under `min_turn_room`) or it would be
+     over the bound. So a turn that cannot be paged further does
+     not pay a rewrite on every request; its recall room can then be under `min_turn_room` until
+     enough has accumulated.
+   - **Stubs.** A stub replaces a `tool_result`'s `content` with one string and keeps
+     `tool_use_id`, `is_error` and the block's other keys. It gives the tool's name, what the call
+     ran or read (the first of `command`, `pattern`, `query`, `url`, `file_path`, `notebook_path`,
+     `path` in the matching `tool_use` input, with `(in <path>)` after a pattern or query, else the
+     input; exact except that a control character becomes a space; past 200 characters the middle
+     is cut out and marked), the size in bytes and lines, how many images it held, where the
+     original is (the page id), and how to get it back: with `contexto_recall` available, recall
+     the page id (an offset continues it; `contexto_search` finds lines), otherwise run the call
+     again. The wording does not depend on the request's tool list (with tool search on,
+     Contexto's tools are deferred and absent from `tools`), so it holds for a conversation
+     without them. A stub and a fold note are pure functions of the CLI's own blocks and the page
+     id, with no estimated number, so they are byte-identical on every request.
+   - **Determinism.** The edits live in the epoch state (which blocks are stubs and their page
+     ids, which messages are folded and into which page, the strip ranges) and are applied on
+     every request, so between batches each forwarded request is a byte-identical extension of
+     the one before. A turn-start rotation that pages a stubbed or folded turn pages it as it was
+     sent (its originals are already in their own pages) and drops its edits; a retained turn
+     keeps them. A resync inside the window (rule 10) at match point `m` drops the stubs from `m`
+     on; a fold is cut back to its whole rounds before `m` (to `m` when a round starts there, else
+     to the assistant message of the round `m` is in), and dropped when none is left, so no call
+     is ever sent without its results nor the other way round; a strip range keeps its end
+     (clipped to the new history's length). A resync in the paged turns drops them all.
+   - **Sizing.** A batch is sized from the pre-send estimate (rule 3) less what its edits took
+     out of the messages, both counted at one ratio; that is the estimate logged as
+     `sent_estimate` and published as the room. Everything that sizes or pages the window
+     afterwards reads the messages as sent: rule 3's estimate, rule 4's window and `k`, rule
+     17's growth, the retained snapshot, and the ratio (a batch ends the "only appends" chain).
+   - **Failures** (rule 14). A store failure during a batch keeps the state from before the
+     attempt and enters degraded mode; the request is sent unpaged. Each later request of the loop
+     over the trigger retries the batch; one that writes its pages leaves degraded mode.
+   - **Events.** One content-free `in_turn_batch` per batch: the epoch, `trigger` (`room`,
+     `bound` when the request was over the bound, `result` when only step 0 ran),
+     `results_stubbed`, `own_results_stubbed`, `unseen_results_stubbed`, `documents_over_bound`, `rounds_folded`,
+     `turns_paged`, `pages`, `estimate_before`, `estimate_after`, `margin` (what the fresh
+     results' dense count added to `estimate_before` for the decision), `first_changed` (the index
+     `p`), `resent_tokens` (the tokens from `p` on, which a cache rewrite re-sends at least), and
+     `messages`. A loop request with strip ranges carries `in_turn_thinking` on its `request` event:
+     counts of thinking blocks `kept_before` the first range, `stripped`, `kept_between` and
+     `kept_after` the last (no content).
+   - **Search.** A hit from an in-turn page is marked with the turn the page was written in,
+     `[paged inside turn N, tool result]` (`folded rounds`, `list of folds`), on the line after its
+     header, from the page alone, so the same in every later turn (the server cannot tell the
+     running turn for certain); the search reply and the tool description say an unmarked hit is
+     older than the conversation in view, while one paged inside a turn can be newer than an earlier
+     copy in view.
+   - **Switch.** `in_turn_paging` (default on), a configuration setting under rule 16's check:
+     `contexto run --no-in-turn-paging`, or `CONTEXTO_IN_TURN_PAGING=0`. Off, a turn that grows
+     past the bound is sent as is, as before D63. Restarting with it off in the middle of a loop
+     that was paging fails rule 16's check (`settings_changed`) and forwards that turn's raw
+     history until the next turn start.
+   - **Not covered.** Codex: the Responses dialect has no in-turn primitives yet, so a Codex tool
+     loop is sent as before. Not confirmed live: whether an enforcing account accepts a request
+     whose earlier tool result was stubbed and whose later in-loop thinking was stripped, and
+     whether later responses of that turn still think (D63 gives the check).
+   Every request forwarded, rotated or not, is checked before the send against the estimate of
+   what is sent: over the bound, it is logged `over_bound` with `source: "estimate"` and
+   `in_tool_loop` (D49). With `in_tool_loop: true` it means in-turn paging had nothing left to page,
+   is off, or is not available for the dialect; in degraded mode it is rule 14's; at a turn start
    it goes with `bound_too_small` or means the rotation's sizing did not hold.
 6. **Head change.** If the CLI's `system` or `tools` change (byte fingerprint), start a new epoch at
    the next turn start; never rewrite them. The cached prefix is lost anyway, so the epoch starts
@@ -734,8 +905,15 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       acceptance. At each new turn start the engine tries the store once; if it is healthy, it leaves
       degraded mode and rotates normally. A persistent `page_conflict` is resolved by moving the
       corrupt stored page to quarantine (never deleted) and paging the turn again from the CLI's
-      current messages, logged `page_quarantined`. Mid tool loop
-      nothing changes, because degraded mode only appends.
+      current messages, logged `page_quarantined`. Mid tool loop the in-turn edits the epoch
+      already holds are applied as before. A store failure during an in-turn batch enters degraded
+      mode the same way, with the state from before the attempt. A loop has no turn start to retry
+      at, and a subagent's turn never ends while it pages, so in degraded mode each later request
+      of the loop whose estimate is over rule 5's trigger retries the batch once: one that writes
+      its pages leaves degraded mode (`degraded_leave`) and is sent paged; a failure stays degraded
+      (logged as a store failure, no second `degraded_enter`). A request under the trigger does not
+      try the store. Measured before this retry: one `OSError` left a subagent's loop at 202,700
+      at bound 60,000.
     - **Terminal step.** A failure inside degraded mode, or a resync (rule 10) that cannot be
       completed without paging while the store is broken, is final for that request: the proxy
       forwards the CLI's original request and logs `fallback_failed`. Each request enters each
@@ -763,8 +941,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     restart rotated from epoch 0, and replaying with epoch state resumed cut rotations from 19 to 9
     and modeled cost by 9.8 to 16.2 percent, depending on the bytes-per-token rate used for the
     changed content. Any user whose proxy restarts mid-session hits the same gap.
-    - **Record.** At every turn start of the main conversation (rotations happen only there)
-      and whenever the engine leaves degraded mode, the engine writes the main conversation's
+    - **Record.** At every turn start of the main conversation, whenever an in-turn batch runs
+      in it (rule 5), and whenever the engine leaves degraded mode, the engine writes the main conversation's
       epoch record, after that request's transform and before it is sent (as for
       `set_retained`; a failed write never blocks the send). The record holds every piece of
       engine state that decides later request bytes or rotation decisions, so a resumed engine
@@ -774,9 +952,15 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       (hashes only), `head_tokens` and the rule it was measured under (`head_rule`, 2 since D61),
       `initial_carried`, `max_turn_growth`, the turn-start counters
       (`last_turn_start_n`, `last_turn_count`, `last_carried_text_count`, `carried_text_streak`),
-      `window_budget`, `window_minimal_count`, and `turn_room_low_epoch`; rule 19's `start_text`,
-      only when it is not empty and `k = 0` (D69); `untrusted`, `true` only for a main conversation
-      the engine did not trust (rule 19, D69); the whole engine
+      `window_budget`, `window_minimal_count`, and `turn_room_low_epoch`; `in_turn`, only when the
+      epoch has in-turn edits (D63: `stubs` as message index, block index and page id, empty for
+      one of Contexto's own results; `folds` as turn-start index, removed index ranges and page
+      id; `strips` as index ranges; `batches`; `rewrote`, the message count of the last request
+      whose batch rewrote the prefix; `lists`, each folds page as turn-start index, folds covered,
+      page id and level, a level absent read as 0; `room_low`; positions and page ids, no
+      conversation text); rule 19's
+      `start_text`, only when it is not empty and `k = 0` (D69); `untrusted`, `true` only for a
+      main conversation the engine did not trust (rule 19, D69); the whole engine
       configuration (every setting, including the recall preamble options and budgets); the
       dialect; the model named by the request; the conversation's identity as the engine keys
       it (a hash); and an anchor: the count `n` of messages in the request that wrote the record
@@ -805,7 +989,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       start did not rotate where the uninterrupted engine did, and none went over the bound; rule
       17's smaller headroom makes such borderlines likelier). A
       resume mid-turn
-      is sent under rule 5 (a logged in-turn over-bound turn if it is over). The newest record
+      applies the recorded in-turn edits, so it extends the last request sent byte for byte, and
+      is then paged under rule 5 like any other request of the loop. The newest record
       written is trusted: if a write and its invalidation both failed, an older record can still
       be found, which is consistent but has a smaller `k`, and the two rules above bound the
       harm. Any failed check, an unreadable or malformed record, or no record starts the epoch
@@ -837,11 +1022,16 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
       `epoch_record_stale`. It does not
       enter degraded mode: the record only saves cache, and losing it costs one rotation.
     - **Not covered.** Subagents and side requests are not recorded (they rotate from 0 after a
-      restart, as today). A record written by an older version, or with a field missing, does
-      not resume, except for the three optional fields, which a record may leave out: `head_rule`
-      (D61), `start_text` and `untrusted` (D69, rule 19). An engine before `untrusted` reads a
-      record that carries it as no record, which costs one rotation's cache. Two proxies serving one session at once are out of scope (the last writer
-      wins).
+      restart, as today; a subagent's in-turn edits go with it, so its next request over the
+      trigger pages again and loses the loop's thinking once more). A record with a required field
+      missing does not resume, except for the four optional fields, which a record may leave out:
+      `head_rule` (D61), `in_turn` (D63), `start_text` and `untrusted` (D69, rule 19). An engine
+      before `untrusted` reads a record that carries it as no record, which costs one rotation's
+      cache. A record written before D63 has no `in_turn_paging` setting and no `in_turn` field: it
+      resumes under either value of the setting, with no in-turn edits. A release before D63 does
+      not resume a record this one wrote (`settings_changed`, or `no_record` when the record has
+      `in_turn`, which its store refuses as an unknown field) and starts from epoch 0. Two proxies
+      serving one session at once are out of scope (the last writer wins).
 
 17. **Headroom.** At a turn start, headroom = max(`headroom_floor`, min(ceil(`headroom_factor` x
     `max_turn_growth`), floor(`headroom_cap` x bound))), with `headroom_cap` = 0.25. At each turn
@@ -859,9 +1049,8 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
     record), so it forgets exactly as the previous engine would have. A record written by an
     engine without these settings does not resume (`settings_changed`). Headroom enters only the
     turn-start rotation decision and the window budget `W` (which an engine also sets once from
-    the measured head after its first response, packet A8); the in-turn over-bound check never
-    reads it, so rule 5 is unchanged: nothing rotates inside a tool loop, and an in-turn request
-    over the bound is logged as before. Measured basis (A33, `docs/research/M2-headroom-outliers.md`,
+    the measured head after its first response, packet A8); the in-turn over-bound check and rule 5's
+    trigger never read it (the trigger uses `headroom_floor`, as the recall room does). Measured basis (A33, `docs/research/M2-headroom-outliers.md`,
     zero-spend replay, reviewed in PR #184): on A32's synthetic seat session with one 149,140-token
     read (92k head, bound 150,000), the unbounded headroom left the session at the minimal window
     for good (34 rotations, 27 minimal windows, `W` as low as -136,986); with this rule, 15
@@ -1053,7 +1242,8 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
 ## Store (normative)
 
 - **Pages:** `pages/<page id>.json`, one per paged-out turn, holding the exact message JSON of that
-  turn (thinking included as received), its turn number, byte size (canonical JSON, summed per
+  turn (thinking included as received; a turn that rule 5 stubbed or folded is paged as it was
+  sent, since each original is already in its own page), its turn number, byte size (canonical JSON, summed per
   content block) and token estimate, and a stub: first 200 characters of the user text, tool names
   used, and at most 20 file paths mentioned. A page with no user text but a system message adds
   the first non-empty line of that text, shown in the index after `[earlier system message]`; a page whose only
@@ -1070,6 +1260,26 @@ usage, which is inferred (INT section 3); acceptance run 1 verifies it.
   already exists is a no-op that keeps the stored page, and only a differing `{turn, messages}`
   under the same id is a conflict. No migration is needed, because no real stores existed before
   this rule.
+- **In-turn pages** (D63, rule 5): a page may carry `kind`. Absent, it is a whole turn, as every
+  page written before D63 is. `result`: one tool call and its result, the `tool_use` block and the
+  `tool_result` block verbatim as they were in the request that paged them, shaped as an
+  assistant message and a user message so rendering, search and the D51 rule read it like a turn.
+  `rounds`: the tool rounds folded out of a running turn, as the CLI sent them, except that a
+  result already stubbed stays a stub (its original is in its result page), so nothing is stored
+  twice; a result of Contexto's own tools, which has no page, is held whole. `folds`: a turn's
+  fold notes since the previous folds page once its note reached its cap (level 0), or the folds
+  pages of the level below (an index). An in-turn page may carry `seq` (the CLI-history index of its
+  first message, so a turn's pages sort in order) and a result page `locator` (its call as a stub
+  names it) and `block` (its result's block index, so parallel results sort in their calls' order);
+  none is in the id, and a page without them sorts by turn and id as before. `kind` is not part of the page id, which still hashes `{turn, messages}` only. An
+  in-turn page carries the turn number its turn gets when it is paged whole and does not count as
+  a paged turn; a side conversation's (a subagent's) carries the main conversation's current
+  turn number, so search's recency prior ranks it as recent. The index lists turn and rounds
+  pages (a rounds page as `[earlier tool rounds]` with its tools and files), not result pages,
+  which would flood its budget and are each named by their stub in the request; `contexto_search`
+  and `contexto_recall` reach all of them. Stores and pages written by earlier releases work
+  unchanged. A release before D63 reads an in-turn page as a whole-turn page: recall and search
+  work, and its index lists result pages too (measured, D63).
 - **Ledger:** the M1 record model (kinds `event`, `decision`, `obligation`, `artifact`,
   `reference`, `closure`; epistemic `verified`, `reported`, `summary`, `hypothesis`; provenance;
   supersession; open obligations) harvested from PR #2 (record model), PR #3 (state derivation),
@@ -1160,7 +1370,7 @@ unknown page, never read. Tools:
   session store (`SessionStore.set_window(window_tokens, bytes_per_token)`, kept in the private
   session metadata). Reason: a 32,000-character recall of numeric log text is about 17,800 tokens,
   more than half of an OpenRig seat's `W` near 33,000, and recall results arrive inside a tool
-  loop where the engine cannot rotate (D17).
+  loop, where the engine can page only in batches (rule 5).
   **Per-turn recall budget.** Recall results stay in the window until the turn ends, so a turn
   that recalls too much would push its own requests over the bound. Rules:
   - The **turn id** is the number of turn-start messages in the CLI's full history, so it is
@@ -2054,7 +2264,8 @@ a no-replayed-thinking baseline.
    it. Either is retrieval of paged-out content; with search returning matching lines (B15),
    answering from the hit is the intended path.
 4. **Cache:** within an epoch, requests read the head and window prefix from cache, except
-   misses explained by the route (report the rate).
+   misses explained by the route (report the rate), and except the request of an in-turn batch
+   (rule 5), which reads the head and at most the prefix before its first changed message.
 5. **Tests:** unit tests for every rewrite rule, the store, and the MCP server; CI green.
 6. Intake runs the acceptance on integrated `main` and records the numbers in `STATUS.md`. Then
    intake cuts v0.1.0 (O5).

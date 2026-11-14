@@ -20,9 +20,10 @@ from contexto.store.memory import MemoryStore
 from contexto.store.pinned import CARRIED_BODY_CHARS, CARRIED_HEADING, READABLE_CARRIED_HEADING
 from contexto.store.recall import DEFAULT_LINES
 from contexto.tokens import estimate_tokens
-from test_project import V0_5_24_PIN_LINE, confirm, main_pin, new_session, repo, v0_5_24_guidance
+from test_project import V0_5_24_EXAMPLE_LINE, V0_5_24_PIN_LINE, confirm, main_pin, new_session, repo, v0_5_24_guidance
 
-OPENING = "\n".join((*DEFAULT_LINES[:2], V0_5_24_PIN_LINE, DEFAULT_LINES[3])) + "\n"  # v0.5.24's
+BASE = estimate_tokens("\n".join(DEFAULT_LINES))  # the preamble's fixed lines: 420 tokens since D63, 380 before
+OPENING = "\n".join((*DEFAULT_LINES[:2], V0_5_24_PIN_LINE, V0_5_24_EXAMPLE_LINE)) + "\n"  # v0.5.24's
 FIRST = "3f2a9c1e" + "0" * 24  # an earlier session, labelled 3f2a9c1e
 
 V0_5_24_PINNED = (
@@ -189,7 +190,7 @@ def test_own_and_carried_records_share_the_one_budget_own_first(tmp_path, home):
     assert [line.split()[1] for line in shown[5:]] == carried[::-1][:len(shown) - 5]  # then carried, newest first
     assert capped[-1] == f"({45 - len(shown)} more pinned items omitted; call contexto_state for the full list)"
     # a budget the own records do not fit in: the carried ones are counted with the rest, and no heading is left over
-    tight = second.pinned_text(480).split("\n")
+    tight = second.pinned_text(BASE + 100).split("\n")  # the fixed lines and room for a few records
     kept = [line for line in tight if line.startswith("- ")]
     assert 0 < len(kept) < 5 and CARRIED_HEADING not in tight
     assert tight[-1] == f"({45 - len(kept)} more pinned items omitted; call contexto_state for the full list)"

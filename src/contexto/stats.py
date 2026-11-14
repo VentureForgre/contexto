@@ -122,6 +122,7 @@ NOT_FAULT_EVENTS = frozenset({
     "stale_temp_removed", "estimate_error", "pdf_allowance", "pdf_pages_uncertain", "cli_version_untested",
     "proxy_stop_incomplete", "carried_text_growing", "sizing_not_restored", "window_budget_warning",
     "hint_mismatch", "start_text", "start_text_changed", "project_memory", "main_record_unmatched",
+    "in_turn_batch", "in_turn_exhausted",
     # contexto serve: its session records, then the events it writes to serve.log, which stats never reads.
     "serve_open", "serve_close",
     "serve_start", "serve_stop", "serve_error", "session_open", "session_open_failed", "session_close",

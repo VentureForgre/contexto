@@ -29,7 +29,7 @@ from xml.sax.saxutils import escape
 Events = list[tuple[float, str]]
 
 COLS = 90
-ROWS = 33  # the recording is 37 rows: the last frame runs from the `contexto: session` line to the last reply
+ROWS = 35  # the recording is 39 rows: the last frame runs from the `contexto: session` line to the last reply
 FONT_SIZE = 14
 CHAR_W = 8.4  # 0.6 em, the advance of the common monospace fonts; textLength pins it for the others
 LINE_H = 19
