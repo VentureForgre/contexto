@@ -51,6 +51,8 @@ Some tests skip when something is missing, and pytest prints the reason:
 - `claude` not on `PATH`: the tests against the real Claude Code MCP client and the acceptance
   driver's launch tests.
 - `codex` not on `PATH`: the Codex acceptance and live tests.
+- `claude-agent-sdk` not installed: the Agent SDK recipe test of `docs/serve.md`. Run it with
+  `uv run --with pytest --with claude-agent-sdk pytest tests/test_serve_recipes.py`.
 - Python below 3.14: the zstd request-body test.
 - A shallow clone: one research test that reads git history.
 - Running as root: two file-permission tests.
