@@ -3575,11 +3575,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
     Messages API requests built from the script alone, scripted replies and file reads,
     `tool_choice: none`, one request per probe turn carrying earlier probe turns with its own
     answers, `not_run` with a reason when it does not fit); `plain` (the same headless Claude Code
-    with no Contexto, its auto-compact window set so that compaction fires near the bound, at bound
-    + 33,000; at its defaults it would compact near 967,000 tokens and not at all in this session).
-    Reason: `full` is the earlier baseline, so results stay comparable with runs #3 and #4, and
-    `plain` is the comparison users care about, which had never been run. Every difference is
-    listed in the manifest's `arm_differences`. Both Claude Code arms run with
+    with no Contexto, its auto-compact window set so that compaction fires near the bound, at
+    bound + 33,000; at its defaults it would compact near 967,000 tokens and not at all in this
+    session). Reason: `full` is the earlier baseline, so results stay comparable with runs #3 and
+    #4, and `plain` is the comparison users care about, which had never been run. Every difference
+    is listed in the manifest's `arm_differences`. Both Claude Code arms run with
     `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`; on 2.1.322 it removes `run_in_background` and about
     771 characters from the Agent and Bash tool definitions, in both arms alike. It does not cover
     the Monitor tool or MCP background tasks; a `result` from either, or any `result` that answers
@@ -3645,60 +3645,59 @@ the owner's delegation. Open decisions are listed at the end with the options an
     (`src/contexto/bench/data/prices.json`, platform.claude.com pricing page, read 2026-11-12),
     applied per request. Reason: fewer tokens is not always less money (claude-haiku-5-5's price
     steps up on a prompt over 100,000 tokens, and cache reads cost a tenth or less of a write), so
-    each arm is priced as billed, request by request. USD per million tokens, input / 5-minute
-    write / 1-hour write / cache read / output: claude-haiku-5-5 0.10 / 0.125 / 0.20 / 0.01 / 0.50
-    up to 100,000 input tokens and 0.50 / 0.625 / 1.00 / 0.05 / 2.50 above (applied to the whole
-    request, output included: a reading of the page, stated as such and held as data);
-    claude-sonnet-5-5 2.00 / 2.50 / 4.00 / 0.10 / 10.00; claude-opus-5-5 4.00 / 5.00 / 8.00 / 0.20 /
-    20.00; claude-fable-5-2 8.00 / 10.00 / 16.00 / 0.20 / 40.00. Unreadable usage gives a cost
-    range; its upper bound also counts, at their reservations and the model's highest rate, the
-    requests with no record: unanswered, torn and in flight at a kill (`results.json`: `no_record`
-    per arm and in `all_requests`, inside every `cost_upper`; #286). Retried units: every attempt's tokens and cost count; accuracy uses the completed
-    attempt.
+    each arm is priced as billed, request by request. USD per million tokens, input / 5-minute write
+    / 1-hour write / cache read / output: claude-haiku-5-5 0.10 / 0.125 / 0.20 / 0.01 / 0.50 up to
+    100,000 input tokens and 0.50 / 0.625 / 1.00 / 0.05 / 2.50 above (applied to the whole request,
+    output included: a reading of the page, stated as such and held as data); claude-sonnet-5-5 2.00
+    / 2.50 / 4.00 / 0.10 / 10.00; claude-opus-5-5 4.00 / 5.00 / 8.00 / 0.20 / 20.00;
+    claude-fable-5-2 8.00 / 10.00 / 16.00 / 0.20 / 40.00. Unreadable usage gives a cost range; its
+    upper bound also counts, at their reservations and the model's highest rate, the requests with
+    no record: unanswered, torn and in flight at a kill (`results.json`: `no_record` per arm and in
+    `all_requests`, inside every `cost_upper`; #286). Retried units: every attempt's tokens and cost
+    count; accuracy uses the completed attempt.
   - **Replay** (`contexto bench --replay`, keyless). Reason: anyone can check the bound and search
     reach with no key and no spend, and a change to the proxy that moves a measurement fails it. A
-    pinned 11,208-byte trace whose turn texts are
-    regenerated from the seed and checked against pinned hashes; the real proxy over HTTP with a
-    synthetic Claude Code-shaped client and a fake upstream that checks every request against the
-    Messages API's structural rules; every environment variable the package reads held at its
-    default; the store's real search for each planted fact. Pinned session (seed 20261016, `v2`,
-    bound 150,000, 48 content and 8 probe turns, 952,971 estimated tokens of history, 6.35 times the
-    bound, 956,104 with the probe turns; synthetic head 21,377): 138 requests, the first 44,373
-    estimated tokens and the largest 116,067, 0 over the bound by both counts, 14 rotations, 46
-    pages, no failure event, no compaction marker. Search reach under mechanical queries, counted
-    with the store's strict search (`SessionStore.search`), not the search tool's reply: 43 of 72 by
-    the fixed rule, all 43 in the top 3 (54 with facts still in view), 55 of 72 by the best query
-    from the question's own words (whole-word matches, top 3); 59 paged; `paraphrase` 0 and 6,
-    `concluded` 0 and 0, `toolloop` 0 and 6, every `d27` class equal in both columns (`chain`
-    paged 21, found 23; `multihop` paged 6, found 6). Since D65 the tool's fallback also answers 1 of the
-    18 queries the strict rule misses (`q_r_02`, `paraphrase`): its reply shows the plant on the
-    second of the three pages it shows in detail, beside two decoy lines. Modelled, not run: full
-    context's last request 977,481 estimated tokens; plain Claude Code compacting 8 times with a
-    largest request of 140,512 (summary 7,920 tokens from
-    `docs/research/M0-proxy-measurements.md`; what survives a compaction is assumed, erring toward
-    plain Claude Code). A replay cannot show answer accuracy, cache reads, real token counts, or
-    what a real CLI or model does, and says so.
+    pinned 11,208-byte trace whose turn texts are regenerated from the seed and checked against
+    pinned hashes; the real proxy over HTTP with a synthetic Claude Code-shaped client and a fake
+    upstream that checks every request against the Messages API's structural rules; every
+    environment variable the package reads held at its default; the store's real search for each
+    planted fact. Pinned session (seed 20261016, `v2`, bound 150,000, 48 content and 8 probe turns,
+    952,971 estimated tokens of history, 6.35 times the bound, 956,104 with the probe turns;
+    synthetic head 21,377): 138 requests, the first 44,373 estimated tokens and the largest 116,067,
+    0 over the bound by both counts, 14 rotations, 46 pages, no failure event, no compaction marker.
+    Search reach under mechanical queries, counted with the store's strict search
+    (`SessionStore.search`), not the search tool's reply: 43 of 72 by the fixed rule, all 43 in the
+    top 3 (54 with facts still in view), 55 of 72 by the best query from the question's own words
+    (whole-word matches, top 3); 59 paged; `paraphrase` 0 and 6, `concluded` 0 and 0, `toolloop` 0
+    and 6, every `d27` class equal in both columns (`chain` paged 21, found 23; `multihop` paged 6,
+    found 6). Since D65 the tool's fallback also answers 1 of the 18 queries the strict rule misses
+    (`q_r_02`, `paraphrase`): its reply shows the plant on the second of the three pages it shows in
+    detail, beside two decoy lines. Modelled, not run: full context's last request 977,481 estimated
+    tokens; plain Claude Code compacting 8 times with a largest request of 140,512 (summary 7,920
+    tokens from `docs/research/M0-proxy-measurements.md`; what survives a compaction is assumed,
+    erring toward plain Claude Code). A replay cannot show answer accuracy, cache reads, real token
+    counts, or what a real CLI or model does, and says so.
   - **The replay's head carries fixed synthetic tool text** (#289, 93b40c1d). D69 (#279) lengthened
     the `contexto_pin` tool description by 213 bytes (+71 estimated tokens on every request) and the
     preamble's pin rule by 100 bytes (+34 estimated tokens a request from the first rotation, +56
-    from the third, where the fake upstream prices the preamble as log text); together they moved each rotation from turn 33 on one turn earlier, so
-    turn 46 was no longer paged before the probes, and the pinned replay failed on `main`. Decision:
-    the synthetic head sends Contexto's five tools under their real names with fixed, plainly
-    synthetic descriptions and schemas (`contexto.bench.replay.client.CONTEXTO_TOOLS`, 3,290 bytes
-    of JSON against 3,291 for the shipped tools, real parameter names), and the trace was recorded
-    again. The preamble, page index, pinned state and the search server's replies stay measured.
-    Reason: the proxy reads the tool list only by name (`contexto.toolcheck`), as a hash (the head
-    fingerprint) and as a size, never a description's words, so rewording a tool must not move a
-    pinned value; a change to what the proxy itself injects still must, which is what the trace is
-    for. Moved by the re-record: head 21,306 to 21,377, largest 116,306 to 116,067, pages 47 to
-    46, paged 66 to 59, strict reach 48 to 43, best query 60 to 55; covered stays 54 and the bound
-    holds.
-  - **Charts**: standard-library SVG, the same bytes for the same input: accuracy by arm with
-    Wilson intervals, and request size against history length (synthetic and modelled lines
-    labelled so). The replay's chart carries a note that its Contexto drops are rotations (old turns
-    moved to the store, nothing summarised) and its plain drops modelled compactions, with the run's
-    three peaks (#286). Reason: the package has no runtime dependency and keeps none, and the same bytes
-    for the same input let a reader check a published chart by making it again.
+    from the third, where the fake upstream prices the preamble as log text); together they moved
+    each rotation from turn 33 on one turn earlier, so turn 46 was no longer paged before the
+    probes, and the pinned replay failed on `main`. Decision: the synthetic head sends Contexto's
+    five tools under their real names with fixed, plainly synthetic descriptions and schemas
+    (`contexto.bench.replay.client.CONTEXTO_TOOLS`, 3,290 bytes of JSON against 3,291 for the
+    shipped tools, real parameter names), and the trace was recorded again. The preamble, page
+    index, pinned state and the search server's replies stay measured. Reason: the proxy reads the
+    tool list only by name (`contexto.toolcheck`), as a hash (the head fingerprint) and as a size,
+    never a description's words, so rewording a tool must not move a pinned value; a change to what
+    the proxy itself injects still must, which is what the trace is for. Moved by the re-record:
+    head 21,306 to 21,377, largest 116,306 to 116,067, pages 47 to 46, paged 66 to 59, strict reach
+    48 to 43, best query 60 to 55; covered stays 54 and the bound holds.
+  - **Charts**: standard-library SVG, the same bytes for the same input: accuracy by arm with Wilson
+    intervals, and request size against history length (synthetic and modelled lines labelled so).
+    The replay's chart carries a note that its Contexto drops are rotations (old turns moved to the
+    store, nothing summarised) and its plain drops modelled compactions, with the run's three peaks
+    (#286). Reason: the package has no runtime dependency and keeps none, and the same bytes for the
+    same input let a reader check a published chart by making it again.
   - **Scale harness** (#262): `spikes/m2/scale/proxy` had stopped running at v0.5.24 (it
     instrumented `SessionStore._pages`, gone since the store split, and seven more drifts). It is
     repaired, has drift tests, and a 200-turn run (634 requests, 913,084 tokens of history, six
@@ -3733,23 +3732,23 @@ the owner's delegation. Open decisions are listed at the end with the options an
     past the six-seed floor.
   - **Departures from the brief.** (1) The `d27` script's JSON digest changed, though every turn
     text and probe field is the spike's: each probe's stored `overlap` annotation now follows the
-    one overlap rule. (2) Scoring differs from the spike's in four ways, in every arm: an
-    unanswered probe is never correct (the spike scored an unanswered `set` probe whose answer is
-    `none` as correct); more answer lines written in markdown are read (bold or backticked ids,
-    numbered and `+` items; the spike already read plain `-` and `*` items); and a line in a fenced
-    code block yields to an answer for the same id outside any fence (#273); and a line whose
-    answer is the probe's own question, word for word, is the reply restating it and not an answer
-    (#286). A blockquote line stays unread, as in the spike. The brief named only the first. (3) Both Claude Code arms run with
-    `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: a background subagent's second `result` desynchronised
-    scoring, 0 of 72 answers counted while the unit said complete. Any extra result now stops the
-    unit as `desync`. (4) Merge rule: the ruleset does not require branches to be up to date
-    (`strict=false`) and CI tests each pull request merged onto `main`, so a `main` commit that
-    touched none of a pull request's files and merged cleanly did not start a new review round; a
-    merge of `main` into a pull request branch got two short merge-check verdicts. That rule let
-    two pull requests that each passed alone turn `main` red together: #279 (D69) changed text the
-    proxy sends and #269 pinned it, and `main` failed 8 replay tests until #289 merged. Requiring
-    branches to be up to date before merging, or a merge queue, would have caught it; that is the
-    owner's call, not taken here.
+    one overlap rule. (2) Scoring differs from the spike's in four ways, in every arm: an unanswered
+    probe is never correct (the spike scored an unanswered `set` probe whose answer is `none` as
+    correct); more answer lines written in markdown are read (bold or backticked ids, numbered and
+    `+` items; the spike already read plain `-` and `*` items); and a line in a fenced code block
+    yields to an answer for the same id outside any fence (#273); and a line whose answer is the
+    probe's own question, word for word, is the reply restating it and not an answer (#286). A
+    blockquote line stays unread, as in the spike. The brief named only the first. (3) Both Claude
+    Code arms run with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: a background subagent's second
+    `result` desynchronised scoring, 0 of 72 answers counted while the unit said complete. Any extra
+    result now stops the unit as `desync`. (4) Merge rule: the ruleset does not require branches to
+    be up to date (`strict=false`) and CI tests each pull request merged onto `main`, so a `main`
+    commit that touched none of a pull request's files and merged cleanly did not start a new review
+    round; a merge of `main` into a pull request branch got two short merge-check verdicts. That
+    rule let two pull requests that each passed alone turn `main` red together: #279 (D69) changed
+    text the proxy sends and #269 pinned it, and `main` failed 8 replay tests until #289 merged.
+    Requiring branches to be up to date before merging, or a merge queue, would have caught it; that
+    is the owner's call, not taken here.
   - **Product findings, open (not fixed in D66).** (a) On Linux each proxy response on a kept-open
     connection waits about 41 ms for a delayed ACK, because the proxy leaves Nagle on and writes
     headers and chunks separately: CI measured 41.3 to 41.5 ms for a 104-byte request, and 0.6 to
