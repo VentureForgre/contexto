@@ -667,7 +667,9 @@ def test_fifty_earlier_sessions_time(tmp_path, clean_env, monkeypatch):
                         for p in (home / "sessions" / session_id("fifty", n) / "pages").iterdir())
     shown, cut = len(carried_lines(seen["text"])), omitted(seen["text"])
     assert shown + cut == len(project.carried()) and estimate_tokens(seen["text"]) <= CONFIG.pin_budget
-    assert seen["line"].startswith(f"contexto: project memory: {len(project.carried())} records carried from "
+    # The start line counts what the pin budget lets the start text show, and what it leaves out.
+    assert seen["line"].startswith(f"contexto: project memory: {shown} of {len(project.carried())} records carried "
+                                   f"({cut} did not fit the pin budget; contexto state lists them all) from "
                                    f"{EARLIER} of {EARLIER} earlier sessions in ")
     show("fifty_sessions", {
         "earlier_sessions": EARLIER, "records_each": RECORDS, "pages_each": PAGES,
