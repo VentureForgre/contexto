@@ -856,6 +856,61 @@ def test_score_returns_one_row_per_probe(v2):
     assert script.score(v2.probes, _answers(v2.probes))["correct"] == 72
 
 
+# (line, what is recorded as given, what it normalizes to); None: not an answer line.
+ANSWER_LINES = [
+    # The forms the spike's parser reads, unchanged.
+    ("q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("q_a_001 = nickel-1771", "nickel-1771", "nickel-1771"),
+    ("  q_a_001:nickel-1771  ", "nickel-1771", "nickel-1771"),
+    ("- q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("* q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("-q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("q_a_001: `nickel-1771`.", "`nickel-1771`.", "nickel-1771"),
+    ("q_a_001:", "", ""),
+    # Markdown a Claude Code arm writes (its system prompt asks for GitHub-flavoured markdown).
+    ("**q_a_001**: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("**q_a_001:** nickel-1771", "** nickel-1771", "nickel-1771"),
+    ("__q_a_001__: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("`q_a_001`: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("- `q_a_001: nickel-1771`", "nickel-1771`", "nickel-1771"),
+    ("- **q_a_001**: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("+ q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("1. q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("12) **q_a_001**: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("> q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("> - q_a_001: nickel-1771", "nickel-1771", "nickel-1771"),
+    ("q_a_001: **nickel-1771**", "**nickel-1771**", "nickel-1771"),
+    ("q_a_001: _nickel-1771_", "_nickel-1771_", "nickel-1771"),
+    # Not answer lines.
+    ("The answer to q_a_001: nickel-1771", None, None),
+    ("q_a_001 is nickel-1771", None, None),
+    ("Q_A_001: nickel-1771", None, None),
+    ("1.5 q_a_001: nickel-1771", None, None),
+]
+
+
+@pytest.mark.parametrize(("line", "given", "normalized"), ANSWER_LINES)
+def test_answer_lines_in_markdown_are_read(line, given, normalized):
+    """The second deliberate difference from the spike's scoring (see ``script.score``): an answer line
+    may carry a blockquote, a list marker, a number, and emphasis or code around the id or the answer."""
+    from contexto.bench import d27
+
+    parsed = d27.parse_answers(f"preamble\n{line}\nclosing words")
+    assert parsed == ({} if given is None else {"q_a_001": given})
+    if given is not None:
+        assert d27.normalize(given) == normalized
+
+
+def test_markdown_answers_are_scored_and_the_last_line_for_an_id_wins(v2):
+    probe = next(p for p in v2.probes if p.kind == "value")
+    for line, given, _normalized in ANSWER_LINES:
+        text = line.replace("q_a_001", probe.id).replace("nickel-1771", probe.answer)
+        expected = 0 if not given else 1
+        assert script.score([probe], text)["correct"] == expected, line
+    assert script.score([probe], f"**{probe.id}**: {probe.answer}\n1. {probe.id}: wrong-0")["correct"] == 0
+    assert script.score([probe], f"{probe.id}: wrong-0\n> `{probe.id}`: {probe.answer}")["correct"] == 1
+
+
 def test_score_never_counts_a_missing_answer_correct(spike):
     # The one deliberate difference from the spike's scoring: seed 11 at the small size has a set
     # probe whose expected answer is "none", which the spike scores correct when nothing is answered.

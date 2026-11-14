@@ -6,7 +6,8 @@ This is a port, kept line for line where the random-number call order depends on
 - ``spikes/m2/acceptance/run.py::build_script`` and ``spikes/m2/acceptance/budget.py::turn_tokens``,
 - ``spikes/m0/fidelity/harder.py`` (``_Pools``, ``_group``, ``_merge``),
 - ``spikes/m0/fidelity/session.py::_filler_text`` and ``spikes/m0/fidelity/l2d.py::_WORDS``,
-- ``spikes/m0/fidelity/scoring.py`` (``normalize``, ``parse_answers``).
+- ``spikes/m0/fidelity/scoring.py`` (``normalize``, ``parse_answers``), which also read answer lines
+  written in markdown (``contexto.bench.script.score`` lists the differences from the spike's scoring).
 
 The spike's probe mix is fixed here (``CHAIN_HEAVY`` in the spike): its 2-hop and reasoning branches
 are not ported because that mix never takes them. For any seed, bound and turn size the turns,
@@ -351,22 +352,33 @@ def build_script(seed: int, turns: int, turn_bytes: int, bound: int) -> tuple[Sc
         n += 1
 
 
-# Scoring: exact match after normalization, as spikes/m0/fidelity/scoring.py.
+# Scoring: exact match after normalization, as spikes/m0/fidelity/scoring.py, except that an answer
+# line may be written in markdown (contexto.bench.script.score names this difference).
 
-_TRIM = " \t\r\n\"'`.,;:!"
-_ANSWER_LINE = re.compile(r"^\s*(q_[a-z0-9_]+)\s*[:=]\s*(.*?)\s*$")
+_TRIM = " \t\r\n\"'`*_.,;:!"  # the spike's, plus "*" and "_": markdown emphasis; no generated answer has either
+# After the leading "-", "*" and spaces are dropped (as the spike does): any blockquote marks, then a list
+# marker ("-", "*", "+", or a number of up to three digits with "." or ")"), then emphasis or code marks
+# ("*", "_", "`") on both sides of the id. The id ends in a letter or digit, so its own underscores stay.
+_ANSWER_LINE = re.compile(r"^(?:>\s*)*(?:(?:[-*+]|\d{1,3}[.)])\s+)?[*_`]*(q_[a-z0-9_]*[a-z0-9])[*_`]*"
+                          r"\s*[:=]\s*(.*?)\s*$")
 
 
 def normalize(text: str | None) -> str:
-    """Case folded, trimmed of whitespace, quotes, backticks and trailing punctuation, with inner
-    whitespace collapsed. Nothing else is forgiven."""
+    """Case folded, trimmed of whitespace, quotes, backticks, ``*`` and ``_`` (markdown emphasis) and
+    trailing punctuation, with inner whitespace collapsed. Nothing else is forgiven."""
     if text is None:
         return ""
     return " ".join(text.strip(_TRIM).casefold().split()).strip(_TRIM)
 
 
 def parse_answers(text: str) -> dict[str, str]:
-    """Parse ``q_<id>: <answer>`` lines. The last line for an id wins; other lines are ignored."""
+    """Parse ``q_<id>: <answer>`` lines (``=`` also separates). The last line for an id wins; other
+    lines are ignored. A line may be markdown: in a blockquote, a list item or a numbered item, with
+    ``**``, ``__`` or backticks around the id or the separator, so ``**q_a_01**: x``, ``1. q_a_01: x``
+    and ``> `q_a_01`: x`` all give ``x``. The answer is kept as written; ``normalize`` trims the marks
+    around it (``**q_a_01:** x`` gives ``** x``, and ``- `q_a_01: x``` gives ``x` ``; both normalize to
+    ``x``). The spike read only ``q_<id>: x`` after leading ``-``, ``*`` and spaces; what it read is
+    read the same."""
     answers: dict[str, str] = {}
     for line in text.splitlines():
         match = _ANSWER_LINE.match(line.strip().lstrip("-* "))
