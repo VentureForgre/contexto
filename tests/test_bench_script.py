@@ -680,11 +680,15 @@ def test_words_tokenisation():
 def test_generator_words_are_the_filler_and_fixed_turn_words():
     texts = [d27.LOG_HEAD, d27.LOG_TAIL, d27.INSTRUCTIONS, *d27.PROBE_HEADER, script.TOOLLOOP_HEAD,
              script.DECISION_HEAD, *(script.DECISION_RULE.format(rule=r) for r in ("lowest", "highest")),
-             *script.DECISION_ASK, d27.filler_text(random.Random(0), 200, "s00")]
+             script.DECISION_ASK[0], script.DECISION_ASK[1].format(label="DX-1"),  # a turn holds a label, not "{label}"
+             d27.filler_text(random.Random(0), 200, "s00")]
     found = {w for t in texts for w in re.findall(r"[a-z]+", t.casefold()) if len(w) >= 3}
     names = {w for name in d27.Pools(random.Random(0)).services for w in name.split("-")} | set(d27.WORDS)
     assert GENERATOR_WORDS == found - names
     assert "search" in found & names  # the one collision: a service root and a word of the tool-loop head
+    assert "label" not in GENERATOR_WORDS  # no turn holds the placeholder's word
+    # Subject words other than service names stay: "shard" is on every filler line.
+    assert {"shard", "log", "name"} <= GENERATOR_WORDS
 
 
 def test_lexical_overlap_counts_distinct_shared_words():

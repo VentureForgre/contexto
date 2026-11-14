@@ -34,14 +34,15 @@ _WORD = re.compile(r"[a-z0-9]+")
 MIN_WORD = 3
 # The words of the generator's filler lines and of its fixed turn texts (the log head and tail, the
 # opening instructions, the probe-turn header, the tool-loop turn's head and the decision turn's
-# fixed lines), 3 or more letters long. They are on every page or every turn of a kind, so a word
-# search learns nothing from them. Words that are also part of a subject's name are left out of this
-# set ("search" is a service root and a word of the tool-loop head). tests/test_bench_script.py
-# derives this set from the generator's texts and checks it is equal.
+# fixed lines, with its label filled in), 3 or more letters long. They are on every page or every
+# turn of a kind, so a word search learns nothing from them. Words that are also part of a service
+# name are left out of this set ("search" is a service root and a word of the tool-loop head); other
+# subject words stay ("shard", "log" and "name" are also words of attribute keys).
+# tests/test_bench_script.py derives this set from the generator's texts and checks it is equal.
 GENERATOR_WORDS = frozenset((
     "about", "all", "and", "answer", "any", "are", "below", "commas", "contain", "conversation", "current",
     "debug", "decision", "directory", "does", "each", "else", "end", "exactly", "file", "files", "for", "form",
-    "give", "has", "have", "highest", "ids", "info", "instead", "its", "keep", "label", "latency", "level",
+    "give", "has", "have", "highest", "ids", "info", "instead", "its", "keep", "latency", "level",
     "line", "list", "listed", "log", "long", "lowest", "matters", "message", "name", "next", "not", "nothing",
     "number", "one", "only", "order", "part", "pasted", "pastes", "paths", "per", "point", "question",
     "questions", "read", "relative", "reply", "rule", "say", "separated", "session", "shard", "skip", "take",
