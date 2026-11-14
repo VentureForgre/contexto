@@ -7,16 +7,19 @@ pull request replaces the body, and the harness then checks every stub it finds 
 
 What the harness holds a stub to:
 
-- It names the calls it stands for. A ``StubRef`` with no ``call_ids`` fails.
-- For each named call, the page ``page_id`` holds that call's original result byte for byte: a
-  ``tool_result`` block (Responses: an ``*_output`` item) with that call id whose content is the
-  original's, compared as canonical JSON.
-- Or the page holds a stub for that call in turn (a page of several rounds keeps a result that was
-  already stubbed as its stub), and following it leads to a page that holds the original. The
-  harness follows the chain by calling ``find_stubs`` on the page's messages, at most
-  ``harness.STUB_DEPTH`` pages deep.
+- It names the calls it stands for, or, with empty ``call_ids``, a page as a whole (a fold note naming
+  a rounds or folds page). A reference to a page as a whole covers every call reachable from that
+  page; one whose page reaches no delivered result fails.
+- A call is reachable from a page when the page holds that call's original result byte for byte (a
+  ``tool_result`` block, Responses: an ``*_output`` item, with that call id whose content is the
+  original's, compared as canonical JSON), or holds a stub or fold reference whose page leads to it.
+  A page of several rounds keeps a result that was already stubbed as its stub. The harness follows
+  the chain by calling ``find_stubs`` on the page's messages, at most ``harness.STUB_DEPTH`` (8)
+  pages deep. For each call a reference names, that call has to be reachable from its page.
 - ``page_id`` may be None only for the result of one of Contexto's own search, recall and state
   calls (``contexto.store.render.own_call_ids``), which the engine may stub without storing a copy.
+
+``targets.storage`` says when a result left out of a request is accounted for.
 """
 
 from __future__ import annotations
@@ -29,7 +32,8 @@ class StubRef(NamedTuple):
     # allowed only when every call in ``call_ids`` is one of Contexto's own search, recall or state calls.
     page_id: str | None
     # The tool calls whose results the stub stands for: Messages ``tool_use`` ids, Responses
-    # ``call_id``s. Never empty.
+    # ``call_id``s. Empty: the reference names ``page_id`` as a whole and covers every call reachable
+    # from it (a fold note naming a rounds or folds page).
     call_ids: tuple[str, ...]
 
 

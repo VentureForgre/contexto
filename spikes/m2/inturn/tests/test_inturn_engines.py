@@ -15,11 +15,22 @@ defects makes it wrong in one way, and the target written for that way fails it:
   (reviewer A's ``no_stub_text``);
 - ``show_once``: every 4th request pages every result it is not the first to carry (reviewer A);
 - ``in_place``: the CLI's own oldest whole result is cleared in place for the send and restored after
-  (reviewer A's ``InPlace``).
+  (reviewer A's ``InPlace``);
+- ``inflate``: once per loop, a second rewrite right after a batch, with an estimate of 999,999 published
+  for it (reviewer A's inflating engine);
+- ``silent_older``: from each turn start on, every earlier turn's result is ``[cleared]``, its rounds paged,
+  its calls and prompt kept (reviewer A's ``SilentOlder``);
+- ``drop_older_stubs``: from each turn start on, an earlier turn's stub becomes ``[result removed]``
+  (reviewer B);
+- ``drop_older_rounds``: from each turn start on, the rounds of earlier turns still in view are removed
+  and paged, and nothing names the page.
 
 Two more are the toy with other batch lines: reviewer A's ``trickle`` (100,000 down to 75,000) and
 reviewer B's (112,500 down to 87,500). Both page in batches of a sixth of the bound or so and re-send
 more than the loop's own tokens.
+
+Two are right and pass: ``noted_older_rounds`` (``drop_older_rounds`` with a line naming the page), and
+the toy with every ``StubRef`` naming its page as a whole (empty ``call_ids``).
 """
 
 from __future__ import annotations
@@ -104,6 +115,8 @@ WRONG = [
 ]
 TRICKLE = (100_000, 75_000)  # reviewer A
 NARROW = (112_500, 87_500)  # reviewer B
+HIGHER = (110_000, 70_000)  # a batch leaves the request over the pressure line, so a second one is held to the in-a-row rule
+OLDER = [("silent_older", 51), ("drop_older_stubs", 31), ("drop_older_rounds", 51)]  # requests failed, quick build
 
 
 @pytest.mark.parametrize(("defect", "rules"), WRONG)
@@ -135,6 +148,48 @@ def test_a_pager_that_batches_a_sixth_of_the_bound_at_a_time_re_sends_more_than_
     assert m["resent"] > 4 * reference["resent"]
 
 
+@pytest.mark.parametrize(("defect", "requests"), OLDER)
+def test_an_engine_that_takes_earlier_turns_results_out_of_view_without_naming_them_fails(defect, requests):
+    """Rule 3 for earlier turns. ``silent_older`` and ``drop_older_stubs`` keep the calls in view, so no
+    exemption applies; ``drop_older_rounds`` removes the calls but keeps the turns' prompts, and no page
+    id in the request reaches the rounds. Each pages what it takes out, so no result is lost."""
+    run = toy_run("multiturn", "claude", defect)
+    assert targets.unmet_by_rule(run) == {"storage": [
+        f"{requests} requests left out a tool result that no stub, fold note or page id in that request accounts for "
+        f"(up to {46 if defect != 'drop_older_stubs' else 32} results at once)"]}
+    assert run.metrics()["requests_with_a_lost_result"] == 0 and run.originals["lost"] == 0
+
+
+def test_rounds_of_an_earlier_turn_may_leave_when_a_page_id_in_the_request_reaches_them():
+    """``noted_older_rounds``: the same rounds removed, with a line naming their page in the request."""
+    for quick in (True, False):
+        run = toy_run("multiturn", "claude", "noted_older_rounds", quick=quick)
+        assert targets.unmet_by_rule(run) == {}
+        assert run.originals["stored"] > run.originals["in_view"] > 0
+
+
+def test_the_v0_5_24_turn_start_rotation_is_accounted_for_by_its_turn_pages():
+    """At v0.5.24 the turn start after ``multiturn``'s loop pages every earlier turn whole, prompt
+    included: rule 3 holds those results to the storage check only, and they are all in pages."""
+    run = harness.cached("multiturn", "claude")
+    assert run.metrics()["requests_with_an_unnamed_result"] == 0 and run.originals["lost"] == 0
+    assert [s.turn for s in run.sent if s.lost] == []
+
+
+def test_an_engine_that_inflates_its_estimate_to_rewrite_twice_in_a_row_fails():
+    """Reviewer A's L1: the second rewrite publishes an estimate of 999,999; it counts as 1.1 x the
+    upstream's count of the request, which leaves it under the line."""
+    for quick in (True, False):
+        assert targets.unmet_by_rule(toy_run("loop120", "claude", lines=HIGHER, quick=quick)) == {}
+        run = toy_run("loop120", "claude", "inflate", lines=HIGHER, quick=quick)
+        assert targets.unmet_by_rule(run) == {"cache": [
+            "main: 1 requests rewrote the prefix right after a rewrite, though the request would have kept "
+            "min_turn_room without it"]}
+        (pair,) = [(a, b) for a, b in zip(run.sent, run.sent[1:]) if a.rewrite and b.rewrite]
+        assert pair[1].estimate_before == toy.INFLATED
+        assert targets.pressure_line(run) < pair[0].tokens + pair[1].appended_tokens < 100_000
+
+
 def test_an_engine_that_edits_the_clis_objects_for_the_send_and_restores_them_fails():
     """Reviewer A's ``InPlace``: the model saw a cleared result, and every check after the usage reads
     the object restored. ``check_wire``, which the target tests run with, digests the CLI's history
@@ -157,10 +212,10 @@ def test_a_subagent_without_a_usable_side_room_fails(defect, rules):
 def test_what_each_wrong_engine_is_told():
     said = {defect: targets.unmet_by_rule(toy_run("loop120", "claude", defect)) for defect, _ in WRONG}
     assert said["junk_page"]["storage"][0].endswith("stubs do not lead to their originals, byte for byte")
-    assert "that no stub or fold note in that request names" in said["junk_page"]["storage"][1]
+    assert "that no stub, fold note or page id in that request accounts for" in said["junk_page"]["storage"][1]
     assert "neither whole in the request nor byte for byte in a store page" in said["junk_page"]["storage"][2]
-    assert said["no_stub_text"]["storage"] == ["22 requests left out a tool result that no stub or fold note in that "
-                                               "request names (up to 22 results at once)"]
+    assert said["no_stub_text"]["storage"] == ["22 requests left out a tool result that no stub, fold note or page id "
+                                               "in that request accounts for (up to 22 results at once)"]
     assert said["show_once"]["cache"] == ["main: 8 loop requests rewrote the prefix though without the rewrite they "
                                           "came to at most 52,251 tokens, not over 67,800"]
     assert said["lying_room"]["room"] == [
@@ -186,14 +241,22 @@ def test_stubbing_on_arrival_is_caught_even_where_some_results_may_be():
     assert by_rule["seen_first"][0].startswith("12 results in 12 requests")
 
 
-def test_a_stub_that_names_no_call_fails_though_its_page_exists():
-    """Reviewer A's first wrong engine: the stub quotes the result's first and last line and its
-    ``StubRef`` names a page and no call."""
-    def nameless(dialect, request):
-        return [StubRef(ref.page_id, ()) for ref in toy.find_stubs(dialect, request)]
+def nameless(dialect, request):
+    """``toy.find_stubs`` with every reference naming its page as a whole, as a fold note does."""
+    return [StubRef(ref.page_id, ()) for ref in toy.find_stubs(dialect, request)]
+
+
+def test_a_reference_to_a_page_as_a_whole_covers_what_the_page_reaches_and_nothing_more():
+    """A ``StubRef`` with empty ``call_ids``: reviewer A's first wrong engine, a stub that names a page
+    and no call, now passes when its page holds the result, and fails when it does not."""
     run = harness.run(scripts.build("loop120", quick=True), "claude", find_stubs=nameless, engine=toy.ToyPager)
-    assert run.stubs["found"] == run.stubs["unreachable"] > 0
-    assert list(targets.unmet_by_rule(run)) == ["storage"]
+    assert targets.unmet_by_rule(run) == {} and run.stubs["unreachable"] == 0
+    assert run.metrics()["stubs"] == toy_run("loop120", "claude").metrics()["stubs"]
+    junk = harness.run(scripts.build("loop120", quick=True), "claude", find_stubs=nameless,
+                       engine=functools.partial(toy.ToyPager, defect="junk_page"))
+    by_rule = targets.unmet_by_rule(junk)
+    assert set(by_rule) == {"storage", "recall"} and junk.stubs["found"] == junk.stubs["unreachable"] == 1
+    assert "that no stub, fold note or page id in that request accounts for" in by_rule["storage"][1]
 
 
 # A stub's original, byte for byte ----------------------------------------------------------------------
@@ -233,7 +296,8 @@ def test_a_stub_is_reachable_only_when_its_page_holds_the_whole_original(tmp_pat
     one, two = s.calls[:2]
     page = s.page(s.round(one))
     assert s.stubs.reachable(StubRef(page, (s.ids[0],)))
-    assert not s.stubs.reachable(StubRef(page, ()))  # names no call
+    assert s.stubs.reachable(StubRef(page, ()))  # the page as a whole: it reaches a delivered result
+    assert not s.stubs.reachable(StubRef(s.page([{"role": "user", "content": "not a result"}]), ()))
     assert not s.stubs.reachable(StubRef(page, (s.ids[1],)))  # another call's result
     assert not s.stubs.reachable(StubRef(page, (s.ids[0], s.ids[1])))  # one of two
     assert not s.stubs.reachable(StubRef(page, ("toolu_unknown",)))
@@ -272,6 +336,33 @@ def test_a_stub_inside_a_page_is_followed_to_the_page_that_holds_the_original(tm
     assert not s.stubs.reachable(StubRef(other, (s.ids[0],)))  # the inner stub stands for another call
 
 
+FOLD = "[folded rounds: page "
+
+
+def folds(dialect, request):
+    """``toy.find_stubs``, and a fold note ``[folded rounds: page <id>]`` as a reference to its page as a whole."""
+    found = toy.find_stubs(dialect, request)
+    for message in request.get("messages") or []:
+        for block in message.get("content") if isinstance(message.get("content"), list) else []:
+            text = block.get("content") if block.get("type") == "tool_result" else block.get("text")
+            if isinstance(text, str) and text.startswith(FOLD):
+                found.append(StubRef(text[len(FOLD):].rstrip("]"), ()))
+    return found
+
+
+def test_a_fold_note_inside_a_page_leads_to_every_call_its_page_reaches(tmp_path):
+    """A rounds page whose results were folded before keeps the fold note; following it reaches them."""
+    s = Stored(tmp_path, find=folds)
+    one, two, three = s.calls
+    rounds = s.page([*s.round(one), *s.round(two)])
+    outer = s.page([*s.round(one, FOLD + rounds + "]"), *s.round(three)])
+    assert s.stubs.reach(outer) == {s.ids[0], s.ids[1], s.ids[2]}  # the note's page reaches two as well
+    assert s.stubs.reachable(StubRef(outer, (s.ids[0], s.ids[2])))
+    junk = s.page([{"role": "user", "content": "nothing"}])
+    astray = s.page([*s.round(one, FOLD + junk + "]"), {"role": "user", "content": "z"}])
+    assert s.stubs.reach(astray) == set()
+
+
 def test_a_chain_of_stubs_is_followed_only_so_far(tmp_path):
     s = Stored(tmp_path)
     one = s.calls[0]
@@ -307,7 +398,8 @@ def test_a_fold_note_names_each_call_its_page_leads_to_and_no_other(tmp_path):
     rounds = s.page([*s.round(one), *s.round(two)])
     assert s.stubs.names([StubRef(rounds, (s.ids[0], s.ids[1]))]) == {s.ids[0], s.ids[1]}
     assert s.stubs.names([StubRef(rounds, (s.ids[0], s.ids[1], s.ids[2]))]) == {s.ids[0], s.ids[1]}
-    assert s.stubs.names([StubRef(rounds, ())]) == set()
+    assert s.stubs.names([StubRef(rounds, ())]) == {s.ids[0], s.ids[1]}  # the page as a whole
+    assert s.stubs.names([StubRef(s.page([{"role": "user", "content": "nothing"}]), ())]) == set()
     assert s.stubs.names([StubRef(s.page(s.round(three)), (s.ids[2],)), StubRef(rounds, (s.ids[1],))]) == {
         s.ids[1], s.ids[2]}
 
@@ -388,8 +480,8 @@ def test_the_storage_rule_counts_every_request_that_left_a_result_nowhere():
 def test_the_storage_rule_counts_every_request_that_left_out_a_result_no_stub_in_it_names():
     run = base()
     run.sent[6].unnamed, run.sent[9].unnamed = 1, 3
-    assert targets.storage(run) == ["2 requests left out a tool result that no stub or fold note in that request "
-                                    "names (up to 3 results at once)"]
+    assert targets.storage(run) == ["2 requests left out a tool result that no stub, fold note or page id in that "
+                                    "request accounts for (up to 3 results at once)"]
 
 
 def test_the_thinking_rule_allows_one_missing_newest_block_for_each_rewrite_in_the_loop():
@@ -468,9 +560,28 @@ def test_the_cache_rule_caps_what_a_loops_rewrites_re_send_at_one_extra_send_of_
     assert len(targets.cache(run)) == 1
 
 
+def test_the_rewrite_allowance_scales_with_the_head():
+    """d = min(bound / 6, max(bound / 30, 0.5 x (room line - head))): 25,000 at every scripted head."""
+    run = base()
+    assert run.heads == {"main": 15_101}
+    assert targets.rewrite_batch(run, "main") == 25_000
+    for head, batch in [(13_538, 25_000), (63_000, 25_000), (73_000, 20_000), (92_000, 10_500), (103_000, 5_000),
+                        (140_000, 5_000)]:
+        run.heads["main"] = head
+        assert targets.rewrite_batch(run, "main") == batch, head
+    run.heads["main"] = 92_000  # PR #274's head: a loop of 21,000 tokens may rewrite 2 + 2 times
+    requests = loop(run)
+    pressed(run, *requests[1:12:3])
+    run.sent[-1].loop_tokens = 21_000
+    assert targets.cache(run) == []
+    run.sent[-1].loop_tokens = 20_999
+    assert targets.cache(run) == ["main, turn 1: 4 prefix rewrites in a loop of 20,999 tokens; at most 3"]
+
+
 def test_the_cache_rule_forbids_a_rewrite_right_after_a_rewrite_unless_the_room_forces_it():
     """The exception counts as the room rule does, with the engine's own pre-send estimate, and allows
-    2% of the bound for it: over 113,000 - 3,000."""
+    2% of the bound for it: over 113,000 - 3,000. The estimate counts at most 1.1 x the upstream's count
+    of the same request."""
     run = base()
     first, second = loop(run)[4:6]
     pressed(run, first, second)
@@ -486,6 +597,12 @@ def test_the_cache_rule_forbids_a_rewrite_right_after_a_rewrite_unless_the_room_
     second.estimate_before = 110_000
     assert len(targets.cache(run)) == 1
     first.tokens, second.estimate_before = 120_000, 109_000  # the engine's count rules, though the upstream's is over
+    assert len(targets.cache(run)) == 1
+    first.tokens, second.appended_tokens, second.estimate_before = 70_000, 1_000, 999_999  # reviewer A's L1
+    assert len(targets.cache(run)) == 1  # it counts as 78,100
+    first.tokens = 99_001  # 100,001 counted: 1.1 x that is over 110,000
+    assert targets.cache(run) == []
+    first.tokens = 99_000
     assert len(targets.cache(run)) == 1
 
 

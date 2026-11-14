@@ -19,8 +19,11 @@ from inturn.harness import LOOP_START, TRUTH_SHARE, Run
 
 SHOW_SHARE = 0.8  # of bound - headroom_floor - min_turn_room: under it, a new result has to be shown once
 PRESSURE_SHARE = 0.6  # of the same line: a loop rewrite is allowed only when the request would pass it
-REWRITE_BATCH = 6  # a loop may rewrite its prefix twice, and once more per bound / REWRITE_BATCH of its own items
+REWRITE_BATCH = 6  # a loop may rewrite its prefix twice, and once more per rewrite_batch tokens of its own items,
+REWRITE_FLOOR = 30  # which is bound / REWRITE_BATCH, or less under a large head, but never under bound / REWRITE_FLOOR
+HEAD_SHARE = 0.5  # of what sits between the head and the room line: what one batch can be expected to free
 ESTIMATE_MARGIN = 0.02  # of the bound: how far under the room line the engine's estimate may be for a second rewrite
+ESTIMATE_TRUST = 110  # percent: the engine's estimate counts at most 1.1 x the upstream's count of the same request
 ROOM_PERCENT = 95  # of a loop's late requests: the response-time room is at least half of min_turn_room
 
 
@@ -39,6 +42,16 @@ def show_ceiling(run: Run) -> int:
 def pressure_line(run: Run) -> int:
     """Under this many tokens (67,800 at the defaults) a loop request may not rewrite its prefix."""
     return int(PRESSURE_SHARE * room_line(run))
+
+
+def rewrite_batch(run: Run, conversation: str) -> float:
+    """The loop tokens that buy one more prefix rewrite: ``min(bound / 6, max(bound / 30, 0.5 x (room_line
+    - head)))``, with the head the conversation's first request carried (``Run.heads``). At the scripted
+    heads (15,101 for Claude Code's main, 10,654 for the subagent, 13,538 for Codex) it is 25,000, bound /
+    6; it is under that only once the head passes 63,000, and with a 92,000-token head it is 10,500."""
+    config = run.config
+    room = room_line(run) - run.heads.get(conversation, 0)
+    return min(config.bound / REWRITE_BATCH, max(config.bound / REWRITE_FLOOR, HEAD_SHARE * room))
 
 
 def bound(run: Run) -> list[str]:
@@ -64,17 +77,31 @@ def violations(run: Run) -> list[str]:
 
 
 def storage(run: Run) -> list[str]:
-    """On every request, each result the CLI has delivered so far in that conversation is whole in the
-    forwarded request, or is named in that same request by a stub or fold note (``stubs.find_stubs``)
-    whose page holds it byte for byte or holds a stub for it that leads there within 8 pages; a result
-    of Contexto's own search, recall or state calls may be named by a reference with no page. Every
-    stub found leads to its originals, and at least one is found."""
+    """Every result accounted for, and every stub leads to its originals (rules 3 and 4).
+
+    A page is referenced by a request when ``stubs.find_stubs`` returns a ``StubRef`` naming it. A call
+    is reachable from a page when the page holds the call's original byte for byte, or holds a stub or
+    fold reference whose page leads to it, within 8 pages (``harness.Stubs``).
+
+    On every request, each result the CLI has delivered so far in that conversation is whole in the
+    forwarded request, or is accounted for there:
+
+    - a ``StubRef`` in that request names its call and its page reaches it, or the ``StubRef`` has
+      empty ``call_ids`` (it references a page as a whole, as a fold note naming a rounds page does) and
+      its page reaches it; a page that reaches nothing that is missing covers nothing;
+    - or, for a result of an earlier turn only, its call is gone from the request too, and either that
+      turn's prompt is gone as well (the whole turn left, as at a turn-start rotation) or a page id
+      anywhere in the request's text reaches it.
+
+    Anything else fails. A result that is not whole in the request is also stored byte for byte in
+    some page (a result of Contexto's own search, recall or state calls may be named by a reference with
+    no page instead). Every stub found leads to its originals, and at least one is found."""
     problems = run.check_stubs()
     unnamed = sum(1 for s in run.sent if s.unnamed)
     if unnamed:
         worst = max(s.unnamed for s in run.sent)
-        problems.append(f"{unnamed} requests left out a tool result that no stub or fold note in that request names "
-                        f"(up to {worst} results at once)")
+        problems.append(f"{unnamed} requests left out a tool result that no stub, fold note or page id in that request "
+                        f"accounts for (up to {worst} results at once)")
     lost = sum(1 for s in run.sent if s.lost)
     if lost:
         worst = max(s.lost for s in run.sent)
@@ -113,23 +140,25 @@ def cache(run: Run) -> list[str]:
 
     - Pressure: a loop request rewrites its prefix only when the previous forwarded request plus the
       items added since is over ``pressure_line`` (0.6 of ``room_line``), by the upstream's count.
-    - Count: a loop has at most 2 prefix rewrites plus one per ``bound / 6`` tokens of its own items.
+    - Count: a loop has at most 2 prefix rewrites plus one per ``rewrite_batch`` tokens of its own items
+      (25,000, bound / 6, at every scripted head; less under a head over 63,000).
     - Cost: the tokens a loop's rewrites re-send (the headline figure: on Messages by breakpoints) are
       at most the loop's own tokens or the bound, whichever is larger: one extra send of the turn.
     - In a row: a loop request is not a rewrite right after another rewrite, unless the engine's own
       pre-send estimate of it without the rewrite (the ``estimate`` of its ``request`` event) is over
-      ``room_line`` less 2% of the bound, so the room rule would fail without it.
+      ``room_line`` less 2% of the bound, so the room rule would fail without it. That estimate counts
+      at most 1.1 x the upstream's count of the same request (the previous request plus what was added
+      since).
     """
     problems = []
     config = run.config
-    batch = config.bound / REWRITE_BATCH
     line, pressure = room_line(run), pressure_line(run)
     forced = line - ESTIMATE_MARGIN * config.bound
     spent = run.loop_resent()
     for (conversation, turn), sent in run.loops().items():
         rewrites = sum(1 for s in sent if s.in_loop and s.rewrite)
         own = max(s.loop_tokens for s in sent)
-        allowed = 2 + own / batch
+        allowed = 2 + own / rewrite_batch(run, conversation)
         if rewrites > allowed:
             problems.append(f"{conversation}, turn {turn + 1}: {rewrites} prefix rewrites in a loop of "
                             f"{own:,} tokens; at most {int(allowed)}")
@@ -153,11 +182,12 @@ def cache(run: Run) -> list[str]:
 
 
 def _estimate_before(previous, sent) -> float:
-    """The engine's pre-send estimate of ``sent`` without its rewrite; the upstream's count of the
-    previous request and the items added since when the engine publishes none."""
-    if sent.estimate_before is not None:
-        return sent.estimate_before
-    return previous.tokens + sent.appended_tokens
+    """The engine's pre-send estimate of ``sent`` without its rewrite, at most 1.1 x the upstream's count
+    of the previous request and the items added since; that count when the engine publishes none."""
+    counted = previous.tokens + sent.appended_tokens
+    if sent.estimate_before is None:
+        return counted
+    return min(sent.estimate_before, counted * ESTIMATE_TRUST / 100)
 
 
 def room(run: Run) -> list[str]:
@@ -168,7 +198,10 @@ def room(run: Run) -> list[str]:
 
     Every room published tells the truth, by the upstream's count: a response-time room (main's turn
     room or a side room) is at most ``bound - (input + output) - headroom_floor`` from that response's
-    usage, and a request-time room at most ``bound - headroom_floor - 0.9 * the request's tokens``."""
+    usage, on every response, and a request-time room at most ``bound - headroom_floor - 0.9 x the
+    request's tokens``, on every request but a conversation's first. The first is sized before any usage,
+    at the estimator's seeds, which run low on a dense head (11% at v0.5.24, a limitation STATUS lists
+    apart from D63)."""
     problems = []
     low = run.config.min_turn_room
     for conversation in run.scenario.conversations:

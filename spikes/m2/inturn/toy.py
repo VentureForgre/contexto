@@ -41,9 +41,12 @@ LOW = 38_000  # ... down to this: head, prompt and a result that has to be shown
 STUB = "[toy pager: this result is stored as page {page} for call {call}; read it with contexto_recall]"
 STUB_FORM = re.compile(r"\[toy pager: this result is stored as page (\S+) for call (\S+); ")
 REMOVED = "[result removed]"
+CLEARED = "[cleared]"
 LYING_ROOM = 100_000
+INFLATED = 999_999
+OLDER = ("silent_older", "drop_older_stubs", "drop_older_rounds", "noted_older_rounds")  # Claude Code only
 DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "no_room", "room_one",
-           "no_stub_text", "show_once", "lying_room", "in_place")
+           "no_stub_text", "show_once", "lying_room", "in_place", "inflate", *OLDER)
 # What each defect does (the reviewers' wrong engines among them):
 # - junk_page: every stub names one page that holds none of the results;
 # - strip_all: all thinking is stripped on every request;
@@ -54,7 +57,18 @@ DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "n
 # - show_once: every 4th request of a conversation pages every result it is not the first to carry, and
 #   the others page none (reviewer A's "show once, then page");
 # - in_place: the CLI's own oldest whole result is cleared in place for the send and restored when the
-#   usage arrives.
+#   usage arrives;
+# - inflate: once per loop, the request right after a batch is a batch of one more result, and its request
+#   event publishes an estimate of 999,999 (reviewer A's inflating engine);
+# - silent_older: from each turn start on, every earlier turn's result is [cleared], with its rounds written
+#   to a page and its calls and prompt kept (reviewer A's SilentOlder);
+# - drop_older_stubs: from each turn start on, an earlier turn's stub becomes [result removed] (reviewer B);
+# - drop_older_rounds: from each turn start on, the rounds of earlier turns are removed, calls and results,
+#   and written to a page; their prompts and final answers stay, and nothing names the page;
+# - noted_older_rounds: the same, but the last earlier answer kept ends with a line naming that page. This
+#   one is right: rule 3 accounts for the rounds through the page id in the request's text.
+# The last four strip thinking where they rewrite: in each earlier turn, from the first item they change to
+# the next prompt.
 
 def find_stubs(dialect: str, request: dict) -> list[StubRef]:
     """``stubs.find_stubs`` for this pager's stub text."""
@@ -84,6 +98,7 @@ class _State:
         self.size = 0  # the last forwarded request, in tokens
         self.first_page = ""
         self.requests = 0
+        self.batched = False  # the previous request was a batch
 
     def stripped(self, i: int) -> bool:
         return i < len(self.strip) and self.strip[i]
@@ -104,6 +119,9 @@ class ToyPager:
         self.count = FakeUpstream()  # used as a tokenizer only
         self.states: dict[str, _State] = {}
         self.forms: dict[tuple[int, str, bool], tuple[dict, dict | None, int]] = {}
+        self.older_forms: dict[tuple[int, bool], tuple[dict, dict]] = {}
+        self.older_pages: dict[int, str] = {}  # OLDER: the turn's prompt index -> the page of what precedes it
+        self.inflated = False
         self.junk: str | None = None
         self.sent: tuple[dict, bool] | None = None  # the request in flight, and whether it is main's
         self.ceiling = int(0.8 * (config.bound - config.headroom_floor - config.min_turn_room))
@@ -186,8 +204,13 @@ class ToyPager:
         main = "X-Claude-Code-Agent-Id" not in headers
         state = self.states.setdefault("main" if main else "sub", _State())
         items = request[field]
+        if self.defect in OLDER and not claude:
+            raise ValueError(f"{self.defect} is written for Claude Code's messages")
         if counting:  # rule 11: the current transform, nothing changed
-            return {**request, field: self.transform(claude, state, items)[0]}, headers, [{"event": "count_tokens"}]
+            forwarded = self.transform(claude, state, items)[0]
+            if self.defect in OLDER:
+                forwarded = self.older(items, forwarded, False)
+            return {**request, field: forwarded}, headers, [{"event": "count_tokens"}]
         self.restore()
         state.requests += 1
         high, low = self.high, self.low
@@ -202,23 +225,29 @@ class ToyPager:
         if fresh and (too_large or self.defect == "stub_on_arrival"):
             for i in fresh:
                 self.page(claude, state, items, i)
-        forwarded, size = self.transform(claude, state, items)
-        size += head
+        forwarded, size = self.view(claude, state, items, head)
         before = size
-        if size > high or self.defect == "rewrite_always":
+        # The defects that take earlier turns out of view leave the batch the running turn's results only.
+        start = self.prompt_index(items) if self.defect in ("silent_older", "drop_older_rounds", "noted_older_rounds") else 0
+        one = self.defect == "inflate" and state.batched and not self.inflated and size <= high
+        if size > high or self.defect == "rewrite_always" or one:
             first = None
-            for i in range(state.seen):  # the oldest first; never a result this request is the first to carry
-                if size <= low and self.defect != "rewrite_always":
+            for i in range(start, state.seen):  # the oldest first; never a result this request is the first to carry
+                if (size <= low and self.defect != "rewrite_always" and not one) or (one and first is not None):
                     break
                 if i not in state.stubbed and self.results(claude, items[i]):
-                    before = self.form(claude, state, i, items[i])[1]
+                    whole = self.form(claude, state, i, items[i])[1]
                     self.page(claude, state, items, i)
-                    size -= before - self.form(claude, state, i, items[i])[1]
+                    size -= whole - self.form(claude, state, i, items[i])[1]
                     first = i if first is None else first
             if first is not None:
                 state.cover(first, n)
-                forwarded, size = self.transform(claude, state, items)
-                size += head
+                forwarded, size = self.view(claude, state, items, head)
+            state.batched = first is not None and not one
+            if one and first is not None:
+                self.inflated, before = True, INFLATED
+        else:
+            state.batched = False
         state.seen, state.size = n, size
         self.sent = (request, main)
         if self.defect == "in_place":
@@ -232,6 +261,65 @@ class ToyPager:
             self.store.set_retained(0, 0, retained_entries(forwarded, 0, dialect))
             self.publish(True, items, claude, size)
         return {**request, field: forwarded}, headers, events
+
+    def view(self, claude: bool, state: _State, items: list[dict], head: int) -> tuple[list[dict], int]:
+        """What is forwarded, and its tokens with the head."""
+        forwarded, size = self.transform(claude, state, items)
+        if self.defect in OLDER:
+            forwarded = self.older(items, forwarded, True)
+            size = sum(self.count.read(True, form).tokens for form in forwarded)
+        return forwarded, head + size
+
+    def prompt_index(self, items: list[dict]) -> int:
+        return max((i for i, item in enumerate(items) if self.is_prompt(True, item)), default=0)
+
+    def older(self, items: list[dict], forwarded: list[dict], write: bool) -> list[dict]:
+        """The ``OLDER`` defects: what they do to the messages before the turn's prompt (Messages only;
+        the toy forwards one message per message of the CLI's). ``write``: page what precedes the
+        prompt the first time a request carries it."""
+        p = self.prompt_index(items)
+        if p and write and p not in self.older_pages:
+            (self.older_pages[p],) = self.store.page_out([items[:p]], len(self.older_pages))
+        out: list[dict] = []
+        first = None
+        for i, (item, form) in enumerate(zip(items, forwarded)):
+            if i >= p:
+                out.append(form)
+                continue
+            if self.is_prompt(True, item):  # each turn was rewritten at its own turn start: its responses after that
+                first = None
+            blocks = item.get("content") if isinstance(item.get("content"), list) else []
+            if self.defect in ("drop_older_rounds", "noted_older_rounds"):
+                if self.results(True, item) or any(b.get("type") == "tool_use" for b in blocks):
+                    first = i if first is None else first
+                    continue
+            elif self.results(True, form):
+                text = CLEARED if self.defect == "silent_older" else REMOVED
+                changed = [{**b, "content": text} if b.get("type") == "tool_result" and (
+                    self.defect == "silent_older" or (isinstance(b.get("content"), str) and STUB_FORM.match(b["content"])))
+                    else b for b in form["content"]]
+                if changed != form["content"]:
+                    form = self.older_form(form, changed)
+                    first = i if first is None else first
+            if first is not None and form.get("role") == "assistant" and isinstance(form.get("content"), list):
+                kept = [b for b in form["content"] if b.get("type") not in THINKING_TYPES]
+                if len(kept) < len(form["content"]):
+                    form = self.older_form(form, kept)
+            out.append(form)
+        earlier = len(out) - (len(items) - p)
+        last = max((n for n in range(earlier) if out[n].get("role") == "assistant"), default=None)
+        if self.defect == "noted_older_rounds" and last is not None and p in self.older_pages:
+            note = {"type": "text", "text": f"[the tool rounds before this point are stored as page {self.older_pages[p]}]"}
+            out[last] = {**out[last], "content": [*out[last]["content"], note]}
+        return out
+
+    def older_form(self, form: dict, content: list[dict]) -> dict:
+        """``form`` with ``content``, the same object for the same form every time."""
+        key = (id(form), len(content))
+        hit = self.older_forms.get(key)
+        if hit is None or hit[0] is not form:
+            hit = self.older_forms[key] = (form, {**form, "content": content})
+        return hit[1]
 
     def clear(self, claude: bool, state: _State, items: list[dict]) -> None:
         """in_place: clear the CLI's own oldest whole result, which goes out as it is."""
