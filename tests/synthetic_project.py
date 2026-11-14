@@ -5,15 +5,18 @@
 - the store is a real ``SessionStore`` opened as the launcher opens it (``launcher.open_session``, so
   the working directory and the project are recorded; ``launcher.record_project_memory`` for a session
   with project memory off), and the launcher's start line is built (``launcher.project_memory_notice``);
-- the real ``RewriteEngine`` is fed a Claude Code-shaped conversation request by request, with the
-  usage a stub upstream would report (the request's bytes at a fixed ratio, as ``test_project_start``
-  does);
+- the real ``RewriteEngine`` is fed a Claude Code-shaped conversation request by request (Messages
+  API), or with ``dialect=RESPONSES`` a Codex-shaped one (Responses API: the lead items, then prompts,
+  ``function_call`` and ``function_call_output`` items), with the usage a stub upstream would report
+  (the request's bytes at a fixed ratio, as ``test_project_start`` does);
 - the real MCP ``Server`` on the same store answers the model's tool calls at the point a model makes
   them: after the turn-start request's response, inside the main conversation's tool loop, so the room
   the engine published is the one a search is charged against. Each call is the model's ``tool_use``
   for ``mcp__contexto__<tool>`` with the arguments the server was given, and the next main request
   appends the matching ``tool_result`` holding the server's reply blocks exactly as returned (``Recorded
-  <kind> <id>.``, ``Closed <id> with <id>.``), as Claude Code sends them. Nothing here marks a record as
+  <kind> <id>.``, ``Closed <id> with <id>.``), as Claude Code sends them; on Codex a
+  ``function_call_output`` whose output is the reply's one text, or its text parts when it has several
+  (a synthetic shape: what a real Codex sends back for an MCP call was not checked here). Nothing here marks a record as
   the main conversation's: whatever rule the store and the engine apply (the room-based author mark, or
   the engine confirming the pin from that call and its reply) sees only what a real session gives it.
 
@@ -37,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import test_codex as codex
 from contexto import launcher, mcp
 from contexto.proxy import serialize_request
 from contexto.rewrite import MESSAGES, Config, EpochState, RewriteEngine
@@ -48,6 +52,7 @@ CONFIG = Config(bound=50_000, headroom_floor=6_000, min_turn_room=3_000)
 RATIO = 3.2  # the stub's bytes per token: denser than the estimator's seed of 3.5, so estimates run low
 MARK = "Carried from earlier sessions of this project"  # how the carried section starts
 TOOL_PREFIX = "mcp__contexto__"
+RESPONSES = "/v1/responses"  # Codex's endpoint, the Responses API dialect
 CARRIED_LINE = re.compile(r"^- (\S+) (obligation|decision)\b.*? \(session ([^,]+), (\d{4}-\d{2}-\d{2})\):? (.*)$")
 NAME = re.compile(r'"?([A-Za-z0-9_-]+)')  # a body's leading token, whether shown raw or as a JSON string
 OMITTED = re.compile(r"^\((\d+) more pinned items omitted; call contexto_state for the full list\)$")
@@ -250,7 +255,7 @@ class Session:
     """One session of a project: the store as the launcher opens it, the engine, and the MCP server."""
 
     def __init__(self, home: Path, sid: str, workdir: Path, *, memory: bool = True, config: Config = CONFIG,
-                 ratio: float = RATIO) -> None:
+                 ratio: float = RATIO, dialect: str = MESSAGES) -> None:
         self.store = launcher.open_session(home, sid, workdir)
         launcher.record_project_memory(self.store, memory)
         err = io.StringIO()
@@ -259,8 +264,8 @@ class Session:
         self.server = mcp.Server(self.store, io.StringIO(), io.StringIO())
         self.server.handle_line(json.dumps({"jsonrpc": "2.0", "id": 0, "method": "tools/list"}))
         self.engine = RewriteEngine(self.store, config=config)
-        self.config, self.ratio = config, ratio
-        self.history: list[dict] = []
+        self.config, self.ratio, self.endpoint = config, ratio, dialect
+        self.history: list[dict] = codex.lead() if dialect == RESPONSES else []
         self.turn_starts: list[int] = []  # the message index of each turn's start
         self.rows: list[Row] = []
         self.calls: list[Call] = []
@@ -270,12 +275,16 @@ class Session:
     def label(self) -> str:
         return self.store.session_id[:8]
 
+    @property
+    def responses(self) -> bool:
+        return self.endpoint == RESPONSES
+
     def send(self, turn: int) -> Row:
-        sent = request(list(self.history))
-        upstream, _, events = self.engine(sent, {}, MESSAGES)
+        sent = codex.request(list(self.history)) if self.responses else request(list(self.history))
+        upstream, _, events = self.engine(sent, {}, self.endpoint)
         room = self.store.turn_room()
         real = usage(upstream, self.ratio)
-        usage_events = self.engine.observe_usage(MESSAGES, real, sent)
+        usage_events = self.engine.observe_usage(self.endpoint, real, sent)
         event = events[-1]
         row = Row(upstream, events, usage_events, real["input_tokens"], event.get("sent_estimate", event["estimate"]),
                   room, event["k"], turn, self.state)
@@ -299,6 +308,9 @@ class Session:
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
     def turn(self, t: int, turn: Turn, ids: dict[str, str]) -> None:
+        if self.responses:
+            self._codex_turn(t, turn, ids)
+            return
         self.turn_starts.append(len(self.history))
         self.history.append(user(turn.prompt, context=t == 0))
         self.send(t)
@@ -317,6 +329,26 @@ class Session:
         self.history += [{"role": "assistant", "content": uses}, {"role": "user", "content": results}]
         self.send(t)
         self.history.append(assistant(turn.answer))
+
+    def _codex_turn(self, t: int, turn: Turn, ids: dict[str, str]) -> None:
+        """A turn as Codex sends it: the prompt, then the model's calls and their outputs as items."""
+        self.turn_starts.append(len(self.history))
+        self.history.append(codex.prompt(turn.prompt))
+        self.send(t)
+        items = [codex.reasoning(t), codex.call(t), codex.output(t, turn.output)]
+        for j, (tool, arguments) in enumerate(turn.calls):
+            args = arguments()
+            made = self.call(tool, args, t)
+            if tool == "contexto_pin" and not made.result["isError"]:
+                ids[args["text"].split(":", 1)[0]] = made.result["structuredContent"]["record_id"]
+            texts = [b["text"] for b in made.result["content"]]
+            items += [{"type": "function_call", "call_id": f"call_{t}_{j}", "name": TOOL_PREFIX + tool,
+                       "arguments": json.dumps(args)},
+                      {"type": "function_call_output", "call_id": f"call_{t}_{j}",
+                       "output": texts[0] if len(texts) == 1 else [{"type": "input_text", "text": x} for x in texts]}]
+        self.history += items
+        self.send(t)
+        self.history.append(codex.answer(turn.answer))
 
     def run(self, plan: Plan, ids: dict[str, str] | None = None) -> Session:
         """Run ``plan``; ``ids`` (shared across the sessions of a project) gets each pinned record's id."""
