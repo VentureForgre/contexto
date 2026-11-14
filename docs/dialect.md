@@ -700,8 +700,8 @@ D53).
   `check_cli_version`, `start_warning`, `run_child` and `report_missing_tools` from
   `src/contexto/launcher.py`. `start_proxy` builds the `RewriteEngine`, passes its `observe_usage` to
   the proxy and clears the previous launch's MCP record. Codex: yes (`run_codex`, `plan_codex`,
-  `add_arguments` in `src/contexto/codex.py`). There is no `contexto serve` command in this
-  checkout; `contexto proxy` (`src/contexto/commands/proxy.py`) starts the proxy alone with the
+  `add_arguments` in `src/contexto/codex.py`). In v0.5.24 the launchers are the only way the engine
+  is wired in (`contexto serve`, D70, adds a standing service for Claude Code clients); `contexto proxy` (`src/contexto/commands/proxy.py`) starts the proxy alone with the
   identity transform, so no dialect runs under it.
 - [ ] **Upstream and credentials.** Where the client's requests go and how it authenticates, without
   Contexto storing a credential. Codex: yes (`codex_upstream_with_source`, the key helper run through
