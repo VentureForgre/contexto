@@ -101,7 +101,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, loads_bounded
+from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, has_lone_surrogate, loads_bounded
 from contexto.hints import without_hint_headers
 
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
@@ -936,6 +936,8 @@ class ContextoProxy:
         parts = urlsplit(upstream)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("upstream must be an http(s) base URL")
+        if has_lone_surrogate(upstream):  # no request line can carry it
+            raise ValueError("upstream holds a lone surrogate")
         self.scheme = parts.scheme
         self.upstream_host = parts.hostname
         # The X-Session-Affinity value added to each request, or None (D36): never for a vendor host.

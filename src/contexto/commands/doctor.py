@@ -552,7 +552,7 @@ def check_claude_upstream(ctx: Context) -> Check:
     try:
         check_upstream(upstream)
     except LaunchError:  # its message quotes the URL, which is not repeated here
-        return Check("claude-upstream", FAIL, f"Claude Code upstream from {place} is not an http(s) base URL: "
+        return Check("claude-upstream", FAIL, f"Claude Code upstream from {place} is not a usable http(s) base URL: "
                      "`contexto run claude` refuses to start with it",
                      f"Fix {BASE_URL_KEY} there, or pass --upstream to contexto run", details)
     try:  # D70: this home's `contexto serve`, which docs/serve.md has clients put in their settings

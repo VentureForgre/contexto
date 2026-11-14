@@ -33,8 +33,11 @@ header decision (D70, below) do read the managed settings file, and only the fil
 that reach Claude Code another way (a device-management profile, a server) are not seen.
 
 Every settings file is read through one reader (``read_settings_file``): a regular file only, at most
-``SETTINGS_FILE_LIMIT`` bytes, with a UTF-8 byte order mark accepted as Claude Code accepts it. A
-caller that needs several values passes one ``SettingsFiles``, which reads each file once.
+``SETTINGS_FILE_LIMIT`` bytes, read exactly when Claude Code 2.1.322 reads it (D70): UTF-8 with or
+without a byte order mark, and UTF-16LE after its byte order mark, malformed ones included, decoded as
+Claude Code decodes them. A settings file Claude Code does not load (one holding ``NaN`` or
+``Infinity``, a comment, a syntax error) is not read for any setting. A caller that needs several
+values passes one ``SettingsFiles``, which reads each file once.
 
 The result carries the winning source as a short label for the session log; the URL itself and
 any file path stay out of logs.
@@ -321,27 +324,29 @@ def read_settings_file(path: Path) -> SettingsFile:
     """One Claude Code settings file, read with a bound.
 
     Opened without blocking and checked to be a regular file before a byte is read, so a FIFO or a
-    device at that path is never read; at most ``SETTINGS_FILE_LIMIT`` bytes; decoded as UTF-8 with a
-    byte order mark accepted, as Claude Code accepts one, and UTF-16LE read when it starts with its own
-    byte order mark, as Claude Code reads it (both measured on 2.1.322, D70); parsed with
-    ``contexto.canonical.loads_bounded``, as Claude Code parses it (measured on 2.1.322, PR #258): an
-    integer past Python's 4,300-digit limit is read, as JavaScript's Infinity (``_json_int``), and
-    ``NaN``, ``Infinity`` and ``-Infinity``, which are not JSON, make the file not valid JSON
-    (``_json_constant``).
+    device at that path is never read; at most ``SETTINGS_FILE_LIMIT`` bytes. Decoded as Claude Code
+    2.1.322 decodes it (measured, D70): UTF-16LE when it starts with that byte order mark, a final odd
+    byte dropped and a lone surrogate kept; otherwise UTF-8, a byte order mark dropped and a byte that
+    is not UTF-8 read as U+FFFD. Parsed with ``contexto.canonical.loads_bounded``, as Claude Code
+    parses it (measured on 2.1.322, PR #258): an integer past Python's 4,300-digit limit is read, as
+    JavaScript's Infinity (``_json_int``), and ``NaN``, ``Infinity`` and ``-Infinity``, which are not
+    JSON, make the file not valid JSON (``_json_constant``), so no setting is taken from it.
 
     ``data`` is the file's JSON object. An empty or blank file, and a document that is not an object,
     give an empty object: nothing can be set there. A file that does not exist, a directory, and a
     file this user cannot open give ``SettingsFile(None, None)``: Claude Code runs as the same user
     and cannot read them either. A file that is there and that Contexto did not read gives
     ``problem``: it is not a regular file, it is larger than the limit, it cannot be read, or it is
-    not valid JSON (not UTF-8, a syntax error, nested too deep), or its ``env`` is there and is not
-    an object (Claude Code 2.1.322 then loads nothing from the file, PR #258: not its
-    ``apiKeyHelper`` either; only ``env``'s type is checked here). Such a file is not
-    evidence that a setting is off, since Claude Code may read it differently; the cloud-provider
-    guard refuses on it (``cloud_provider``) unless it was read whole, is not valid JSON, and its text
+    not valid JSON (a syntax error, ``NaN``, a wide encoding Claude Code does not load, nested too
+    deep), or its ``env`` is there and is not an object (Claude Code 2.1.322 then loads nothing from
+    the file, PR #258: not its ``apiKeyHelper`` either; only ``env``'s type is checked here). Such a
+    file is not evidence that a setting is off, since Claude Code may read it differently; the
+    cloud-provider guard refuses on it (``cloud_provider``) unless it was read whole, is not valid JSON, and its text
     could not name a switch (``may_name_provider``): Claude Code does not load a file with a comment,
     a trailing comma or another syntax error (measured on 2.1.322, D70), or with ``NaN`` or an ``env``
-    that is not an object (PR #258), so such a file turns no switch on."""
+    that is not an object (PR #258), so such a file turns no switch on. The NUL byte in that rule is
+    the backstop for wide files that still do not parse: UTF-16BE, UTF-16LE without the mark, UTF-32,
+    and UTF-16LE with the mark and a syntax error."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except (OSError, ValueError):  # missing, not permitted, a symlink loop, a name the system rejects
@@ -368,8 +373,14 @@ def read_settings_file(path: Path) -> SettingsFile:
     raw = b"".join(chunks)
     try:
         # Claude Code 2.1.322 loads UTF-8, with or without a byte order mark, and UTF-16LE that starts
-        # with one (measured, D70); it does not load UTF-16BE, UTF-16LE without the mark, or UTF-32.
-        text = raw[2:].decode("utf-16-le") if raw.startswith(b"\xff\xfe") else raw.decode("utf-8-sig")
+        # with one (measured, D70); it does not load UTF-16BE, UTF-16LE without the mark, or UTF-32. It
+        # also loads UTF-16LE with the mark that holds a lone surrogate or ends in one odd byte, and
+        # UTF-8 with a byte that is not UTF-8 (all measured, D70 round 4), so they are decoded the same
+        # way: the odd byte dropped, lone surrogates kept, a bad UTF-8 byte read as U+FFFD.
+        if raw.startswith(b"\xff\xfe"):
+            text = raw[2:len(raw) - len(raw) % 2].decode("utf-16-le", "surrogatepass")
+        else:
+            text = raw.decode("utf-8-sig", "replace")
         data = loads_bounded(text, parse_int=_json_int, parse_constant=_json_constant) if text.strip() else {}
     except (ValueError, RecursionError):  # UnicodeDecodeError and JSONTooDeepError are ValueErrors
         return SettingsFile(None, "is not valid JSON", _may_name_provider(raw))
