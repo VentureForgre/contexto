@@ -25,9 +25,12 @@ What is measured, and from where:
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
+import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,6 +52,37 @@ FAILURE_EVENTS = (
     "unclassified_system_message", "turn_room_low", "retained_stale", "epoch_record_stale", "mcp_tools_missing",
     "mcp_tools_denied", "toolcheck_error", "side_room_close_failed", "request_too_deep",
 )
+
+
+# Every environment variable the package reads (each ``os.environ`` read under src/contexto, checked by a
+# test), held at its default for the length of a replay whatever the user's environment says, so a
+# setting such as CONTEXTO_RECALL_VARIANT=legacy cannot change what the pinned trace measures. The
+# default of each is "not set". Any other CONTEXTO_ variable is held unset too, so a knob added later is
+# covered before anyone lists it.
+ENVIRONMENT = (
+    "ANTHROPIC_BASE_URL", "CLAUDE_CODE_CUSTOM_OAUTH_URL", "CLAUDE_CODE_IGNORE_PERSISTED_TRUST", "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME", "CONTEXTO_CODEX_KEY_HELPER", "CONTEXTO_CODEX_UPSTREAM", "CONTEXTO_HOME", "CONTEXTO_NO_VERSION_CHECK",
+    "CONTEXTO_RECALL_VARIANT", "CONTEXTO_SEARCH_CACHE_MB", "CONTEXTO_SESSION", "OPENRIG_SESSION_NAME",
+)
+ENVIRONMENT_PREFIX = "CONTEXTO_"
+
+
+@contextlib.contextmanager
+def pinned_environment() -> Iterator[dict[str, Any]]:
+    """Unset every variable of ``ENVIRONMENT`` and every ``CONTEXTO_`` variable for the block, and put
+    the user's values back after it. Yields what goes in ``manifest.replay``: the variables pinned,
+    and the names (never the values) of those the user's environment had set."""
+    held = {name: os.environ[name] for name in os.environ
+            if name in ENVIRONMENT or name.startswith(ENVIRONMENT_PREFIX)}
+    for name in held:
+        del os.environ[name]
+    try:
+        yield {"pinned": [*ENVIRONMENT, ENVIRONMENT_PREFIX + "*"], "value": "not set (each one's default)",
+               "set_by_the_user_and_ignored": sorted(held)}
+    finally:
+        for name in [n for n in os.environ if n in ENVIRONMENT or n.startswith(ENVIRONMENT_PREFIX)]:
+            del os.environ[name]
+        os.environ.update(held)
 
 
 @dataclass
@@ -74,6 +108,7 @@ class Measured:
     seconds: float
     problems: list[str] = field(default_factory=list)  # anything that did not go as scripted
     notices: list[str] = field(default_factory=list)  # what the launcher would have printed on stderr
+    environment: dict[str, Any] = field(default_factory=dict)  # what pinned_environment held, for the manifest
 
     @property
     def max_input(self) -> int:
@@ -152,9 +187,16 @@ def head_tokens(fields: dict[str, Any]) -> int:
 
 
 def replay(script: Script, home: Path) -> Measured:
-    """Replay ``script`` with the session's store under ``home``. Raises ``ReplayError`` when the
-    session cannot be carried to its end, and ``contexto.launcher.LaunchError`` for a bound the
-    launcher refuses."""
+    """Replay ``script`` with the session's store under ``home``, with every environment knob of the
+    package at its default (``pinned_environment``). Raises ``ReplayError`` when the session cannot be
+    carried to its end, and ``contexto.launcher.LaunchError`` for a bound the launcher refuses."""
+    with pinned_environment() as environment:
+        measured = _replay(script, home)
+    measured.environment = environment
+    return measured
+
+
+def _replay(script: Script, home: Path) -> Measured:
     from contexto import launcher
     from contexto.store import SessionStore
 

@@ -63,6 +63,7 @@ def manifest(script: Script, turns: int, measured: Any, version: str, pinned: bo
                         "expectations") if pinned else "nothing: this is not the pinned trace",
             "turns": turns, "script_sha256": script.digest(), "session": measured.session_id,
             "rates": dict(trace.RATES), "head_tokens": measured.head_tokens,
+            "environment": dict(measured.environment),
             "modelled": {"arms": ["full", "plain"], "trigger": script.bound, "summary_tokens": lines.SUMMARY_TOKENS,
                          "summary_source": lines.SUMMARY_SOURCE, "survives": lines.SURVIVES},
         },

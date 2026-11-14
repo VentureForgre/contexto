@@ -783,6 +783,43 @@ def test_failure_events_are_found_wherever_the_log_carries_them(spike):
     assert session.failure_events([{"event": "request", "transform_events": None}]) == {}
 
 
+def test_every_environment_variable_the_package_reads_is_pinned():
+    """Every name a module of the package reads from the environment is held at its default in a replay.
+    The names are the string constants of the modules that read ``os.environ``; a new knob that is not a
+    ``CONTEXTO_`` variable fails here until it is added to ``session.ENVIRONMENT``."""
+    import ast
+    import re
+
+    root = Path(session.__file__).resolve().parents[2]
+    found: dict[str, str] = {}
+    for path in sorted(root.rglob("*.py")):
+        if "bench" in path.relative_to(root).parts:
+            continue
+        source = path.read_text("utf-8")
+        if "environ" not in source and "getenv" not in source:
+            continue
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and re.fullmatch(
+                    r"(?:CONTEXTO|ANTHROPIC|CLAUDE|CODEX|OPENRIG)_[A-Z0-9_]+", node.value):
+                found.setdefault(node.value, path.name)
+    assert {"CONTEXTO_RECALL_VARIANT", "CONTEXTO_SEARCH_CACHE_MB", "OPENRIG_SESSION_NAME"} <= set(found)
+    missing = {name: where for name, where in found.items()
+               if name not in session.ENVIRONMENT and not name.startswith(session.ENVIRONMENT_PREFIX)}
+    assert missing == {}
+
+
+def test_the_pinned_environment_is_put_back(monkeypatch):
+    import os
+
+    monkeypatch.setenv("CONTEXTO_RECALL_VARIANT", "legacy")
+    monkeypatch.delenv("CONTEXTO_HOME", raising=False)
+    with session.pinned_environment() as held:
+        assert "CONTEXTO_RECALL_VARIANT" not in os.environ
+        assert "CONTEXTO_RECALL_VARIANT" in held["set_by_the_user_and_ignored"]
+        os.environ["CONTEXTO_HOME"] = "set inside"  # nothing set inside the block leaks out of it
+    assert os.environ["CONTEXTO_RECALL_VARIANT"] == "legacy" and "CONTEXTO_HOME" not in os.environ
+
+
 def test_the_log_reader_skips_a_torn_line(tmp_path):
     path = tmp_path / "log.jsonl"
     path.write_text('{"event": "a"}\n[1]\n{"event": "b"\n{"event": "c"}\n', encoding="utf-8")

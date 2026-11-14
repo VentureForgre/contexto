@@ -472,6 +472,31 @@ def test_a_failure_event_or_a_request_over_the_bound_fails_the_pinned_replay(mon
     assert "the session did not go as scripted: request 3 does not fit round 1 of turn 3" in text
 
 
+@pytest.mark.parametrize("variant", ["legacy", "bogus"])
+def test_the_users_environment_does_not_change_the_pinned_replay(monkeypatch, tmp_path, variant):
+    """Reviewer B's repro: CONTEXTO_RECALL_VARIANT=legacy made the pinned replay differ, and a mistyped
+    value made it report that the bound did not hold. Every knob the package reads is held at its default."""
+    settings = {"CONTEXTO_RECALL_VARIANT": variant, "CONTEXTO_SEARCH_CACHE_MB": "not-a-number",
+                "OPENRIG_SESSION_NAME": "canary-session", "CONTEXTO_HOME": str(tmp_path / "canary-home"),
+                "CONTEXTO_SESSION": "canary", "ANTHROPIC_BASE_URL": "http://canary.invalid",
+                "CLAUDE_CONFIG_DIR": str(tmp_path / "canary-config"), "CONTEXTO_A_KNOB_ADDED_LATER": "1"}
+    for name, value in settings.items():
+        monkeypatch.setenv(name, value)
+    out = tmp_path / "out"
+    code, text, err = _run(["--replay", "--out", str(out)])
+    assert code == 0 and err == "", text + err
+    assert "Pinned expectations: every measurement equals the trace." in text
+    environment = _load(out)["manifest"]["replay"]["environment"]
+    assert set(session.ENVIRONMENT) | {"CONTEXTO_*"} == set(environment["pinned"])
+    assert set(settings) <= set(environment["set_by_the_user_and_ignored"])
+    for path in out.rglob("*"):
+        if path.is_file():
+            data = path.read_bytes()
+            assert b"canary" not in data and b"not-a-number" not in data, path.name
+    import os
+    assert {name: os.environ.get(name) for name in settings} == settings  # put back after the replay
+
+
 def test_a_proxy_that_breaks_the_tool_loop_stops_the_replay_with_the_rule_named(monkeypatch, capsys):
     """Reviewer A's repro: the engine drops every assistant message that holds a tool call. The real API
     refuses each request that then carries a tool result, and so does the fake upstream."""
