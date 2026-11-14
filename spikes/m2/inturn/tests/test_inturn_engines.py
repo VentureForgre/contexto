@@ -121,7 +121,9 @@ TRICKLE = (100_000, 75_000)  # reviewer A
 NARROW = (112_500, 87_500)  # reviewer B
 HIGHER = (110_000, 70_000)  # a batch leaves the request over the pressure line, so a second one is held to the in-a-row rule
 OLDER = [("silent_older", 51), ("drop_older_stubs", 31), ("drop_older_rounds", 51), ("trim_older_prompts", 51),
-         ("split_older_prompts", 51), ("drop_older_turns", 51)]  # requests failed, quick build
+         ("split_older_prompts", 51), ("drop_older_turns", 51), ("fake_omission", 51), ("fake_omission_split", 51),
+         ("fake_omission_trim", 51), ("fake_omission_trimall", 51), ("fake_omission_doc", 51), ("omit_turns_n0", 51),
+         ("omit_turns_n99", 51)]  # requests failed, quick build
 
 
 @pytest.mark.parametrize(("defect", "rules"), WRONG)
@@ -175,7 +177,7 @@ def test_rounds_of_an_earlier_turn_may_leave_when_a_page_id_in_the_request_reach
 
 def test_the_v0_5_24_turn_start_rotation_is_accounted_for_by_its_turn_pages():
     """At v0.5.24 the turn start after ``multiturn``'s loop pages every earlier turn whole, prompt
-    included: rule 3 holds those results to the storage check only, and they are all in pages."""
+    included, and the index names the 4 turn pages by id, which reaches every result."""
     run = harness.cached("multiturn", "claude")
     assert run.metrics()["requests_with_an_unnamed_result"] == 0 and run.originals["lost"] == 0
     assert [s.turn for s in run.sent if s.lost] == []
@@ -770,3 +772,72 @@ def test_only_the_text_the_model_reads_names_a_page():
               {"type": "text", "text": "the index"}, {"type": "input_text", "text": "codex"}]
     assert _read_texts({"role": "user", "content": blocks}) == ["the index", "codex"]
     assert _read_texts({"type": "function_call_output", "call_id": "c", "output": "pg_0123456789abcdef"}) == []
+
+
+def test_an_index_past_its_budget_accounts_for_the_whole_turns_it_omits():
+    """Reviewer A's M at 9fe691ef. v0.5.24 with an index of 40 tokens lists only its newest page and writes
+    "(N older pages omitted; ...)"; the whole earlier turns it paged are accounted for by that line."""
+    for dialect in ("claude", "codex"):
+        _past_budget(dialect)
+
+
+def _past_budget(dialect: str) -> None:
+    run = harness.run(scripts.build("multiturn", quick=True), dialect, index_budget=40)
+    assert run.sent and run.metrics()["requests_with_an_unnamed_result"] == 0
+    # (storage itself reports only that v0.5.24 has no stubs hook: the baseline's hook is empty by design)
+    assert targets.unmet_by_rule(run)["storage"] == ["stubs.find_stubs is not filled in, so no stub was checked"]
+
+
+def test_the_omission_line_needs_a_count_the_store_bears_out_and_the_whole_turn_gone():
+    from inturn.harness import OMITTED
+    assert OMITTED.findall("(0 older pages omitted; use contexto_search to find them)") == ["0"]
+    assert OMITTED.findall("see 3 older pages omitted; use contexto_search") == []  # not the index's form
+
+
+def test_the_open_case_an_omission_line_the_store_bears_out_after_a_whole_turn_left_passes():
+    """Stated as open in the note: an engine that drops whole earlier turns and writes an omission line
+    with a count the store bears out passes rule 3 for them, as a turn-start rotation past the index budget
+    does; the results stay stored. The same engine claiming 0 or 99 older pages fails (above)."""
+    run = toy_run("multiturn", "claude", "omit_turns")
+    assert targets.unmet_by_rule(run) == {}
+    assert run.metrics()["requests_with_a_lost_result"] == 0
+
+
+def test_text_two_turns_share_says_nothing_about_which_turn_is_in_view():
+    """Reviewer B's L1 at 10c8ae79 and reviewer A's medium at a5d680c8: a run of a turn's text found in
+    another turn's text (a recurring prompt, a template, a later prompt quoting an earlier one) is not
+    evidence that this turn is still in view; a short text counts only as a whole text part."""
+    from inturn.harness import _bare, _turn_left
+
+    def left(turn, texts, *view):
+        return _turn_left(turn, texts, _bare("\0".join(view)), {_bare(v) for v in view})  # as the harness joins
+
+    template = "Use the same checklist as before and report the result in one table."
+    texts = [(template, "the first answer names the file src/a.py"), (template, "the second answer names src/b.py")]
+    assert left(0, texts, template, "the second answer names src/b.py")  # only turn 1 is in view
+    assert not left(0, texts, template, "the first answer names the file src/a.py")
+    # Over 40 characters without whitespace, so the window rule decides, not the short-text rule (reviewer A
+    # at 350a23f7: matching aligned windows only, as at a5d680c8, fails this).
+    quoted = [("Find every caller of parse_config in the whole source tree.", "Found 3."),
+              ("As before: Find every caller of parse_config in the whole source tree. Then rename it.", "Renamed.")]
+    assert len(_bare(quoted[0][0])) > 40
+    assert left(0, quoted, quoted[1][0], "Renamed.")  # a later prompt quoting turn 0 does not keep it in view
+    assert not left(0, quoted, quoted[0][0], "Found 3.")  # its own answer in view keeps it there
+    assert left(0, quoted, quoted[0][0], "Renamed.")  # a prompt quoted in full elsewhere is not its own (a stated limit)
+    short = [("ok", "Done."), ("Run the tests now.", "All pass.")]
+    assert left(0, short, "Run the tests now, ok? I am done.", "All pass.")  # "ok" inside other text is not turn 0
+    assert not left(0, short, "ok", "Run the tests now.")  # "ok" as a whole text part is
+    assert not left(0, short, "Run the tests now.", "Done.")  # so is "Done."
+    # Reviewer B at 59de142f: a short text inside another turn's text is still this turn's own.
+    kept = [("yes", "Done."), ("yes, now the docs", "Done. Docs fixed.")]
+    assert not left(0, kept, "yes", "Done.", *kept[1])  # turn 0 is whole in view
+    assert left(0, kept, *kept[1])
+    same = [("continue", "Done."), ("continue", "Done.")]
+    assert left(0, same, *same[1])  # all of turn 0's text is exactly another turn's: it cannot be told apart
+
+
+def test_format_characters_cannot_hide_a_turn_in_view():
+    """Reviewer B's L2 at 10c8ae79: a zero-width space between characters is removed before matching."""
+    from inturn.harness import _bare
+    assert _bare("con\u200btin ue\u2060d") == "continued"
+    assert _bare("con\u034ftinued") == "continued"  # a combining grapheme joiner (reviewer A, a5d680c8)

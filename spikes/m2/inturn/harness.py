@@ -32,6 +32,7 @@ import os
 import re
 import statistics
 import tempfile
+import unicodedata
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -57,7 +58,7 @@ SESSION = "inturn"
 PAGE_LINE = re.compile(r"(\S+) \(turn \d+\)")
 HIT_LINE = re.compile(r"> (\d+): ")
 PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")  # contexto.store.pages.page_id
-OMITTED = re.compile(r"\d+ older pages omitted; use contexto_search")  # render_index's line past its budget
+OMITTED = re.compile(r"\((\d+) older pages omitted; use contexto_search")  # render_index's line past its budget
 NEARLY_SPENT = mcp.RECALL_NEARLY_SPENT.split("{")[0]
 StubFinder = Callable[[str, dict], list[StubRef]]
 EngineFactory = Callable[[Any, Config], Any]
@@ -357,6 +358,7 @@ class _Actor:
         self.results: dict[str, bytes] = {}  # every result delivered: call id -> digest of its content
         self.prompts: list[str] = []  # each turn's prompt text, in order
         self.call_turn: dict[str, int] = {}  # call id -> the turn (index into prompts) that delivered its result
+        self.answers: dict[int, list[str]] = {}  # turn -> the text of each of its assistant messages that has text
         self.result_tokens: dict[str, int] = {}
         self.scripted: dict[str, str] = {}  # the scripted ones: call id -> call key
         self.hit: tuple[str, int] | None = None  # the page and offset the last search named
@@ -385,34 +387,63 @@ def _digest(item: dict) -> str:
 
 
 def _read_texts(item: Any) -> list[str]:
-    """The text the model reads of a forwarded message or item as prose: a string content and its
-    ``text`` and ``input_text`` parts. Tool results and outputs are left out, so a page id inside some
-    tool's output (or a request field the model never reads) names nothing."""
+    """The text the model reads of a forwarded message or item as prose: a string content, its ``text``,
+    ``input_text`` and ``output_text`` parts, and the text of a plain-text ``document`` block. Tool results
+    and outputs are left out, so a page id inside some tool's output (or a request field the model never
+    reads) names nothing."""
     if not isinstance(item, dict):
         return []
     content = item.get("content")
     if isinstance(content, str):
         return [content]
-    return [block["text"] for block in content if isinstance(content, list) and isinstance(block, dict)
-            and block.get("type") in ("text", "input_text") and isinstance(block.get("text"), str)] \
-        if isinstance(content, list) else []
-
-
-def _texts(item: Any) -> list[str]:
-    """The texts of a forwarded message or item: a string content, its text and ``input_text`` parts, and
-    a string tool result or output, where a prompt the engine moved could be."""
-    if not isinstance(item, dict):
-        return []
-    found = [item["output"]] if isinstance(item.get("output"), str) else []
-    content = item.get("content")
-    if isinstance(content, str):
-        return [*found, content]
+    found = []
     for block in content if isinstance(content, list) else []:
-        if isinstance(block, dict):
-            found.extend(t for t in (block.get("text"), block.get("content")) if isinstance(t, str))
-            if isinstance(block.get("content"), list):
-                found.extend(b["text"] for b in block["content"] if isinstance(b, dict) and isinstance(b.get("text"), str))
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in ("text", "input_text", "output_text") and isinstance(block.get("text"), str):
+            found.append(block["text"])
+        elif block.get("type") == "document" and isinstance(block.get("source"), dict) \
+                and isinstance(block["source"].get("data"), str) and block["source"].get("type") == "text":
+            found.append(block["source"]["data"])
     return found
+
+
+WINDOW = 40  # characters: a turn is still in view when any window this long of its prompt or answers is
+
+
+def _bare(text: str) -> str:
+    """``text`` without whitespace, Unicode format characters (zero-width spaces and joiners) and
+    non-spacing or enclosing marks (a combining grapheme joiner), so none can hide a turn still in view."""
+    return "".join(c for c in text if not c.isspace() and unicodedata.category(c) not in ("Cf", "Mn", "Me"))
+
+
+def _windows(texts: tuple[str, ...]) -> set[str]:
+    """Every ``WINDOW``-character run of ``texts`` (bare), one every half window and the last one; a text
+    shorter than the window counts whole."""
+    found: set[str] = set()
+    step = max(1, WINDOW // 2)
+    for text in texts:
+        t = _bare(text)
+        if len(t) <= WINDOW:
+            found.update([t] if t else [])
+        else:
+            found.update(t[i:i + WINDOW] for i in range(0, len(t) - WINDOW + 1, step))
+            found.add(t[-WINDOW:])
+    return found
+
+
+def _turn_left(turn: int, texts: list[tuple[str, ...]], haystack: str, parts: set[str]) -> bool:
+    """Rule 3: whether turn ``turn`` (``texts[turn]`` is its prompt and answers) has left the request whose
+    bare text is ``haystack`` and whose bare text parts are ``parts``. Only the turn's own runs count: a run
+    found anywhere in another turn's text (a template, a quote of an earlier prompt) says nothing about
+    which turn is there. A run shorter than the window is a whole short text (such as "ok" or "Done."): it
+    is set aside only when another turn has that same whole text (every prompt "continue"), and counts only
+    when it is a whole text part of the request, not inside other text."""
+    others = [_bare(x) for t, own in enumerate(texts) if t != turn for x in own]
+    whole = set(others)
+    mine = [w for w in _windows(texts[turn])
+            if (w not in whole if len(w) < WINDOW else not any(w in other for other in others))]
+    return not any((w in parts) if len(w) < WINDOW else (w in haystack) for w in mine)
 
 
 def _estimate(events: list[dict]) -> tuple[int | None, int | None]:
@@ -424,13 +455,14 @@ def _estimate(events: list[dict]) -> tuple[int | None, int | None]:
 
 
 def run(scenario: Scenario, dialect: str, *, find_stubs: StubFinder = stubs.find_stubs,
-        engine: EngineFactory | None = None, check_wire: bool = False) -> Run:
+        engine: EngineFactory | None = None, check_wire: bool = False, index_budget: int | None = None) -> Run:
     """Play ``scenario`` on ``dialect`` (``claude`` or ``codex``) and measure it.
 
     ``engine(store, config)`` builds the engine under test; the default is the real ``RewriteEngine``.
     It is called like the proxy calls one: ``prime(request)``, ``engine(request, headers, endpoint)``
     returning ``(forwarded, headers, events)``, and ``observe_usage(...)`` returning events.
-    ``check_wire`` also serializes every forwarded request, to prove the byte count."""
+    ``check_wire`` also serializes every forwarded request, to prove the byte count. ``index_budget``
+    sets the engine's ``Config.index_budget``, to run a session whose index lists only its newest pages."""
     if dialect not in scenario.dialects:
         raise ValueError(f"{scenario.name} does not run on {dialect}")
     with tempfile.TemporaryDirectory(prefix="inturn-") as home:
@@ -438,7 +470,7 @@ def run(scenario: Scenario, dialect: str, *, find_stubs: StubFinder = stubs.find
         store.set_mcp_listed()  # as after the MCP server answered tools/list in a real session
         reader = SessionStore(Path(home), SESSION)  # the MCP server's own handle: another process, in real use
         try:
-            return _Play(scenario, dialect, store, reader, find_stubs, engine, check_wire).play()
+            return _Play(scenario, dialect, store, reader, find_stubs, engine, check_wire, index_budget).play()
         finally:
             reader.release()
             store.release()
@@ -446,9 +478,11 @@ def run(scenario: Scenario, dialect: str, *, find_stubs: StubFinder = stubs.find
 
 class _Play:
     def __init__(self, scenario: Scenario, dialect: str, store: RecordingStore, reader: SessionStore,
-                 find_stubs: StubFinder | None, engine: EngineFactory | None, check_wire: bool) -> None:
+                 find_stubs: StubFinder | None, engine: EngineFactory | None, check_wire: bool,
+                 index_budget: int | None = None) -> None:
         self.scenario, self.dialect, self.store, self.check_wire = scenario, dialect, store, check_wire
-        self.config = Config(bound=scenario.bound)
+        self.config = (Config(bound=scenario.bound) if index_budget is None
+                       else Config(bound=scenario.bound, index_budget=index_budget))
         self.engine = engine(store, self.config) if engine else RewriteEngine(store, config=self.config)
         self.upstream = FakeUpstream()
         self.server = mcp.Server(reader, io.StringIO(), io.StringIO())
@@ -494,6 +528,10 @@ class _Play:
                 actor.result_tokens[call_id] = block_tokens(blocks[n]) if blocks else item_tokens(item)
                 actor.fresh.append(call_id)
                 actor.call_turn[call_id] = len(actor.prompts) - 1
+            if item.get("role") == "assistant":
+                text = "".join(_read_texts(item))
+                if text.strip():
+                    actor.answers.setdefault(len(actor.prompts) - 1, []).append(text)
 
     def resolve(self, actor: _Actor, step: Step) -> Step:
         """A probe step as the model would answer it: a search, then a recall of the page it named."""
@@ -544,8 +582,14 @@ class _Play:
         how many are not accounted for. Only a result of an earlier turn whose call is gone from the
         request as well can be, and only when the text the model reads names where it went: a page id
         in the request's own text (a text part of a message, not a tool result and not another request
-        field) reaches it, or that text carries the index's "older pages omitted" line and the result is
-        stored byte for byte in some page (an index past its budget lists only the newest pages)."""
+        field) reaches it; or the whole turn left (no 40-character run of its prompt or of any of its
+        answers that is found in no other turn's text, whitespace, format characters and combining marks
+        removed, is anywhere in that text; a text shorter than 40 characters is set aside only when another
+        turn has that same whole text, and counts only as a whole text part), that text
+        carries the index's "(N older pages omitted; use contexto_search" line with N at least 1 and at
+        most the number of store pages it does not name, and the result is stored byte for byte in some
+        page. An index past its budget lists only the newest pages, so a correct long session needs the
+        second way. ``system`` is not read: the engine sends it byte for byte (contract rule 1)."""
         current = len(actor.prompts) - 1
         earlier = [call_id for call_id in missing if actor.call_turn.get(call_id, current) < current]
         if not earlier:
@@ -558,9 +602,18 @@ class _Play:
         reached: set[str] = set()
         for page_id in set(PAGE_ID.findall(texts)):
             reached |= self.stubs.reach(page_id)
-        omitted = OMITTED.search(texts) is not None
-        accounted = sum(1 for call_id in gone
-                        if call_id in reached or (omitted and actor.results[call_id] in self.paged.get(call_id, ())))
+        named = set(PAGE_ID.findall(texts))
+        unlisted = sum(1 for name in self.page_names if name[:-5] not in named)
+        omitted = any(1 <= int(n) <= unlisted for n in OMITTED.findall(texts))
+        haystack = _bare(texts)
+        parts = {_bare(x) for x in texts.split("\0")}
+        turn_texts = [(actor.prompts[t], *actor.answers.get(t, ())) for t in range(len(actor.prompts))]
+
+        def left(turn: int) -> bool:
+            return _turn_left(turn, turn_texts, haystack, parts)
+
+        accounted = sum(1 for call_id in gone if call_id in reached or (
+            omitted and left(actor.call_turn[call_id]) and actor.results[call_id] in self.paged.get(call_id, ())))
         return len(missing) - accounted
 
     # One request ----------------------------------------------------------------------------------

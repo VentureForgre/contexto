@@ -49,11 +49,13 @@ def find_stubs(dialect: str, request: dict) -> list[StubRef]:
     result page that holds its call and result. A stub of one of Contexto's own search, recall or state
     results names no page (``page_id`` None): the result was a copy of stored pages, and the stub gives
     the call's arguments. A turn's fold note in a user message (``contexto.inturn.turn_note``) names the
-    newest fold's rounds page, each earlier fold's rounds page, and the folds page that lists the oldest
+    newest fold's rounds page, each earlier fold's rounds page, and the folds pages that list the oldest
     folds; each is a reference to the page as a whole, and the ids the note lists for a page (the newest
     folds' only, within its cap) are a reference to those calls as well. A rounds page holds its rounds
-    as sent (a result that was already a stub there is its stub); a folds page holds each listed fold's
-    note with every call id. Codex has no in-turn paging yet, so no stubs."""
+    as sent (a result that was already a stub there is its stub); a folds page of level 0 holds each
+    listed fold's note with every call id, and one of a higher level a line in fold-note form for each
+    folds page it names, which this function reads the same way. Codex has no in-turn paging yet, so no
+    stubs."""
     if dialect != "claude":
         return []
     found = []
