@@ -341,11 +341,14 @@ def test_a_settings_file_whose_env_is_not_an_object_is_not_read(tmp_path, home, 
     assert claude_key_helper(tmp_path, home, {}, trusted_only=False).value is None
 
 
+NOT_LOADED = "has an env that is not a JSON object, so Claude Code loads nothing from it"
+
+
 @pytest.mark.parametrize("text, problem", [
     ('{"env": {"CLAUDE_CODE_USE_BEDROCK": "0"}, "n": NaN}', "is not valid JSON"),
     ('{"env": {}, "n": -Infinity}', "is not valid JSON"),
-    ('{"env": ["CLAUDE_CODE_USE_BEDROCK=1"]}', "has an env that is not a JSON object"),
-    ('{"env": null}', "has an env that is not a JSON object"),
+    ('{"env": ["CLAUDE_CODE_USE_BEDROCK=1"]}', NOT_LOADED),
+    ('{"env": null}', NOT_LOADED),
 ])
 def test_read_settings_file_reports_a_file_claude_code_does_not_load(tmp_path, text, problem):
     """The rules of PR #258 in the one reader: Claude Code 2.1.322 loads nothing from a file holding

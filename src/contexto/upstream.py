@@ -374,7 +374,7 @@ def read_settings_file(path: Path) -> SettingsFile:
     except (ValueError, RecursionError):  # UnicodeDecodeError and JSONTooDeepError are ValueErrors
         return SettingsFile(None, "is not valid JSON", _may_name_provider(raw))
     if isinstance(data, dict) and "env" in data and not isinstance(data["env"], dict):
-        return SettingsFile(None, "has an env that is not a JSON object", False)
+        return SettingsFile(None, "has an env that is not a JSON object, so Claude Code loads nothing from it", False)
     return SettingsFile(data if isinstance(data, dict) else {}, None)
 
 

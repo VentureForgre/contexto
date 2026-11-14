@@ -47,11 +47,14 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   is on (a failure, with the launcher's own message). `--json` prints the same results for scripts.
   It makes no network request, runs no key helper and prints no key. Details:
   [docs/doctor.md](docs/doctor.md).
-- `contexto run claude` also refuses to launch (exit 2) when `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`
-  (Claude Platform on Google Cloud) is on, in the environment or in a settings file, as it does for
-  `CLAUDE_CODE_USE_BEDROCK` and the other cloud-provider switches (D70). With it on, Claude Code sends
-  its requests to that provider and none through the proxy, so the session would not be kept under
-  the bound.
+- `contexto run claude` now refuses to launch (exit 2) when a cloud-provider switch is on, in the
+  environment or in a Claude Code settings file: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+  `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS` or
+  `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` (D70, D64). With one on, Claude Code sends its requests to
+  that provider and none through the proxy, so the session would not be kept under the bound;
+  0.5.24 launched anyway. It also refuses while a settings file that may turn one on cannot be read.
+  The message says which switch and where; to keep using the provider, run `claude` without
+  Contexto.
 - A Claude Code settings file that starts with a UTF-8 byte order mark is read. Claude Code reads
   such a file, and Contexto treated it as absent, so `contexto run` missed an
   `ANTHROPIC_BASE_URL` or `apiKeyHelper` set there and used another upstream than Claude Code's own.

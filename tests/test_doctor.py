@@ -749,7 +749,7 @@ def test_settings_files_that_are_read_are_named_by_scope(both, capsys, fast_mcp)
 
 @pytest.mark.parametrize("fault,problem", [
     ("not-json", "is not valid JSON"), ("not-utf8", "is not valid JSON"),
-    ("env-list", "has an env that is not a JSON object")])
+    ("env-list", "has an env that is not a JSON object, so Claude Code loads nothing from it")])
 @pytest.mark.parametrize("scope", ["user", "project"])
 def test_an_unusable_settings_file_is_a_warning_that_names_it_and_what_is_wrong(both, capsys, fast_mcp, scope,
                                                                                  fault, problem):
@@ -767,6 +767,7 @@ def test_an_unusable_settings_file_is_a_warning_that_names_it_and_what_is_wrong(
     assert code == 0 and check["status"] == "warn" and line.startswith("[warn]"), line
     assert f"{name} {problem}" in line and str(path.parent.parent) not in line
     assert "Fix or remove it" in check["action"] and URL_SECRET not in json.dumps(check)
+    assert "refuses" not in check["action"]  # none of these can turn a switch on (reviewer B, round 5)
     assert {"kind": scope, "state": "unusable", "problem": problem} in check["details"]["files"]
     assert found["claude-upstream"]["details"]["source"] == "default"  # as the launcher reads it
     assert found["provider"]["status"] == "pass"  # the file cannot name a provider switch, so the launch goes on
@@ -1134,6 +1135,7 @@ def test_a_settings_file_that_may_name_a_switch_and_cannot_be_read_fails(both, c
     code, found = checks(capsys)
     provider = found["provider"]
     assert code == 1 and provider["status"] == "fail" and found["settings"]["status"] == "warn"
+    assert "refuses to launch while it may turn on a cloud provider" in found["settings"]["action"]
     assert provider["summary"].startswith("Contexto could not read .claude/settings.json (it is not valid JSON)")
     assert provider["details"] == {"variables": [], "unread": [{"source": "settings:project",
                                                                  "problem": "is not valid JSON"}]}

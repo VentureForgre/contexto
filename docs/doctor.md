@@ -249,6 +249,9 @@ the rest of the launcher's message, word for word:
        -> Contexto's proxy would see no request and the session would run with no bound, so the launch is refused. Contexto refuses when a switch is on in any of these places, whichever of them Claude Code would apply. To run through Contexto: unset CLAUDE_CODE_USE_BEDROCK for this command (env -u CLAUDE_CODE_USE_BEDROCK contexto run ...); and give Contexto an upstream that speaks the Anthropic Messages API (--upstream or ANTHROPIC_BASE_URL). To keep using the provider, run claude without contexto.
 ```
 
+`env -u` unsets the switch for that one command only, so a plain `contexto doctor` afterwards still
+fails this check; run `env -u CLAUDE_CODE_USE_BEDROCK contexto doctor` to see what the launch will see.
+
 In short: a switch counts when it is `1`, `true`, `yes` or `on` (any case; a JSON `true` or `1`
 too) in the environment or in the `env` block of any of the settings files under
 [`settings`](#settings), whichever of them Claude Code would apply, and with

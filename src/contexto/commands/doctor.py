@@ -473,6 +473,7 @@ def check_settings(ctx: Context) -> Check:
     a directory, and one this user cannot open are absent: Claude Code cannot read them either."""
     files: list[dict[str, str]] = []
     wrong: list[str] = []
+    may_switch = False
     read: list[str] = []
     paths = list(claude_settings_order(ctx.cwd, ctx.home, ctx.env))
     managed = managed_settings_path()
@@ -484,6 +485,7 @@ def check_settings(ctx: Context) -> Check:
         if found.problem:
             files.append({"kind": kind, "state": "unusable", "problem": found.problem})
             wrong.append(f"{name} {found.problem}")
+            may_switch = may_switch or found.may_name_provider
         elif found.data is not None:
             files.append({"kind": kind, "state": "read"})
             read.append(name)
@@ -491,10 +493,11 @@ def check_settings(ctx: Context) -> Check:
             files.append({"kind": kind, "state": "absent"})
     details = {"files": files}
     if wrong:
-        return Check("settings", WARN, f"Claude Code settings: {'; '.join(wrong)}",
-                     "Fix or remove it: Contexto takes nothing from it (an upstream, a key helper), and `contexto "
-                     "run claude` refuses to launch while it may turn on a cloud provider (see the provider check)",
-                     details)
+        step = "Fix or remove it: Contexto takes nothing from it (an upstream, a key helper)"
+        if may_switch:
+            step += (", and `contexto run claude` refuses to launch while it may turn on a cloud provider "
+                     "(see the provider check)")
+        return Check("settings", WARN, f"Claude Code settings: {'; '.join(wrong)}", step, details)
     if read:
         return Check("settings", PASS, f"Claude Code settings: read {' and '.join(read)}", details=details)
     return Check("settings", PASS, "Claude Code settings: no settings file here or for this user", details=details)
@@ -736,7 +739,7 @@ def check_store(env: Mapping[str, str], *, claude: bool = True) -> Check:
             if problem:
                 return failed(f"cannot be written in its sessions directory ({problem})")
         else:
-            note = " (its sessions directory is read-only now; `contexto run` sets it to mode 0700)"
+            note = " (its sessions directory cannot be written into now; `contexto run` sets it to mode 0700)"
     except OSError as exc:
         return failed(f"cannot be used: its sessions directory cannot be read ({exc.strerror or type(exc).__name__})")
     if home_problem:
