@@ -15,6 +15,16 @@ What is counted:
 - Cost is the recorded token classes priced per request (``contexto.bench.prices``) at every model
   in the price table, so the comparison does not depend on one model's prices. The report calls
   the tokens measured only when every request record counted gives ``measured`` as its basis.
+- A session the live run stopped and ran again has one attempt per run. Its tokens and cost count
+  every attempt, because every attempt was billed; its probes, its compactions and its line on the
+  request-size chart are those of the attempt the manifest names (the one that completed). Each
+  arm says how many of its sessions were retried and what the attempts that did not complete
+  used.
+- A request whose usage could not be read (``usage_unreadable``) is not a measurement: it is left
+  out of the token totals, the largest request and the chart, and counted on its own. The cost is
+  then a range: the requests that were read, and that plus each unreadable request's reservation
+  (``reserved_tokens``) priced at the model's highest per-token price
+  (``prices.reservation_cost``). Without a reservation the cost is only a lower bound, and says so.
 
 Words. The manifest calls one arm on one seed, run once, a unit; ``results.md`` calls it a session
 throughout. A manifest ``label`` is printed in the title of ``results.md``, under "What this run
@@ -69,6 +79,7 @@ SEED_INTERVAL_CAVEAT = (
     "the direction of a difference: the pooled test and the sign-flip test do.")
 # The v2 classes whose search by the service name also shows decoy lines (contexto.bench.script DECOYS).
 DECOY_CLASSES = ("paraphrase", "toolloop")
+ZERO = 1e-12  # a difference in accuracy smaller than this is 0: any real one is at least 1 / probes
 
 
 class ReportError(ValueError):
@@ -162,7 +173,7 @@ def _group(runs: Sequence[records.Run]) -> dict[str, _Group]:
     for group in groups.values():
         group.arms.sort(key=lambda arm: ARM_ORDER.index(arm) if arm in ARM_ORDER else len(ARM_ORDER))
         for rows in group.requests.values():
-            rows.sort(key=lambda r: r["n"])
+            rows.sort(key=lambda r: (records.attempt(r), r["n"]))
         _check_group(group)
     return groups
 
@@ -215,12 +226,49 @@ def _by_class(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[Mapping[str, 
     return out
 
 
+def _read(requests: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The requests whose usage was read: the ones whose counts are a measurement."""
+    return [r for r in requests if not records.unreadable(r)]
+
+
 def _tokens(requests: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """Token totals of the requests whose usage was read; the others are counted by ``_unreadable``."""
+    requests = _read(requests)
     out = {"requests": len(requests)}
     for name in ("uncached", "cache_write", "cache_read", "output"):
         out[name] = sum(r[name] for r in requests)
     out["input"] = out["uncached"] + out["cache_write"] + out["cache_read"]
     return out
+
+
+def _unreadable(requests: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    """The requests whose usage could not be read: how many, the tokens reserved for those whose
+    record carries a reservation (or what was read of one, if that is more, as the live run's own
+    guard counts it), and how many carry none."""
+    rows = [r for r in requests if records.unreadable(r)]
+    reserved = [max(r["reserved_tokens"], _input(r) + r["output"])
+                for r in rows if r.get("reserved_tokens") is not None]
+    return {"requests": len(rows), "reserved_tokens": sum(reserved), "without_reservation": len(rows) - len(reserved)}
+
+
+def _final(group: _Group, key: Key) -> list[dict[str, Any]]:
+    """The requests of the attempt a unit's manifest entry names: the one its probes come from."""
+    at = records.attempt(group.units[key])
+    return [r for r in group.requests.get(key, []) if records.attempt(r) == at]
+
+
+def _retries(group: _Group, keys: Sequence[Key]) -> dict[str, int]:
+    """Of ``keys``, the sessions that took more than one attempt, how many attempts did not
+    complete, and their requests and measured tokens (input and output)."""
+    earlier = []
+    attempts = 0
+    for key in keys:
+        at = records.attempt(group.units[key])
+        attempts += at
+        earlier += [r for r in group.requests.get(key, []) if records.attempt(r) != at]
+    tokens = _tokens(earlier)
+    return {"sessions": sum(1 for key in keys if records.attempt(group.units[key]) > 0), "attempts": attempts,
+            "requests": len(earlier), "tokens": tokens["input"] + tokens["output"]}
 
 
 def _price_order(model: str, table: Mapping[str, Any]) -> list[str]:
@@ -233,11 +281,20 @@ def _price_order(model: str, table: Mapping[str, Any]) -> list[str]:
     return [own, *(m for m in known if m != own)]
 
 
-def _costs(group: _Group, keys: Iterable[Key], table: Mapping[str, Any]) -> dict[str, float]:
+def _costs(group: _Group, keys: Iterable[Key],
+           table: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, float] | None]:
+    """The cost of the requests whose usage was read, at every model of the table, and the upper
+    bound that adds each unreadable request's reservation at the model's highest price. The upper
+    bound is None when an unreadable request carries no reservation: then nothing bounds it."""
     keys = list(keys)
-    return {model: math.fsum(price_tables.cost(group.requests.get(key, []), model, group.ttl[key], table)
-                             for key in keys)
-            for model in _price_order(group.model, table)}
+    lower = {model: math.fsum(price_tables.cost(_read(group.requests.get(key, [])), model, group.ttl[key], table)
+                              for key in keys)
+             for model in _price_order(group.model, table)}
+    unread = _unreadable(r for key in keys for r in group.requests.get(key, []))
+    if unread["without_reservation"]:
+        return lower, None
+    return lower, {model: usd + price_tables.reservation_cost(unread["reserved_tokens"], model, table)
+                   for model, usd in lower.items()}
 
 
 def _counted(group: _Group, arm: str) -> list[Key]:
@@ -262,16 +319,18 @@ def _arm(group: _Group, arm: str, bound: int, table: Mapping[str, Any]) -> dict[
     keys = _counted(group, arm)
     rows = [row for key in keys for row in group.probes[key].values()]
     requests = [r for key in keys for r in group.requests.get(key, [])]
-    sizes = [_input(r) for r in requests]
+    sizes = [_input(r) for r in _read(requests)]
     compactions = [group.units[key]["compactions"] for key in keys]
-    cost = _costs(group, keys, table)
+    cost, upper = _costs(group, keys, table)
     block = _proportion(rows)
     block = {"units": len(keys), "seeds": [key[1] for key in keys], **block}
     block.update({
         "stale": sum(1 for r in rows if r["stale"]),
-        "bases": sorted({r["basis"] for r in requests}),
+        "bases": sorted({r["basis"] for r in _read(requests)}),
         "by_class": {cls: _proportion(of_class) for cls, of_class in _by_class(rows).items()},
         "tokens": _tokens(requests),
+        "unreadable": _unreadable(requests),
+        "retries": _retries(group, keys),
         "max_input": max(sizes, default=0),
         "over_bound": sum(1 for size in sizes if size > bound),
         "http_errors": sum(1 for r in requests if not 200 <= r["status"] < 300),
@@ -279,6 +338,9 @@ def _arm(group: _Group, arm: str, bound: int, table: Mapping[str, Any]) -> dict[
         "compactions": None if any(c is None for c in compactions) or not keys else sum(compactions),
         "cost": cost,
         "cost_per_unit": {model: usd / len(keys) for model, usd in cost.items()} if keys else {},
+        "cost_upper": upper,
+        "cost_upper_per_unit": None if upper is None else (
+            {model: usd / len(keys) for model, usd in upper.items()} if keys else {}),
         "concluded": _concluded(group, arm, keys),
         "not_complete": [{"seed": key[1], "repeat": key[2], "status": unit["status"], "reason": unit["reason"]}
                          for key, unit in group.units.items() if key[0] == arm and unit["status"] != "complete"],
@@ -304,6 +366,7 @@ def _p(value: float) -> str:
 
 
 def _points(value: float, signed: bool = False) -> str:
+    value = 0.0 if abs(value) < ZERO else value  # never "-0.0"
     return f"{100 * value:+.1f}" if signed else f"{100 * value:.1f}"
 
 
@@ -512,6 +575,8 @@ def _pair(group: _Group, a: str, b: str) -> dict[str, Any]:
         out["pooled"] = stats.paired(right_a, right_b)
         out["by_class"] = {cls: stats.paired(x, y) for cls, (x, y) in classes.items()}
         out["seed_level"] = stats.seed_level([s["difference"] for s in out["per_seed"]])
+        if abs(out["seed_level"]["mean"]) < ZERO:  # differences that sum to 0 leave a float residue
+            out["seed_level"]["mean"] = 0.0
     out["verdict"] = _verdict(a, b, out["pooled"], out["seed_level"], out["repeats"])
     return out
 
@@ -519,8 +584,11 @@ def _pair(group: _Group, a: str, b: str) -> dict[str, Any]:
 def _series(group: _Group) -> dict[str, Any]:
     out = {}
     for arm in group.arms:
-        rows = [r for r in group.requests.get((arm, group.first_seed, 0), [])
-                if r["main"] and r["history_tokens"] is not None]
+        key = (arm, group.first_seed, 0)
+        if key not in group.units:
+            continue
+        rows = [r for r in _final(group, key)
+                if r["main"] and r["history_tokens"] is not None and not records.unreadable(r)]
         if not rows:
             continue
         bases = sorted({r["basis"] for r in rows})
@@ -555,10 +623,11 @@ def _model_block(group: _Group, bound: int, table: Mapping[str, Any]) -> dict[st
     noise = {arm: _noise(group, arm) for arm in group.arms}
     pairs = {f"{a}_vs_{b}": _pair(group, a, b) for a, b in PAIRS if a in arms and b in arms}
     every = [r for rows in group.requests.values() for r in rows]
+    cost, upper = _costs(group, group.requests, table)
     return {"arms": arms, "pairs": pairs, "noise": noise, "request_series": _series(group),
             "plain_compaction": _plain_compaction(group, bound),
             "all_requests": {"units": len(group.requests), "tokens": _tokens(every),
-                             "cost": _costs(group, group.requests, table)}}
+                             "unreadable": _unreadable(every), "cost": cost, "cost_upper": upper}}
 
 
 def _manifest(runs: Sequence[records.Run]) -> dict[str, Any]:
@@ -650,6 +719,12 @@ def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any]
         notes.append(f"Request size is the input each main request of seed {first.first_seed}, repeat 0 records "
                      f"(uncached, cache write and cache read tokens added). The records give it as "
                      f"{_and(sorted(basis))}; the legend says which for each line.")
+    left_out = sum(1 for group in groups.values() for arm in group.arms if (arm, group.first_seed, 0) in group.units
+                   for r in _final(group, (arm, group.first_seed, 0)) if r["main"] and records.unreadable(r))
+    if left_out:
+        notes.append(f"{_plural(left_out, 'main request')} of seed {first.first_seed}, repeat 0 "
+                     f"{'is' if left_out == 1 else 'are'} not drawn, because {'its' if left_out == 1 else 'their'} "
+                     "usage could not be read.")
     notes.append(f"History length is estimated from the script, not counted by a tokenizer: {BYTES_PER_TOKEN_LOG} "
                  f"bytes per token for log turns plus {REPLY_TOKENS} tokens per reply, and {BYTES_PER_TOKEN_TEXT} "
                  "bytes per token for probe turns.")
@@ -937,14 +1012,25 @@ def _concluded_section(block: Mapping[str, Any], h: str) -> list[str]:
                      "Concluded probes right, where the decision was right"], rows)]
 
 
+def _reserved_cell(unread: Mapping[str, int]) -> str:
+    if unread["requests"] and unread["without_reservation"] == unread["requests"]:
+        return "not recorded"
+    shown = f"{unread['reserved_tokens']:,}"
+    return f"{shown}, and {unread['without_reservation']} not recorded" if unread["without_reservation"] else shown
+
+
 def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str) -> list[str]:
     bases = sorted({basis for a in block["arms"].values() for basis in a["bases"]})
+    unread = sum(a["unreadable"]["requests"] for a in block["arms"].values())
     if bases == ["measured"]:
         counts = "The counts are measured: the upstream reported them."
     elif len(bases) == 1:
         counts = f"The counts are {bases[0]}: no upstream reported them."
     else:
         counts = f"The counts are {_basis_words(bases)}."
+    if unread:
+        counts = (counts.removesuffix(".") + f", except for {_plural(unread, 'request')} whose usage could not be "
+                  f"read, which {'is' if unread == 1 else 'are'} left out of this table and counted in the next.")
     lines = [f"{h} Tokens and requests", "",
              f"Every request that reached the upstream in the sessions counted above, side requests included. "
              f"Input is uncached, cache write and cache read added. {counts} The bound is {results['bound']:,} "
@@ -956,6 +1042,20 @@ def _tokens_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str
                       f"{a['tokens']['output']:,}", f"{a['max_input']:,}", a["over_bound"],
                       "not applicable" if a["compactions"] is None else a["compactions"], a["http_errors"]]
                      for arm, a in block["arms"].items()])
+    lines += ["Sessions run more than once, and requests whose usage could not be read. A session stopped by the "
+              "budget or by an error is run again by the same command; where a session was retried, every attempt "
+              "of a session is counted, because every attempt was billed: the table above and the cost below "
+              "include the attempts that did not complete, and the accuracy is that of the attempt that completed. "
+              "A request whose usage could not be read (the response ended before its usage, or could not be "
+              "decoded) is not in the table above. Before it was sent the live run reserved tokens for it: its "
+              "bytes at 1.5 bytes per token, a rate chosen to overstate the token count of everything this "
+              "benchmark sends, plus its `max_tokens`. That reservation is taken as the most the request can have "
+              "used, and the cost below uses it as a bound.", ""]
+    lines += _table(["Arm", "Sessions", "Sessions retried", "Attempts that did not complete", "Their requests",
+                     "Their tokens", "Requests whose usage could not be read", "Their reservation (tokens)"],
+                    [[label(arm), a["units"], a["retries"]["sessions"], a["retries"]["attempts"],
+                      f"{a['retries']['requests']:,}", f"{a['retries']['tokens']:,}", a["unreadable"]["requests"],
+                      _reserved_cell(a["unreadable"])] for arm, a in block["arms"].items()])
     return lines
 
 
@@ -1008,14 +1108,14 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, 
     bill = ("No row is a bill. The upstream was a local stub, so nothing was billed for this run." if local else
             "No row is a bill: what an account was charged depends on how it pays, and these are published prices "
             "only.")
+    unread = {arm: a["unreadable"] for arm, a in arms.items() if a["unreadable"]["requests"]}
+    apart = ", apart from the requests whose usage could not be read (below)," if unread else ","
     lines = [f"{h} Cost at published prices", "",
-             f"The token classes of each arm are {_basis_words(bases)}, and are priced here at every model in the "
-             f"price table, request by request. {rows} {bill} Each cell is USD per session, then the total over "
-             "the arm's sessions.", ""]
+             f"The token classes of each arm are {_basis_words(bases)}{apart} and are priced here at every model in "
+             f"the price table, request by request. {rows} {bill} Each cell is USD per session, then the total "
+             "over the arm's sessions.", ""]
     lines += _table(["Prices of", *(label(arm) for arm in arms)],
-                    [[m, *((f"{_usd(a['cost_per_unit'][m])} ({_usd(a['cost'][m])} over "
-                            f"{_plural(a['units'], 'session')})") if a["units"] else "not run"
-                           for a in arms.values())] for m in models])
+                    [[m, *(_cost_cell(a, m) if a["units"] else "not run" for a in arms.values())] for m in models])
     sessions = {a["units"] for a in arms.values() if a["units"]}
     if len(sessions) > 1:
         lines += ["The arms completed different numbers of sessions, so compare the cost per session, not the "
@@ -1029,6 +1129,28 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, 
         entry = table["models"][m]
         if len(entry["rows"]) > 1 and entry.get("note"):
             lines.append(f"- {m}: {entry['note']}")
+    for arm, u in unread.items():
+        many = u["requests"] > 1
+        whose = f"{_plural(u['requests'], 'request')} whose usage could not be read"
+        if arms[arm]["cost_upper"] is None:
+            missing = u["without_reservation"]
+            if missing == u["requests"]:
+                records_words = "their records carry" if many else "its record carries"
+            else:
+                records_words = f"{missing} of their records {'carry' if missing > 1 else 'carries'}"
+            lines.append(f"- {label(arm)}: {whose}, and {records_words} no reservation, so nothing bounds the cost. "
+                         f"The figure leaves {'them' if many else 'it'} out and is a lower bound.")
+        else:
+            lines.append(f"- {label(arm)}: {whose}. The lower figure leaves {'them' if many else 'it'} out; the "
+                         f"higher adds the {u['reserved_tokens']:,} tokens reserved for "
+                         f"{'them' if many else 'it'}, each priced at the model's highest price per token in the "
+                         "table, and is an upper bound if no request used more than its reservation. The cost is "
+                         "between the two.")
+    retried = {arm: a["retries"] for arm, a in arms.items() if a["retries"]["sessions"]}
+    for arm, r in retried.items():
+        lines.append(f"- {label(arm)}: {_plural(r['sessions'], 'session')} {'was' if r['sessions'] == 1 else 'were'} "
+                     f"retried; the cost includes the {_plural(r['attempts'], 'attempt')} that did not complete "
+                     f"({_plural(r['requests'], 'request')}), because they were billed.")
     other = sum(a["other_model_requests"] for a in arms.values())
     if other:
         lines.append(f"- {_plural(other, 'request')} went to a model other than the run's own (a CLI sends some "
@@ -1037,11 +1159,32 @@ def _cost_section(block: Mapping[str, Any], results: Mapping[str, Any], h: str, 
     total = block["all_requests"]
     if total["cost"]:
         first = next(iter(total["cost"]))
-        lines.append(f"- Every request recorded, repeats and unfinished sessions included: "
-                     f"{total['tokens']['requests']:,} requests, {total['tokens']['input']:,} input and "
-                     f"{total['tokens']['output']:,} output tokens, {_usd(total['cost'][first])} at the prices of "
-                     f"{first}.")
+        every = (f"- Every request recorded, repeats, unfinished sessions and retried attempts included: "
+                 f"{total['tokens']['requests']:,} requests, {total['tokens']['input']:,} input and "
+                 f"{total['tokens']['output']:,} output tokens, {_usd(total['cost'][first])} at the prices of "
+                 f"{first}.")
+        u = total["unreadable"]
+        if u["requests"]:
+            every = every.removesuffix(".") + (
+                f"; {_plural(u['requests'], 'more request')} whose usage could not be read "
+                + (f"{'bring' if u['requests'] > 1 else 'brings'} the cost to at most "
+                   f"{_usd(total['cost_upper'][first])}." if total["cost_upper"] is not None else
+                   f"{'are' if u['requests'] > 1 else 'is'} not in these figures, which are a lower bound."))
+        lines.append(every)
     return [*lines, ""]
+
+
+def _cost_cell(a: Mapping[str, Any], model: str) -> str:
+    """USD per session and over the arm's sessions: one figure, a range when some usage could not
+    be read, or a lower bound when nothing bounds it."""
+    low, total = a["cost_per_unit"][model], a["cost"][model]
+    sessions = _plural(a["units"], "session")
+    if not a["unreadable"]["requests"]:
+        return f"{_usd(low)} ({_usd(total)} over {sessions})"
+    if a["cost_upper"] is None:
+        return f"{_usd(low)} or more ({_usd(total)} or more over {sessions})"
+    high, high_total = a["cost_upper_per_unit"][model], a["cost_upper"][model]
+    return f"{_usd(low)} to {_usd(high)} ({_usd(total)} to {_usd(high_total)} over {sessions})"
 
 
 def _compaction_section(block: Mapping[str, Any], h: str) -> list[str]:

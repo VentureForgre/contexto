@@ -117,6 +117,14 @@ Every request that reached the upstream in the sessions counted above, side requ
 | Full context | 6 | 120 | 133,597 | 266,948 | 934,418 | 1,440 | 20,808 | 84 | not applicable | 0 |
 | Plain Claude Code | 6 | 144 | 141,947 | 46,838 | 164,032 | 23,040 | 6,785 | 24 | 24 | 0 |
 
+Sessions run more than once, and requests whose usage could not be read. A session stopped by the budget or by an error is run again by the same command; where a session was retried, every attempt of a session is counted, because every attempt was billed: the table above and the cost below include the attempts that did not complete, and the accuracy is that of the attempt that completed. A request whose usage could not be read (the response ended before its usage, or could not be decoded) is not in the table above. Before it was sent the live run reserved tokens for it: its bytes at 1.5 bytes per token, a rate chosen to overstate the token count of everything this benchmark sends, plus its `max_tokens`. That reservation is taken as the most the request can have used, and the cost below uses it as a bound.
+
+| Arm | Sessions | Sessions retried | Attempts that did not complete | Their requests | Their tokens | Requests whose usage could not be read | Their reservation (tokens) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Contexto | 6 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Full context | 6 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Plain Claude Code | 6 | 0 | 0 | 0 | 0 | 0 | 0 |
+
 ## Cost at published prices
 
 The token classes of each arm are measured, and are priced here at every model in the price table, request by request. The run's model, invented-figures-no-model-was-run, has no row in the price table, so every row answers what the same tokens would cost at another model's prices. `--prices FILE` takes a table that includes it. No row is a bill. The upstream was a local stub, so nothing was billed for this run. Each cell is USD per session, then the total over the arm's sessions.
@@ -131,7 +139,7 @@ The token classes of each arm are measured, and are priced here at every model i
 - Prices: https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-12, USD per million tokens.
 - Cache writes are priced at the 5-minute rate for every arm, because a request record does not carry its cache lifetime.
 - claude-haiku-5-5: Priced by prompt length. The page says a request whose prompt is over 100,000 tokens pays higher prices, that the prompt length counts all input tokens including cache reads and cache writes, and that each request is priced on its own. A prompt of exactly 100,000 tokens pays the lower row. That the higher row applies to the whole request, output included, is a reading of the page, which gives two complete price rows and has no wording about an excess; the page does not use the words "whole request". If that reading is wrong, change size_rule: "applies_to" to "excess" prices only the input above the threshold at the higher row, and "output" to "first_row" keeps output at the lower row.
-- Every request recorded, repeats and unfinished sessions included: 512 requests, 2,726,282 input and 34,560 output tokens, $0.1409 at the prices of claude-haiku-5-5.
+- Every request recorded, repeats, unfinished sessions and retried attempts included: 512 requests, 2,726,282 input and 34,560 output tokens, $0.1409 at the prices of claude-haiku-5-5.
 
 ## Compaction in the plain Claude Code arm
 

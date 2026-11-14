@@ -594,8 +594,8 @@ def test_read_run_refuses_a_request_recorded_twice(tmp_path):
 
 def test_read_run_refuses_a_gap_in_the_requests_of_a_unit(tmp_path):
     out = _one_unit(tmp_path, lambda probes, requests: requests.pop(5))
-    with pytest.raises(records.RecordError, match="requests.jsonl: the unit contexto, seed 1, repeat 0 has no "
-                                                  "request 5"):
+    with pytest.raises(records.RecordError, match="requests.jsonl: the unit contexto, seed 1, repeat 0, attempt 0 "
+                                                  "has no request 5"):
         records.read_run(out)
     out = _one_unit(tmp_path, lambda probes, requests: requests.reverse())  # the order in the file is free
     assert len(records.read_run(out).requests) == len(small_script(1).turns)

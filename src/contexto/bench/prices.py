@@ -21,6 +21,9 @@ A model with more than one row is priced by request size, and the rule is in the
     output always pays the first row.
 
 ``cost`` prices each request record on its own and sums, because a size rule applies per request.
+
+``reservation_cost`` gives an upper bound for a request whose usage could not be read: a number of
+tokens with no split into classes, each priced at the model's highest rate in any row.
 """
 
 from __future__ import annotations
@@ -204,3 +207,14 @@ def cost(requests: Iterable[Mapping[str, Any]], model: str, cache_ttl: str = "5m
         raise PriceError(f"no cache-write price for a cache lifetime of {cache_ttl!r}: the table has "
                          f"{' and '.join(CACHE_TTLS)}")
     return math.fsum(request_cost(r, model, cache_ttl, table) for r in requests)
+
+
+def reservation_cost(tokens: int, model: str, table: Mapping[str, Any] | None = None) -> float:
+    """An upper bound in USD on a request that counted at most ``tokens`` tokens of any class: each
+    token at ``model``'s highest price in any row and any class (in practice the output price of
+    its last row). Used for a request whose usage could not be read, priced at the reservation the
+    live run's spend guard kept for it, which says how many tokens it can have used but not of
+    which class."""
+    table = load() if table is None else table
+    rows = table["models"][resolve(model, table)]["rows"]
+    return tokens * max(row[rate] for row in rows for rate in RATES) / 1_000_000

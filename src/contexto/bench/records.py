@@ -19,6 +19,19 @@ manifest's ``label`` (a short line the report prints at the top of ``results.md`
 chart's title, for example to say that a stub answered), and on a unit ``probes`` and ``requests``
 (how many records the unit wrote, so that a file cut at the end of a unit is noticed) and
 ``cache_ttl`` (the unit's own cache lifetime where it differs from the manifest's).
+
+What the live run (``contexto.bench.runner``) adds and this module reads:
+
+- ``attempt`` on a unit and on a request record (absent means 0). A unit that was stopped and run
+  again has one attempt per run; each attempt numbers its requests ``n`` from 0, every attempt's
+  records stay in ``requests.jsonl``, and the unit names its last attempt. A unit's ``requests``
+  counts the records of that attempt, and each entry of its ``attempts`` list counts its own.
+- ``usage_unreadable`` and ``reserved_tokens`` on a request record: the meter could not read the
+  response's usage in full, so the four token counts are what it read (possibly nothing), and
+  ``reserved_tokens`` is what its spend guard reserved for the request (the request's bytes at
+  1.5 bytes per token plus its ``max_tokens``), an upper bound on what it can have cost.
+- A unit's ``status`` is ``running`` only while a run is in progress or after it was killed; such
+  a directory is refused with what to do (the same command resumes the run and records the unit).
 """
 
 from __future__ import annotations
@@ -34,6 +47,7 @@ FORMAT = 1
 KINDS = ("live", "replay")
 UPSTREAMS = ("anthropic", "custom", "local")
 STATUSES = ("complete", "stopped", "not_run")
+RUNNING = "running"  # the live run's status for a unit in progress
 BASES = ("measured", "estimated", "modelled")
 CACHE_TTLS = ("5m", "1h")
 LARGEST = 10 ** 12  # no count of tokens, probes or requests is larger; a longer number is a damaged file
@@ -191,8 +205,19 @@ def _format(value: Any, field: str) -> None:
         raise _Bad(field, f"this version reads format {FORMAT}, got {_show(value)}")
 
 
+def _status(value: Any, field: str) -> None:
+    if value == RUNNING:
+        raise _Bad(field, "the session is 'running': the run that wrote this directory was interrupted while this "
+                          "session ran, or it is still running. When no run is using the directory, the same command "
+                          "with the same --out resumes it and records the session; then report again")
+    _choice(*STATUSES)(value, field)
+
+
+_ATTEMPT = _object({"attempt": _integer(0)}, optional={"status": _string(nullable=True),
+                                                      "requests": _integer(0, nullable=True)})
+
 _UNIT: dict[str, Check] = {
-    "arm": _string(), "seed": _integer(0), "repeat": _integer(0), "status": _choice(*STATUSES),
+    "arm": _string(), "seed": _integer(0), "repeat": _integer(0), "status": _status,
     "reason": _string(nullable=True), "cli_exit": _integer(nullable=True),
     "compactions": _integer(0, nullable=True), "compaction_pre_tokens": _list_of(_integer(0)),
     "concluded_ok": _map_of(_boolean), "toolloop_reads": _integer(0, nullable=True),
@@ -200,7 +225,8 @@ _UNIT: dict[str, Check] = {
 }
 _UNIT_OPTIONAL: dict[str, Check] = {
     "probes": _integer(0, nullable=True), "requests": _integer(0, nullable=True),
-    "cache_ttl": _or_null(_choice(*CACHE_TTLS)),
+    "cache_ttl": _or_null(_choice(*CACHE_TTLS)), "attempt": _integer(0, nullable=True),
+    "attempts": _or_null(_list_of(_ATTEMPT)),
 }
 
 _MANIFEST: dict[str, Check] = {
@@ -228,6 +254,10 @@ _REQUEST: dict[str, Check] = {
     "history_tokens": _integer(0, nullable=True), "uncached": _integer(0), "cache_write": _integer(0),
     "cache_read": _integer(0), "output": _integer(0), "status": _integer(0), "compaction": _boolean,
     "basis": _choice(*BASES),
+}
+_REQUEST_OPTIONAL: dict[str, Check] = {
+    "attempt": _integer(0, nullable=True), "usage_unreadable": _boolean,
+    "reserved_tokens": _integer(0, nullable=True),
 }
 
 _REACH: dict[str, Check] = {
@@ -283,7 +313,7 @@ def _check_results(data: dict[str, Any]) -> None:
 
 
 def _check_request(record: dict[str, Any]) -> None:
-    _fields(record, _REQUEST)
+    _fields(record, _REQUEST, optional=_REQUEST_OPTIONAL)
     if record["history_tokens"] is None and record["turn"] is not None:
         raise _Bad("history_tokens", "may be null only when 'turn' is null: a request that serves a turn has a "
                                      "history length")
@@ -460,8 +490,19 @@ def unit_key(record: dict[str, Any]) -> tuple[str, int, int]:
     return (record["arm"], record["seed"], record["repeat"])
 
 
-def _unit_words(key: tuple[str, int, int]) -> str:
-    return f"{key[0]}, seed {key[1]}, repeat {key[2]}"
+def attempt(record: dict[str, Any]) -> int:
+    """The attempt a unit names as its last, or the attempt a request record belongs to: 0 when the
+    field is absent or null (a writer that does not retry)."""
+    return record.get("attempt") or 0
+
+
+def unreadable(request: dict[str, Any]) -> bool:
+    """Whether the request's usage could not be read: its token counts are not a measurement."""
+    return request.get("usage_unreadable") is True
+
+
+def _unit_words(key: tuple[str, int, int], at: int | None = None) -> str:
+    return f"{key[0]}, seed {key[1]}, repeat {key[2]}" + ("" if at is None else f", attempt {at}")
 
 
 def read_run(out_dir: Path | str) -> Run:
@@ -475,9 +516,11 @@ def read_run(out_dir: Path | str) -> Run:
     recomputed from records.
 
     Against a ``requests.jsonl`` that lost records: no request number ``n`` is used twice in one
-    unit, the numbers of a unit run from 0 with no gap (in any order in the file), and a
-    ``complete`` unit has one request record or more. A file cut at the end of a unit leaves no
-    gap, so a unit that carries its counts (``probes``, ``requests``) is also checked against them.
+    attempt of a unit, the numbers of each attempt run from 0 with no gap (in any order in the
+    file), no record belongs to an attempt later than the one the unit names as its last, and a
+    ``complete`` unit has one request record or more in its last attempt. A file cut at the end of
+    a unit leaves no gap, so a unit that carries its counts (``probes``, ``requests``, and
+    ``requests`` in each entry of ``attempts``) is also checked against them.
     """
     out_dir = Path(out_dir)
     manifest_path = out_dir / "manifest.json"
@@ -510,25 +553,33 @@ def read_run(out_dir: Path | str) -> Run:
                               line=number, field="id")
         seen.add((key, row["id"]))
     requests = read_requests(requests_path)
-    numbers: dict[tuple[str, int, int], set[int]] = {key: set() for key in status}
+    last = {unit_key(unit): attempt(unit) for unit in manifest["units"]}
+    numbers: dict[tuple[str, int, int], dict[int, set[int]]] = {key: {} for key in status}
     for number, row in enumerate(requests, start=1):
-        key = unit_key(row)
+        key, at = unit_key(row), attempt(row)
         if key not in status:
             raise RecordError(requests_path, f"the unit {_unit_words(key)} is not in manifest.json", line=number)
-        if row["n"] in numbers[key]:
+        if at > last[key]:
+            raise RecordError(requests_path, f"the record is of the unit {_unit_words(key)}, attempt {at}, but "
+                                             f"manifest.json names attempt {last[key]} as the last; the manifest is "
+                                             "older than the records", line=number, field="attempt")
+        of_attempt = numbers[key].setdefault(at, set())
+        if row["n"] in of_attempt:
             raise RecordError(requests_path, f"the request {row['n']} appears twice for the unit "
-                                             f"{_unit_words(key)}", line=number, field="n")
-        numbers[key].add(row["n"])
+                                             f"{_unit_words(key, at)}", line=number, field="n")
+        of_attempt.add(row["n"])
     answered: dict[tuple[str, int, int], int] = {key: 0 for key in status}
     for key, _ in seen:
         answered[key] += 1
     for unit in manifest["units"]:
         key = unit_key(unit)
-        found = numbers[key]
-        lost = next((n for n in range(len(found)) if n not in found), None)
-        if lost is not None:
-            raise RecordError(requests_path, f"the unit {_unit_words(key)} has no request {lost}: a unit's "
-                                             "requests are numbered from 0 with no gap, so a record was lost")
+        for at, found in sorted(numbers[key].items()):
+            lost = next((n for n in range(len(found)) if n not in found), None)
+            if lost is not None:
+                raise RecordError(requests_path, f"the unit {_unit_words(key, at)} has no request {lost}: each "
+                                                 "attempt's requests are numbered from 0 with no gap, so a record "
+                                                 "was lost")
+        found = numbers[key].get(last[key], set())
         if unit["status"] == "complete" and not found:
             raise RecordError(requests_path, f"the unit {_unit_words(key)} is complete in manifest.json but has "
                                              "no request record: the file was cut short or emptied")
@@ -537,4 +588,10 @@ def read_run(out_dir: Path | str) -> Run:
             if unit.get(name) is not None and unit[name] != have:
                 raise RecordError(path, f"the unit {_unit_words(key)} has {have} {words} records and "
                                         f"manifest.json says {unit[name]}: the file was cut short or added to")
+        for entry in unit.get("attempts") or []:
+            have = len(numbers[key].get(entry["attempt"], set()))
+            if entry.get("requests") is not None and entry["requests"] != have:
+                raise RecordError(requests_path, f"the unit {_unit_words(key, entry['attempt'])} has {have} request "
+                                                 f"records and manifest.json says {entry['requests']}: the file was "
+                                                 "cut short or added to")
     return Run(out_dir, manifest, probes, requests)
