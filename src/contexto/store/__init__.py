@@ -70,7 +70,7 @@ from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, render_index, same_content
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
-from contexto.store.search import rank
+from contexto.store.search import Approximate, rank, rank_approximate
 
 __all__ = ["SessionStore", "PageConflictError", "PageNotFoundError", "PageUnreadableError", "KeyFileError",
            "LockFileDamagedError", "SessionNotFoundError", "redact"]
@@ -1041,6 +1041,17 @@ class SessionStore(LedgerOps):
         for _ in range(3):
             entries, fetch, names = self._catalog.search_entries()
             found = rank(entries, query, fetch)
+            if self._catalog.all_present(names):
+                break
+        return found
+
+    def search_approximate(self, query: str) -> Approximate:
+        """Pages holding part of ``query``, best first, each with the words it matched and how: what
+        search falls back to when ``search`` finds no page (``contexto.store.search.rank_approximate``,
+        D65). Empty when no page passes the floor."""
+        for _ in range(3):  # as ``search``: run again on a new listing when a page went meanwhile
+            entries, fetch, names = self._catalog.search_entries()
+            found = rank_approximate(entries, query, fetch)
             if self._catalog.all_present(names):
                 break
         return found

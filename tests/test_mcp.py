@@ -263,7 +263,11 @@ def test_search_matches_words_case_insensitively(server, stores):
     assert tool(server, "contexto_search", {"query": "GARNET-4821"})["result"]["content"][0]["text"] == text  # D34
     assert (tool(server, "contexto_search", {"query": "staging garnet-4821"})["result"]["content"][0]["text"]
             .startswith(f"{BEST}{a}"))
-    assert (tool(server, "contexto_search", {"query": "garnet-4821 absent-word"})["result"]["content"][0]["text"]
+    # No page holds both words: the page holding the identifier is an approximate match, said to be (D65).
+    partial = tool(server, "contexto_search", {"query": "garnet-4821 absent-word"})["result"]["content"][0]["text"]
+    assert partial.split("\n")[:3] == [mcp.SEARCH_APPROX_HEADER, f"{a} (turn 3)",
+                                       "  [matched: garnet-4821; not matched: absent-word]"]
+    assert (tool(server, "contexto_search", {"query": "absent-word other-absent"})["result"]["content"][0]["text"]
             == "No paged-out turn contains every word of that query.")
     assert tool(server, "contexto_search", {"query": "x"})["result"]["content"][0]["text"].startswith(f"{BEST}{b}")
     assert tool(server, "contexto_search", {"query": ""})["result"]["isError"] is True
