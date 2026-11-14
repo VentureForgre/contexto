@@ -1392,16 +1392,14 @@ def test_a_file_whose_env_is_not_an_object_is_not_read_at_all(both, capsys, fast
     assert found["claude-key"]["status"] == "warn" and found["claude-key"]["details"] == {"found": []}
 
 
-def test_a_fifo_settings_file_is_named_and_the_other_checks_go_on(both, capsys, fast_mcp):
+def test_a_fifo_settings_file_is_named_and_the_other_checks_go_on(both, capsys, fast_mcp, within):
     """Reviewer A's re-review: a named pipe at a settings path is never opened for reading
     (``read_settings_file``), so doctor names it and finishes. The launcher refuses on it (D70: a file
     that is there and cannot be read may turn on a provider), so the provider check fails as it does."""
     pipe = both.cwd / ".claude" / "settings.json"
     pipe.parent.mkdir()
     os.mkfifo(pipe)
-    started = time.monotonic()
-    code, found = checks(capsys)
-    assert time.monotonic() - started < 60
+    code, found = within(60, lambda: checks(capsys))  # a doctor that blocks on the pipe fails, not hangs
     assert found["settings"]["status"] == "warn"
     assert ".claude/settings.json is not a regular file" in found["settings"]["summary"]
     assert found["provider"]["status"] == "fail"
