@@ -2715,7 +2715,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     (`docs/README.md`) and a link check (`tests/test_docs_links.py`); the README went from 772 to
     185 lines. (2) PR #259 adds the recording (`docs/assets/demo.svg`, its transcript `demo.txt`),
     the request-size chart (`request-size-light.svg`, `request-size-dark.svg`) and the scripts that
-    make them (`spikes/readme/`). (3) This slice (PR #265) wrote the README (219 lines): the first screen, who
+    make them (`spikes/readme/`). (3) This slice (PR #265) wrote the README (225 lines): the first screen, who
     it is for and not for, a diagram, the comparison, what the user sees when it works and when it
     fails, privacy, and a short limitations list. It moved the Results table and its cost paragraph
     to `docs/results.md` and the full limitations list to `docs/limitations.md`, word for word, and
@@ -2750,7 +2750,14 @@ the owner's delegation. Open decisions are listed at the end with the options an
     - The link check is a pytest in the existing suite, not a new workflow.
     - The diagram is Mermaid, which GitHub renders in both themes with no image file to keep.
     - The chart is drawn from run #3's per-request CSV, the only run with a modeled full-history
-      size for every request.
+      size for every request. Its full-history line is the record's plain-run shape: turns 1 to 18
+      modeled, and for the six probe turns the baseline arm's measured `count_tokens` (435,590 to
+      438,406). The CSV's own probe-turn column, the "same request points" series that peaks at
+      493,902, is not plotted: the record says it overstates plain, because it carries the search
+      tool loops that only Contexto makes. Review of PR #259 found this.
+    - The recording is an animated SVG drawn by `spikes/readme/termsvg.py`, every row made only of
+      `<tspan>` pieces: WebKit (Safari, every iOS browser) stretched bare text beside a `<tspan>` to
+      the row's whole `textLength` and garbled the sizes. Review of PR #259 found this.
     - The Python badge is static (3.12 to 3.15, from the classifiers and the CI matrix), because the
       package is not on PyPI. The other two badges are CI on main and the licence.
     - The README no longer has a `#results` anchor; `docs/faq.md` links `docs/results.md`. The

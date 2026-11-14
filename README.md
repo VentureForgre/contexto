@@ -13,8 +13,9 @@ moving the oldest turns to disk, word for word, and giving the model tools to se
   answered 47. That is one synthetic session and one seed, and the gap is inside noise (p = 0.18).
   On claude-opus-5-5 it was 53 against 54 ([results](docs/results.md)).
 - **Fewer input tokens sent**: 46.6% fewer in one measured session, against a partly modeled plain
-  Claude Code. Cost depends on the model and on cache hits: 49.7% less at Haiku 5.5's prices, more
-  at flat prices such as Opus 5.5's ([results](docs/results.md#tokens-and-cost)).
+  Claude Code. Cost depends on the model and on cache hits: 49.7% less at Haiku 5.5's prices. At
+  flat prices such as Opus 5.5's it is more if plain Claude Code hits the prompt cache on every
+  request, and less with the two cache misses the full-context run had ([results](docs/results.md#tokens-and-cost)).
 
 ## Install
 
@@ -40,10 +41,13 @@ configuration is edited. Every option: [docs/run-reference.md](docs/run-referenc
 `/clear` and `/compact`: [docs/claude-code.md](docs/claude-code.md). Codex runs through `contexto run codex`
 in API-key mode and needs a key helper, a command that prints your API key ([docs/codex.md](docs/codex.md)).
 
-<img src="docs/assets/demo.svg" width="800" alt="Terminal recording of a synthetic session. contexto run starts a stub CLI with a bound of 60,000 tokens. Over eight turns the history the CLI sends grows from 13,222 to 99,475 tokens, while the request that reaches the fake upstream never exceeds 38,451. contexto sessions show then lists 6 paged-out turns and 0 over-bound turns. Turn 9 asks for a deploy token name stated in turn 2, and a contexto_search call returns that line from the paged-out turn.">
+<img src="docs/assets/demo.svg" width="800" alt="Terminal recording of a synthetic session. contexto run starts a stub CLI with a bound of 60,000 tokens. Over turns 0 to 7 the history the CLI sends grows from 13,216 to 99,426 tokens, while the request that reaches the fake upstream never exceeds 38,434. contexto sessions show then lists 6 paged-out turns and 0 over-bound turns. Turn 8 asks for a release codename stated in turn 1, and a contexto_search call returns that line, amber-kestrel-17, from the paged-out turn.">
 
 A synthetic session: a stub CLI and a fake upstream on `127.0.0.1`, no model, with one token counted
 per 3.5 bytes. `contexto`, its proxy, store and search are the real code ([transcript](docs/assets/demo.txt)).
+The small bound, `--headroom-floor`, `--no-version-check` and `--upstream` are there only for the
+stand-ins. The request shrinks at a history of about 50,000 because Contexto moves old turns out
+before the next request could reach the bound.
 
 ## Who it is for
 
@@ -92,12 +96,14 @@ never inside a tool loop. It makes no model calls of its own.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/request-size-dark.svg">
-  <img src="docs/assets/request-size-light.svg" alt="Line chart of the largest request in each of 24 turns. The Contexto line stays under the bound of 150,000 tokens and peaks at 109,868. The line for the full history without Contexto grows to 493,902." width="720">
+  <img src="docs/assets/request-size-light.svg" alt="Line chart of the largest request in each of 24 turns. The Contexto line stays under the bound of 150,000 tokens and peaks at 109,868. The line for the full history without Contexto grows to 438,406." width="720">
 </picture>
 
 Largest request in each turn of acceptance run 3 (Claude Code 2.1.301, claude-haiku-5-5, bound
-150,000), one scripted session. Contexto's request sizes are measured; the full-history line is
-modeled from the byte sizes of Claude Code's requests ([record](docs/research/M2-usage-savings-run3.md)).
+150,000), one scripted session. Contexto's request sizes are measured. The full-history line is
+modeled from the byte sizes of Claude Code's requests for turns 1 to 18 and measured for the six
+question turns ([record](docs/research/M2-usage-savings-run3.md)). Haiku 5.5 has a 1M-token window,
+so plain Claude Code would not have compacted at 438,406.
 
 ## Why not compaction, a 1M window or the memory tool?
 
