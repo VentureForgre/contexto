@@ -1,6 +1,6 @@
 # Contexto status
 
-Updated 2026-11-13 by claude (D67: packaging for PyPI as `contexto-proxy`, releases cut by hand,
+Updated 2026-11-14 by claude (D67: packaging for PyPI as `contexto-proxy`, releases cut by hand,
 `install.sh`; before that v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
 D48 to D61, live acceptance run #4, and deleting the v0.1.0 to v0.4.0 releases, D62). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
@@ -45,7 +45,8 @@ compaction never fires, and accuracy equals full context.
   v0.1.0 to v0.4.0 were deleted (D62), because GitHub's source archives of those 19 releases held the
   hostname; their commits stay on `main`. Old commits, pull request diffs and pull request comments
   still hold it (D42).
-- Install, PyPI and release cadence (D67, 2026-11-13; PRs #253, #256, #260, #270, @@FOLLOWUP@@):
+- Install, PyPI and release cadence (D67, 2026-11-13 to 2026-11-14; PRs #253, #256, #260, #270,
+  #278, @@DOCSPR@@):
   - The distribution is `contexto-proxy` (the PyPI project `contexto` is unrelated); the command
     and import name stay `contexto`. Nothing is on PyPI yet. The `pypi` job of `release.yml`
     publishes by trusted publishing, with no token, once the owner has registered the pending
@@ -59,8 +60,10 @@ compaction never fires, and accuracy equals full context.
   - CI also installs the built wheel and sdist on every Python and OS of the matrix and checks
     the package for PyPI. Python stays 3.12 or later: on 3.11 the suite fails 7 tests (3,178
     pass), five of them the JSON nesting limit. WSL is untested and not claimed.
-  - Not verified: the OIDC exchange with PyPI and whether PyPI accepts the name. Both need the
-    owner's account.
+  - A reattach refuses a tag that is not on `main`'s first-parent chain, and rebuilds the same
+    sdist bytes (gzip level 9, uv's Python 3.12 in both jobs; shown on macOS only).
+  - Not verified: the OIDC exchange with PyPI and whether PyPI accepts the name (both need the
+    owner's account), and a reattach on a Linux runner.
 - CI and releases run on GitHub-hosted runners (PR #213): Python 3.12 to 3.15 on Ubuntu, 3.12 and
   3.15 on macOS, and Ruff lint (`uvx ruff@0.17.2 check .`; `ruff format` is not enforced). `ci` is a
   required check in the main ruleset, and workflow runs on fork pull requests need approval for all
@@ -634,8 +637,9 @@ Needs the owner:
   `pypi`), set the repository variable `PYPI_PUBLISH_ENABLED` to `true`, and cut v0.6.0 soon
   after. Until the first upload the name is unregistered, so anyone can take it, and the README
   and `docs/install.md` already name it. Steps: `docs/pypi-publishing.md`. Optional: a required
-  reviewer on the `pypi` environment, a tag ruleset on `v*`, and a public tap repository for the
-  draft Homebrew formula in `docs/install.md`.
+  reviewer on the `pypi` environment, a tag ruleset on `v*`, squash as the only merge method in
+  the `main` ruleset (D67), and a public tap repository for the draft Homebrew formula in
+  `docs/install.md`.
 - Live checks the fix round could not run at zero spend: D51's "keep it open until the user
   withdraws it" wording (added after the live run, not measured live), standing-rule pinning on
   claude-opus-5-5 and on Codex, and the full acceptance on Claude Code 2.1.314 (run #4 covered

@@ -2708,10 +2708,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
 
 - **D67. Contexto goes to PyPI as `contexto-proxy`, releases are cut by hand, and there is a
   one-line install.** Owner request, 2026-11-12; design and calls by Claude, 2026-11-13, each PR
-  with two reviewer agents (#253, #256, #260, #270, @@FOLLOWUP@@, @@DOCSPR@@). The owner asked for a PyPI release
-  under a free name. That supersedes "nothing goes to a package registry" in D0, D14 and D42, for
-  PyPI only: there is still no npm package and no Homebrew tap. Nothing was published and no
-  account was created; what only the owner can do is listed at the end.
+  with two reviewer agents (#253, #256, #260, #270, #278, @@DOCSPR@@). The owner asked for a PyPI
+  release under a free name. That supersedes "nothing goes to a package registry" in D0, D14 and
+  D42, for PyPI only: there is still no npm package and no Homebrew tap. Nothing was published and
+  no account was created; what only the owner can do is listed at the end.
   - **Name.** The distribution is `contexto-proxy`; the command and the import name stay
     `contexto`. `contexto` on PyPI is an unrelated project (ConTexto 0.2.0), so `pip install
     contexto` and `uvx contexto` fetch the wrong thing. `pypi.org/pypi/<name>/json` returned 404 on
@@ -2768,6 +2768,17 @@ the owner's delegation. Open decisions are listed at the end with the options an
     job runs `twine check --strict`, checks every classifier against a pinned
     `trove-classifiers`, and renders the PyPI description (`docs/pypi-description.md`, absolute
     links only) with `readme_renderer`. Both are required by `ci`.
+  - **Release follow-ups (#278).** A reattach refuses a tag whose commit is not on `main`'s
+    first-parent chain, so a tag on a side-branch commit that reached `main` through a merge
+    commit cannot be rebuilt and attested as a release; all 25 tags v0.5.0 to v0.5.24 pass. The
+    sdist repack pins gzip level 9 (Python 3.15 changed the default to 6), and the `release` and
+    `reattach` jobs both use uv's managed Python 3.12, so a reattach rebuilds the same bytes.
+    That was shown on macOS only; the first reattach on a hosted Linux runner is the real check.
+  - **Branches and `main`.** #270 and #278 each merged `main` in before their last two reviews. When
+    `main` moved again after those reviews, in files the PR does not touch, the PR merged without
+    another round: the ruleset requires `ci` but not an up-to-date branch, and squash merging puts
+    the PR's diff on the newest `main`. #278 merged that way over #275 (docs) and
+    #266 (search probes).
   - **Python floor stays 3.12.** The suite on CPython 3.11.15 (macOS, `requires-python` lowered
     in a scratch clone): 7 failed, 3,178 passed. Five failures are the 512-level JSON nesting
     limit (D45): on 3.11 a document inside the limit raises `RecursionError` in a handler thread.
@@ -2782,7 +2793,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     which needs Rust. A tap needs a new public repository, which is the owner's to create.
   - **Not verified, because it needs the owner's PyPI account:** the OIDC exchange with PyPI,
     GitHub refusing the `pypi` environment to a run from another ref (documented by GitHub, not
-    exercised), and whether PyPI accepts the name.
+    exercised), and whether PyPI accepts the name. Also not verified: a reattach on Linux.
   - **Needs the owner.** (1) On pypi.org, Publishing > "Add a new pending publisher", GitHub tab:
     PyPI Project Name `contexto-proxy`, Owner `VentureForgre`, Repository name `contexto`,
     Workflow name `release.yml`, Environment name `pypi`. (2) `gh variable set
@@ -2790,7 +2801,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
     soon after: a pending publisher does not reserve the name, so until the first upload anyone
     can register `contexto-proxy`, and the README already names it. Steps and checks:
     `docs/pypi-publishing.md`. Optional: a required reviewer on the `pypi` environment, a tag
-    ruleset on `v*`, and the Homebrew tap.
+    ruleset on `v*`, squash as the only merge method in the `main` ruleset (it also allows merge
+    and rebase today; after a rebase merge every commit of the PR is on the first-parent chain,
+    so a hand-pushed tag on one of them would pass the reattach check), and the Homebrew tap.
 
 ## Open decisions
 
