@@ -42,7 +42,7 @@ FORMAT = 1
 KIND = "contexto-bench-replay-trace"
 # The pinned session. ``turns`` is the number of d27 content turns given to ``script.build``: 40 of
 # about 40,000 bytes, to which protocol v2 adds 8 content turns and 2 probe turns, 56 turns in all and
-# 952,957 estimated tokens of history, 6.35 times the bound.
+# 952,971 estimated tokens of history, 6.35 times the bound.
 PINNED = {"seed": 20261016, "protocol": "v2", "bound": 150_000, "turn_bytes": 40_000, "turns": 40}
 RATES = {"log_bytes_per_token": upstream.LOG_BYTES_PER_TOKEN, "other_bytes_per_token": upstream.OTHER_BYTES_PER_TOKEN,
          "log_text_min_bytes": upstream.LOG_TEXT_MIN_BYTES, "tool_result_text_is_log_text": True}

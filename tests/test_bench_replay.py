@@ -461,6 +461,22 @@ def test_repeated_tool_use_ids_are_refused():
     assert upstream.check_request(body) == "messages: `tool_use` ids must be unique"
 
 
+def test_a_handler_error_is_recorded_not_printed(small, capsys):
+    """A failure inside the fake upstream's handler is named in ``unexpected`` (so the replay fails with
+    it) and prints no traceback, which would name the Python install's paths."""
+    server = upstream.FakeUpstream(small, scripted.steps(small))
+    server.start()
+    try:
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            server._server.handle_error(None, ("127.0.0.1", 1))
+    finally:
+        server.stop()
+    assert server.unexpected == ["the fake upstream failed while answering a request: ValueError"]
+    assert capsys.readouterr().err == ""
+
+
 def test_a_request_the_api_refuses_gets_its_400_and_is_recorded(small):
     """The proxy broke the conversation: the reply is the API's 400, and the script does not advance."""
     planned = scripted.steps(small)
@@ -750,7 +766,8 @@ def test_the_shipped_trace_pins_the_default_session(pinned):
         assert shipped[key] == value, key
     assert len(shipped["turn_sha256"]) == len(pinned.turns) and shipped["script_sha256"] == pinned.digest()
     assert shipped["model"]["rounds"] == scripted.rounds(pinned)
-    assert sum(shipped["model"]["rounds"]) == shipped["model"]["steps"] == shipped["expected"]["requests"]
+    expected = shipped["expected"]
+    assert sum(shipped["model"]["rounds"]) == expected["requests"] == len(expected["request_tokens"])
     assert shipped["model"]["rules"] == scripted.RULES
     assert list(shipped["files"]) == list(pinned.reads)
     estimate = bench_script.estimate(pinned)
