@@ -3546,12 +3546,6 @@ the owner's delegation. Open decisions are listed at the end with the options an
   block with a changed prefix, which is the same thing a rotation does at a turn start (rule 2, the
   conformance probe's "full epoch rewrite with all thinking stripped", 200). What it gives up is
   the second rule, inside the turn, and that case has never been measured live (below).
-  **The thinking rule.** An in-turn edit whose first changed message is at index `p` strips every
-  thinking and redacted-thinking block in messages `[p, n)`, `n` being the request's message count
-  at that moment, on that request and deterministically on every later one (`[thinking omitted]`
-  for a message left empty). Thinking before `p`, and in messages added afterwards, passes through
-  byte for byte. The paged_changed resync still keeps in-flight thinking after a prefix change
-  (rule 10, a known limitation); in-turn paging does not copy that.
   **The ladder.** In a tool loop, on a request that adds messages (in degraded mode too, as rule
   14's retry), when the pre-send estimate passes the line `T - min_turn_room / 4`, with `T = bound
   - headroom_floor - min_turn_room` (113,000 and 110,000 with the defaults; `T` is the point where
@@ -3597,10 +3591,19 @@ the owner's delegation. Open decisions are listed at the end with the options an
   how to read them, so the cost is an extra round. When the bound is tight, that is when it leaves
   less than two `min_turn_room` between the head plus the prompt and `T` (bound 60,000 with a
   20,000-token head; a 92,000-token head at 150,000), a batch holds requests under `bound -
-  headroom_floor - min_turn_room / 4` instead of the line, and a new result is shown once if it fits
-  there by the session's ratio; the room on such requests may be under `min_turn_room`, logged
-  once per turn as `turn_room_low` with `reason: "in_turn_small_bound"`. Before (Reviewer B, finding
-  3) bound 60,000 with a 20,000-token head stubbed 60 of 60 results unread. What the engine adds that
+  headroom_floor - min_turn_room / 4` instead of the line, and a new result is shown once if the
+  request with it fits under `bound - 2 * (min_turn_room / 4)` (54,000 at bound 60,000: the output
+  allowance and as much again for the estimate's error, which reached 8.6% in the reviewer's sweep),
+  by the session's ratio, whether or not the head is measured. The headroom floor and the recall
+  room are given up on that request: its room may be 0, logged once per turn as `turn_room_low`
+  with `reason: "in_turn_small_bound"`, and `contexto_recall` is refused there. The result is
+  stubbed at a later batch once seen. Before (Reviewer B, finding 3) bound 60,000 with a
+  20,000-token head stubbed 60 of 60 results unread; then (Reviewer B at 15293e9c, M1), against
+  `bound - headroom_floor - min_turn_room / 4`, a 26,000 head at 60,000 still stubbed 60 of 60, a
+  28,000 head 120 of 120, a 48,000 head at 80,000 60 of 60, and a 20,000 head with usage never
+  arriving 120 of 120, though each request with the result whole was 35,000 to 42,000. Now 0 in
+  each, the largest requests 40,479, 42,914, 62,479 and 28,675 by the fake upstream, none over the
+  bound (`tests/test_inturn.py`, four cases). What the engine adds that
   no batch can page counts with the head here: D69's carried records while `k = 0`, the preamble
   after the first rotation. Before (merging D69): a bound too small for the carried records was not
   seen as tight, so with records carried it logged no `turn_room_low` where the same session whose
@@ -3622,10 +3625,24 @@ the owner's delegation. Open decisions are listed at the end with the options an
   5 of 80 PDFs on the reviewer's machine were not counted). Inside a batch such a PDF counts as
   nothing: its D60 count leaves the batch's pressure while it is unread, so it is sent once as
   v0.5.24 sends it (`pdf_pages_uncertain` logged as before, and the request's estimate-only
-  `over_bound` too), and nothing older is paged to make room for an estimate. Once read, a later
-  batch may stub it like any result, counted as freeing nothing. If the API's count then shows the
-  request over the bound, that is the `over_bound` logged from usage, as today. A PDF counted with
-  certainty over the bound is still stubbed on arrival.
+  `over_bound` too), and nothing older is paged to make room for an estimate. If the API's count
+  then shows the request over the bound, that is the `over_bound` logged from usage, as today. Once
+  usage has measured the first request that carried it, the PDF has a measured cost, the engine's
+  own way: that request's real input less the estimate of everything else in it, never under 0,
+  shared evenly over the unmeasured PDFs it carried (keyed by content, so a second read of the same
+  file is measured already). From then on the estimate counts it at that cost (rule 3's estimate and
+  every count inside a batch), and stubbing it frees that cost. The costs are per engine and never
+  recorded: after a restart the next usage measures the PDF again. Before (Reviewer A at 15293e9c,
+  finding 1, and Reviewer B, L3) a read uncertain PDF counted as freeing nothing: with two reads of
+  a 55 KB PDF (24,500 tokens each by the reviewer's fake upstream) a batch stubbed a fresh 15 KB
+  result unread and sent 7,301 tokens of 60,000 with an estimate of 56,473 (at the defaults five
+  reads and a 60 KB result, 7,370 of 150,000, estimated 130,279); 3 KB rounds after two reads rode
+  up to 57,249 and 58,329 of 60,000 with no batch and no event; and a PDF of 120,000 real tokens
+  made the next batch stub 12 results and fold 11 rounds down to 20,696, estimated 140,945. Now
+  the fresh result is read whole (37,544 of 60,000 and 54,517 of 150,000, no batch), the ride-up
+  request runs a batch at the line (sent at 31,792, estimated 31,782), and the 120,000-token PDF is
+  stubbed with no round folded (28,821, estimated 28,847). Each case has a text control
+  (`tests/test_inturn.py`). A PDF counted with certainty over the bound is still stubbed on arrival.
   (b) The room at response time. The line is `T` less a quarter of `min_turn_room` (3,000), an
   allowance for the output: an output of up to 9,000 tokens still leaves half of `min_turn_room`.
   (c) The estimate of a result that has just arrived. For the trigger and every decision of a
@@ -3638,7 +3655,16 @@ the owner's delegation. Open decisions are listed at the end with the options an
   (d) Rewrites of the cached prefix. Steps 1 to 3 run only when together they could free
   `min_turn_room`, and never on the request right after a batch that ran one of them unless that
   request's estimate is over `T` (its room would fall under `min_turn_room`; under a tight bound,
-  over the tight line) or it would be over the bound.
+  over the tight line) or it would be over the bound. Until a response's usage has arrived since
+  the last batch, none of them runs unless the request is over the bound itself (step 0 still
+  does). Before (Reviewer B at 15293e9c, L2), with usage never arriving each new round stayed
+  counted at 1.8 bytes a token, every pre-send estimate landed just over `T`, and at bound 150,000
+  with a 92,000-token head 138 of 151 requests rewrote the prefix, 126 back to back (about 1.1 of
+  the cost ceiling). Now 38 rewrite, none back to back, the largest request 120,142 by the fake
+  upstream; at bound 60,000 with a 20,000 head, 60 rewrites, none back to back (119 and 118
+  before). The price is the room: with no usage it is published from an estimate nothing
+  corrects, and was under `min_turn_room` on 107 of 151 requests in the first case. Usage delivered
+  late counts as none, since the engine drops stale usage (rule 3).
   (e) Depth. Under the harness's breakpoint cache (an entry at each `cache_control`; Claude Code
   marks both `system` blocks and the newest message), a rewrite re-reads only the head and re-sends
   the rest, so a batch costs about the request's size after it less the head. Swept on the replay
@@ -3655,7 +3681,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
   message of the round `m` is in) and drops a fold with none left, so no `tool_use` is sent without
   its `tool_result` nor the other way round, whichever role `m` lands on; a strip range keeps its
   end (clipped to the new history's length). Before (A1): a change in a folded results message left
-  a `tool_result` with no `tool_use` for the rest of the turn.
+  a `tool_result` with no `tool_use` for the rest of the turn. A folds page stays while the folds it
+  stands for are unchanged; the resync then writes the turn's folds pages again from what still
+  holds, so the note is within `NOTE_BYTES` on the request it sends. Before (Reviewer A at
+  15293e9c, finding 2) every fold a dropped page stood for was named in the note until the next
+  fold: 31,309 bytes at 2,000 folds cut at fold 1,800.
   (g) What the user typed mid-turn stays. A round whose user message holds content the user put
   there (a text block that is not a `<system-reminder>` context block, `[Request interrupted by
   user` included, an image, a document, any block but a `tool_result`) is never folded: it stays
@@ -3788,15 +3818,17 @@ the owner's delegation. Open decisions are listed at the end with the options an
   10,408), share of the ceiling 0.38, smallest room 8,763 (tight bound, `turn_room_low` once). A
   10-page PDF in every result for 1,000 rounds: 0 `over_bound`, largest 112,572, 997 rewrites
   (allowance 1,834), share of the ceiling 1.30. That one is over the ceiling, and no engine that
-  keeps the bound can meet it there: a round is 45,799 tokens (the PDF by rule 3's page estimate),
+  keeps the bound and the recall room can meet it there (two whole rounds and the head fit under
+  the bound, not under the line): a round is 45,799 tokens (the PDF by rule 3's page estimate),
   and two whole ones beside the 20,184-token head come to 111,782, over the page line of 110,000,
   so every request has to stub the PDF before it and rewrites. The breakpoint model then re-sends
   everything after the head, the new round included, so the floor is about one ceiling (the loop's
   own tokens); the 0.30 above it is the earlier rounds' stubs and the note, about 14,100 tokens a
   request. Folding those stubbed rounds at every rewrite would bring it toward 1.0, not under 0.8,
   and would change every other scenario's folds, so it is left as is. Engine time per request
-  (the scripted CLI, the engine and the fake upstream): 18.0 ms in the large-head loop, 13.7 ms
-  in the PDF loop; in a 2,000-round loop with a fold every 6 rounds it grows with the history, not
+  (the scripted CLI, the engine and the fake upstream, one `--cases` run at this PR's head): 17.3 ms
+  in the large-head loop, 14.3 ms in the PDF loop; it depends on the machine (a reviewer measured
+  17.5 and 14.4); in a 2,000-round loop with a fold every 6 rounds it grows with the history, not
   with the folds (a folded message builds no stub in the view). With `in_turn_paging` off, every
   forwarded message list and every event of four scenarios (`d63_measure.py --digest`) hash the
   same on this branch and on the v0.5.24 code (measured at 51b6b7d2; the off path is unchanged
@@ -3875,7 +3907,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
   rule 16's check (`settings_changed`) and starts from epoch 0 (one cache miss).
   **Limits.** Restarting with `--no-in-turn-paging` in the middle of a loop that was paging forwards
   that turn's raw history until the next turn start: over the bound, and with thinking produced
-  under stubs that are now gone, which an enforcing account may refuse (A8). After a batch,
+  under stubs that are now gone, which an enforcing account may refuse (A8). The same holds for a
+  downgrade to v0.5.24: it reads the record as no record and sends the raw history, and an enforcing
+  upstream refused the first request ("thinking block ... bound to a different conversation") when
+  the reviewer continued a paged loop of 300 rounds (Reviewer B at 15293e9c, L1). Downgrade, or
+  turn the setting off, between turns, never in the middle of a tool loop; between turns v0.5.24
+  resumes from epoch 0, rotates and stays valid. After a batch,
   `sent_estimate` can run 13 to 18% under the upstream's count when tool results are sparser text
   than the head (the stubs are taken out at the session's blended ratio); the next usage corrects
   it and nothing went over the bound in the reviewer's runs (B5). A tight bound costs rewrites
