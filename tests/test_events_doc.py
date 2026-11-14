@@ -35,11 +35,19 @@ What they guarantee:
     by bare name or on ``self`` or ``cls`` (under the name of the parameter that receives it), and
     into each function nested in one of those that reads the variable. So the variable can be
     renamed in one function or in all of them with no change here, and a variable of the same name
-    that another function binds itself (a local, a loop variable) is not the event;
+    that another function binds itself (a local, a loop variable) is not the event. A function that binds
+    the variable to anything else as well (an assignment, ``+=``, a loop, ``with``, ``except ... as``, an
+    import, a ``match`` capture; not a comprehension's target, which is its own) is not followed: none of
+    the keys stored on the variable there is taken for a field, nothing is followed from it, and if it
+    stores a key on the variable or passes it on, the test fails and says to rename one of the two;
   - for an event listed in ``RETURNED_FIELDS``: a key of the dict that a function named there returns,
     when the returned value, or the element of the returned tuple the table names, is a dict display,
     a conditional expression of them, or a local variable assigned only dict displays (with the keys
-    stored on it later), and whatever those unpack with ``**`` from such a variable.
+    stored on it later), and whatever those unpack with ``**`` from such a variable. Each function named
+    there (for a name with ``*``, one of the functions it matches) must have a ``return`` that gives one of
+    those forms, so a change to what it returns fails rather than leaving the entry to read nothing;
+  - for an event listed in ``LAST_EVENTS``: a key stored on the last element of a list (``x[-1]["key"]``,
+    ``x[-1].update(...)``, ``x[-1].setdefault("key", ...)``) in the function named there.
 - A key stored on a variable that holds more than one event name is in ``HELPER_FIELDS`` under at
   least one of those names.
 - Fields the scan cannot read, by a list. ``HELPER_FIELDS`` names the fields that reach an event in a
@@ -78,19 +86,25 @@ What they do not guarantee:
 - A field the source starts to write through the return value of a function ``RETURNED_FIELDS`` does
   not name, through a returned value that is not one of the forms above (a call's result, a dict
   filled in by a loop), through ``**`` of anything but the forms above, or on something that is not
-  a bare variable (``self.entry["key"]``, ``events[-1]["key"]``). Nothing fails until someone adds it
-  to ``HELPER_FIELDS``. A field the document lists that is in neither the scan nor that list is
-  checked document to source only.
+  a bare variable (``self.entry["key"]``, or ``events[-1]["key"]`` in a function ``LAST_EVENTS`` does not
+  name). Nothing fails until someone adds it to ``HELPER_FIELDS``. For a ``RETURNED_FIELDS`` name with
+  ``*``, one function it matches with a ``return`` the scan reads is enough: another that it matches and
+  whose returns the scan cannot read is not read. A field the document lists that is in neither the
+  scan nor that list is checked document to source only.
 - That ``HELPER_FIELDS`` is right about the source. It is a list kept by hand. It only makes sure the
   document keeps the bullets it names. For a key stored on a variable that holds several event names,
   the test checks that the key is listed under one of them, not that it is listed under the right
   ones.
 - A ``CARRIED_EVENTS`` dict through a call the scan cannot resolve: a call on another object
-  (``owner.note(entry)``), a function of another file, a function passed as a value. There the scan
-  goes by the name alone: a parameter with the same name as a variable that holds the dict is read
-  as the dict. So a key stored through a parameter under another name, reached only by such a call,
-  is not read; and an unrelated parameter that has the name is read as the event. The failure says
-  so, and says to rename the parameter.
+  (``owner.method(entry)``), a function of another file, a function passed as a value or bound with
+  ``functools.partial``, ``getattr(self, "_f")(entry)``, a local alias (``f = self._f``, then
+  ``f(entry)``), arguments unpacked with ``*`` or ``**`` (``self._f(*args)``, ``self._f(**{"rec":
+  entry})``), a lambda's parameter, a method of a class defined inside a function, and the dict stored on
+  an attribute (``self.current = entry``). There the scan goes by the name alone: a parameter with the
+  same name as a variable that holds the dict is read as the dict. So a key stored through a parameter
+  under another name, reached only by such a call, is not read; and an unrelated parameter that has the
+  name is read as the event, even when every call to its function that the scan resolves passes another
+  dict. The failure says so, and says to rename the parameter.
 - An entry's writer, where it appears and its kind against the source. The index and the examples
   must agree with the entry, so a change to one of these is a change in two places, but none of them
   is read from the source.
@@ -161,6 +175,16 @@ RETURNED_FIELDS: dict[tuple[str, str], tuple[tuple[str, int | None], ...]] = {
     ("mcp_tools_missing", "src/contexto/toolcheck.py"): (("ToolCheck.verdict", None),),
 }
 
+# Functions that store keys on the last element of a list of events, which is known to be one event: (source
+# file, function) -> that event. In the function, a key stored on ``x[-1]`` (``x[-1]["key"] = ...``,
+# ``x[-1].update(...)``, ``x[-1].setdefault("key", ...)``) is a field of the event, whatever the list is called.
+# An entry fails when the function is gone, stores no key on a last element any more, or stores keys on the last
+# elements of two lists.
+LAST_EVENTS: dict[tuple[str, str], str] = {
+    # RewriteEngine._call: "the engine's request event stays last" in the list rewrite() returns
+    ("src/contexto/rewrite.py", "RewriteEngine._call"): "request",
+}
+
 # Fields the scan cannot read from the source: (event, source file) -> the fields. They reach the event
 # through a helper whose return value the scan cannot read, on a variable that holds more than one event
 # name, or on a dict the scan does not follow. Each must be listed under the event, like a field the scan
@@ -171,8 +195,6 @@ HELPER_FIELDS: dict[tuple[str, str], frozenset[str]] = {
     # UsageReader.end_fields() returns what _keep() stored, merged with entry.update(...)
     ("request", "src/contexto/proxy.py"): frozenset({
         "stop_reason", "error_type", "end_event", "response_status", "incomplete_reason", "error_code"}),
-    # RewriteEngine._call adds these to the last event of the list, which is the nested request event
-    ("request", "src/contexto/rewrite.py"): frozenset({"main", "conversations"}),
     # _within_room returns the budget fields, which each budgeted tool unpacks into its own
     ("mcp_call", "src/contexto/mcp.py"): frozenset({
         "turn_budget", "charged_tokens", "room_left", "limited_by", "side_rooms", "limiting_age_s"}),
@@ -193,7 +215,7 @@ VOCABULARY_HEADING = "Reading an entry"
 
 @dataclass(frozen=True)
 class Tables:
-    """The six tables above. Every check takes them as an argument, so the tests of the checks themselves
+    """The seven tables above. Every check takes them as an argument, so the tests of the checks themselves
     run on tables of their own and never on the package's."""
 
     dynamic_sites: dict[tuple[str, str, str], frozenset[str]] = field(default_factory=dict)
@@ -202,9 +224,11 @@ class Tables:
     shared_names: dict[str, dict[str, str]] = field(default_factory=dict)
     helper_fields: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict)
     returned_fields: dict[tuple[str, str], tuple[tuple[str, int | None], ...]] = field(default_factory=dict)
+    last_events: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
-TABLES = Tables(DYNAMIC_SITES, NOT_SESSION_LOG, CARRIED_EVENTS, SHARED_NAMES, HELPER_FIELDS, RETURNED_FIELDS)
+TABLES = Tables(DYNAMIC_SITES, NOT_SESSION_LOG, CARRIED_EVENTS, SHARED_NAMES, HELPER_FIELDS, RETURNED_FIELDS,
+                LAST_EVENTS)
 
 
 @dataclass(frozen=True)
@@ -221,6 +245,7 @@ class Site:
     spreads: tuple[str, ...] = ()  # the local variables unpacked into it with ``**``
     reference: str | None = None  # the variable the value is, when it is a bare name
     callee: str | None = None  # for ``event=`` in a call that builds no dict: what is called, as written
+    built: tuple[int, int] | None = None  # where the dict assigned to ``variable`` starts: (line, column)
 
     @property
     def where(self) -> str:
@@ -264,6 +289,12 @@ class Module:
     returns: list[tuple[str, ast.expr]] = field(default_factory=list)  # (scope, the value a ``return`` gives)
     stores: list[tuple[str, str, str, int]] = field(default_factory=list)  # (scope, variable, key, line)
     spread_stores: list[tuple[str, str, str]] = field(default_factory=list)  # (scope, variable, unpacked variable)
+    # the same two for a key stored on the last element of a list, ``variable[-1]``
+    last_stores: list[tuple[str, str, str, int]] = field(default_factory=list)
+    last_spread_stores: list[tuple[str, str, str]] = field(default_factory=list)
+    # (scope, variable) -> each place the function binds it other than as a parameter: (line, where the dict
+    # display or ``dict()`` call it is assigned starts, or None for any other value)
+    bindings: dict[tuple[str, str], list[tuple[int, tuple[int, int] | None]]] = field(default_factory=dict)
     # (scope, variable) -> the literal keys of the dicts assigned to it; None when the function also binds
     # it to something that is not a dict display, so neither its keys nor what it holds is known
     local_dicts: dict[tuple[str, str], list[tuple[str, int]] | None] = field(default_factory=dict)
@@ -282,9 +313,21 @@ class Module:
         return direct + [pair for where, name, spread in self.spread_stores if (where, name) == (scope, variable)
                          for pair in self.unpacked(where, spread)]
 
+    def stored_last(self, scope: str) -> list[tuple[str, str, int]]:
+        """The keys stored in ``scope`` on the last element of a list: (the list's variable, key, line)."""
+        direct = [(name, key, line) for where, name, key, line in self.last_stores if where == scope]
+        return direct + [(name, *pair) for where, name, spread in self.last_spread_stores if where == scope
+                         for pair in self.unpacked(where, spread)]
+
     def binds(self, scope: str, variable: str) -> bool:
-        """Whether ``scope`` itself binds ``variable``, as a parameter or by an assignment the scan tracks."""
-        return (scope, variable) in self.local_dicts
+        """Whether ``scope`` itself binds ``variable``, as a parameter or otherwise."""
+        return (scope, variable) in self.local_dicts or (scope, variable) in self.bindings
+
+    def rebound(self, scope: str, variable: str, keep: frozenset[tuple[int, int]] = frozenset()) -> int | None:
+        """The first line where ``scope`` binds ``variable`` to a value other than its parameter's and other
+        than the dicts that start at ``keep``; None when it binds it nowhere else."""
+        lines = [line for line, built in self.bindings.get((scope, variable), []) if built is None or built not in keep]
+        return min(lines, default=None)
 
     def strings(self, scope: str, variable: str) -> frozenset[str] | None:
         """The event names the variable can be: what its function assigns it, if only strings; for a name
@@ -308,6 +351,13 @@ def _names(value: ast.AST) -> frozenset[str] | None:
         body, orelse = _names(value.body), _names(value.orelse)
         return body | orelse if body is not None and orelse is not None else None
     return None
+
+
+def _is_last(index: ast.AST) -> bool:
+    """Whether a subscript's index is ``-1``."""
+    if isinstance(index, ast.UnaryOp) and isinstance(index.op, ast.USub):
+        return isinstance(index.operand, ast.Constant) and index.operand.value == 1
+    return isinstance(index, ast.Constant) and index.value == -1
 
 
 def _builds_dict(value: ast.AST | None) -> bool:
@@ -355,16 +405,26 @@ class _Scan(ast.NodeVisitor):
     def scope(self) -> str:
         return ".".join(self._scope) or "<module>"
 
-    def _site(self, value: ast.AST, fields: list[tuple[str, int]], variable: str | None = None,
+    def _site(self, value: ast.AST, fields: list[tuple[str, int]], built: ast.AST | None = None,
               spreads: list[str] | None = None, callee: str | None = None) -> None:
+        variable = self._assigned.get(id(built)) if built is not None else None
         self.module.sites.append(Site(self.module.path, value.lineno, self.scope, _names(value), ast.unparse(value),
                                       tuple(fields), variable, tuple(spreads or ()),
-                                      value.id if isinstance(value, ast.Name) else None, callee))
+                                      value.id if isinstance(value, ast.Name) else None, callee,
+                                      (built.lineno, built.col_offset) if variable is not None else None))
+
+    def _bind(self, name: str, line: int, value: ast.AST | None = None) -> None:
+        """``name`` is bound in this scope other than as a parameter; ``value`` is a dict it is assigned."""
+        built = (value.lineno, value.col_offset) if value is not None else None
+        self.module.bindings.setdefault((self.scope, name), []).append((line, built))
 
     def _store(self, target: ast.AST, fields: list[tuple[str, int]], spreads: list[str] | None = None) -> None:
         if isinstance(target, ast.Name):
             self.module.stores.extend((self.scope, target.id, key, line) for key, line in fields)
             self.module.spread_stores.extend((self.scope, target.id, name) for name in spreads or ())
+        elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and _is_last(target.slice):
+            self.module.last_stores.extend((self.scope, target.value.id, key, line) for key, line in fields)
+            self.module.last_spread_stores.extend((self.scope, target.value.id, name) for name in spreads or ())
 
     def _unknown(self, target: ast.AST | None) -> None:
         """``target`` is bound to something the scan does not read: a parameter, a loop variable, a call, one
@@ -385,6 +445,8 @@ class _Scan(ast.NodeVisitor):
                 self._unknown(arg)
         elif isinstance(target, (ast.Name, ast.arg)):
             name = target.id if isinstance(target, ast.Name) else target.arg
+            if isinstance(target, ast.Name):
+                self._bind(name, target.lineno)
             self.module.local_dicts[(self.scope, name)] = None
             self.module.local_strings[(self.scope, name)] = None
 
@@ -422,7 +484,7 @@ class _Scan(ast.NodeVisitor):
             spreads: list[str] = []
             _display_keys(node, fields, spreads)
             for value in events:
-                self._site(value, fields, self._assigned.get(id(node)), spreads)
+                self._site(value, fields, node, spreads)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -434,7 +496,7 @@ class _Scan(ast.NodeVisitor):
         _call_keys(node, fields, spreads)
         for kw in node.keywords:
             if kw.arg == "event":  # dict(event=...), x.update(event=...), or a function that takes ``event``
-                self._site(kw.value, fields if builds else [], self._assigned.get(id(node)),
+                self._site(kw.value, fields if builds else [], node,
                            spreads if builds else None, None if builds or method == "update" else ast.unparse(func))
         if method == "setdefault" and len(node.args) >= 2 and (key := _string(node.args[0])) is not None:
             if key == "event":
@@ -489,6 +551,7 @@ class _Scan(ast.NodeVisitor):
             strings = self.module.local_strings.setdefault(key, set())
             if _builds_dict(value):
                 self._assigned[id(value)] = target.id
+                self._bind(target.id, target.lineno, value)
                 self.module.local_strings[key] = None
                 if dicts is not None:
                     if isinstance(value, ast.Dict):
@@ -496,6 +559,7 @@ class _Scan(ast.NodeVisitor):
                     else:
                         _call_keys(value, dicts, [])
             elif (names := _names(value)) is not None:
+                self._bind(target.id, target.lineno)
                 self.module.local_dicts[key] = None
                 if strings is not None:
                     strings.update(names)
@@ -541,6 +605,29 @@ class _Scan(ast.NodeVisitor):
         self.generic_visit(node)
 
     visit_AsyncWith = visit_With
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name:
+            self._bind(node.name, node.lineno)
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import | ast.ImportFrom) -> None:
+        for alias in node.names:
+            self._bind(alias.asname or alias.name.partition(".")[0], node.lineno)
+
+    visit_ImportFrom = visit_Import
+
+    def visit_MatchAs(self, node: ast.MatchAs | ast.MatchStar) -> None:
+        if node.name:
+            self._bind(node.name, node.lineno)
+        self.generic_visit(node)
+
+    visit_MatchStar = visit_MatchAs
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        if node.rest:
+            self._bind(node.rest, node.lineno)
+        self.generic_visit(node)
 
 
 def scan_source(text: str, path: str) -> Module:
@@ -594,6 +681,14 @@ class Carry:
     event: str
     how: str  # completes "on `variable`, which holds the `event` dict there: ..."
     sure: bool  # False: only the parameter's name says so
+    rebound: int | None = None  # the first line where the function binds the variable to something else
+
+    def because(self, variable: str, scope: str) -> str:
+        """Why the scan takes ``variable`` in ``scope`` for the dict, as a clause."""
+        if self.sure:
+            return self.how
+        return (f"it is a parameter of {scope} with the name of the variable that holds the dict in {self.how}, "
+                f"and the scan found no call that passes it")
 
 
 def _callees(module: Module, call: Call) -> list[Function]:
@@ -612,30 +707,36 @@ def _callees(module: Module, call: Call) -> list[Function]:
     return []
 
 
+def _passes(module: Module, scope: str, variable: str) -> list[tuple[tuple[str, str], str]]:
+    """Where ``variable`` of ``scope`` goes: each (function, parameter) a call passes it to, and each function
+    nested in ``scope`` that reads it, with how it gets there."""
+    found: list[tuple[tuple[str, str], str]] = []
+    for call in module.calls:
+        for function in _callees(module, call) if call.scope == scope else ():
+            skip = 1 if call.on_self and function.method else 0
+            params = [function.positional[at + skip] for at, name in enumerate(call.positional)
+                      if name == variable and at + skip < len(function.positional)]
+            params += [param for param, name in call.keywords if name == variable and param in function.named]
+            found += [((function.scope, param), f"{scope} passes it at {module.path}:{call.line}") for param in params]
+    for inner in module.functions:
+        if inner.startswith(scope + "."):
+            depth = scope.count(".") + 1
+            between = [".".join(inner.split(".")[:size]) for size in range(depth + 1, inner.count(".") + 2)]
+            if not any(module.binds(part, variable) for part in between):
+                found.append(((inner, variable), f"it is read from the enclosing {scope}"))
+    return found
+
+
 def _follow(module: Module, out: dict[tuple[str, str], Carry], pending: list[tuple[str, str]]) -> None:
     """Follow each (function, variable) in ``pending`` into the functions it is passed to and the functions
-    nested in its own that read it."""
+    nested in its own that read it. A function that also binds the variable to something else is not followed
+    further: what it stores on the variable, and passes on, may be the other value."""
     while pending:
         scope, variable = pending.pop()
         carry = out[(scope, variable)]
-        found: list[tuple[tuple[str, str], str]] = []
-        for call in module.calls:
-            for function in _callees(module, call) if call.scope == scope else ():
-                skip = 1 if call.on_self and function.method else 0
-                params = [function.positional[at + skip] for at, name in enumerate(call.positional)
-                          if name == variable and at + skip < len(function.positional)]
-                params += [param for param, name in call.keywords if name == variable and param in function.named]
-                found += [((function.scope, param), f"{scope} passes it at {module.path}:{call.line}")
-                          for param in params]
-        for inner in module.functions:
-            if inner.startswith(scope + "."):
-                depth = scope.count(".") + 1
-                between = [".".join(inner.split(".")[:size]) for size in range(depth + 1, inner.count(".") + 2)]
-                if not any(module.binds(part, variable) for part in between):
-                    found.append(((inner, variable), f"it is read from the enclosing {scope}"))
-        for key, how in found:
+        for key, how in _passes(module, scope, variable) if carry.rebound is None else ():
             if key not in out:
-                out[key] = Carry(carry.event, how, carry.sure)
+                out[key] = Carry(carry.event, how, carry.sure, module.rebound(*key))
                 pending.append(key)
 
 
@@ -646,17 +747,21 @@ def carried(module: Module, tables: Tables) -> dict[tuple[str, str], Carry]:
     resolve and into nested functions. A parameter that only has the name of a variable that holds the dict is
     taken for it too, and marked as not sure: the call that passes it may be one the scan cannot resolve."""
     out: dict[tuple[str, str], Carry] = {}
+    built: dict[tuple[str, str], set[tuple[int, int]]] = {}  # where the carried dicts assigned there start
     for site in log_sites(module, tables):
-        for name in sorted(site_names(site, tables)) if site.variable is not None else ():
+        for name in sorted(site_names(site, tables)) if site.variable is not None and site.built else ():
             if (module.path, name) in tables.carried_events:
+                built.setdefault((site.scope, site.variable), set()).add(site.built)
                 out.setdefault((site.scope, site.variable), Carry(name, "it is assigned in that function", True))
+    for key, carry in out.items():
+        out[key] = dataclasses.replace(carry, rebound=module.rebound(*key, frozenset(built[key])))
     _follow(module, out, list(out))
     guessed = []
     for (scope, variable), carry in list(out.items()):
-        for function in module.functions.values():
+        for function in module.functions.values() if carry.rebound is None else ():
             key = (function.scope, variable)
             if key not in out and variable in (*function.positional, *function.named):
-                out[key] = Carry(carry.event, scope, False)
+                out[key] = Carry(carry.event, scope, False, module.rebound(*key))
                 guessed.append(key)
     _follow(module, out, guessed)
     return out
@@ -674,6 +779,22 @@ def held_names(module: Module, tables: Tables) -> dict[tuple[str, str], set[str]
 def _matches(pattern: str, scope: str) -> bool:
     """Whether a ``RETURNED_FIELDS`` function names ``scope``: ``*`` is any run of characters but a dot."""
     return re.fullmatch(re.escape(pattern).replace(r"\*", "[^.]*"), scope) is not None
+
+
+RETURNED_FORMS = "a dict display, a conditional expression of them, or a local variable assigned only dict displays"
+
+
+def _readable(module: Module, scope: str, value: ast.expr, index: int | None) -> bool:
+    """Whether a ``return`` in ``scope`` gives, as the value or at ``index`` of a tuple, a form ``returned_keys``
+    reads."""
+    if index is not None:
+        if not isinstance(value, ast.Tuple) or index >= len(value.elts):
+            return False
+        value = value.elts[index]
+    if isinstance(value, ast.IfExp):
+        return _readable(module, scope, value.body, None) or _readable(module, scope, value.orelse, None)
+    return isinstance(value, ast.Dict) or (isinstance(value, ast.Name)
+                                           and module.local_dicts.get((scope, value.id)) is not None)
 
 
 def returned_keys(module: Module, scope: str, value: ast.expr, index: int | None) -> list[tuple[str, int]]:
@@ -725,6 +846,8 @@ def written_fields(modules: list[Module], tables: Tables) -> dict[tuple[str, str
             carry = carrying.get((scope, variable))
             names = held.get((scope, variable), set())
             at = f"written at {module.path}:{line}"
+            if carry is not None and carry.rebound is not None:
+                continue  # which value the key is stored on is not known: rebound_carriers reports it
             if carry is not None and carry.sure:
                 add(carry.event, key, module.path, Known(
                     f"{at} (on `{variable}`, which holds the `{carry.event}` dict there: {carry.how}; see "
@@ -747,12 +870,36 @@ def written_fields(modules: list[Module], tables: Tables) -> dict[tuple[str, str
                         add(name, key, path, Known(
                             f"returned at {path}:{line} by {scope}, which RETURNED_FIELDS in {TEST_NAME} names as "
                             f"a function whose return value becomes fields of `{name}`"))
+        for (path, scope), name in tables.last_events.items():
+            for variable, key, line in module.stored_last(scope) if path == module.path else ():
+                add(name, key, path, Known(
+                    f"written at {path}:{line} (on `{variable}[-1]`, which LAST_EVENTS in {TEST_NAME} names as the "
+                    f"`{name}` event in {scope})"))
     for (name, path), keys in tables.helper_fields.items():
         for key in sorted(keys):
             add(name, key, path, Known(
                 f"which HELPER_FIELDS in {TEST_NAME} names as a field {path} writes in a way the scan cannot read",
                 ". If the source no longer writes it, remove it from HELPER_FIELDS instead"))
     return out
+
+
+def rebound_carriers(modules: list[Module], tables: Tables) -> list[str]:
+    """A variable that holds a ``CARRIED_EVENTS`` dict in a function that also binds it to something else: the
+    scan cannot tell which keys stored on it there, and which functions it is passed to from there, are the
+    event's, so it reads none of them and the variable must be renamed."""
+    problems = []
+    for module in modules:
+        for (scope, variable), carry in sorted(carried(module, tables).items()):
+            if carry.rebound is None or not (module.stored(scope, variable) or _passes(module, scope, variable)):
+                continue
+            fix = "Give the other value" if carry.sure else "Rename the parameter, or give the other value"
+            problems.append(
+                f"{module.path}:{carry.rebound} binds `{variable}` in {scope} to another value, but `{variable}` "
+                f"also holds the `{carry.event}` dict there ({carry.because(variable, scope)}), so the scan cannot "
+                f"tell which keys stored on `{variable}` in {scope}, or passed on with it from there, are fields of "
+                f"`{carry.event}`. {fix} another name in {scope}; add no bullet to {DOC_NAME} for a key stored on "
+                f"the other value. See CARRIED_EVENTS in {TEST_NAME}")
+    return problems
 
 
 def ambiguous_stores(modules: list[Module], tables: Tables) -> list[str]:
@@ -995,12 +1142,41 @@ def table_problems(modules: list[Module], tables: Tables) -> list[str]:
                                 f"to the key the source writes")
     for (event, path), parts in sorted(tables.returned_fields.items()):
         if writes("RETURNED_FIELDS", event, path):
-            for pattern, _index in parts:
-                if not any(_matches(pattern, scope) for scope in by_path[path].functions):
+            module = by_path[path]
+            for pattern, index in parts:
+                if not any(_matches(pattern, scope) for scope in module.functions):
                     problems.append(f"RETURNED_FIELDS in {TEST_NAME} names the function `{pattern}` in {path} for the "
                                     f"event `{event}`, but {path} has no function of that name; correct it to the "
                                     f"function whose return value becomes fields of `{event}` now, or remove it "
                                     f"and list those fields in HELPER_FIELDS")
+                elif not any(_readable(module, scope, value, index) for scope, value in module.returns
+                             if _matches(pattern, scope)):
+                    part = "the returned value" if index is None else f"element {index} of a returned tuple"
+                    problems.append(f"RETURNED_FIELDS in {TEST_NAME} names `{pattern}` in {path} for the event "
+                                    f"`{event}`, but no `return` there gives, as {part}, a form the scan "
+                                    f"reads ({RETURNED_FORMS}), so it reads no field of `{event}` from it. Update the "
+                                    f"table: name the function that returns that dict now, or correct the part, or "
+                                    f"remove the entry and list the fields it returns in HELPER_FIELDS")
+    for (path, scope), event in sorted(tables.last_events.items()):
+        if not writes("LAST_EVENTS", event, path):
+            continue
+        module = by_path[path]
+        lists = sorted({variable for variable, _key, _line in module.stored_last(scope)})
+        if scope not in module.functions:
+            problems.append(f"LAST_EVENTS in {TEST_NAME} names the function {scope} in {path} for the event `{event}`, "
+                            f"but {path} has no function of that name; correct it to the function that stores keys "
+                            f"on the last element of a list of events now, or remove it and list those keys in "
+                            f"HELPER_FIELDS")
+        elif not lists:
+            problems.append(f"LAST_EVENTS in {TEST_NAME} names {scope} in {path} for the event `{event}`, but {scope} "
+                            f"stores no key on the last element of a list (`x[-1][\"key\"] = ...`, "
+                            f"`x[-1].update(...)`) any more; remove the entry, or correct it to the function that "
+                            f"does now")
+        elif len(lists) > 1:
+            problems.append(f"{scope} in {path} stores keys on the last elements of {' and '.join(lists)}, and "
+                            f"LAST_EVENTS in {TEST_NAME} says the last element there is the `{event}` event, so the "
+                            f"scan cannot tell which list holds it; store the other list's keys in another function, "
+                            f"or name the element in a variable first")
     return problems
 
 
@@ -1498,7 +1674,7 @@ def _sample(text: str = SAMPLE_DOC, tables: Tables = SAMPLE) -> dict[str, list[s
             "undocumented": undocumented_events(written, doc), "unwritten": unwritten_events(written, doc),
             "shared": shared_name_problems(written, doc, tables),
             "fields": undocumented_fields(written_fields(modules, tables), doc, tables),
-            "ambiguous": ambiguous_stores(modules, tables),
+            "ambiguous": ambiguous_stores(modules, tables), "rebound": rebound_carriers(modules, tables),
             "words": unwritten_fields(modules, written, doc, tables), "facts": missing_facts(doc),
             "index": index_problems(doc), "links": broken_links(doc), "examples": bad_examples(doc)}
 
@@ -1631,6 +1807,99 @@ def note(entry, code):
                                  "bullet, and rename that parameter instead")
 
 
+def test_a_function_that_binds_the_carrier_to_another_value_is_not_followed():
+    calling = LINE_SOURCE.replace("    fill(entry)\n", "    fill(entry)\n    copy(entry)\n")
+    for name, line, helper in (("rec", 17, '''
+def copy(rec):
+    rec = dict(rec)
+    rec["copied"] = 1
+'''), ("entry", 17, '''
+def copy(entry):
+    entry = {"seen": len(entry)}
+    entry["copied"] = 1
+'''), ("rec", 18, '''
+def copy(rec, rows=()):
+    rec["copied"] = 1
+    for rec in rows:
+        rec["looped"] = True
+'''), ("rec", 17, '''
+def copy(rec):
+    with open(rec["path"]) as rec:
+        mark(rec)
+
+def mark(rec):
+    rec["copied"] = 1
+''')):
+        module = scan_source(calling + helper, "line.py")
+        # none of what is stored on the variable in that function, or passed on from it, is taken for a field
+        assert set(written_fields([module], SAMPLE)[("shared", "line.py")]) == LINE_FIELDS, helper
+        assert rebound_carriers([module], SAMPLE) == [
+            f"line.py:{line} binds `{name}` in copy to another value, but `{name}` also holds the `shared` dict there "
+            f"(line passes it at line.py:5), so the scan cannot tell which keys stored on `{name}` in copy, or passed "
+            f"on with it from there, are fields of `shared`. Give the other value another name in copy; add no "
+            f"bullet to docs/events.md for a key stored on the other value. See CARRIED_EVENTS in "
+            f"tests/test_events_doc.py"], helper
+    # a rebinding that neither stores a key on the variable nor passes it on is harmless
+    assert rebound_carriers([scan_source(calling + "\ndef copy(rec):\n    rec = len(rec)\n", "line.py")], SAMPLE) == []
+    # the function that builds the dict is held to the same rule
+    looped = LINE_SOURCE.replace("    log(entry)\n", "    log(entry)\n    for entry in []:\n        entry['x'] = 1\n")
+    module = scan_source(looped, "line.py")
+    assert set(written_fields([module], SAMPLE)[("shared", "line.py")]) == {"size", "epoch", "ended"}
+    assert rebound_carriers([module], SAMPLE)[0].startswith(
+        "line.py:6 binds `entry` in line to another value, but `entry` also holds the `shared` dict there (it is "
+        "assigned in that function)")
+    # a parameter taken for the dict by its name alone: renaming the parameter is a fix too
+    guessed = rebound_carriers([scan_source(LINE_SOURCE + "\ndef note(entry):\n    entry = {}\n    entry['k'] = 1\n",
+                                            "line.py")], SAMPLE)
+    assert len(guessed) == 1 and "(it is a parameter of note with the name of the variable that holds the dict in " \
+        "line, and the scan found no call that passes it), so" in guessed[0] and ". Rename the parameter, or give " \
+        "the other value another name in note;" in guessed[0], guessed
+
+
+LAST_SOURCE = '''
+def rewrite():
+    return [{"event": "nested", "epoch": 0}]
+
+def engine():
+    events = rewrite()
+    events[-1].update(main=True)
+    events[-1]["side"] = 1
+    events[-1].setdefault("count", 0)
+    return events
+
+def other(spans):
+    spans[-1]["end"] = 2
+'''
+LAST = Tables(last_events={("last.py", "engine"): "nested"})
+
+
+def test_a_key_stored_on_the_last_element_of_a_named_function_s_list_is_a_field():
+    module = scan_source(LAST_SOURCE, "last.py")
+    assert table_problems([module], LAST) == []
+    fields = written_fields([module], LAST)[("nested", "last.py")]
+    assert set(fields) == {"epoch", "main", "side", "count"}  # not `end`, stored in a function the table does not name
+    assert fields["side"].how == ("written at last.py:8 (on `events[-1]`, which LAST_EVENTS in "
+                                  "tests/test_events_doc.py names as the `nested` event in engine)")
+    assert set(written_fields([module], NONE)[("nested", "last.py")]) == {"epoch"}
+    renamed = scan_source(LAST_SOURCE.replace("events", "found"), "last.py")
+    assert set(written_fields([renamed], LAST)[("nested", "last.py")]) == set(fields)
+    gone = scan_source(LAST_SOURCE.replace("def engine", "def engine2"), "last.py")
+    assert table_problems([gone], LAST) == [
+        "LAST_EVENTS in tests/test_events_doc.py names the function engine in last.py for the event `nested`, but "
+        "last.py has no function of that name; correct it to the function that stores keys on the last element of "
+        "a list of events now, or remove it and list those keys in HELPER_FIELDS"]
+    none = scan_source(LAST_SOURCE.replace("    events[-1]", "    last = events[-1]\n    last"), "last.py")
+    assert table_problems([none], LAST)[0].startswith(
+        "LAST_EVENTS in tests/test_events_doc.py names engine in last.py for the event `nested`, but engine stores no "
+        "key on the last element of a list")
+    two = scan_source(LAST_SOURCE.replace("    return events", "    spans = []\n    spans[-1]['end'] = 1\n"
+                                          "    return events"), "last.py")
+    assert table_problems([two], LAST) == [
+        "engine in last.py stores keys on the last elements of events and spans, and LAST_EVENTS in "
+        "tests/test_events_doc.py says the last element there is the `nested` event, so the scan cannot tell which "
+        "list holds it; store the other list's keys in another function, or name the element in a variable first"]
+
+
 RETURNING_SOURCE = '''
 class Tools:
     def call(self, name, args, log):
@@ -1678,6 +1947,16 @@ def test_fields_a_named_function_returns_are_read_and_a_stale_name_is_reported()
         "returned at tools.py:11 by Tools._tool_read, which RETURNED_FIELDS in tests/test_events_doc.py names as a "
         "function whose return value becomes fields of `called`")
     assert table_problems([module], RETURNING) == []
+    # a named function that no longer returns a form the scan reads would read nothing: that fails
+    unread = dataclasses.replace(RETURNING, returned_fields={("called", "tools.py"): (("Tools._room", 2),)})
+    assert table_problems([module], unread) == [
+        "RETURNED_FIELDS in tests/test_events_doc.py names `Tools._room` in tools.py for the event `called`, but no "
+        "`return` there gives, as element 2 of a returned tuple, a form the scan reads (a dict display, a conditional "
+        "expression of them, or a local variable assigned only dict displays), so it reads no field of `called` "
+        "from it. Update the table: name the function that returns that dict now, or correct the part, or remove "
+        "the entry and list the fields it returns in HELPER_FIELDS"]
+    assert table_problems([module], dataclasses.replace(RETURNING, returned_fields={
+        ("called", "tools.py"): (("Tools._room", None),)})) == []
     stale = dataclasses.replace(RETURNING, returned_fields={
         ("called", "tools.py"): (("Tools._tool_*", 2), ("Tools.gone", None)), ("called", "other.py"): (("x", None),)})
     assert table_problems([module], stale) == [
@@ -1801,6 +2080,11 @@ def test_entries_that_share_a_name_are_told_apart():
 
 def test_every_field_the_scan_finds_or_the_test_names_is_documented():
     problems = undocumented_fields(written_fields(scan_package(), TABLES), _document(), TABLES)
+    assert not problems, _report(problems)
+
+
+def test_a_variable_that_holds_a_carried_event_holds_nothing_else():
+    problems = rebound_carriers(scan_package(), TABLES)
     assert not problems, _report(problems)
 
 
