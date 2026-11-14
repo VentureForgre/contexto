@@ -33,7 +33,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                                    description="Run the Contexto proxy alone, without the rewrite engine or a "
                                                "CLI, mainly for tests. Prints the port, session, and upstream "
                                                "source once listening, then serves until interrupted.")
-    parser.add_argument("--session", default=None, help="full session id to resume or create (default: a new one)")
+    parser.add_argument("--session", default=None,
+                        help="full session id to resume or create; a prefix of an existing id is refused "
+                             "(default: a new one)")
     parser.add_argument("--port", type=_port, default=0, help="port on 127.0.0.1 (default 0: a free port)")
     parser.add_argument("--upstream", default=None,
                         help="upstream base URL (default: what Claude Code would use from this directory)")
