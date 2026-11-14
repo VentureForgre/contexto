@@ -343,9 +343,10 @@ python_is_new_enough() {
 }
 
 # Sets pipx_python: empty when pipx's default Python is 3.12 or later, else the path of a newer
-# one on PATH for --python. uv needs no such check: it is given the requirement, and downloads
-# a Python it manages when the machine has none that meets it.
-choose_pipx_python() {
+# one on PATH for --python. Returns 1, with pipx_python empty, when there is neither. uv needs no
+# such check: it is given the requirement, and downloads a Python it manages when the machine has
+# none that meets it.
+find_pipx_python() {
     pipx_python=
     default=$(pipx environment --value PIPX_DEFAULT_PYTHON 2>/dev/null </dev/null) || default=
     if [ -n "$default" ] && python_is_new_enough "$default"; then
@@ -357,6 +358,12 @@ choose_pipx_python() {
             return 0
         fi
     done
+    return 1
+}
+
+# find_pipx_python, for an install with pipx: with no Python new enough, the script stops.
+choose_pipx_python() {
+    find_pipx_python && return 0
     stop "Contexto needs Python 3.12 or later. pipx's default Python${default:+ ($default)} is older or" \
         "unknown, and no python3.15, python3.14, python3.13, python3.12 or python3 on PATH is new enough." \
         "Install one, or install uv, which can download one."
@@ -475,6 +482,11 @@ restore_hint() {
         case $restore_with in
             uv) set -- uv tool install --python '>=3.12' "$old_url" ;;
             *)
+                # pipx's Python was looked at only if pipx was this run's installer. With none new
+                # enough, the hint goes without --python rather than stopping before it is printed.
+                if [ "$installer" != pipx ]; then
+                    find_pipx_python || :
+                fi
                 set -- pipx install
                 if [ -n "$pipx_python" ]; then
                     set -- "$@" --python "$pipx_python"

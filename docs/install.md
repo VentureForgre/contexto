@@ -81,7 +81,8 @@ used, when both tools had one):
   two options and that base URL. The script cannot know where your copy of it came from.
 - For a release before v0.5.13, which the script refuses, it gives the install of that release's
   wheel by URL, `uv tool install --python '>=3.12' <url>` or `pipx install <url>`, and says that
-  download is not checksum-verified.
+  download is not checksum-verified. When pipx's default Python is older than 3.12, the pipx
+  command also has `--python` with a newer one found on `PATH`.
 
 Step 5 takes a second or two. It leaves nothing in the tool's install or command directories. uv
 and pipx each keep that run's environment in their own cache.
@@ -178,10 +179,12 @@ uvx --from contexto-proxy contexto --version
 ```
 
 Before you install from PyPI, open
-[pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/). In the sidebar, under
-"Project links", PyPI puts the links it verified in a group labeled "Data verified by PyPI on",
-followed by the upload date. Install from PyPI only if `github.com/VentureForgre/contexto` is a
-link in that group (point at a link to see its address).
+[pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/). In the sidebar (on a
+phone, the Metadata tab), under "Project links", PyPI puts the links it verified in a group labeled
+"Data verified by PyPI on", followed by the upload date. Install from PyPI only if a link in that
+group has the address `https://github.com/VentureForgre/contexto`. The page shows each link's name,
+which the uploader chooses, so point at a link, or long-press it, to see its address. The address,
+not the name, must match, letter by letter: an owner name one letter off is someone else.
 
 Anyone can upload a package whose metadata names this repository, but PyPI marks a GitHub link
 verified only when the files were uploaded by trusted publishing from that repository's workflow.

@@ -1265,6 +1265,19 @@ def test_the_restore_hint_names_the_tool_whose_install_was_removed(box):
     assert box.installed() == {}
 
 
+def test_when_both_tools_had_an_install_the_restore_hint_names_this_runs_tool(box):
+    box.preinstall("uv", "contexto", "1.2.2")
+    box.preinstall("pipx", "contexto", "1.2.2")
+    box.hub.add("2.0.0", "contexto-proxy")
+    script, env = as_default_base(box)
+    result = failed(box.run("--with", "pipx", script=script, STUB_INSTALL_FAIL="1", **env),
+                    "No contexto is installed now")
+    assert "uv tool uninstall contexto" in result.stdout
+    assert "pipx uninstall contexto" in result.stdout
+    assert "--version 1.2.2 --with pipx" in result.stderr
+    assert box.installed() == {}
+
+
 def test_with_a_base_url_override_the_restore_hint_names_it(box):
     box.preinstall("uv", "contexto", "1.2.2")
     box.hub.add("2.0.0", "contexto-proxy")
@@ -1287,6 +1300,33 @@ def test_the_restore_hint_for_a_release_without_checksums_installs_its_wheel_by_
     assert f"To get 0.5.8 back: {command}" in result.stderr.splitlines()
     assert "not checksum-verified" in " ".join(result.stderr.split())
     assert "--version 0.5.8" not in result.stderr
+
+
+def test_the_pipx_restore_hint_names_a_newer_python_when_uv_was_this_runs_tool(box):
+    """pipx's Python is looked at only when pipx installs, so the hint has to look at it itself."""
+    newer = box.stub("python3.13", "python-new")
+    box.preinstall("pipx", "contexto", "0.5.8")
+    box.hub.add("2.0.0", "contexto-proxy")
+    script, env = as_default_base(box)
+    result = failed(box.run("--with", "uv", script=script, STUB_INSTALL_FAIL="1",
+                            STUB_PIPX_PYTHON=str(box.old_python), **env),
+                    "No contexto is installed now")
+    url = f"{box.hub.url}/releases/download/v0.5.8/contexto-0.5.8-py3-none-any.whl"
+    assert f"To get 0.5.8 back: pipx install --python {newer} {url}" in result.stderr.splitlines()
+
+
+def test_the_pipx_restore_hint_without_a_new_enough_python_still_prints(box):
+    """No Python is new enough for pipx: the hint is printed without --python, and the run does not
+    stop on that before saying what happened."""
+    box.preinstall("pipx", "contexto", "0.5.8")
+    box.hub.add("2.0.0", "contexto-proxy")
+    script, env = as_default_base(box)
+    result = failed(box.run("--with", "uv", script=script, STUB_INSTALL_FAIL="1",
+                            STUB_PIPX_PYTHON=str(box.old_python), **env),
+                    "No contexto is installed now")
+    url = f"{box.hub.url}/releases/download/v0.5.8/contexto-0.5.8-py3-none-any.whl"
+    assert f"To get 0.5.8 back: pipx install {url}" in result.stderr.splitlines()
+    assert "not checksum-verified" in " ".join(result.stderr.split())
 
 
 def test_the_force_hint_is_left_out_when_the_command_had_force(make_box):
