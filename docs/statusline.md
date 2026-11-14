@@ -151,8 +151,9 @@ exist also prints nothing; it does not fall through to stdin. `--session` is tak
 named it.
 
 Contexto learns which Claude Code session it serves from that session's model requests. So in steps
-2 and 3 a conversation shows nothing until its first request goes through Contexto: at the start of
-a new session and after `/clear`. The command `contexto run claude` installs names its session with
+2 and 3 a conversation shows nothing until its first request goes through Contexto in the current
+launch: at the start of a new session, after `/clear`, and when a conversation is resumed in a new
+launch. The command `contexto run claude` installs names its session with
 `--session` and shows `bound 150k` from the start.
 
 Stdin is read for steps 2 and 3. A terminal on stdin is not read, and a pipe that stays silent is
@@ -252,8 +253,10 @@ Three things keep it short:
   launch, a proxy start or a tool call (found by searching the bytes), and from the end backwards
   the last requests: enough for the current prompt and for whether paging is stopped. The lines it
   parses are counted by the same code `contexto stats` uses, and the tests hold the two to the same
-  answers on every log shape in `LOG_SHAPES`. When paging is stopped, or the log has no `launch` line, it reads
-  the whole log as `contexto stats` does.
+  answers on every log shape in `LOG_SHAPES`. When paging is stopped, or the log has no `launch` line,
+  it reads the whole log as `contexto stats` does. When the session comes from stdin or
+  `$CONTEXTO_SESSION` rather than `--session`, the log is read once more to find when
+  the open launch started (measured: 54 ms against 39 ms at 20,000 requests).
 - Pages are counted from the directory listing; no page file is opened.
 
 A damaged log is read as far as it goes: a line cut short by a full disk is skipped. With no log at
