@@ -10,8 +10,12 @@
   does);
 - the real MCP ``Server`` on the same store answers the model's tool calls at the point a model makes
   them: after the turn-start request's response, inside the main conversation's tool loop, so the room
-  the engine published is the one a search is charged against and a pin gets its author from the real
-  rule (``pin_author``). Each call is a ``tool_use`` in the next request and its reply the ``tool_result``.
+  the engine published is the one a search is charged against. Each call is the model's ``tool_use``
+  for ``mcp__contexto__<tool>`` with the arguments the server was given, and the next main request
+  appends the matching ``tool_result`` holding the server's reply blocks exactly as returned (``Recorded
+  <kind> <id>.``, ``Closed <id> with <id>.``), as Claude Code sends them. Nothing here marks a record as
+  the main conversation's: whatever rule the store and the engine apply (the room-based author mark, or
+  the engine confirming the pin from that call and its reply) sees only what a real session gives it.
 
 The content is synthetic and deterministic: standing rules the user states and the model pins as
 obligations, decisions it pins (one may supersede an earlier one), closures, and facts with unique
@@ -44,7 +48,8 @@ CONFIG = Config(bound=50_000, headroom_floor=6_000, min_turn_room=3_000)
 RATIO = 3.2  # the stub's bytes per token: denser than the estimator's seed of 3.5, so estimates run low
 MARK = "Carried from earlier sessions of this project"  # how the carried section starts
 TOOL_PREFIX = "mcp__contexto__"
-CARRIED_LINE = re.compile(r"^- (\S+) (obligation|decision)\b.*? \(session ([^,]+), (\d{4}-\d{2}-\d{2})\): (.*)$")
+CARRIED_LINE = re.compile(r"^- (\S+) (obligation|decision)\b.*? \(session ([^,]+), (\d{4}-\d{2}-\d{2})\):? (.*)$")
+NAME = re.compile(r'"?([A-Za-z0-9_-]+)')  # a body's leading token, whether shown raw or as a JSON string
 OMITTED = re.compile(r"^\((\d+) more pinned items omitted; call contexto_state for the full list\)$")
 OUT = os.environ.get("CONTEXTO_MEASURE_OUT")  # where a run records its numbers as JSON, when set
 
@@ -308,7 +313,7 @@ class Session:
                 ids[args["text"].split(":", 1)[0]] = made.result["structuredContent"]["record_id"]
             uses.append({"type": "tool_use", "id": f"toolu_{t}_{j}", "name": TOOL_PREFIX + tool, "input": args})
             results.append({"type": "tool_result", "tool_use_id": f"toolu_{t}_{j}",
-                            "content": "".join(b["text"] for b in made.result["content"])})
+                            "content": [{"type": "text", "text": b["text"]} for b in made.result["content"]]})
         self.history += [{"role": "assistant", "content": uses}, {"role": "user", "content": results}]
         self.send(t)
         self.history.append(assistant(turn.answer))
@@ -347,12 +352,14 @@ class Session:
 
 def carried_lines(text: str) -> list[tuple[str, str, str, str]]:
     """(record id, kind, session label, name) of each carried line of a carried section; the name is the
-    body up to its first colon."""
+    body's leading ASCII token (``RULE01Q`` of ``RULE01Q: ...``), so a body shown as a JSON string literal
+    reads the same."""
     out = []
     for line in text.splitlines():
         found = CARRIED_LINE.match(line)
         if found:
-            out.append((found.group(1), found.group(2), found.group(3), found.group(5).split(":", 1)[0]))
+            name = NAME.match(found.group(5))
+            out.append((found.group(1), found.group(2), found.group(3), name.group(1) if name else ""))
     return out
 
 

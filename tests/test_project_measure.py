@@ -38,7 +38,7 @@ from contexto import launcher, mcp
 from contexto.rewrite import MESSAGES, RewriteEngine, compose_preamble
 from contexto.store import SessionStore
 from contexto.store import project as project_module
-from contexto.store.project import MAIN_AUTHOR, read_records
+from contexto.store.project import read_records
 from contexto.tokens import estimate_tokens
 from synthetic_project import (
     CONFIG,
@@ -186,12 +186,31 @@ def test_two_sessions_the_first_session_ran_as_a_session_does(two):
     first = two.first
     records = read_records(first.store.dir)
     pins = [r for r in records if r.kind in ("obligation", "decision")]
-    assert len(pins) == len(RULES) + len(DECISIONS) and {r.author for r in pins} == {MAIN_AUTHOR}
+    assert len(pins) == len(RULES) + len(DECISIONS)
     assert sum(r.kind == "closure" for r in records) == len(CLOSED)
     assert len(first.rotations()) >= 3 and not OFF_PATH & every_event(first)
-    assert all(c.result["isError"] is False for c in first.calls)
+    check_replies(first)
     assert max(fact_turns(first, FACTS)) < first.paged_turns()  # every fact the plan spreads is paged out
     assert min(fact_turns(first, TAIL)) >= first.paged_turns()  # and the tail's are in the retained window
+
+
+def check_replies(session: Session) -> None:
+    """Every pin and closure succeeded, and the next main request holds its call and the server's own
+    reply: what a rule that confirms main-conversation pins from the conversation reads."""
+    for call in session.calls:
+        assert call.result["isError"] is False, call.result
+        if call.tool == "contexto_pin":
+            reply = f"Recorded {call.arguments['kind']} {call.result['structuredContent']['record_id']}."
+        elif call.tool == "contexto_close":
+            reply = f"Closed {call.arguments['obligation_id']} with {call.result['structuredContent']['record_id']}."
+        else:
+            continue
+        assert call.result["content"][0]["text"].startswith(reply)
+        loop = [row for row in session.rows if row.turn == call.turn][-1]  # the request after the tool call
+        results = [m for m in loop.upstream["messages"] if m["role"] == "user" and isinstance(m["content"], list)
+                   and any(b.get("type") == "tool_result" for b in m["content"])]
+        assert any(b.get("type") == "tool_result" and b["content"] == call.result["content"]
+                   for b in results[-1]["content"])
 
 
 def fact_turns(session: Session, said: tuple[Fact, ...]) -> list[int]:
@@ -359,9 +378,7 @@ def test_five_sessions_each_later_session_closed_and_replaced_through_the_carrie
         replaced = {d.supersedes for d in plan.decisions if d.supersedes}
         for name in {n for n in plan.closes if n not in own} | replaced:
             assert session.ids[name] in session.text(0)  # the model read the id in its start text
-        assert all(c.result["isError"] is False for c in session.calls), [c.result for c in session.calls]
-        records = read_records(session.store.dir)
-        assert {r.author for r in records if r.kind in ("obligation", "decision")} == {MAIN_AUTHOR}
+        check_replies(session)
 
 
 def test_five_sessions_the_fifth_starts_with_exactly_the_still_open_set_in_order(five):
@@ -460,18 +477,23 @@ def page_turn(text: str) -> list[dict]:
 
 
 def earlier_session(home: Path, sid: str, root: Path, n: int, records: int, pages: int) -> None:
-    """A session of ``root`` as a long one ends: ``records`` pins of the main conversation and ``pages``
-    paged turns of about 2 KB, two of which mention the deploy key and one a fact of its own."""
-    store = launcher.open_session(home, sid, root)
-    for i in range(records):
-        kind = "obligation" if i % 2 == 0 else "decision"
-        store.pin(kind, f"record {i} of session {n}: keep the migration for table {i} reversible",
-                  author=MAIN_AUTHOR)
+    """A session of ``root`` as a long one ends: ``records`` pins the model made through the MCP server in
+    the main conversation's tool loop (two turns of the real engine, half of them in each, the calls and
+    the server's replies in the next request), then ``pages`` paged turns of about 4 KB, two of which
+    mention the deploy key and one a fact of its own."""
+    session = Session(home, sid, root)
+    store = session.store
+    for t, part in enumerate((range(0, records // 2), range(records // 2, records))):
+        calls = [("contexto_pin", lambda i=i: {"kind": "obligation" if i % 2 == 0 else "decision",
+                                              "text": f"record {i} of session {n}: keep the migration for "
+                                                      f"table {i} reversible"}) for i in part]
+        session.turn(t, Turn(f"prompt {t}", f"output {t}", f"answer {t}", calls), {})
+    assert all(c.result["isError"] is False for c in session.calls)
     texts = [f"turn {j} of session {n}\n{FILL}" for j in range(pages)]
     for j in (3 % pages, (pages // 2) % pages):
         texts[j] = f"turn {j} of session {n}: the deploy key was rotated to key-{n}-{j}\n{FILL}"
     texts[(n + 7) % pages] += f"\nFor the record, FIFTYKEY{n:03d}Z is fifty-value-{n:03d}."
-    store.page_out([page_turn(t) for t in texts], 0)
+    store.page_out([page_turn(t) for t in texts], 2)  # after the two turns the engine saw
     store.release()
 
 
