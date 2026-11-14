@@ -18,13 +18,27 @@ Both arms get the same things, and a fresh copy per unit:
   traffic is kept), plus ``ENV`` below, the prompt cache
   TTL, and the credential's own variable.
 
-Organization-managed Claude Code settings on the machine still apply to both arms; nothing here can
-turn them off.
+Organization-managed Claude Code settings on the machine still apply to both arms and nothing here
+can turn them off, so the run refuses to start when they set what the arms set
+(``contexto.bench.arms.managed``), and a turn that ends with no request through the meter stops the
+unit (``unmetered``): something sent Claude Code around it.
 
-What is read from the stream: the ``result`` event's text (a decision reply, a probe turn's answers)
-and error flag, ``compact_boundary`` events with ``compact_metadata.pre_tokens``, and how many
-file-read tool calls the assistant made in a turn. Nothing of it is written anywhere except the
-parsed probe answers.
+What is read from the stream:
+
+- the text of every top-level assistant message of a turn (``parent_tool_use_id`` null), in order,
+  joined with newlines: a decision reply, or a probe turn's answers. A model may answer some probes,
+  call a tool, and answer the rest in a later message; the ``result`` event holds only the last
+  message's text, so it is used only when the turn wrote no text block. The scoring lets the last
+  line for an id win;
+- the ``result`` event's error flag, and ``compact_boundary`` events with
+  ``compact_metadata.pre_tokens``;
+- the tool calls of a turn: how many, and the ``file_path`` of each file-read call.
+
+Nothing of it is written anywhere except the parsed probe answers and those counts.
+
+The child runs in its own process group, and a watchdog process (``WATCHDOG``, the pattern of
+``contexto run``'s own, D55) holds a pipe from the benchmark: if the benchmark dies without closing
+the session (SIGKILL), the pipe closes and the watchdog stops the whole group, SIGTERM then SIGKILL.
 """
 
 from __future__ import annotations
@@ -36,6 +50,7 @@ import queue
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -45,7 +60,7 @@ from pathlib import Path
 from typing import Any
 
 from contexto.bench import script as bench_script
-from contexto.bench.arms import Stop, Unit, UnitResult, ledger_stop
+from contexto.bench.arms import Stop, Unit, UnitResult, ledger_stop, stop_pending
 
 STRIPPED_PREFIXES = ("ANTHROPIC_", "CLAUDE_", "CLAUDECODE", "CONTEXTO_", "OPENRIG_")
 STRIPPED_NAMES = frozenset({"DISABLE_AUTO_COMPACT", "DISABLE_COMPACT", "FORCE_PROMPT_CACHING_5M", "MAX_THINKING_TOKENS",
@@ -62,6 +77,34 @@ CLAUDE_ARGS = ("-p", "--input-format", "stream-json", "--output-format", "stream
 CLOSE_TIMEOUT_S = 60
 KILL_TIMEOUT_S = 10
 _EOF = object()
+# The watchdog of a session's process group. Lines from the benchmark: "group <n>" once the child has
+# started (its pid is the group's id), "exited" once the child is reaped (the id may then be reused, so
+# it is never signalled after that), "done" when the session is closed. End of file without "done": the
+# benchmark is gone, so the group gets SIGTERM, then SIGKILL if it is still there after a grace period.
+WATCHDOG = r"""
+import os, signal, sys, time
+group = None
+for line in iter(sys.stdin.buffer.readline, b""):
+    if line == b"done\n":
+        sys.exit(0)
+    if line.startswith(b"group "):
+        group = int(line[6:])
+    if line == b"exited\n":
+        group = None
+if group is not None:
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(group, signum)
+        except OSError:
+            break
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(group, 0)
+            except OSError:
+                sys.exit(0)
+            time.sleep(0.05)
+"""
 
 
 def child_env(unit: Unit, config_dir: Path, environ: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -115,8 +158,58 @@ def claude_version(claude: str, environ: Mapping[str, str] | None = None) -> str
 
 @dataclass
 class Turn:
-    text: str = ""
-    reads: int = 0
+    text: str = ""  # every top-level assistant text block of the turn, in order, joined with newlines
+    read_paths: list[str] = field(default_factory=list)  # file_path of each file-read call, in order
+    tool_calls: int = 0
+
+
+def files_read(read_paths: list[str], wanted: tuple[str, ...] | list[str], cwd: Path) -> int:
+    """How many of ``wanted`` (paths relative to ``cwd``) were read, each counted once, whether the
+    call named it relative or absolute."""
+    try:
+        root = cwd.resolve()
+    except OSError:
+        root = cwd
+    seen = set()
+    for raw in read_paths:
+        path = Path(raw)
+        if path.is_absolute():
+            try:
+                path = path.resolve().relative_to(root)
+            except (OSError, ValueError):
+                continue
+        seen.add(path.as_posix().removeprefix("./"))
+    return sum(1 for name in wanted if Path(name).as_posix() in seen)
+
+
+class Watchdog:
+    """Stops a session's process group if the benchmark dies without closing it (``WATCHDOG``)."""
+
+    def __init__(self) -> None:
+        try:
+            self.process: subprocess.Popen | None = subprocess.Popen(
+                [sys.executable, "-I", "-S", "-c", WATCHDOG], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+        except (OSError, subprocess.SubprocessError):  # the session goes on without it
+            self.process = None
+
+    def send(self, line: bytes) -> None:
+        try:
+            if self.process is not None and self.process.stdin is not None:
+                self.process.stdin.write(line)
+                self.process.stdin.flush()
+        except (OSError, ValueError):
+            pass
+
+    def done(self) -> None:
+        if self.process is None:
+            return
+        self.send(b"done\n")
+        with contextlib.suppress(OSError):
+            if self.process.stdin is not None:
+                self.process.stdin.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self.process.wait(timeout=5)
 
 
 @dataclass
@@ -130,8 +223,16 @@ class Session:
     thrashing: bool = False
 
     def __post_init__(self) -> None:
-        self.proc = subprocess.Popen(self.command, cwd=self.cwd, env=self.env, stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        # The watchdog first, so the child cannot inherit its pipe (close_fds does that too).
+        self.watchdog = Watchdog()
+        self._reaped = False
+        try:
+            self.proc = subprocess.Popen(self.command, cwd=self.cwd, env=self.env, stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        except BaseException:
+            self.watchdog.done()
+            raise
+        self.watchdog.send(f"group {self.proc.pid}\n".encode())
         self._events: queue.Queue[Any] = queue.Queue()
         self._stderr: deque[bytes] = deque(maxlen=50)
         threading.Thread(target=self._read_stdout, name="contexto-bench-stdout", daemon=True).start()
@@ -174,11 +275,11 @@ class Session:
         # not hold the run past the turn's timeout.
         threading.Thread(target=write, name="contexto-bench-stdin", daemon=True).start()
         turn = Turn()
+        texts: list[str] = []
         deadline = time.monotonic() + unit.turn_timeout
-        ledger = unit.meter.ledger
         number = index + 1
         while True:
-            if ledger.stopped.is_set() and (stop := ledger_stop(unit)) is not None:
+            if stop_pending(unit) and (stop := ledger_stop(unit)) is not None:
                 raise stop
             if time.monotonic() > deadline:
                 raise Stop("timeout", f"turn {number} had no result within {unit.turn_timeout:.0f} seconds")
@@ -198,11 +299,20 @@ class Session:
                 metadata = event.get("compact_metadata") if isinstance(event.get("compact_metadata"), dict) else {}
                 pre = metadata.get("pre_tokens")
                 self.compaction_pre_tokens.append(pre if isinstance(pre, int) and not isinstance(pre, bool) else None)
-            elif kind == "assistant":
+            elif kind == "assistant" and event.get("parent_tool_use_id") is None:
                 message = event.get("message")
                 content = message.get("content") if isinstance(message, dict) else None
-                turn.reads += sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_use"
-                                  and b.get("name") == READ_TOOL) if isinstance(content, list) else 0
+                for block in content if isinstance(content, list) else []:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "text" and isinstance(block.get("text"), str):
+                        texts.append(block["text"])
+                    elif block.get("type") == "tool_use":
+                        turn.tool_calls += 1
+                        call = block.get("input") if isinstance(block.get("input"), dict) else {}
+                        path = call.get("file_path")
+                        if block.get("name") == READ_TOOL and isinstance(path, str):
+                            turn.read_paths.append(path)
             elif kind == "result":
                 text = str(event.get("result") or "")
                 if event.get("is_error") or THRASHING in text:
@@ -212,14 +322,25 @@ class Session:
                         raise Stop("thrashing", f"Claude Code stopped on turn {number}: auto-compaction was thrashing")
                     subtype = event.get("subtype") if isinstance(event.get("subtype"), str) else "error"
                     raise Stop("cli_error", f"Claude Code reported an error on turn {number} ({subtype[:40]})")
-                turn.text = text
+                if unit.meter.turn_requests(index) == 0:
+                    raise Stop("unmetered", f"turn {number} ended with no request through the benchmark's meter: "
+                                            "something sent Claude Code around it (organization-managed settings "
+                                            "can), so its tokens could not be counted")
+                turn.text = "\n".join(texts) if texts else text
                 return turn
 
     def _wait(self, timeout: float) -> int | None:
         try:
-            return self.proc.wait(timeout=timeout)
+            code = self.proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return None
+        self._mark_reaped()
+        return code
+
+    def _mark_reaped(self) -> None:
+        if not self._reaped:
+            self._reaped = True
+            self.watchdog.send(b"exited\n")
 
     def close(self) -> int | None:
         """End the session: close stdin and wait; if the child does not exit, stop its process group."""
@@ -229,6 +350,8 @@ class Session:
         code = self._wait(CLOSE_TIMEOUT_S) if self.proc.poll() is None else self.proc.returncode
         if code is None:
             code = self.kill()
+        self._mark_reaped()
+        self.watchdog.done()
         for pipe in (self.proc.stdout, self.proc.stderr):
             if pipe:
                 with contextlib.suppress(OSError):
@@ -253,7 +376,8 @@ def run_session(unit: Unit, command: list[str], env: dict[str, str]) -> UnitResu
     script = unit.script
     result = UnitResult(compactions=0, toolloop_reads=None)
     decisions = {d.turn: d.probe for d in script.decisions}
-    session = Session(command, working_directory(unit), env)
+    cwd = working_directory(unit)
+    session = Session(command, cwd, env)
     try:
         for index, text in enumerate(script.turns):
             unit.meter.turn = index
@@ -262,7 +386,8 @@ def run_session(unit: Unit, command: list[str], env: dict[str, str]) -> UnitResu
             if kind == "decision":
                 result.concluded_ok[decisions[index]] = bench_script.decision_reply_ok(script, index, turn.text)
             elif kind == "toolloop":
-                result.toolloop_reads = turn.reads
+                result.toolloop_reads = files_read(turn.read_paths, script.reads, cwd)
+                result.toolloop_tool_calls = turn.tool_calls
             elif kind == "probe":
                 result.answers[index] = turn.text
                 result.probe_turns_completed += 1

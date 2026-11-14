@@ -20,9 +20,15 @@ benchmark session directly or under ``contexto run``:
 - With ``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` set it sends ``x-claude-code-request-class`` (``main`` or
   ``compaction``) and ``x-claude-code-compaction: auto`` on the summary request.
 
+- With ``STUB_CLAUDE_RETRY_WAIT`` set to a number of seconds it waits that long before each retry
+  (of a 429, 529 or 5xx, or a connection that failed), as Claude Code backs off: a session whose
+  upstream is gone then lives on for minutes, as the real one does.
+- With ``STUB_CLAUDE_DIRECT_URL`` set it ignores its base URL and sends every request there, as
+  organization-managed settings could make Claude Code do: the benchmark's meter sees nothing.
+
 What it does not imitate: Claude Code's real system prompt and tool list (its head is a few hundred
 bytes, not tens of thousands of tokens), tool search and deferred tools, thinking, permission prompts
-beyond the allow list, retries with backoff (it retries a 429, 529 or 5xx three times at once), side
+beyond the allow list, retries with backoff (by default it retries a 429, 529 or 5xx three times at once), side
 requests such as title generation, subagents, hooks, session files, prompt cache breakpoints, the
 estimate Claude Code adds to the last usage before it decides to compact, and every flag not named
 above (they are accepted and ignored).
@@ -34,6 +40,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -110,8 +117,8 @@ class Session:
     def __init__(self, args: dict[str, str]) -> None:
         flag = load(args.get("--settings"))
         user = load(os.path.join(os.environ.get("CLAUDE_CONFIG_DIR", ""), "settings.json"))
-        self.base = ((flag.get("env") or {}).get("ANTHROPIC_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
-                     or "http://127.0.0.1:9").rstrip("/")
+        self.base = (os.environ.get("STUB_CLAUDE_DIRECT_URL") or (flag.get("env") or {}).get("ANTHROPIC_BASE_URL")
+                     or os.environ.get("ANTHROPIC_BASE_URL") or "http://127.0.0.1:9").rstrip("/")
         self.allow = [*((user.get("permissions") or {}).get("allow") or []),
                       *((flag.get("permissions") or {}).get("allow") or [])]
         self.helper = user.get("apiKeyHelper")
@@ -155,6 +162,7 @@ class Session:
                                                                f"Working directory: {os.getcwd()}\n"}],
                            "tools": self.tools, "messages": messages,
                            "metadata": {"user_id": json.dumps({"session_id": self.session})}}).encode("utf-8")
+        wait = float(os.environ.get("STUB_CLAUDE_RETRY_WAIT") or 0)
         for attempt in range(4):
             req = urllib.request.Request(self.base + "/v1/messages", data=body, headers=self.headers(request_class),
                                          method="POST")
@@ -165,6 +173,10 @@ class Session:
                 exc.read()
                 if exc.code not in (429, 529) and exc.code < 500 or attempt == 3:
                     raise
+            except OSError:
+                if not wait or attempt == 3:
+                    raise
+            time.sleep(wait)
         raise AssertionError("unreachable")
 
     def tool(self, call: dict[str, Any]) -> dict[str, Any]:

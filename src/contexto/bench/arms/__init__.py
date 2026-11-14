@@ -23,8 +23,13 @@ from typing import Any
 
 ARMS = ("contexto", "full", "plain")
 CLI_ARMS = ("contexto", "plain")
-# Why a unit stopped. "budget" and "auth" end the whole run; after any other the next unit runs.
-STOPS = ("budget", "auth", "cli_exit", "cli_error", "thrashing", "timeout", "api_error", "interrupted", "error")
+# Why a unit stopped. "budget", "auth" and "managed_settings" end the whole run; after any other the next
+# unit runs. "runaway": the unit passed a per-turn request cap or its token cap (contexto.bench.meter).
+# "unmetered": a Claude Code turn ended with no request through the meter, so something sent Claude Code
+# around it. "interrupted": Ctrl+C, SIGTERM, or (found on resume) a run killed while the unit ran.
+STOPS = ("budget", "auth", "cli_exit", "cli_error", "thrashing", "timeout", "api_error", "interrupted", "error",
+         "runaway", "unmetered", "managed_settings")
+RUN_STOPS = ("budget", "auth", "managed_settings")
 
 
 @dataclass
@@ -52,10 +57,12 @@ class UnitResult:
     compactions: int | None = None
     compaction_pre_tokens: list[int] = field(default_factory=list)
     concluded_ok: dict[str, bool] = field(default_factory=dict)
-    toolloop_reads: int | None = None
+    toolloop_reads: int | None = None  # distinct files of the tool-loop turn's list that were read
+    toolloop_tool_calls: int | None = None  # every tool call the assistant made in that turn
     probe_turns_completed: int = 0
     turns_completed: int = 0
-    answers: dict[int, str] = field(default_factory=dict)  # probe turn index -> the reply; never written whole
+    # probe turn index -> every text the assistant wrote in that turn, in order; never written whole
+    answers: dict[int, str] = field(default_factory=dict)
 
     def stopped(self, stop: str, reason: str) -> UnitResult:
         self.status, self.stop, self.reason = "stopped", stop, reason
@@ -78,7 +85,8 @@ def runner(arm: str) -> Callable[[Unit], UnitResult]:
 
 
 def ledger_stop(unit: Unit) -> Stop | None:
-    """The run-wide stop the meter's ledger holds, as a ``Stop``, or None."""
+    """The stop the meter holds, as a ``Stop``, or None: the run-wide one of its ledger first, then the
+    unit's own (a runaway cap)."""
     ledger = unit.meter.ledger
     if ledger.stop == "budget":
         return Stop("budget", f"the token budget would have been passed ({ledger.spent:,} of {ledger.budget:,} "
@@ -86,4 +94,12 @@ def ledger_stop(unit: Unit) -> Stop | None:
     if ledger.stop == "auth":
         return Stop("auth", f"the upstream answered {unit.meter.auth_status or 401}: the credential was refused, and "
                             "the run stops at the first such answer")
+    if getattr(unit.meter, "unit_stop", None) == "runaway":
+        return Stop("runaway", unit.meter.unit_stop_reason or "the unit passed a runaway cap")
     return None
+
+
+def stop_pending(unit: Unit) -> bool:
+    """Whether the meter has a stop for this unit (cheap: two event flags)."""
+    stopped = getattr(unit.meter, "stopped", None)
+    return unit.meter.ledger.stopped.is_set() or (stopped is not None and stopped.is_set())

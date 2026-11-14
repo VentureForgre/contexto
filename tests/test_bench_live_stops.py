@@ -331,7 +331,9 @@ def test_probe_lines_of_a_unit_the_manifest_does_not_record_are_dropped_on_resum
     manifest["units"], manifest["finished"] = [], None
     (first.out / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     again = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND)
-    assert again.code == 0 and again.unit("full")["attempt"] == 0
+    # requests.jsonl holds attempt 0's records, so the rerun is attempt 1 though the manifest had lost it.
+    unit = again.unit("full")
+    assert again.code == 0 and unit["attempt"] == 1 and [a["attempt"] for a in unit["attempts"]] == [1]
     probes = again.lines("probes.jsonl")
     assert len(probes) == len(script.probes) == len({p["id"] for p in probes})
     assert len(again.lines("requests.jsonl")) == 16  # both attempts' requests stay: they were billed

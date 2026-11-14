@@ -209,6 +209,26 @@ def read_spent(path: Path) -> int:
     return total
 
 
+def read_recorded(path: Path) -> dict[tuple[str, int, int], dict[int, dict[str, int]]]:
+    """What ``requests.jsonl`` holds per unit (arm, seed, repeat) and attempt: requests and tokens."""
+    out: dict[tuple[str, int, int], dict[int, dict[str, int]]] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return out
+    for line in lines:
+        try:
+            record = json.loads(line)
+            key = (str(record["arm"]), int(record["seed"]), int(record["repeat"]))
+            attempt = int(record.get("attempt") or 0)
+        except (ValueError, KeyError, TypeError):
+            continue  # a torn last line from a killed run
+        seen = out.setdefault(key, {}).setdefault(attempt, {"requests": 0, "tokens": 0})
+        seen["requests"] += 1
+        seen["tokens"] += record_tokens(record)
+    return out
+
+
 class _UsageReader:
     """Reads ``usage`` from a Messages response as it passes: SSE ``message_start`` and
     ``message_delta`` events, or a JSON body. It keeps the four counts and nothing else."""

@@ -95,3 +95,33 @@ def test_the_plain_arm_compacts_at_the_bound_and_the_contexto_arm_does_not(run):
     assert before[-1] <= pre_tokens < BOUND + 3_000, (before[-1], pre_tokens)
     after = [r for r in requests[requests.index(summaries[-1]) + 1:] if r["main"]]
     assert after and after[0]["uncached"] + after[0]["cache_write"] + after[0]["cache_read"] < before[-1]
+
+
+@pytest.fixture(scope="module")
+def split_run(script, tmp_path_factory):
+    """The same session, with the stub answering each decision and probe turn in two messages around a
+    file-read tool call, and correcting one answer in the second (``StubModel.split``)."""
+    tmp = tmp_path_factory.mktemp("bench-real-split")
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        bench_stubs.bench_environment(monkeypatch, tmp, real_claude=True)
+        stub = bench_stubs.StubModel([script], key=bench_stubs.FAKE_KEY, split=True, read_paths="absolute")
+        result = bench_stubs.run_bench(monkeypatch, tmp, [script], arms=("contexto", "plain"), bound=BOUND, stub=stub,
+                                       upstream=stub.start(), turn_timeout=300.0)
+        stub.stop()
+    finally:
+        monkeypatch.undo()
+    return result
+
+
+def test_answers_on_both_sides_of_a_tool_call_are_all_scored_with_the_real_claude(split_run, script):
+    """Claude Code's ``result`` holds only the last message's text; the arms read every assistant
+    message of the turn, so the answers and the decision written before the tool call count."""
+    assert split_run.code == 0, split_run.printed
+    for arm in ("contexto", "plain"):
+        unit = split_run.unit(arm)
+        assert unit["status"] == "complete" and unit["concluded_ok"] == {d.probe: True for d in script.decisions}
+        lines = [p for p in split_run.lines("probes.jsonl") if p["arm"] == arm]
+        assert len(lines) == len(script.probes)
+        assert [p["given"] for p in lines] == [split_run.stub.answered[(arm, script.seed, p["id"])] for p in lines]
+        assert not any(p["given"] in (None, "unsure") for p in lines)

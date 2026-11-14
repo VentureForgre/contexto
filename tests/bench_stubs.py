@@ -11,7 +11,10 @@ per probe, and answers from what the search returned: recall goes through the re
 
 It reports usage with the three input classes, checks each request's key in memory (booleans only),
 and can answer chosen requests with an error status, cut a stream short, or report a token count that
-does not fit.
+does not fit. With ``split`` it answers a Claude Code arm's decision and probe turns in two messages
+around a file-read tool call, as a model that checks something before it finishes: the decision line
+and half the answers (in markdown, one of them wrong) first, then the rest and the corrected answer.
+With ``tool_forever`` it answers every request of a Claude Code arm with another tool call.
 
 ``install_stub_claude`` writes a ``claude`` executable that runs ``tests/fixtures/bench/stub_claude.py``.
 """
@@ -103,6 +106,9 @@ class StubModel:
     count_tokens: dict[str, int] = field(default_factory=dict)  # arm -> the count_tokens answer, instead of the model
     delay_s: dict[str, float] = field(default_factory=dict)  # arm -> seconds to wait before answering a request
     read_paths: str = "relative"  # "relative", or "absolute": join the working directory named in the system prompt
+    split: bool = False  # answer decision and probe turns in two messages around a tool call (Claude Code arms)
+    tool_forever: set[str] = field(default_factory=set)  # arms whose every request is answered with a tool call
+    long_answers: bool = False  # put 250 backticks before each right answer
     requests: list[dict[str, Any]] = field(default_factory=list)
     answered: dict[tuple[str, int, str], str] = field(default_factory=dict)  # (arm, seed, probe id) -> answer given
     searches: int = 0
@@ -172,12 +178,22 @@ class StubModel:
             return [{"type": "text", "text": SUMMARY}]
         script, index, after = found
         kind = script.kinds[index]
+        if arm in self.tool_forever:
+            return [{"type": "tool_use", "id": f"toolu_again_{len(after):04d}", "name": READ_TOOL,
+                     "input": {"file_path": "does-not-exist.txt"}}]
+        split = self.split and arm != "full"
+        checked = split and any(b.get("type") == "tool_use" and str(b.get("id", "")).startswith("toolu_split")
+                                for m in after if m.get("role") == "assistant" and isinstance(m.get("content"), list)
+                                for b in m["content"] if isinstance(b, dict))
         if kind == "log":
             return [{"type": "text", "text": "OK"}]
         if kind == "decision":
             right = script.scripted_reply(index) or ""
             if index in self.wrong_decisions and arm != "full":
                 right = right.rsplit(":", 1)[0] + ": not-the-right-one"
+            if split:  # the decision first, a check, then a last message with no decision line in it
+                return [{"type": "text", "text": "Noted, nothing else to add."}] if checked else [
+                    {"type": "text", "text": f"**Decision**\n\n- {right}"}, _split_read(index)]
             return [{"type": "text", "text": right}]
         if kind == "toolloop":
             done = len(_tool_results(after))
@@ -207,10 +223,19 @@ class StubModel:
                 replies = [v for v in re.findall(rf"DECISION {re.escape(label)}: (\S+)", seen) if v != "<name>"]
                 recalled = replies[-1] if replies else "unknown"
             given = "unknown" if wrong(arm, script.seed, probe.id, self.error_rates.get(arm, 0.0)) else recalled
+            if self.long_answers and given != "unknown":
+                given = "`" * 250 + given  # right when scored whole (backticks are trimmed), wrong once cut
             with self.lock:
                 self.answered[(arm, script.seed, probe.id)] = given
             lines.append(f"{probe.id}: {given}")
-        return [{"type": "text", "text": "\n".join(lines)}]
+        if not split:
+            return [{"type": "text", "text": "\n".join(lines)}]
+        half = len(lines) // 2
+        if not checked:  # the first half, and the last probe's id with a wrong answer it corrects later
+            first = ["**Answers so far**", "", *(f"- {line}" for line in lines[:half]), f"- {asked[-1].id}: unsure",
+                     "", "Let me check one thing before the rest."]
+            return [{"type": "text", "text": "\n".join(first)}, _split_read(index)]
+        return [{"type": "text", "text": "\n".join(["The rest:", *lines[half:]])}]
 
     def usage(self, arm: str, conversation: str, body: dict[str, Any]) -> dict[str, int]:
         tokens = int(model_tokens(body) * self.usage_scale.get(arm, 1.0))
@@ -357,6 +382,11 @@ class StubModel:
         return Handler
 
 
+def _split_read(index: int) -> dict[str, Any]:
+    return {"type": "tool_use", "id": f"toolu_split_{index:03d}", "name": READ_TOOL,
+            "input": {"file_path": "notes-that-do-not-exist.md"}}
+
+
 def _query(script: Script, probe: Probe) -> str:
     """What a model would search for: the key the fact was planted under, or the decision's label."""
     for decision in script.decisions:
@@ -417,8 +447,8 @@ class BenchRun:
 
 
 def bench_environment(monkeypatch: Any, tmp: Path, *, real_claude: bool = False) -> Path:
-    """A temp HOME, no inherited credential or base URL, and (unless ``real_claude``) the stub
-    ``claude`` first on PATH. Returns the home directory."""
+    """A temp HOME, no inherited credential or base URL, no managed settings read from this machine,
+    and (unless ``real_claude``) the stub ``claude`` first on PATH. Returns the home directory."""
     home = tmp / HOME_NAME
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
@@ -428,6 +458,9 @@ def bench_environment(monkeypatch: Any, tmp: Path, *, real_claude: bool = False)
             monkeypatch.delenv(name)
     if not real_claude:
         monkeypatch.setenv("PATH", str(install_stub_claude(tmp / "bin")) + os.pathsep + os.environ["PATH"])
+    from contexto.bench.arms import managed
+
+    monkeypatch.setattr(managed, "sources", lambda platform=None: [])  # never this machine's managed settings
     return home
 
 

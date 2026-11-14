@@ -107,7 +107,9 @@ def test_every_unit_completes_and_the_manifest_has_the_shared_fields(run, script
         assert unit["toolloop_reads"] == len(script.reads) == 10
         assert unit["toolloop_requests"] == 11 and unit["over_bound"] == 0
     assert (run.out / "scripts" / f"seed-{SEED}.json").read_text(encoding="utf-8") == script.to_json()
-    assert sorted(p.name for p in run.out.iterdir()) == ["manifest.json", "probes.jsonl", "requests.jsonl", "scripts"]
+    assert sorted(p.name for p in run.out.iterdir()) == [
+        ".lock", "manifest.json", "probes.jsonl", "requests.jsonl", "scripts"]
+    assert (run.out / ".lock").read_bytes() == b""  # the run's lock: an empty file
 
 
 def test_probes_are_the_parsed_answers_scored_against_the_script(run, script):
@@ -117,7 +119,7 @@ def test_probes_are_the_parsed_answers_scored_against_the_script(run, script):
     correct = {}
     for line in probes:
         assert set(line) == {"arm", "seed", "repeat", "model", "id", "cls", "type", "tier", "kind", "turn", "overlap",
-                             "expected", "given", "correct", "stale"}
+                             "expected", "given", "given_truncated", "correct", "stale"}
         probe = by_id[line["id"]]
         assert (line["cls"], line["type"], line["tier"], line["kind"], line["overlap"], line["expected"]) == (
             probe.cls, probe.type, probe.tier, probe.kind, probe.overlap, probe.answer)
@@ -190,7 +192,7 @@ def test_the_meter_agrees_with_contextos_own_session_log(run):
 
 def test_nothing_private_is_written_printed_or_on_a_command_line(run):
     files = [p for p in run.out.rglob("*") if p.is_file()]
-    assert len(files) == 4
+    assert len(files) == 5  # manifest, probes, requests, one script, and the empty lock file
     haystacks = {f"file {p.relative_to(run.out)}": p.read_text(encoding="utf-8") for p in files}
     haystacks["printed"] = run.printed
     # The one process whose command line is the helper command is the helper itself (/bin/sh -c COMMAND).

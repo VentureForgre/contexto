@@ -10,6 +10,7 @@ from typing import Any
 from contexto.bench.modes import add_option, seeds
 
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
+TURN_REQUEST_CAP = 60  # contexto.bench.runner.TURN_REQUEST_CAP, repeated so that module is not imported at start
 ARMS = ("contexto", "full", "plain")  # contexto.bench.arms.ARMS, repeated so that module is not imported at start
 
 
@@ -48,7 +49,10 @@ def add(parser: Any) -> None:
                     "earlier run already recorded in OUT. The live run refuses to start without it or when the "
                     "plan's worst case is above it, and stops before passing it; --dry-run prints the figure to pass")
     add_option(parser, "--upstream", default=None, metavar="URL",
-               help=f"the model API's base URL (default $ANTHROPIC_BASE_URL, else {DEFAULT_UPSTREAM})")
+               help=f"the model API's base URL (default $ANTHROPIC_BASE_URL when it is set, else {DEFAULT_UPSTREAM}; "
+                    "inside a Claude Code or Contexto session that variable may name a local proxy). The manifest "
+                    "records only its kind and where it came from, never the host; a run against 127.0.0.1 is "
+                    "labelled a stub run")
     add_option(parser, "--key-helper", default=None, metavar="COMMAND",
                help="a command that prints your API key, run with /bin/sh -c when a key is needed, as Claude Code "
                     "runs an apiKeyHelper. Without it and without --settings the key is $ANTHROPIC_API_KEY. A key "
@@ -67,6 +71,13 @@ def add(parser: Any) -> None:
                     "(CLAUDE_CODE_PROMPT_CACHE_TTL) and the full arm marks its history with (default 5m)")
     add_option(parser, "--turn-timeout", type=_seconds, default=1_800.0, metavar="SECONDS",
                help="stop a unit when a turn has no result for this long (default 1800)")
+    add_option(parser, "--max-turn-requests", type=_tokens, default=TURN_REQUEST_CAP, metavar="N",
+               help="stop a unit as runaway when one script turn asks for more than N billed requests (default "
+                    f"{TURN_REQUEST_CAP}; the recorded runs needed at most 6, the tool-loop turn needs 11); the run "
+                    "goes on with the next unit")
+    add_option(parser, "--max-unit-tokens", type=_tokens, default=None, metavar="T",
+               help="stop a unit as runaway when it would pass T tokens (default: twice the unit's planned worst "
+                    "case); the run goes on with the next unit")
     add_option(parser, "--context-window", type=_tokens, default=None, metavar="TOKENS",
                help="the model's context window, for the full arm's fit check (default: the published window of "
                     "a model the benchmark knows, else 200,000)")
@@ -76,6 +87,13 @@ def upstream(args: argparse.Namespace) -> str:
     return args.upstream or os.environ.get("ANTHROPIC_BASE_URL") or DEFAULT_UPSTREAM
 
 
+def upstream_source(args: argparse.Namespace) -> str:
+    """Where the upstream came from: ``flag``, ``environment`` or ``default``."""
+    if args.upstream:
+        return "flag"
+    return "environment" if os.environ.get("ANTHROPIC_BASE_URL") else "default"
+
+
 def config(args: argparse.Namespace, credentials: Any) -> Any:
     from contexto.bench.runner import Config
 
@@ -83,4 +101,6 @@ def config(args: argparse.Namespace, credentials: Any) -> Any:
                   seed=args.seed, seeds=seeds(args), repeats=args.repeats, arms=tuple(args.arms),
                   budget=args.budget_tokens, out=args.out, upstream=upstream(args), credentials=credentials,
                   work=args.work, keep_work=args.keep_work, cache_ttl=args.cache_ttl,
-                  turn_timeout=args.turn_timeout, context_window=args.context_window)
+                  turn_timeout=args.turn_timeout, context_window=args.context_window,
+                  upstream_source=upstream_source(args), turn_request_cap=args.max_turn_requests,
+                  unit_token_cap=args.max_unit_tokens)
