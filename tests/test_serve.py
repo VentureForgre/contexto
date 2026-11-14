@@ -1372,7 +1372,8 @@ def test_a_settings_base_url_with_a_lone_surrogate_is_a_usage_error(home, tmp_pa
     (user_home / ".claude" / "settings.json").write_bytes(content)
     refused = run_cli(home, "--port", "0")
     assert refused.returncode == 2 and "Traceback" not in refused.stderr, refused.stderr
-    assert refused.stderr.strip() == "contexto serve: invalid upstream (from settings:user): it holds a lone surrogate"
+    assert refused.stderr.strip() == ("contexto serve: invalid upstream (from settings:user): "
+                                      "upstream holds a lone surrogate")
     assert not (home / serve.STATE_FILE).exists() and not (home / serve.LOG_FILE).exists()
 
 

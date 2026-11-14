@@ -137,7 +137,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from contexto import __version__, servecontract
-from contexto.canonical import has_lone_surrogate, loads_bounded
+from contexto.canonical import loads_bounded
 from contexto.hints import FORWARDED, STRIPPED
 from contexto.launcher import (
     CLAUDE_SESSION_HEADER,
@@ -361,8 +361,6 @@ def check_upstream_url(upstream: Upstream) -> None:
         parts = urlsplit(upstream.url)
         _ = parts.port  # parsed on access; raises for a bad one
         ok, problem = parts.scheme in ("http", "https") and bool(parts.hostname), "it must be an http(s) base URL"
-        if ok and has_lone_surrogate(upstream.url):  # a settings file can hold one; no request line can
-            ok, problem = False, "it holds a lone surrogate"
     except ValueError as exc:
         ok, problem = False, str(exc)
     if not ok:
