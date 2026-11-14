@@ -1,8 +1,11 @@
-"""``contexto recall <page id>``: print a paged-out turn exactly as ``contexto_recall`` renders it."""
+"""``contexto recall <page id>``: print a paged-out turn exactly as ``contexto_recall`` renders it.
+
+``--json`` prints the same chunk as one JSON object, with where to read on from (D64)."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from contexto.commands._common import EXIT_OK, add_session_option, fail, say_session
@@ -21,13 +24,16 @@ def register(subparsers) -> None:
         description=f"Print a paged-out turn as plain text, thinking omitted, at most {RECALL_LIMIT:,} "
                     "characters at a time and about a quarter of the session's window budget (the same "
                     "rendering and limit as the MCP contexto_recall tool). `contexto sessions show` lists "
-                    "the page ids; `contexto search` finds them with the offsets of their matching lines.")
+                    "the page ids; `contexto search` finds them with the offsets of their matching lines. "
+                    "With --json, one object: session, page_id, offset, text, total_chars (the whole turn's "
+                    "length) and next_offset (the --offset that reads on, null at the end).")
     parser.add_argument("page_id", metavar="PAGE_ID",
                         help="the page to print, for example pg_0123456789abcdef")
     add_session_option(parser)
     parser.add_argument("--offset", type=int, default=0, metavar="N",
                         help="character offset to continue from, or a matching line's offset from "
                              "`contexto search` (default 0)")
+    parser.add_argument("--json", action="store_true", help="print JSON; an error is still one line on stderr")
     parser.set_defaults(func=run)
 
 
@@ -55,6 +61,9 @@ def run(args: argparse.Namespace) -> int:
         chunk = recall_chunk(page, args.offset, limit)
     except ValueError as e:
         return fail(str(e))
+    if args.json:  # next_offset says what the note below says
+        print(json.dumps({"session": session_id, "page_id": args.page_id, **chunk}, indent=2, sort_keys=True))
+        return EXIT_OK
     sys.stdout.write(chunk["text"])
     if chunk["text"] and not chunk["text"].endswith("\n"):
         sys.stdout.write("\n")
