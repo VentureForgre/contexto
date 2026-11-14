@@ -340,13 +340,14 @@ def read_settings_file(path: Path) -> SettingsFile:
     ``problem``: it is not a regular file, it is larger than the limit, it cannot be read, or it is
     not valid JSON (a syntax error, ``NaN``, a wide encoding Claude Code does not load, nested too
     deep), or its ``env`` is there and is not an object (Claude Code 2.1.322 then loads nothing from
-    the file, spikes/m2/providers/README.md: not its ``apiKeyHelper`` either; only ``env``'s type is checked here). Such a
-    file is not evidence that a setting is off, since Claude Code may read it differently; the
-    cloud-provider guard refuses on it (``cloud_provider``) unless it was read whole, is not valid JSON, and its text
+    the file, spikes/m2/providers/README.md: not its ``apiKeyHelper`` either; only ``env``'s type is
+    checked here). Such a file is not evidence that a setting is off, since Claude Code may read it
+    differently; the cloud-provider guard refuses on it (``cloud_provider``) unless it was read whole,
+    is not valid JSON, and its text
     could not name a switch (``may_name_provider``): Claude Code does not load a file with a comment,
     a trailing comma or another syntax error (measured on 2.1.322, D70), or with ``NaN`` or an ``env``
-    that is not an object (spikes/m2/providers/README.md), so such a file turns no switch on. The NUL byte in that rule is
-    the backstop for wide files that still do not parse: UTF-16BE, UTF-16LE without the mark, UTF-32,
+    that is not an object (spikes/m2/providers/README.md), so such a file turns no switch on. The NUL
+    byte in that rule is the backstop for wide files that still do not parse: UTF-16BE, UTF-16LE without the mark, UTF-32,
     and UTF-16LE with the mark and a syntax error."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
