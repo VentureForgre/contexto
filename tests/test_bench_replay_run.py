@@ -509,11 +509,12 @@ def check_the_chart_of_a_replay_names_each_basis_once(run):
     assert (label.text, label.get("text-anchor")) == ("bound: 150,000 tokens", "end")
 
 
-PINNED_CHECKS =[check_equals_the_trace, check_the_bound_held, check_the_engine_ran_as_in_a_launch,
-                 check_the_terminal_text, check_results_md, check_manifest, check_requests_jsonl, check_reach_jsonl,
-                 check_results_json, check_the_store_is_kept_without_its_private_files,
-                 check_no_path_of_this_machine_is_in_any_output_file, check_output_helpers_agree_with_what_was_written,
-                 check_the_pinned_fallback_sentence_holds_in_the_run, check_the_chart_of_a_replay_names_each_basis_once]
+PINNED_CHECKS = [check_equals_the_trace, check_the_bound_held, check_the_engine_ran_as_in_a_launch,
+                  check_the_terminal_text, check_results_md, check_manifest, check_requests_jsonl, check_reach_jsonl,
+                  check_results_json, check_the_store_is_kept_without_its_private_files,
+                  check_no_path_of_this_machine_is_in_any_output_file,
+                  check_output_helpers_agree_with_what_was_written, check_the_pinned_fallback_sentence_holds_in_the_run,
+                  check_the_chart_of_a_replay_names_each_basis_once]
 
 
 # The pinned replay
@@ -949,8 +950,6 @@ def test_options_a_replay_cannot_use_are_usage_errors(monkeypatch, capsys, tmp_p
     assert list(tmp_path.iterdir()) == []  # nothing dumped, nothing recorded
 
 
-
-
 @pytest.mark.parametrize("argv", [["--dump-trace", "DIR"], ["--record-trace", "trace.json"], ["--replay-turns", "8"],
                                   ["--force"]])
 def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path, argv):
@@ -963,7 +962,8 @@ def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path
     assert argv[0] in replay_mode.OWN_OPTIONS
     # The live run is installed (contexto.bench.modes.live, the default mode), so with no mode flag this
     # would be a live run: the replay's option is refused before any mode runs.
-    assert any(getattr(m, "FLAG", 0) is None for m in bench_command.discover()), modes.__path__
+    default = [m.__name__ for m in bench_command.discover() if getattr(m, "FLAG", 0) is None]
+    assert default == ["contexto.bench.modes.live"], (default, modes.__path__)
     assert cli.main(["bench", *argv]) == 2
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err.strip() == said
