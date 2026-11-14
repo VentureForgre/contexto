@@ -61,6 +61,7 @@ Environment:
   CONTEXTO_INSTALL_BASE_URL   Where the releases are, for mirrors and tests.
                               Default: https://github.com/VentureForgre/contexto
                               https only; http only for 127.0.0.1 or localhost.
+                              It must have GitHub's layout (see docs/install.md).
 
 Exit status: 0 when Contexto is installed or already up to date, and after a
 dry run. 1 when the install could not be done. 2 when an option, a value or
@@ -105,6 +106,46 @@ have() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# quoted WORD...: the words as one line that a shell reads back as the same words, so a printed
+# command can be pasted. A word with anything but letters, digits and _./:=@%+,- is put in single
+# quotes: `--python '>=3.12'`, not a redirection.
+quoted() {
+    quoted_line=
+    for word; do
+        case $word in
+            '' | *[!A-Za-z0-9_./:=@%+,-]*)
+                rest=$word
+                word=
+                while :; do
+                    case $rest in
+                        *\'*)
+                            word="$word${rest%%\'*}'\\''"
+                            rest=${rest#*\'}
+                            ;;
+                        *)
+                            word="$word$rest"
+                            break
+                            ;;
+                    esac
+                done
+                word="'$word'"
+                ;;
+        esac
+        quoted_line="$quoted_line${quoted_line:+ }$word"
+    done
+    printf '%s\n' "$quoted_line"
+}
+
+# has_force WORD...: one of the words is --force.
+has_force() {
+    for word; do
+        if [ "$word" = --force ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # is_version X.Y.Z: three numbers of at most six digits, and nothing else.
 is_version() {
     case $1 in
@@ -147,10 +188,12 @@ download() {
 }
 
 # Sets tag to the latest release's tag, without the GitHub API: /releases/latest redirects to
-# /releases/tag/vX.Y.Z, and the tag is the end of the final URL. Only headers are read.
+# /releases/tag/vX.Y.Z, and the tag is the end of the final URL. Only headers are read: a HEAD
+# request, so a mirror must answer HEAD with that redirect.
 find_latest() {
     final=$(download "$base/releases/latest" /dev/null 1048576 -I -w '%{url_effective}') ||
-        stop "Could not read $base/releases/latest (curl's message is above)."
+        stop "Could not read $base/releases/latest (curl's message is above). --version X.Y.Z skips" \
+            "this lookup."
     case $final in
         "$base/releases/tag/v"*) tag=${final#"$base/releases/tag/"} ;;
         *) stop "$base/releases/latest did not lead to a release of this repository." ;;
@@ -367,13 +410,17 @@ try_wheel() {
             ;;
     esac
     if [ "$dry_run" = 1 ]; then
-        say "Would run: $*"
+        say "Would run: $(quoted "$@")"
         return 0
     fi
-    if ! tried=$("$@" 2>"$tmpdir/tool.log" </dev/null) || [ "$tried" != "contexto $version" ]; then
+    if ! tried=$("$@" 2>"$tmpdir/tool.log" </dev/null); then
         cat "$tmpdir/tool.log" >&2
-        stop "The checked wheel did not run with $installer: \`$*\` should print \"contexto $version\"" \
-            "($installer's message is above). The earlier install was left as it was."
+        stop "The checked wheel did not run with $installer: \`$(quoted "$@")\` should print" \
+            "\"contexto $version\" ($installer's message is above). The earlier install was left as it was."
+    fi
+    if [ "$tried" != "contexto $version" ]; then
+        stop "The checked wheel ran with $installer, but \`$(quoted "$@")\` should print" \
+            "\"contexto $version\". It printed \"$tried\". The earlier install was left as it was."
     fi
 }
 
@@ -397,17 +444,55 @@ remove_other_installs() {
                 *) set -- pipx uninstall "$name" ;;
             esac
             if [ "$dry_run" = 1 ]; then
-                say "Would run: $*"
+                say "Would run: $(quoted "$@")"
                 continue
             fi
-            say "Removing the earlier install, which provides the same contexto command: $*"
+            say "Removing the earlier install, which provides the same contexto command: $(quoted "$@")"
             if ! "$@" >"$tmpdir/tool.log" 2>&1 </dev/null; then
                 cat "$tmpdir/tool.log" >&2
-                die "\`$*\` failed ($tool's message is above). The new release was not installed."
+                die "\`$(quoted "$@")\` failed ($tool's message is above). The new release was not installed."
             fi
             removed=1
+            case " $removed_by " in
+                *" $tool "*) ;;
+                *) removed_by="$removed_by${removed_by:+ }$tool" ;;
+            esac
         done
     done
+}
+
+# Prints, after a failed install that followed a removal, how to get the earlier release back: with
+# the tool whose install was removed (the one this run used, when both tools had one), and in a
+# form that works for a piped script. A release older than v0.5.13 has no SHA256SUMS, so this
+# script refuses it; for one of those it prints the install of the release's wheel by URL.
+restore_hint() {
+    case $removed_by in
+        uv | pipx) restore_with=$removed_by ;;
+        *) restore_with=$installer ;;
+    esac
+    if older_than "$previous" "$oldest_with_sums"; then
+        old_url=$base/releases/download/v$previous/contexto-$previous-py3-none-any.whl
+        case $restore_with in
+            uv) set -- uv tool install --python '>=3.12' "$old_url" ;;
+            *)
+                set -- pipx install
+                if [ -n "$pipx_python" ]; then
+                    set -- "$@" --python "$pipx_python"
+                fi
+                set -- "$@" "$old_url"
+                ;;
+        esac
+        printf '%s\n' "To get $previous back: $(quoted "$@")" \
+            "v$previous has no SHA256SUMS, so this script cannot install it and that download is not" \
+            "checksum-verified."
+    elif [ "$base" = "$default_base" ]; then
+        printf '%s\n' "To get $previous back: curl -fsSL $script_url | sh -s -- --version $previous --with $restore_with"
+    else
+        # The script cannot know where this copy of it came from, so it names the options and the
+        # base URL, not a command.
+        printf '%s\n' "To get $previous back, run this script again the same way, with --version $previous" \
+            "--with $restore_with and CONTEXTO_INSTALL_BASE_URL=$base."
+    fi
 }
 
 install_wheel() {
@@ -432,18 +517,25 @@ install_wheel() {
     esac
     set -- "$@" "$tmpdir/$wheel"
     if [ "$dry_run" = 1 ]; then
-        say "Would run: $*"
+        say "Would run: $(quoted "$@")"
         return 0
     fi
-    say "Installing with $installer: $*"
+    say "Installing with $installer: $(quoted "$@")"
     if ! "$@" >"$tmpdir/tool.log" 2>&1 </dev/null; then
         cat "$tmpdir/tool.log" >&2
         if [ "$removed" = 1 ]; then
-            die "\`$*\` failed ($installer's message is above). No contexto is installed now: the earlier" \
-                "install was removed first.${previous:+ To get $previous back: sh install.sh --version $previous}"
+            printf 'install.sh: error: %s %s\n' "\`$(quoted "$@")\` failed ($installer's message is above)." \
+                "No contexto is installed now: the earlier install was removed first." >&2
+            if [ -n "$previous" ]; then
+                restore_hint >&2
+            fi
+            exit 1
         fi
-        die "\`$*\` failed ($installer's message is above). If it says that a contexto executable" \
-            "already exists, --force lets $installer overwrite it."
+        if has_force "$@"; then
+            die "\`$(quoted "$@")\` failed ($installer's message is above)."
+        fi
+        die "\`$(quoted "$@")\` failed ($installer's message is above). If it says that a contexto" \
+            "executable already exists, --force lets $installer overwrite it."
     fi
 }
 
@@ -476,6 +568,7 @@ main() {
 
     repo=VentureForgre/contexto
     default_base=https://github.com/$repo
+    script_url=https://raw.githubusercontent.com/$repo/main/install.sh
     oldest_with_sums=0.5.13
     # Seconds: to connect, of a stalled transfer, and for one whole download.
     connect_timeout=15
@@ -488,6 +581,7 @@ main() {
     force=0
     dry_run=0
     removed=0
+    removed_by=
     tmpdir=
 
     while [ $# -gt 0 ]; do
@@ -624,7 +718,7 @@ main() {
         say "Would download: $release/$wheel"
         say "Would check: its SHA-256 is $wheel_sha, from $release/SHA256SUMS"
         if [ "$attest" = 1 ]; then
-            say "Would run: gh attestation verify $tmpdir/$wheel --repo $repo"
+            say "Would run: $(quoted gh attestation verify "$tmpdir/$wheel" --repo "$repo")"
         fi
         if [ -n "$uv_names$pipx_names" ]; then
             try_wheel

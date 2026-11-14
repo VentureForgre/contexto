@@ -10,7 +10,9 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import shutil
+import socketserver
 import subprocess
 import threading
 import time
@@ -49,8 +51,9 @@ case "${1-} ${2-}" in
 "tool run")
     # uv tool run --python X --from WHEEL contexto --version: runs the wheel, installs nothing.
     [ -z "${STUB_TRIAL_FAIL-}" ] || { echo "error: stub trial failure" >&2; exit 2; }
-    name=$(basename "$6"); v=${name#contexto_proxy-}; v=${v#contexto-}
-    echo "contexto ${v%%-*}" ;;
+    while [ "$1" != --from ]; do shift; done
+    name=$(basename "$2"); v=${name#contexto_proxy-}; v=${v#contexto-}
+    echo "contexto ${STUB_TRIAL_VERSION:-${v%%-*}}" ;;
 "tool uninstall")
     [ -e "$STUB_STATE/uv/$3" ] || { echo "error: \`$3\` is not installed" >&2; exit 2; }
     rm "$STUB_STATE/uv/$3"
@@ -105,9 +108,15 @@ environment)
 run)
     # pipx run [--python X] --no-cache --spec WHEEL contexto --version: installs nothing.
     [ -z "${STUB_TRIAL_FAIL-}" ] || { echo "stub trial failure" >&2; exit 1; }
-    while [ "$1" != --spec ]; do shift; done
-    name=$(basename "$2"); v=${name#contexto_proxy-}; v=${v#contexto-}
-    echo "contexto ${v%%-*}" ;;
+    shift; python=; spec=
+    while [ $# -gt 0 ]; do
+        case $1 in --python) python=$2; shift ;; --spec) spec=$2; shift ;; esac
+        shift
+    done
+    # Like real pipx: with no --python it uses its default, and the wheel refuses one before 3.12.
+    [ -n "$python" ] || "$STUB_PIPX_PYTHON" || { echo "requires a different Python: needs >=3.12" >&2; exit 1; }
+    name=$(basename "$spec"); v=${name#contexto_proxy-}; v=${v#contexto-}
+    echo "contexto ${STUB_TRIAL_VERSION:-${v%%-*}}" ;;
 uninstall)
     [ -e "$STUB_STATE/pipx/$2" ] || { echo "Nothing to uninstall for $2" >&2; exit 1; }
     rm "$STUB_STATE/pipx/$2"
@@ -117,12 +126,13 @@ uninstall)
         rm -f "$bin/contexto" "$STUB_STATE/owner"
     fi ;;
 install)
-    shift; force=0; wheel=
+    shift; force=0; wheel=; python=
     while [ $# -gt 0 ]; do
-        case $1 in --force) force=1 ;; --python) shift ;; *) wheel=$1 ;; esac
+        case $1 in --force) force=1 ;; --python) python=$2; shift ;; *) wheel=$1 ;; esac
         shift
     done
     [ -f "$wheel" ] || { echo "no wheel at $wheel" >&2; exit 1; }
+    [ -n "$python" ] || "$STUB_PIPX_PYTHON" || { echo "requires a different Python: needs >=3.12" >&2; exit 1; }
     [ -z "${STUB_INSTALL_FAIL-}" ] || { echo "stub install failure" >&2; exit 1; }
     name=$(basename "$wheel")
     case $name in
@@ -186,6 +196,16 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+class LocalServer(ThreadingHTTPServer):
+    """HTTPServer.server_bind looks up the host's name with socket.getfqdn, a reverse DNS lookup that
+    took 35 seconds on every call with one Python 3.15 build. The name is not used here."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
+
+
 class Hub:
     """A server on 127.0.0.1 that answers like github.com does for one repository's releases."""
 
@@ -202,12 +222,17 @@ class Hub:
                     hub.released.wait(30)
                     return
                 status, headers, body = hub.answer(self.path, "http://" + self.headers["Host"])
+                if self.path.endswith("/releases/latest") and self.command in hub.refused_on_latest:
+                    # The script reads only the redirect, with HEAD. GET is refused, so a switch to
+                    # GET, which would download the whole release page, fails the tests.
+                    status, headers, body = 405, {"Allow": "HEAD"}, b"Method Not Allowed"
                 slow = any(part in self.path for part in hub.drip)
                 endless = any(part in self.path for part in hub.endless)
+                huge = any(part in self.path for part in hub.huge)
                 self.send_response(status)
                 for key, value in headers.items():
                     self.send_header(key, value)
-                if not endless:
+                if not (endless or huge):
                     self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 if self.command == "HEAD":
@@ -222,6 +247,12 @@ class Hub:
                     elif endless:  # no Content-Length, and far more than any limit
                         for _ in range(128):
                             self.wfile.write(b"a" * 65536)
+                    elif huge:  # no Content-Length, 160 MB at once, then a stall
+                        chunk = b"a" * 1048576
+                        for _ in range(160):
+                            self.wfile.write(chunk)
+                        self.wfile.flush()
+                        hub.released.wait(60)
                     else:
                         self.wfile.write(body)
                 except OSError:
@@ -229,7 +260,7 @@ class Hub:
 
             do_HEAD = do_GET
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = LocalServer(("127.0.0.1", 0), Handler)
         self.root = f"http://127.0.0.1:{self.server.server_address[1]}"
         self.url = self.root + "/owner/repo"
         self.released = threading.Event()
@@ -247,6 +278,8 @@ class Hub:
         self.stall: set[str] = set()
         self.drip: set[str] = set()
         self.endless: set[str] = set()
+        self.huge: set[str] = set()
+        self.refused_on_latest = {"GET"}
 
     def answer(self, path: str, origin: str):
         base = "/owner/repo"
@@ -1061,6 +1094,58 @@ def test_an_endless_checksum_file_is_refused(box):
     assert box.hub.downloads(".whl") == []
 
 
+def test_an_endless_wheel_is_cut_at_the_size_limit(box):
+    """The script as shipped, with its 600 second limit: only the 100 MB size limit can end this
+    quickly. The server sends 160 MB and then stalls, so a higher limit would wait for the stall."""
+    box.hub.add("1.2.3")
+    box.hub.huge = {"/blob/v1.2.3/contexto-1.2.3-py3"}
+    started = time.monotonic()
+    failed(box.run(), "Could not download", "contexto-1.2.3-py3-none-any.whl", "Nothing was installed")
+    assert time.monotonic() - started < 15
+    box.assert_untouched()
+
+
+def test_the_latest_release_is_found_with_head_only(box):
+    """The test server refuses GET on /releases/latest, as every other test runs with."""
+    box.hub.add("1.2.3")
+    ok(box.run("--dry-run"))
+    assert box.hub.requests.count("/owner/repo/releases/latest") == 1
+
+
+def test_a_mirror_that_refuses_head_is_told_that_version_skips_the_lookup(box):
+    box.hub.add("1.2.3")
+    box.hub.refused_on_latest = {"GET", "HEAD"}
+    result = failed(box.run(), "Could not read", "--version X.Y.Z skips this lookup", "Nothing was installed")
+    assert "405" in result.stderr
+    box.assert_untouched()
+    ok(box.run("--version", "1.2.3"))
+    assert box.installed() == {"uv:contexto": "1.2.3"}
+
+
+def test_printed_commands_can_be_pasted(make_box):
+    """`>=3.12` unquoted would be a redirection; a temporary directory may hold a space."""
+    box = make_box()
+    spaced = box.tmpdir / "with space"
+    spaced.mkdir()
+    box.preinstall("pipx", "contexto", "1.2.2")
+    box.hub.add("2.0.0", "contexto-proxy")
+    result = ok(box.run("--dry-run", "--with", "uv", TMPDIR=str(spaced)))
+    lines = [line.split(": ", 1)[1] for line in result.stdout.splitlines() if line.startswith("Would run: ")]
+    assert [shlex.split(line)[:3] for line in lines] == [
+        ["uv", "tool", "run"], ["pipx", "uninstall", "contexto"], ["uv", "tool", "install"]]
+    for line in lines:
+        words = shlex.split(line)
+        assert ">" not in line.replace("'>=3.12'", ""), line
+        if words[0] == "uv":
+            assert words[3:5] == ["--python", ">=3.12"], line
+            assert any(word.startswith(f"{spaced}/contexto-install.") for word in words), line
+    box.hub.add("2.0.1", "contexto-proxy")
+    output = ok(box.run("--with", "uv")).stdout
+    installing = [line for line in output.splitlines() if line.startswith("Installing with uv: ")]
+    words = shlex.split(installing[0].split(": ", 1)[1])
+    assert words[:5] == ["uv", "tool", "install", "--python", ">=3.12"] and words[5].endswith(".whl")
+
+
 def test_every_download_has_a_time_limit_and_a_size_limit():
     code = SCRIPT.read_text().replace("\\\n", " ")
     calls = [line for line in code.splitlines() if re.match(r"\s*curl --", line)]
@@ -1137,16 +1222,105 @@ def test_a_first_install_is_not_tried_first(box):
     assert not [call for call in box.calls() if " run " in call]
 
 
+RAW_SCRIPT = "https://raw.githubusercontent.com/VentureForgre/contexto/main/install.sh"
+
+
+def as_default_base(box: Box) -> tuple[Path, dict[str, str]]:
+    """A copy of the script whose default base is the test server, and no override set: the
+    script then behaves as it does for a user who runs it against GitHub."""
+    copy = box.edited_script(("default_base=https://github.com/$repo\n", f"default_base={box.hub.url}\n"))
+    return copy, {"CONTEXTO_INSTALL_BASE_URL": ""}
+
+
 @pytest.mark.parametrize("tool", ["uv", "pipx"])
 def test_an_install_that_fails_after_the_removal_says_how_to_get_the_old_release_back(make_box, tool):
+    """The command works for a piped script and puts the release back with the same tool."""
     box = make_box(tools=(tool,))
     box.preinstall(tool, "contexto", "1.2.2")
+    box.hub.add("1.2.2", latest=False)
     box.hub.add("2.0.0", "contexto-proxy")
-    result = failed(box.run(STUB_INSTALL_FAIL="1"), "stub install failure", "No contexto is installed now",
-                    "sh install.sh --version 1.2.2")
+    script, env = as_default_base(box)
+    result = failed(box.run(script=script, STUB_INSTALL_FAIL="1", **env), "stub install failure",
+                    "No contexto is installed now")
+    hint = f"To get 1.2.2 back: curl -fsSL {RAW_SCRIPT} | sh -s -- --version 1.2.2 --with {tool}"
+    assert hint in result.stderr.splitlines()
     assert "Nothing was installed" not in result.stderr
     assert box.installed() == {}
     assert list(box.tmpdir.iterdir()) == []
+    # The printed command, with this script in place of the curl, brings the release back.
+    words = shlex.split(hint.split(" | ", 1)[1])
+    assert words[:3] == ["sh", "-s", "--"]
+    ok(box.run(*words[3:], script=script, how="stdin", **env))
+    assert box.installed() == {f"{tool}:contexto": "1.2.2"}
+
+
+def test_the_restore_hint_names_the_tool_whose_install_was_removed(box):
+    box.preinstall("pipx", "contexto", "1.2.2")
+    box.hub.add("2.0.0", "contexto-proxy")
+    script, env = as_default_base(box)
+    result = failed(box.run("--with", "uv", script=script, STUB_INSTALL_FAIL="1", **env),
+                    "No contexto is installed now")
+    assert "pipx uninstall contexto" in result.stdout
+    assert "--version 1.2.2 --with pipx" in result.stderr
+    assert box.installed() == {}
+
+
+def test_with_a_base_url_override_the_restore_hint_names_it(box):
+    box.preinstall("uv", "contexto", "1.2.2")
+    box.hub.add("2.0.0", "contexto-proxy")
+    result = failed(box.run(STUB_INSTALL_FAIL="1"), "No contexto is installed now")
+    assert ("run this script again the same way, with --version 1.2.2 --with uv and "
+            f"CONTEXTO_INSTALL_BASE_URL={box.hub.url}.") in " ".join(result.stderr.split())
+    assert RAW_SCRIPT not in result.stderr
+
+
+@pytest.mark.parametrize("tool", ["uv", "pipx"])
+def test_the_restore_hint_for_a_release_without_checksums_installs_its_wheel_by_url(make_box, tool):
+    """The script refuses a release before v0.5.13, so the hint must not be the script."""
+    box = make_box(tools=(tool,))
+    box.preinstall(tool, "contexto", "0.5.8")
+    box.hub.add("2.0.0", "contexto-proxy")
+    script, env = as_default_base(box)
+    result = failed(box.run(script=script, STUB_INSTALL_FAIL="1", **env), "No contexto is installed now")
+    url = f"{box.hub.url}/releases/download/v0.5.8/contexto-0.5.8-py3-none-any.whl"
+    command = f"uv tool install --python '>=3.12' {url}" if tool == "uv" else f"pipx install {url}"
+    assert f"To get 0.5.8 back: {command}" in result.stderr.splitlines()
+    assert "not checksum-verified" in " ".join(result.stderr.split())
+    assert "--version 0.5.8" not in result.stderr
+
+
+def test_the_force_hint_is_left_out_when_the_command_had_force(make_box):
+    """pipx upgrades in place with --force, so telling the user to add it would be no help."""
+    box = make_box(tools=("pipx",))
+    box.preinstall("pipx", "contexto", "1.2.2")
+    box.hub.add("1.2.3")
+    result = failed(box.run(STUB_INSTALL_FAIL="1"), "pipx install --force", "stub install failure")
+    assert "--force lets" not in result.stderr
+    assert box.installed() == {"pipx:contexto": "1.2.2"}, "pipx keeps the earlier install when it fails"
+
+
+@pytest.mark.parametrize("tool", ["uv", "pipx"])
+def test_a_wheel_that_prints_another_version_stops_the_upgrade_and_says_what_it_printed(make_box, tool):
+    box = make_box(tools=(tool,))
+    box.preinstall(tool, "contexto", "1.2.2")
+    box.hub.add("2.0.0", "contexto-proxy")
+    result = failed(box.run(STUB_TRIAL_VERSION="2.0.1"), 'should print "contexto 2.0.0"',
+                    'It printed "contexto 2.0.1".', "Nothing was installed")
+    assert "message is above" not in result.stderr, "the trial command succeeded, so nothing is above"
+    box.assert_untouched()
+    assert box.installed() == {f"{tool}:contexto": "1.2.2"}
+
+
+def test_pipx_with_an_old_default_python_tries_the_wheel_with_the_newer_one(make_box):
+    """The trial run needs the same --python as the install, or every upgrade stops."""
+    box = make_box(tools=("pipx",))
+    newer = box.stub("python3.13", "python-new")
+    box.preinstall("pipx", "contexto", "1.2.2")
+    box.hub.add("1.2.3")
+    ok(box.run(STUB_PIPX_PYTHON=str(box.old_python)))
+    trial = [call for call in box.calls() if call.startswith("pipx run")]
+    assert len(trial) == 1 and trial[0].startswith(f"pipx run --python {newer} ")
+    assert box.installed() == {"pipx:contexto": "1.2.3"}
 
 
 def test_a_pipx_package_that_only_shares_the_name_is_left_alone(box):
@@ -1159,6 +1333,18 @@ def test_a_pipx_package_that_only_shares_the_name_is_left_alone(box):
     assert box.installed() == {"pipx:contexto": "9.0.0", "uv:contexto": "1.2.3"}
     assert (box.state / "pipx-venvs" / "contexto" / "bin" / "otherthing").exists()
     assert "uninstall" not in result.stdout
+
+
+def test_a_pipx_too_old_to_name_its_environments_goes_by_the_name(box):
+    """Without `pipx environment --value PIPX_LOCAL_VENVS` the script cannot look for the command,
+    so a pipx package named contexto counts, as docs/install.md says. pipx refuses to install a
+    package that has no command, so the unrelated library of that name is not one of these."""
+    box.stub("python3.12", "python-new")
+    box.preinstall("pipx", "contexto", "9.0.0", command="otherthing")
+    box.hub.add("1.2.3")
+    ok(box.run(STUB_PIPX_NO_ENVIRONMENT="1"))
+    assert box.installed() == {"pipx:contexto": "1.2.3"}
+    assert [change.split()[:3] for change in box.changes()] == [["pipx", "install", "--python"]]
 
 
 def test_replacing_a_newer_release_with_an_older_one_is_said(box):
