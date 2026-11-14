@@ -14,7 +14,7 @@ body:
     id: contexto-version
     attributes:
       label: Contexto version
-      description: Output of `contexto --version`. If it says `0.0.0+checkout`, add the commit (`git rev-parse --short HEAD`).
+      description: Output of `contexto --version`. If it says `0.0.0+checkout` with no commit after it, add the commit (`git rev-parse --short HEAD` in the checkout).
       placeholder: contexto 0.5.8
     validations:
       required: true
