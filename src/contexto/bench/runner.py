@@ -51,9 +51,11 @@ a local upstream), ``budget_tokens``, ``spent_tokens``, ``credential_source``, `
 ``unanswered_tokens`` (also in each entry of ``attempts``: billed requests that got no response, and
 the reservations of those that were sent, counted as spent; see ``metering``), and ``torn_lines``
 when a resumed run found a last line with no newline in ``requests.jsonl`` or ``probes.jsonl``
-(``repair_torn``). A unit's ``status`` may also
-be ``running`` while it runs. ``requests.jsonl``: ``attempt``, and ``usage_unreadable`` with
-``reserved_tokens`` on a response whose usage could not be read (``contexto.bench.meter``).
+(``repair_torn``; a request record it moved aside carries ``counted_tokens``, ``counted_from`` and,
+when the fragment names them, ``arm``, ``seed``, ``repeat`` and ``attempt``). A unit's ``status`` may
+also be ``running`` while it runs. ``requests.jsonl``: ``attempt`` and ``reserved_tokens`` (the spend
+guard's reservation for the request, written near the start of each line), and ``usage_unreadable``
+on a response whose usage could not be read (``contexto.bench.meter``).
 ``probes.jsonl``: ``given_truncated`` (the answer was longer than 200 characters; it was scored whole).
 """
 
@@ -64,6 +66,7 @@ import fcntl
 import functools
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -172,6 +175,11 @@ METERING = (
     "(request bytes / 1.5 + max_tokens) is not released but counted as spent, in unanswered_tokens and in "
     "spent_tokens, and a resumed run counts it too; a request whose connection was never made counts 0 tokens. "
     "A unit's tokens are its records' own.",
+    "Every request record carries its reservation (reserved_tokens) near the start of its line. A request record "
+    "that a killed run left cut short is moved aside by the next run and counted in spent_tokens at the "
+    "reservation the fragment holds, or, when the fragment ends before it, at the largest reservation of the "
+    "file's whole records (torn_lines: counted_tokens, counted_from): the upstream answered that request, so it "
+    "may have been billed.",
 )
 
 
@@ -276,8 +284,9 @@ def repair_torn(out: Path) -> list[dict[str, Any]]:
     killed in the middle of a write leaves. When it is a whole JSON object (only the newline was lost),
     the newline is added and the record counts as any other. Otherwise the fragment is copied to
     ``<file>.torn-<n>`` (the first free ``n``) and then cut from the file, so the bytes are kept and
-    the next record starts a line of its own; a request whose record was torn is not counted in the
-    spend, since its usage cannot be read."""
+    the next record starts a line of its own. A request whose record was torn got a response, so the
+    provider may have billed it, but its usage cannot be read: its entry gets ``counted_tokens``, what
+    ``recorded_spend`` counts for it (``torn_cost``)."""
     done: list[dict[str, Any]] = []
     for name in TORN_FILES:
         path = out / name
@@ -305,8 +314,51 @@ def repair_torn(out: Path) -> list[dict[str, Any]]:
         aside = out / f"{name}.torn-{n}"
         aside.write_bytes(last)  # first the copy, then the cut: a kill between them loses nothing
         os.truncate(path, start)
-        done.append({**entry, "action": "moved", "moved_to": aside.name})
+        moved = {**entry, "action": "moved", "moved_to": aside.name}
+        if name == "requests.jsonl":
+            moved.update(torn_cost(last, data[:start]))
+        done.append(moved)
     return done
+
+
+# The start of a request record as the meter writes it (json.dumps, default separators): the unit,
+# the attempt and the reservation, each matched only when the comma after it shows it is whole.
+_TORN_UNIT = re.compile(rb'^\{"arm": "([a-z]+)", "seed": (\d+), "repeat": (\d+), "attempt": (\d+), ')
+_TORN_RESERVED = re.compile(rb'"reserved_tokens": (\d+), ')
+
+
+def torn_cost(fragment: bytes, whole: bytes) -> dict[str, Any]:
+    """What a resumed run counts for a request record cut short, and the unit it names. The fragment's
+    own reservation when it holds one (``counted_from: "reservation"``); otherwise the largest that
+    the file's whole records count (``"largest_in_file"``), a stand-in that may be lower than the lost
+    request's own, since a session's requests grow."""
+    out: dict[str, Any] = {}
+    if (unit := _TORN_UNIT.match(fragment)) is not None:
+        out = {"arm": unit.group(1).decode(), "seed": int(unit.group(2)), "repeat": int(unit.group(3)),
+               "attempt": int(unit.group(4))}
+    if (reserved := _TORN_RESERVED.search(fragment)) is not None:
+        return {"counted_tokens": int(reserved.group(1)), "counted_from": "reservation", **out}
+    largest = 0
+    for line in whole.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            reserved_tokens = record.get("reserved_tokens")
+            own = reserved_tokens if isinstance(reserved_tokens, int) and not isinstance(reserved_tokens, bool) else 0
+            largest = max(largest, own, bench_meter.record_tokens(record))
+    return {"counted_tokens": largest, "counted_from": "largest_in_file", **out}
+
+
+def torn_spend(manifest: dict[str, Any]) -> int:
+    """The tokens counted for request records a killed run tore (``torn_lines``)."""
+    total = 0
+    for entry in manifest.get("torn_lines") or []:
+        counted = entry.get("counted_tokens") if isinstance(entry, dict) else None
+        if isinstance(counted, int) and not isinstance(counted, bool) and counted > 0:
+            total += counted
+    return total
 
 
 def drop_unrecorded_probes(out: Path, manifest: dict[str, Any]) -> int:
@@ -503,8 +555,8 @@ def unanswered_spend(manifest: dict[str, Any]) -> int:
 
 def recorded_spend(out: Path, manifest: dict[str, Any]) -> int:
     """What an output directory has spent: its request records, plus the reservations of requests that
-    got no response, which only the manifest counts."""
-    return bench_meter.read_spent(out / "requests.jsonl") + unanswered_spend(manifest)
+    got no response and of request records a kill tore, which only the manifest counts."""
+    return bench_meter.read_spent(out / "requests.jsonl") + unanswered_spend(manifest) + torn_spend(manifest)
 
 
 def settle_killed(manifest: dict[str, Any], recorded: dict[tuple[str, int, int], dict[int, dict[str, int]]]) -> int:

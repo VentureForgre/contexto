@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import bench_stubs
+from contexto.bench import meter
 from contexto.bench import script as bench_script
 
 SEED = 3
@@ -230,3 +231,11 @@ def test_a_record_torn_by_a_kill_mid_write_is_moved_aside_and_the_next_run_appen
     (unit,) = manifest["units"]
     assert unit["status"] == "complete" and [a["attempt"] for a in unit["attempts"]] == [0, 1]
     assert unit["attempts"][0]["requests"] == 4  # the torn record is not counted as one of the file's
+    # The request was answered, so it may have been billed: the resumed run counts it in the spend at
+    # its reservation, which every record writes near its start, before the unit's fields that follow.
+    reserved = json.loads(fragment[: fragment.index(b', "model"')] + b"}")
+    assert reserved["reserved_tokens"] > 0
+    assert {k: torn[k] for k in ("counted_tokens", "counted_from", "arm", "seed", "repeat", "attempt")} == {
+        "counted_tokens": reserved["reserved_tokens"], "counted_from": "reservation", "arm": "full",
+        "seed": SEED, "repeat": 0, "attempt": 0}
+    assert manifest["spent_tokens"] == meter.read_spent(requests) + reserved["reserved_tokens"]

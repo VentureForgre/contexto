@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import os
 import socket
 import subprocess
@@ -212,9 +213,10 @@ def test_the_meter_forwards_unchanged_and_records_counts_only(upstream, tmp_path
 
     assert not GATED_HINT_HEADERS & set(sent) and sent["x-claude-code-session-id"] == "s-1"
     assert bench_meter.HINT_HEADERS == GATED_HINT_HEADERS
-    record = {"arm": "plain", "seed": 5, "repeat": 1, "model": "m", "n": 0, "turn": 1, "main": True,
-              "history_tokens": 20, "uncached": 7, "cache_write": 100, "cache_read": 900, "output": 12, "status": 200,
-              "compaction": False, "basis": "measured", "attempt": 2}
+    reserved = math.ceil(len(body) / bench_meter.RESERVE_BYTES_PER_TOKEN) + 64  # its bytes, and max_tokens
+    record = {"arm": "plain", "seed": 5, "repeat": 1, "attempt": 2, "reserved_tokens": reserved, "model": "m", "n": 0,
+              "turn": 1, "main": True, "history_tokens": 20, "uncached": 7, "cache_write": 100, "cache_read": 900,
+              "output": 12, "status": 200, "compaction": False, "basis": "measured"}
     assert meter.records == [record]
     written = (tmp_path / "requests.jsonl").read_text(encoding="utf-8")
     assert [json.loads(x) for x in written.splitlines()] == [record]

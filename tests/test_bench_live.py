@@ -88,7 +88,7 @@ def test_every_unit_completes_and_the_manifest_has_the_shared_fields(run, script
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",  # no background task, so one result per turn
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",  # the caller's own opt-out, kept for both arms and recorded
         "settings": {"permissions": {"allow": ["Read"]}}}
-    assert len(manifest["arm_differences"]) == 7 and len(manifest["metering"]) == 5
+    assert len(manifest["arm_differences"]) == 7 and len(manifest["metering"]) == 6
     background = next(line for line in manifest["arm_differences"] if "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" in line)
     assert background.startswith("Both Claude Code arms alike")
     for words in ("removes the run_in_background parameter", "Agent and Bash", "about 770 characters", "2.1.322",
@@ -167,7 +167,10 @@ def test_requests_have_the_shared_fields_and_one_record_per_billed_request(run, 
     assert history[-1] == bench_script.estimate(script)["tokens"]
     for record in records:
         assert set(record) == {"arm", "seed", "repeat", "model", "n", "turn", "main", "history_tokens", "uncached",
-                               "cache_write", "cache_read", "output", "status", "compaction", "basis", "attempt"}
+                               "cache_write", "cache_read", "output", "status", "compaction", "basis", "attempt",
+                               "reserved_tokens"}
+        assert list(record)[:5] == ["arm", "seed", "repeat", "attempt", "reserved_tokens"]  # what a torn line keeps
+        assert record["reserved_tokens"] > record["uncached"] + record["cache_write"] + record["cache_read"]
         assert record["basis"] == "measured" and record["status"] == 200 and record["compaction"] is False
         assert record["main"] is True and record["history_tokens"] == history[record["turn"]]
         assert all(isinstance(record[k], int) for k in ("uncached", "cache_write", "cache_read", "output", "n"))

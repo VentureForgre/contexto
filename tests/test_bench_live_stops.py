@@ -501,6 +501,46 @@ def test_a_torn_last_line_is_moved_aside_or_completed_before_the_run_appends(env
     assert sorted(p.name for p in out.glob("*.torn-*")) == ["probes.jsonl.torn-1", "probes.jsonl.torn-2"]
 
 
+def test_a_torn_request_record_is_counted_in_the_spend_at_its_reservation(tmp_path):
+    """The upstream answered a request whose record a kill tore, so it may have been billed. The
+    resumed run counts it in the spend: at the reservation the fragment still holds (every record writes
+    it near its start), or, when the fragment ends before that, at the largest reservation in the file."""
+    import json
+
+    from contexto.bench import runner
+
+    def record(n: int, reserved: int) -> str:
+        return json.dumps({"arm": "full", "seed": 3, "repeat": 0, "attempt": 1, "reserved_tokens": reserved,
+                           "model": "m", "n": n, "turn": 0, "main": True, "history_tokens": 10, "uncached": 5,
+                           "cache_write": 0, "cache_read": 0, "output": 2, "status": 200, "compaction": False,
+                           "basis": "measured"})
+
+    out = tmp_path / "out"
+    out.mkdir()
+    requests = out / "requests.jsonl"
+    whole = record(0, 9_000) + "\n" + record(1, 12_000) + "\n"
+    requests.write_text(whole + record(2, 15_000)[:120], encoding="utf-8")
+    manifest = {"units": []}
+    (torn,) = runner.repair_torn(out)
+    assert {k: torn[k] for k in ("action", "counted_tokens", "counted_from", "arm", "seed", "repeat", "attempt")} == {
+        "action": "moved", "counted_tokens": 15_000, "counted_from": "reservation", "arm": "full", "seed": 3,
+        "repeat": 0, "attempt": 1}
+    manifest["torn_lines"] = [torn]
+    assert runner.recorded_spend(out, manifest) == 2 * 7 + 15_000
+    # Cut before its reservation: the largest reservation of the file's whole records stands in for it.
+    requests.write_text(whole + '{"arm": "full", "se', encoding="utf-8")
+    (torn,) = runner.repair_torn(out)
+    assert (torn["counted_tokens"], torn["counted_from"]) == (12_000, "largest_in_file")
+    assert "arm" not in torn
+    # A whole record that lost only its newline is counted by its record, and a probe fragment counts nothing.
+    requests.write_text(whole + record(2, 15_000), encoding="utf-8")
+    (out / "probes.jsonl").write_text('{"arm": "full", "seed": 3, "repe', encoding="utf-8")
+    added, probe = runner.repair_torn(out)
+    assert added["action"] == "newline_added" and "counted_tokens" not in added
+    assert probe["action"] == "moved" and "counted_tokens" not in probe
+    assert runner.recorded_spend(out, {"units": [], "torn_lines": [added, probe]}) == 3 * 7
+
+
 def test_torn_lines_are_left_alone_in_a_directory_that_is_not_a_live_run(env, tmp_path, script):
     out = tmp_path / "out"
     out.mkdir()

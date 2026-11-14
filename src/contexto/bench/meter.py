@@ -53,8 +53,8 @@ the count before the unit ends.
 Usage that cannot be read. When a 2xx response to a billed request ends without a usage the meter
 can read in full (an encoded body, a stream cut short before its final ``message_delta`` usage, a
 body that is not JSON), the vendor may still have billed up to the request's ``max_tokens``. The
-record then carries ``usage_unreadable: true`` and ``reserved_tokens``, the request's reservation,
-and the request counts as that reservation (or what was read, if more) everywhere: in the guard, in
+record then carries ``usage_unreadable: true`` beside ``reserved_tokens``, the request's reservation
+(which every record carries, near the start of its line), and the request counts as that reservation (or what was read, if more) everywhere: in the guard, in
 the unit's tokens and when a resumed run reads ``requests.jsonl`` (``record_tokens``). The guard
 never counts less than a request could have cost.
 
@@ -654,12 +654,15 @@ class _Handler(BaseHTTPRequestHandler):
                 main = request_class == "main"
             else:  # no class header: a main request has a tool list and no subagent id
                 main = owner.arm == "full" or (shape["tools"] and AGENT_HEADER not in received)
-            record = {"arm": owner.arm, "seed": owner.seed, "repeat": owner.repeat, "model": owner.model,
+            # The unit, the attempt and the reservation come first, so that a record a kill cuts short
+            # still says what the request may have cost (``contexto.bench.runner.repair_torn``).
+            record = {"arm": owner.arm, "seed": owner.seed, "repeat": owner.repeat, "attempt": owner.attempt,
+                      "reserved_tokens": reserved, "model": owner.model,
                       "n": owner.next_index(), "turn": turn, "main": bool(main),
                       "history_tokens": owner.history[turn] if turn is not None and turn < len(owner.history) else 0,
                       "uncached": 0, "cache_write": 0, "cache_read": 0, "output": 0, "status": 0,
                       "compaction": COMPACTION_HEADER in received or request_class == "compaction",
-                      "basis": "measured", "attempt": owner.attempt}
+                      "basis": "measured"}
         reached, tail, kept = False, b"", 0
         self.sent = False
         try:
@@ -668,7 +671,7 @@ class _Handler(BaseHTTPRequestHandler):
             if billed:
                 if reached and record is not None:
                     if record.pop("_unreadable", False):
-                        record["usage_unreadable"], record["reserved_tokens"] = True, reserved
+                        record["usage_unreadable"] = True
                     with owner._lock:
                         owner.records.append(record)
                         owner.usage_unreadable += int(bool(record.get("usage_unreadable")))
