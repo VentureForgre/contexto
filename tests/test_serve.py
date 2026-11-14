@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from contexto import __version__, cli, serve
+from contexto import __version__, cli, serve, serveclient, servecontract
 from contexto.launcher import build_engine, contexto_tool_rules
 from contexto.proxy import REFUSED_MESSAGE
 from contexto.store import SessionStore
@@ -92,6 +92,34 @@ def call(service, method: str, path: str, data: bytes = b"", head: dict | None =
 
 def post(service, session: str | None, text: str = "hello", path: str = "/v1/messages?beta=true", **kwargs):
     return call(service, "POST", path, body(session, text, **kwargs), headers(session))
+
+
+def settle(service, timeout: float = 30) -> None:
+    """Wait until the service has no request in flight. A client has its whole response a moment
+    before the handler returns its session's lease, so a test that goes on to count leases, close idle
+    sessions or fill the session cap waits for this state, not for a length of time."""
+    deadline = time.monotonic() + timeout
+    with service._idle:
+        while service._in_flight:
+            left = deadline - time.monotonic()
+            assert left > 0, f"{service._in_flight} requests still in flight"
+            service._idle.wait(left)
+
+
+def turn(service, session: str | None, text: str = "hello", **kwargs):
+    """``post``, then ``settle``: the request is over for the service too."""
+    answer = post(service, session, text, **kwargs)
+    settle(service)
+    return answer
+
+
+def until(condition, what: str, timeout: float = 30):
+    """Poll ``condition`` until it is true; fail naming ``what`` at the deadline."""
+    deadline = time.monotonic() + timeout
+    while not (found := condition()):
+        assert time.monotonic() < deadline, f"timed out waiting for {what}"
+        time.sleep(0.005)
+    return found
 
 
 def sessions(home: Path) -> list[str]:
@@ -380,7 +408,8 @@ def test_a_teammate_with_a_parent_session_reaches_the_parents_store(make_service
     lead = served(home)[A]
     response, _ = call(service, "POST", "/v1/messages", body(B, "teammate turn", parent=A), headers(B))
     assert response.status == 200
-    assert sessions(home) == [lead] and served(home) == {A: lead, B: lead}
+    # The store records the id the request was routed by, the lead's, and never the teammate's own.
+    assert sessions(home) == [lead] and served(home) == {A: lead}
     # Its count_tokens carries the header only (measured: no metadata), and follows the remembered parent.
     count = json.dumps({"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": "x"}], "tools": []})
     response, data = call(service, "POST", "/v1/messages/count_tokens?beta=true", count.encode(), headers(B))
@@ -512,7 +541,7 @@ def test_a_long_transform_in_one_session_does_not_stall_another(make_service, ho
 def test_an_idle_session_is_closed_and_a_later_request_reopens_it(make_service, home):
     clock = Clock()
     service = make_service(clock=clock, idle_s=600)
-    post(service, A)
+    turn(service, A)
     name = served(home)[A]
     clock.now += 599
     assert service.reap() == 0 and service.health()["sessions"] == 1
@@ -524,7 +553,7 @@ def test_an_idle_session_is_closed_and_a_later_request_reopens_it(make_service, 
         == ["session_open", "session_close"]
     turn_two = [{"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
                 {"role": "user", "content": [{"type": "text", "text": "and again"}]}]
-    assert post(service, A, extra=turn_two)[0].status == 200
+    assert turn(service, A, extra=turn_two)[0].status == 200
     assert sessions(home) == [name] and service.health()["sessions"] == 1
     log = session_log(home, name)
     assert [e["event"] for e in log if e["event"] in ("serve_open", "serve_close")] \
@@ -538,16 +567,16 @@ def test_the_cap_closes_the_least_recently_used_session(make_service, home):
     clock = Clock()
     service = make_service(clock=clock, max_sessions=2)
     for session in (A, B):
-        post(service, session)
+        turn(service, session)
         clock.now += 1
-    post(service, A)  # B is now the least recently used
+    turn(service, A)  # B is now the least recently used
     clock.now += 1
-    post(service, C)
+    turn(service, C)
     mapping = served(home)
     assert service.health()["sessions"] == 2 and len(sessions(home)) == 3
     assert [e["reason"] for e in session_log(home, mapping[B]) if e["event"] == "serve_close"] == ["cap"]
     assert not any(e["event"] == "serve_close" for e in session_log(home, mapping[A]))
-    post(service, B)  # reopens B's own store, closing A's
+    turn(service, B)  # reopens B's own store, closing A's
     assert served(home)[B] == mapping[B] and len(sessions(home)) == 3 and service.health()["sessions"] == 2
 
 
@@ -573,6 +602,7 @@ def test_a_session_with_a_request_in_flight_is_never_closed(make_service, home):
     finally:
         gate.set()
         first.join(10)
+    settle(service)
     assert service.reap() == 0  # just used
     clock.now += 11
     assert service.reap() == 1
@@ -713,6 +743,7 @@ def test_a_tool_call_resolves_before_the_client_receives_the_event_that_complete
     service = make_service(upstream=tool_upstream)
     seen = bytearray()
     at_block: list = []
+    arrived: list[tuple[float, bool]] = []  # when each read returned, and whether the tool call was in it by then
     marker = b'"content_block_stop", "index": 1'  # the tool call's block is complete
 
     def client():
@@ -721,6 +752,7 @@ def test_a_tool_call_resolves_before_the_client_receives_the_event_that_complete
         response = conn.getresponse()
         while chunk := response.read1(65536):
             seen.extend(chunk)
+            arrived.append((time.monotonic(), ToolUpstream.tool_use_id.encode() in seen))
             if not at_block and marker in seen:
                 at_block.append(resolve(service, ToolUpstream.tool_use_id))  # the moment the call is complete
         conn.close()
@@ -728,14 +760,19 @@ def test_a_tool_call_resolves_before_the_client_receives_the_event_that_complete
     thread = threading.Thread(target=client)
     thread.start()
     try:
-        assert ToolUpstream.block_sent.wait(10)
-        time.sleep(0.3)
-        # Upstream has sent the whole tool call; the proxy holds it until the response-time work is done.
-        assert b"calling" in seen and ToolUpstream.tool_use_id.encode() not in seen and not at_block
+        assert ToolUpstream.block_sent.wait(30)
+        # Upstream has sent the whole tool call. The service has read it once the id resolves, and the
+        # client has what came before it; neither is waited for by the clock.
+        until(lambda: service.resolve(ToolUpstream.tool_use_id) and b"calling" in seen,
+              "the service to read the tool call and the client to get the text before it")
+        assert ToolUpstream.tool_use_id.encode() not in seen and not at_block
     finally:
+        opened = time.monotonic()
         ToolUpstream.gate.set()
-        thread.join(15)
+        thread.join(30)
     assert marker in seen, bytes(seen[-300:])
+    # The proxy held the call until upstream sent the rest: no read before that had any of it.
+    assert [at for at, has_call in arrived if has_call and at < opened] == []
     assert at_block == [(200, {"session": served(home)[A]})]
 
 
@@ -744,9 +781,9 @@ def test_the_tool_call_map_keeps_the_most_recent_ids(make_service, monkeypatch):
     service = make_service()
     for n in range(5):
         service.register_tool_calls((f"toolu_{n}",), "s1")
-    service.register_tool_calls(("toolu_2",), "s2")  # seen again: now the newest
-    service.register_tool_calls(("toolu_5",), "s1")
-    assert [service.resolve(f"toolu_{n}") for n in range(6)] == [None, None, "s2", None, "s1", "s1"]
+    service.register_tool_calls(("toolu_2",), "s1")  # seen again in its session: now the newest
+    service.register_tool_calls(("toolu_5",), "s2")
+    assert [service.resolve(f"toolu_{n}") for n in range(6)] == [None, None, "s1", None, "s1", "s2"]
 
 
 @pytest.mark.parametrize("data, status", [
@@ -1162,20 +1199,810 @@ def test_rotate_token_replaces_the_token_and_says_what_to_do(home, running):
     assert service.stop() == 0
 
 
-def test_status_without_a_service_makes_no_request(home):
+class Listener:
+    """A listening socket on 127.0.0.1 that accepts nothing: any connection made to it stays in its
+    backlog, so ``connections`` says whether anything connected, however briefly."""
+
+    def __init__(self) -> None:
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.sock.setblocking(False)
+        self.port = self.sock.getsockname()[1]
+
+    def connections(self) -> int:
+        count = 0
+        while True:
+            try:
+                self.sock.accept()[0].close()
+            except BlockingIOError:
+                return count
+            count += 1
+
+    def close(self) -> None:
+        self.sock.close()
+
+
+@pytest.fixture
+def listener():
+    made = Listener()
+    yield made
+    made.close()
+
+
+def write_private(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(0o600)
+
+
+def test_status_without_a_service_makes_no_request(home, listener):
     status = run_cli(home, "--status")
     assert status.returncode == 1 and status.stdout.strip() == "contexto serve: not running"
-    # A record left by a killed service names a pid that is gone: still not running, and said so.
-    (home / serve.STATE_FILE).write_text(json.dumps({"port": 1, "pid": 2 ** 22 + 12345}))
+    assert not home.exists()  # a status query creates nothing: no home, no token
+    # A record left by a killed service: its port now belongs to another program, and its pid to a
+    # process that runs (this test). Nothing holds the lock, so nothing is sent to that port.
+    token = serve.ensure_token(home)
+    write_private(home / serve.STATE_FILE, json.dumps({"port": listener.port, "pid": os.getpid()}))
     status = run_cli(home, "--status")
-    assert status.returncode == 1 and "not running" in status.stdout
+    assert status.returncode == 1 and status.stdout.startswith("contexto serve: not running")
+    assert str(os.getpid()) in status.stdout and token not in status.stdout + status.stderr
+    printed = run_cli(home, "--print-settings")
+    assert json.loads(printed.stdout)["env"]["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{serve.DEFAULT_PORT}/{token}"
+    with pytest.raises(serveclient.ResolveError) as refused:
+        serveclient.resolve(home, "toolu_01D70stale")
+    assert refused.value.kind == serveclient.NOT_RUNNING and "serve.lock" in refused.value.reason
+    # The same with a lock file left behind and not held.
+    write_private(home / servecontract.LOCK_FILE, "")
+    assert run_cli(home, "--status").returncode == 1
+    with pytest.raises(serveclient.ResolveError):
+        serveclient.resolve(home, "toolu_01D70stale")
+    assert listener.connections() == 0
 
 
 def test_the_service_warns_about_a_cloud_provider_and_a_small_bound(home, running):
     service = running("--bound", "60000", env={"CLAUDE_CODE_USE_VERTEX": "1"})
-    text = "\n".join(service.stderr_lines)
     assert "(bound 60,000, upstream flag)" in service.stderr_lines[0]
-    time.sleep(0.2)
-    text = "\n".join(service.stderr_lines)
+    # The two warnings follow the listening line; they are waited for, not given a fixed time.
+    text = until(lambda: (lambda lines: "CLAUDE_CODE_USE_VERTEX" in lines and "window budget" in lines and lines)(
+        "\n".join(service.stderr_lines)), "both warnings on the service's stderr")
     assert "CLAUDE_CODE_USE_VERTEX" in text and "window budget" in text
     assert service.stop() == 0
+
+
+# One service per home: the lock
+
+
+def test_a_second_service_on_the_same_home_is_refused_whatever_its_port(home, running, upstream, make_service):
+    first = running()
+    for port in ("0", str(first.port)):
+        second = run_cli(home, "--port", port, "--upstream", upstream)
+        assert second.returncode == 1 and second.stdout == "" and len(second.stderr.splitlines()) == 1, second.stderr
+        assert f"contexto serve is already running on 127.0.0.1:{first.port} (pid {first.pid})" in second.stderr
+    with pytest.raises(serve.ServeError) as refused:  # the same from the class, in this process
+        make_service()
+    assert "already running" in str(refused.value) and first.token not in str(refused.value)
+    # The first one's record stands, and it is still the one that answers.
+    assert json.loads((home / serve.STATE_FILE).read_text()) == {"port": first.port, "pid": first.pid}
+    status = run_cli(home, "--status")
+    assert status.returncode == 0 and f"running on 127.0.0.1:{first.port} (pid {first.pid}" in status.stdout
+    assert first.stop() == 0
+    assert not (home / serve.STATE_FILE).exists() and run_cli(home, "--status").returncode == 1
+    assert stat.S_IMODE((home / servecontract.LOCK_FILE).stat().st_mode) == 0o600
+
+
+def test_a_killed_service_leaves_a_record_that_is_never_believed(home, running, listener):
+    first = running()
+    first.kill()  # SIGKILL: no cleanup runs
+    assert json.loads((home / serve.STATE_FILE).read_text())["pid"] == first.pid
+    assert not servecontract.service_running(home) and servecontract.running_state(home) is None
+    assert run_cli(home, "--status").returncode == 1
+    # The record now names a port another program holds; the next service removes it before it binds.
+    write_private(home / serve.STATE_FILE, json.dumps({"port": listener.port, "pid": os.getpid()}))
+    second = running()
+    assert json.loads((home / serve.STATE_FILE).read_text()) == {"port": second.port, "pid": second.pid}
+    assert servecontract.running_state(home) == {"port": second.port, "pid": second.pid}
+    assert second.stop() == 0 and listener.connections() == 0
+
+
+def test_a_record_that_is_not_the_users_own_private_file_is_not_read(home, make_service, tmp_path):
+    service = make_service()
+    assert servecontract.read_state(home) == {"port": service.port, "pid": os.getpid()}
+    (home / serve.STATE_FILE).chmod(0o644)
+    with pytest.raises(servecontract.ServeFileError) as refused:
+        servecontract.read_state(home)
+    assert refused.value.kind == "mode" and servecontract.running_state(home) is None
+    with pytest.raises(servecontract.ServeFileError):
+        servecontract.endpoint(home)
+    (home / serve.STATE_FILE).unlink()
+    elsewhere = tmp_path / "elsewhere.json"
+    write_private(elsewhere, json.dumps({"port": service.port, "pid": os.getpid()}))
+    (home / serve.STATE_FILE).symlink_to(elsewhere)
+    with pytest.raises(servecontract.ServeFileError) as refused:
+        servecontract.read_state(home)
+    assert refused.value.kind == "symlink"
+
+
+def test_a_lock_file_that_is_a_symlink_stops_the_service(home, tmp_path, upstream):
+    serve.ensure_token(home)
+    (home / servecontract.LOCK_FILE).symlink_to(tmp_path / "elsewhere.lock")
+    refused = run_cli(home, "--port", "0", "--upstream", upstream)
+    assert refused.returncode == 1 and "serve.lock" in refused.stderr and "Traceback" not in refused.stderr
+    assert not (tmp_path / "elsewhere.lock").exists() and not servecontract.service_running(home)
+
+
+# Routing a teammate (one rule: the request names its parent, and the store records the lead)
+
+
+def test_a_teammate_before_its_lead_makes_the_one_store_the_lead_then_finds(make_service, home):
+    clock = Clock()
+    service = make_service(clock=clock, idle_s=10)
+    assert turn(service, B, "teammate first", parent=A)[0].status == 200
+    assert len(sessions(home)) == 1 and set(served(home)) == {A}  # recorded under the lead, not the teammate
+    store = served(home)[A]
+    clock.now += 11
+    assert service.reap() == 1
+    assert turn(service, A, "the lead's own turn")[0].status == 200
+    assert turn(service, B, "teammate again", parent=A)[0].status == 200
+    assert sessions(home) == [store] and served(home) == {A: store}
+    assert len([e for e in session_log(home, store) if e["event"] == "request"]) == 3
+
+
+def test_a_remembered_parent_steers_count_tokens_only(make_service, home):
+    service = make_service()
+    turn(service, B)  # B's own conversation
+    turn(service, A, "A as a teammate of B", parent=B)
+    b_store = served(home)[B]
+    assert sessions(home) == [b_store]
+    count = json.dumps({"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": "x"}], "tools": []})
+    assert call(service, "POST", "/v1/messages/count_tokens", count.encode(), headers(A))[0].status == 200
+    assert [e["path"] for e in session_log(home, b_store) if e["event"] == "request"][-1] == "/v1/messages/count_tokens"
+    # A /v1/messages of A that names no parent is A's own conversation: its own store, and B's is untouched.
+    before = (home / "sessions" / b_store / "meta.json").read_bytes()
+    assert turn(service, A, "A on its own")[0].status == 200
+    mapping = served(home)
+    assert set(mapping) == {A, B} and mapping[A] != b_store and mapping[B] == b_store
+    assert (home / "sessions" / b_store / "meta.json").read_bytes() == before
+    # Its count_tokens now follows it there, and a restart changes nothing: no store records A under B.
+    call(service, "POST", "/v1/messages/count_tokens", count.encode(), headers(A))
+    settle(service)
+    assert [e["path"] for e in session_log(home, mapping[A]) if e["event"] == "request"] \
+        == ["/v1/messages", "/v1/messages/count_tokens"]
+    service.stop()
+    again = make_service()
+    turn(again, A, "A after a restart")
+    assert served(home) == mapping
+
+
+# The stores index
+
+
+def test_a_store_made_after_the_service_started_is_found_and_unchanged_stores_are_not_reread(make_service, home,
+                                                                                            monkeypatch):
+    for n in range(5):
+        store = SessionStore(home, f"old-{n}")
+        store.record_cli_session("claude", f"00000000-0000-4000-8000-00000000000{n}", 100.0 + n)
+        store.release()
+    service = make_service()
+    read: list[str] = []
+    real = SessionStore.open_existing.__func__
+    monkeypatch.setattr(SessionStore, "open_existing",
+                        classmethod(lambda cls, home, name: read.append(name) or real(cls, home, name)))
+    turn(service, A)  # a new id: nothing is read again, the index has every store as it stands
+    assert read == []
+    made = SessionStore(home, "made-meanwhile")  # as `contexto run claude` would, while the service runs
+    made.record_cli_session("claude", B, 500.0)
+    made.release()
+    turn(service, B)
+    assert served(home)[B] == "made-meanwhile" and read == ["made-meanwhile"]
+    turn(service, "00000000-0000-4000-8000-000000000003")
+    assert [e["event"] for e in session_log(home, "old-3") if e["event"] in ("serve_open", "request")] \
+        == ["serve_open", "request"]
+
+
+# Requests forwarded unbounded are said so
+
+
+def test_a_messages_request_forwarded_unbounded_is_logged_and_warned_about_once_a_minute(make_service, home):
+    clock = Clock()
+    stderr = io.StringIO()
+    service = make_service(clock=clock, stderr=stderr)
+
+    def round_of_three():
+        call(service, "POST", "/v1/messages", body(B), headers(A))  # mismatch
+        call(service, "POST", "/v1/messages", body(None), headers(**{"X-Claude-Code-Session-Id": "a/b"}))
+        call(service, "POST", "/v1/messages?beta=true", body(None), headers())  # no id at all
+        settle(service)
+
+    round_of_three()
+    reasons = ["session_id_mismatch", "invalid_session_id", "no_session_id"]
+    assert [e["reason"] for e in serve_log(home, "unrouted")] == reasons
+    lines = stderr.getvalue().splitlines()
+    assert len(lines) == 3 and all(line.startswith("contexto serve: warning: 1 request forwarded unchanged")
+                                   for line in lines)
+    assert [reason for line in lines for reason in reasons if f"({reason}:" in line] == reasons
+    for _ in range(4):
+        round_of_three()
+    assert len(stderr.getvalue().splitlines()) == 3  # inside the minute: counted, not printed
+    clock.now += 61
+    round_of_three()
+    lines = stderr.getvalue().splitlines()
+    assert len(lines) == 6 and all("5 requests forwarded unchanged" in line for line in lines[3:])
+    assert len(serve_log(home, "unrouted")) == 18 and sessions(home) == []
+    assert service.token not in stderr.getvalue() and A not in stderr.getvalue()
+    # A count_tokens no session served is logged and not warned about: nothing unbounded reaches a model.
+    call(service, "POST", "/v1/messages/count_tokens", b'{"messages": []}', headers(C))
+    settle(service)
+    assert serve_log(home, "unrouted")[-1]["reason"] == "no_session" and len(stderr.getvalue().splitlines()) == 6
+
+
+def test_a_store_that_cannot_be_opened_leaves_no_directory_and_is_not_retried_at_once(make_service, home):
+    clock = Clock()
+    stderr = io.StringIO()
+    tried: list[str] = []
+
+    def failing(store, config):
+        tried.append(store.session_id)
+        raise OSError(28, "No space left on device")
+
+    service = make_service(clock=clock, stderr=stderr, engine_factory=failing)
+    data = json.dumps(json.loads(body(A)), indent=1).encode()
+    for _ in range(5):
+        response, _ = call(service, "POST", "/v1/messages", data, headers(A))
+        assert response.status == 200 and StubUpstream.received[-1][3] == data  # forwarded as it was sent
+    settle(service)
+    assert len(tried) == 1 and sessions(home) == []  # one attempt, and the directory it made is gone
+    assert [e["reason"] for e in serve_log(home, "unrouted")] == ["session_open_failed"] * 5
+    failed = serve_log(home, "session_open_failed")
+    assert len(failed) == 1 and failed[0]["error"] == "OSError" and failed[0]["errno"] == 28
+    assert stderr.getvalue().count("session_open_failed") == 1
+    clock.now += serve.OPEN_FAILED_TTL_S + 1
+    call(service, "POST", "/v1/messages", data, headers(A))
+    settle(service)
+    assert len(tried) == 2 and sessions(home) == [] and service.health()["sessions"] == 0
+
+
+def test_a_failed_open_of_an_existing_store_leaves_it_alone(make_service, home):
+    kept = SessionStore(home, "kept")
+    kept.record_cli_session("claude", A, 100.0)
+    kept.pin("decision", "kept across a failed open")
+    kept.release()
+
+    def failing(store, config):
+        raise RuntimeError("engine cannot start")
+
+    service = make_service(engine_factory=failing)
+    assert post(service, A)[0].status == 200
+    settle(service)
+    assert sessions(home) == ["kept"] and "kept across a failed open" in SessionStore(home, "kept").state_text()
+
+
+# The session cap
+
+
+def test_a_request_at_the_cap_waits_for_a_session_to_finish_and_is_then_bounded(make_service, home):
+    """The window the eviction tests used to fall into: another session's response is complete and
+    its lease not yet returned. The request waits for the lease, not for a length of time."""
+    stderr = io.StringIO()
+    service = make_service(max_sessions=1, cap_wait_s=60, stderr=stderr)
+    turn(service, A)
+    held = service.acquire(A, create=True)  # A has a request in flight, as far as the service knows
+    done: list[int] = []
+    waiter = threading.Thread(target=lambda: done.append(post(service, B)[0].status))
+    waiter.start()
+    try:
+        until(lambda: service._cap_waiting == 1, "B's request to wait for a session")
+        assert not done and set(served(home)) == {A}
+    finally:
+        service.release(held)
+        waiter.join(30)
+    settle(service)
+    assert done == [200] and set(served(home)) == {A, B} and service.health()["sessions"] == 1
+    assert serve_log(home, "unrouted") == [] and stderr.getvalue() == ""
+    assert [e["reason"] for e in session_log(home, served(home)[A]) if e["event"] == "serve_close"] == ["cap"]
+
+
+def test_a_request_that_opens_a_session_during_shutdown_adds_nothing_to_the_registry(make_service, home):
+    service = None
+
+    def stopping(store, config):
+        with service._lock:  # what stop() does between this open's start and its insertion
+            service._stopping = True
+        return build_engine(store, config)
+
+    service = make_service(engine_factory=stopping)
+    with pytest.raises(serve._Unrouted) as unrouted:
+        service.acquire(A, create=True)
+    assert unrouted.value.reason == "stopping" and service._sessions == {} and service._routes == {}
+    (name,) = sessions(home)
+    assert [e["reason"] for e in session_log(home, name) if e["event"] == "serve_close"] == ["shutdown"]
+    assert [e["event"] for e in serve_log(home) if e["event"].startswith("session_")] == ["session_close"]
+
+
+def test_the_missing_tools_warning_is_printed_once_per_session_however_often_it_reopens(make_service, home):
+    clock = Clock()
+    stderr = io.StringIO()
+    service = make_service(clock=clock, stderr=stderr, idle_s=10)
+    extra: list = []
+    for n in range(4):
+        turn(service, A, extra=list(extra))
+        extra += [{"role": "assistant", "content": [{"type": "text", "text": f"reply {n}"}]},
+                  {"role": "user", "content": [{"type": "text", "text": f"turn {n + 2}"}]}]
+        clock.now += 11
+        assert service.reap() == 1
+    name = served(home)[A]
+    assert len([e for e in session_log(home, name) if e["event"] == "serve_open"]) == 4
+    warnings = [line for line in stderr.getvalue().splitlines() if "MCP" in line]
+    assert len(warnings) == 1 and warnings[0].startswith(f"contexto serve: session {name}: warning: "), warnings
+
+
+# The tool-call map: registered before the call reaches the client, whatever the framing
+
+
+class Framed(BaseHTTPRequestHandler):
+    """Answers a Messages request with one tool call, framed as ``framing`` says: ``chunked`` (an SSE
+    stream the proxy holds), ``length`` (an SSE body with a Content-Length), ``gzip`` (an SSE stream
+    upstream encoded although it was asked not to) or ``json``. No event carries ``usage`` unless
+    ``usage`` is set. A stream stops after the tool call's ``content_block_stop`` until ``gates[0]``
+    is set, and after ``message_delta`` until ``gates[1]`` is."""
+
+    protocol_version = "HTTP/1.1"
+    framing = "chunked"
+    usage = False
+    tool_use_id = "toolu_01D70framed"
+    gates = (threading.Event(), threading.Event())
+    block_sent = threading.Event()
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        cls = type(self)
+        answer = tool_response(cls.tool_use_id)
+        if not cls.usage:
+            del answer["usage"]
+        if cls.framing == "json":
+            data = json.dumps(answer).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        delta = {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}
+        if cls.usage:
+            delta["usage"] = {"output_tokens": 5}
+        parts = [b"".join(sse(event) for event in [
+                     {"type": "message_start", "message": {**answer, "content": [], "stop_reason": None}},
+                     {"type": "content_block_start", "index": 0, "content_block": answer["content"][0]},
+                     {"type": "content_block_delta", "index": 0,
+                      "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+                     {"type": "content_block_stop", "index": 0}]),
+                 sse(delta), sse({"type": "message_stop"})]
+        compressor = __import__("zlib").compressobj(9, 8, 16 + 15) if cls.framing == "gzip" else None
+        if compressor is not None:
+            parts = [compressor.compress(part) + compressor.flush(2) for part in parts]  # Z_SYNC_FLUSH
+            parts[-1] += compressor.flush()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        if compressor is not None:
+            self.send_header("Content-Encoding", "gzip")
+        if cls.framing == "length":
+            self.send_header("Content-Length", str(sum(len(part) for part in parts)))
+        else:
+            self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for index, part in enumerate(parts):
+            self.wfile.write(part if cls.framing == "length" else b"%x\r\n%s\r\n" % (len(part), part))
+            self.wfile.flush()
+            if index < 2:
+                if index == 0:
+                    cls.block_sent.set()
+                cls.gates[index].wait(30)
+        if cls.framing != "length":
+            self.wfile.write(b"0\r\n\r\n")
+
+
+@pytest.fixture
+def framed():
+    Framed.gates, Framed.block_sent = (threading.Event(), threading.Event()), threading.Event()
+    Framed.framing, Framed.usage = "chunked", False
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Framed)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    for gate in Framed.gates:
+        gate.set()
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.mark.parametrize("framing, usage", [("chunked", False), ("chunked", True), ("length", False),
+                                            ("length", True), ("gzip", False)])
+def test_a_streamed_tool_call_resolves_when_the_client_has_it_with_or_without_usage(make_service, home, framed,
+                                                                                    framing, usage):
+    Framed.framing, Framed.usage = framing, usage
+    service = make_service(upstream=framed)
+    marker = b'"content_block_stop", "index": 0'
+    seen = bytearray()
+    at_block: list = []
+
+    def client():
+        conn = http.client.HTTPConnection("127.0.0.1", service.port, timeout=60)
+        conn.request("POST", f"/{service.token}/v1/messages?beta=true", body(A, stream=True), headers(A))
+        response = conn.getresponse()
+        inflate = __import__("zlib").decompressobj(16 + 15) if framing == "gzip" else None
+        while chunk := response.read1(65536):
+            seen.extend(inflate.decompress(chunk) if inflate else chunk)
+            if not at_block and marker in seen:  # the client has the whole call: Claude Code would start it now
+                at_block.append(resolve(service, Framed.tool_use_id))
+        conn.close()
+
+    thread = threading.Thread(target=client)
+    thread.start()
+    try:
+        assert Framed.block_sent.wait(30)
+        # Registered as soon as the service has read the call, which is before it passes any of it on.
+        until(lambda: service.resolve(Framed.tool_use_id), "the service to read the tool call")
+        Framed.gates[0].set()  # upstream goes on; the response is still open when the client has the call
+        until(lambda: at_block, "the client to have the complete tool call")
+        assert at_block == [(200, {"session": served(home)[A]})]
+    finally:
+        for gate in Framed.gates:
+            gate.set()
+        thread.join(30)
+    settle(service)
+    assert resolve(service, Framed.tool_use_id) == (200, {"session": served(home)[A]})
+    logged = [e["event"] for e in session_log(home, served(home)[A])]
+    assert ("hold_skipped" in logged) == (framing != "chunked")
+
+
+def test_a_json_tool_call_without_usage_resolves(make_service, home, framed):
+    Framed.framing = "json"
+    service = make_service(upstream=framed)
+    assert post(service, A)[0].status == 200
+    assert resolve(service, Framed.tool_use_id) == (200, {"session": served(home)[A]})
+
+
+def test_an_id_two_sessions_registered_is_ambiguous_and_resolves_as_unknown(make_service, home, framed):
+    Framed.framing = "json"  # an upstream that repeats its ids: every response carries the same one
+    service = make_service(upstream=framed)
+    turn(service, A)
+    assert resolve(service, Framed.tool_use_id) == (200, {"session": served(home)[A]})
+    turn(service, B)
+    assert resolve(service, Framed.tool_use_id) == (404, {"error": "unknown_tool_use"})
+    turn(service, A)  # and it stays so: the first session does not get it back
+    assert resolve(service, Framed.tool_use_id) == (404, {"error": "unknown_tool_use"})
+    logged = serve_log(home, "tool_use_ambiguous")
+    assert logged == [{"ts": logged[0]["ts"], "event": "tool_use_ambiguous", "count": 1}]
+    assert Framed.tool_use_id not in (home / "serve.log").read_text()
+    with pytest.raises(serveclient.ResolveError) as refused:  # so the MCP server fails closed
+        serveclient.resolve(home, Framed.tool_use_id, sleep=lambda seconds: None)
+    assert refused.value.kind == serveclient.UNKNOWN_TOOL_USE
+
+
+def test_the_mcp_clients_retry_covers_an_id_registered_after_its_first_try(make_service, home):
+    """The race the retry exists for: the call reaches the MCP server before the service has read it
+    (a response upstream encoded, read from a decoded side copy). The id is registered while the
+    client waits between tries, and the client is the real one, asking the real service."""
+    service = make_service()
+    turn(service, A)
+    name = served(home)[A]
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        if len(slept) == 2:
+            service.register_tool_calls(("toolu_01D70late",), name)
+
+    assert serveclient.resolve(home, "toolu_01D70late", sleep=sleep) == name
+    assert slept == list(serveclient.RETRY_DELAYS_S[:2])
+    # The whole window is 1.9 s of waiting: an id registered later than that is refused, not waited for.
+    with pytest.raises(serveclient.ResolveError) as refused:
+        serveclient.resolve(home, "toolu_01D70never", sleep=slept.append)
+    assert refused.value.kind == serveclient.UNKNOWN_TOOL_USE and sum(serveclient.RETRY_DELAYS_S) <= 2.0
+    assert sessions(home) == [name]
+
+
+def test_a_tool_call_in_a_response_to_an_unrouted_request_is_never_registered(make_service, home, framed):
+    Framed.framing = "json"
+    service = make_service(upstream=framed)
+    assert call(service, "POST", "/v1/messages", body(None), headers())[0].status == 200  # no session id
+    assert resolve(service, Framed.tool_use_id) == (404, {"error": "unknown_tool_use"})
+
+
+# Before the token check: one answer, bounded logging, a deadline and a cap
+
+
+def raw(port: int, data: bytes, timeout: float = 30) -> bytes:
+    """Send ``data`` on a new connection and read to the end of the stream."""
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+        if data:
+            sock.sendall(data)
+        got = bytearray()
+        while True:
+            try:
+                chunk = sock.recv(65536)
+            except ConnectionResetError:
+                break
+            if not chunk:
+                break
+            got += chunk
+        return bytes(got)
+
+
+def refusal(service) -> bytes:
+    """The bytes of the one 403, as an ordinary request without the token gets them."""
+    got = raw(service.port, b"GET /not-the-token/x HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    head, _, payload = got.partition(b"\r\n\r\n")
+    assert head.splitlines() == [b"HTTP/1.1 403 Forbidden", b"Content-Type: application/json",
+                                 b"Content-Length: %d" % len(payload)] and json.loads(payload) == REFUSED
+    return got
+
+
+def unparseable(token: str) -> dict[str, bytes]:
+    """Requests ``http.server`` answers itself, before any check: each carries the token, so an echo
+    of the request line would show it."""
+    target = f"/{token}/v1/messages".encode()
+    host = b"Host: 127.0.0.1\r\n"
+    return {
+        "no version": b"GET " + target + b"\r\n\r\n",
+        "no version, not GET": b"POST " + target + b"\r\n\r\n",
+        "one word": b"GET\r\n\r\n",
+        "four words": b"GET " + target + b" HTTP/1.1 extra\r\n" + host + b"\r\n",
+        "bad version": b"GET " + target + b" HTTP/9.9\r\n" + host + b"\r\n",
+        "version 2": b"GET " + target + b" HTTP/2.0\r\n" + host + b"\r\n",
+        "not http": b"GET " + target + b" FTP/1.1\r\n" + host + b"\r\n",
+        "unsupported method": b"CONNECT " + target + b" HTTP/1.1\r\n" + host + b"\r\n",
+        "trace": b"TRACE " + target + b" HTTP/1.1\r\n" + host + b"\r\n",
+        "unknown method": b"BREW " + target + b" HTTP/1.1\r\n" + host + b"\r\n",
+        "too many headers": b"GET " + target + b" HTTP/1.1\r\n" + host + b"".join(
+            b"X-Filler-%d: x\r\n" % n for n in range(150)) + b"\r\n",
+        "over-long header": b"GET " + target + b" HTTP/1.1\r\n" + host + b"X-Long: " + b"x" * 70_000 + b"\r\n\r\n",
+        "over-long target": b"GET " + target + b"?" + b"x" * 70_000 + b" HTTP/1.1\r\n" + host + b"\r\n",
+        "garbage": b"\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03" + b"\r\n\r\n",
+    }
+
+
+def test_every_answer_before_the_checks_is_the_same_403(make_service, home):
+    clock = Clock()
+    service = make_service(clock=clock)
+    expected = refusal(service)
+    for what, data in unparseable(service.token).items():
+        got = raw(service.port, data)
+        assert got == expected, (what, got[:200])
+    # Nothing of http.server's own: no HTML, no library or Python version, no echo of the request.
+    assert b"Server:" not in expected and b"Python" not in expected and b"<" not in expected
+    # Expect: 100-continue gets no interim answer unless the request passes the checks.
+    expecting = b"POST /nope/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nExpect: 100-continue\r\nContent-Length: 0\r\n\r\n"
+    assert raw(service.port, expecting) == expected
+    data = body(A)
+    passing = (b"POST /%s/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Claude-Code-Session-Id: %s\r\n"
+               b"Expect: 100-continue\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s"
+               % (service.token.encode(), A.encode(), len(data), data))
+    got = raw(service.port, passing)
+    assert got.startswith(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 "), got[:120]
+    settle(service)
+    assert StubUpstream.received[-1][3] == data and len(StubUpstream.received) == 1
+    # All of it is one line in the log (the clock stands still), with no path, method or version.
+    refused = serve_log(home, "request_refused")
+    assert len(refused) == 1 and set(refused[0]) == {"ts", "event", "reason"}
+    assert not serve_log(home, "serve_error") and service.token not in (home / "serve.log").read_text()
+
+
+def test_thousands_of_unparseable_requests_write_a_bounded_number_of_log_lines(make_service, home):
+    clock = Clock()
+    service = make_service(clock=clock)
+    expected = refusal(service)
+    before = len((home / "serve.log").read_text().splitlines())
+    sent = 2000
+    for n in range(sent):
+        got = raw(service.port, b"GET /x\r\n\r\n" if n % 2 else b"NOPE\r\n\r\n")
+        assert got == expected
+    settle(service)
+    assert len((home / "serve.log").read_text().splitlines()) == before  # all counted on the line already there
+    clock.now += 2
+    raw(service.port, b"GET /x\r\n\r\n")
+    refused = serve_log(home, "request_refused")
+    assert len(refused) == 2 and refused[1]["reason"] == "malformed" and refused[1]["not_logged"] == sent
+    assert not serve_log(home, "serve_error")
+
+
+def test_a_failure_before_the_token_check_is_refused_and_logged_through_the_limiter(make_service, home, monkeypatch):
+    clock = Clock()
+    service = make_service(clock=clock)
+    expected = refusal(service)
+
+    def broken(self):
+        raise RuntimeError("a bug in a check")
+
+    monkeypatch.setattr(serve._ServeHandler, "_refusal", broken)
+    for _ in range(20):
+        assert raw(service.port, f"GET /{service.token}/v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode()) \
+            == expected
+    monkeypatch.undo()
+    clock.now += 2
+    raw(service.port, b"GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    refused = serve_log(home, "request_refused")
+    assert [e["reason"] for e in refused] == ["token", "token"] and refused[1]["not_logged"] == 20
+    assert not serve_log(home, "serve_error") and StubUpstream.received == []
+
+
+def closed_within(sock: socket.socket, timeout: float = 30) -> bytes:
+    """Everything the service sends on ``sock`` until it closes it; fails if it is still open at ``timeout``."""
+    sock.settimeout(timeout)
+    got = bytearray()
+    while True:
+        try:
+            chunk = sock.recv(65536)
+        except ConnectionResetError:
+            break
+        if not chunk:
+            break
+        got += chunk
+    return bytes(got)
+
+
+def test_a_connection_that_has_not_passed_the_check_ends_at_its_deadline(make_service, home):
+    service = make_service(unchecked_deadline_s=0.4)
+    expected = refusal(service)
+    started = time.monotonic()
+    silent = socket.create_connection(("127.0.0.1", service.port))
+    slow_line = socket.create_connection(("127.0.0.1", service.port))
+    slow_line.sendall(b"GET /" + service.token.encode()[:10])  # a request line that never ends
+    slow_head = socket.create_connection(("127.0.0.1", service.port))
+    slow_head.sendall(b"GET /%s/contexto/health HTTP/1.1\r\nHost: 127.0.0.1\r\n" % service.token.encode())
+    no_body = socket.create_connection(("127.0.0.1", service.port))
+    no_body.sendall(b"POST /nope/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100000\r\n\r\n")
+    no_chunks = socket.create_connection(("127.0.0.1", service.port))
+    no_chunks.sendall(b"POST /nope/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n")
+    try:
+        assert closed_within(silent) == b""  # nothing was asked, so nothing is answered
+        assert closed_within(slow_line) == expected
+        # A head with the right token that never ends is not served: the connection had not passed.
+        assert closed_within(slow_head) == b""
+        assert closed_within(no_body) == expected and closed_within(no_chunks) == expected
+    finally:
+        for sock in (silent, slow_line, slow_head, no_body, no_chunks):
+            sock.close()
+    assert time.monotonic() - started >= 0.4
+    until(lambda: not service._unchecked, "the service to forget the closed connections")
+    assert StubUpstream.received == [] and sessions(home) == []
+    assert {e["reason"] for e in serve_log(home, "request_refused")} <= {"token", "deadline", "malformed", "host"}
+
+
+def test_a_connection_that_passed_the_check_has_no_deadline(make_service, home, tool_upstream):
+    service = make_service(upstream=tool_upstream, unchecked_deadline_s=0.3)
+    token = service.token.encode()
+    # One connection kept alive between requests, and one request whose response upstream holds open.
+    kept = socket.create_connection(("127.0.0.1", service.port), timeout=30)
+    health = b"GET /%s/contexto/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" % token
+    kept.sendall(health)
+    assert kept.recv(65536).startswith(b"HTTP/1.1 200 ")
+    stream = socket.create_connection(("127.0.0.1", service.port), timeout=30)
+    data = body(A, stream=True)
+    stream.sendall(b"POST /%s/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Claude-Code-Session-Id: %s\r\n"
+                   b"Connection: close\r\nContent-Length: %d\r\n\r\n%s" % (token, A.encode(), len(data), data))
+    assert ToolUpstream.block_sent.wait(30)
+    # Two deadlines go by, measured by connections that say nothing and are closed for it.
+    for _ in range(2):
+        with socket.create_connection(("127.0.0.1", service.port)) as silent:
+            assert closed_within(silent) == b""
+    kept.sendall(health)
+    assert kept.recv(65536).startswith(b"HTTP/1.1 200 ")
+    ToolUpstream.gate.set()
+    answer = closed_within(stream)
+    assert answer.startswith(b"HTTP/1.1 200 ") and b"message_stop" in answer and answer.endswith(b"0\r\n\r\n")
+    # A later request on the kept connection is still checked, and a refused one is under a deadline again.
+    kept.sendall(b"POST /nope HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5000\r\n\r\n")
+    assert closed_within(kept) == refusal(service)
+    kept.close()
+    stream.close()
+
+
+def test_the_cap_on_unchecked_connections_closes_the_newest_and_frees_at_the_deadline(make_service, home):
+    clock = Clock()
+    service = make_service(clock=clock, unchecked_deadline_s=0.5, max_unchecked=4)
+    waiting = [socket.create_connection(("127.0.0.1", service.port)) for _ in range(4)]
+    try:
+        until(lambda: len(service._unchecked) == 4, "the four silent connections to be counted")
+        # Over the cap: closed at once and unanswered, whoever it is; no handler thread is started for it.
+        threads = threading.active_count()
+        for _ in range(20):
+            with socket.create_connection(("127.0.0.1", service.port)) as extra:
+                extra.sendall(b"GET /%s/contexto/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" % service.token.encode())
+                assert closed_within(extra) == b""
+        assert threading.active_count() <= threads and len(service._unchecked) == 4
+        # The slots free when the silent connections reach their deadline; a token holder is then served.
+        for sock in waiting:
+            assert closed_within(sock) == b""
+        response, data = call(service, "GET", "/contexto/health")
+        assert response.status == 200 and json.loads(data)["ok"] is True
+    finally:
+        for sock in waiting:
+            sock.close()
+    refused = serve_log(home, "request_refused")
+    assert len(refused) == 1 and refused[0]["reason"] == "connection_cap"  # the clock stands still: one line
+
+
+def test_a_request_header_that_holds_the_token_is_not_forwarded(make_service, home):
+    service = make_service()
+    url = serve.base_url(service.port, service.token)
+    response, _ = call(service, "POST", "/v1/messages?beta=true", body(A),
+                       {**headers(A), "Referer": url + "/v1/messages", "X-Debug-Url": f"see {url}", "X-Kept": "plain"})
+    assert response.status == 200
+    settle(service)
+    _, path, sent, _ = StubUpstream.received[0]
+    assert "Referer" not in sent and "X-Debug-Url" not in sent and sent["X-Kept"] == "plain"
+    assert service.token not in path and not any(service.token in value for value in sent.values())
+    assert sent["x-api-key"] == SECRET and sent["X-Claude-Code-Session-Id"] == A
+    dropped = serve_log(home, "token_header_dropped")
+    assert len(dropped) == 1 and set(dropped[0]) == {"ts", "event", "count"} and dropped[0]["count"] == 2
+    log = (home / "serve.log").read_text()
+    assert service.token not in log and "Referer" not in log
+
+
+# Recognising the service's own address
+
+
+@pytest.mark.parametrize("host, loopback", [
+    ("127.0.0.1", True), ("127.1", True), ("2130706433", True), ("0x7f.1", True), ("0x7f000001", True),
+    ("0177.0.0.1", True), ("[::1]", True), ("::1", True), ("localhost", True), ("LOCALHOST.", True),
+    ("app.localhost", True), ("127.9.9.9", True), ("0.0.0.0", True), ("::", True), ("::ffff:127.0.0.1", True),
+    ("[::ffff:7f00:1]", True), ("0", True),
+    ("api.anthropic.com", False), ("128.0.0.1", False), ("10.0.0.1", False), ("2130706432.example", False),
+    ("localhost.example", False), ("", False), ("::2", False), ("1.2.3.4.5", False),
+])
+def test_loopback_addresses_are_recognised_in_every_spelling(host, loopback):
+    assert servecontract.is_loopback(host) is loopback
+
+
+@pytest.mark.parametrize("url", ["http://127.1:7837", "http://2130706433:7837/x", "http://0x7f.1:7837",
+                                 "http://[::1]:7837", "http://localhost:7837", "http://[::ffff:127.0.0.1]:7837"])
+def test_an_upstream_that_spells_this_machine_another_way_is_still_refused(url):
+    with pytest.raises(serve.ServeError):
+        serve.check_upstream_loop(UpstreamChoice(url, "flag"), 7837, "T" * 43)
+
+
+def test_the_launcher_and_the_proxy_command_refuse_this_homes_service_as_their_upstream(home, tmp_path):
+    token = serve.ensure_token(home)
+    user_home = tmp_path / "user-home"
+    (user_home / ".claude").mkdir(parents=True)
+    # What docs/serve.md has a user without --settings do: the service's URL in their Claude Code settings.
+    (user_home / ".claude" / "settings.json").write_text(json.dumps(
+        {"env": {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:7911/{token}"}}))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ran = tmp_path / "claude-ran"
+    (bin_dir / "claude").write_text(f"#!/bin/sh\ntouch {ran}\n")
+    (bin_dir / "claude").chmod(0o755)
+    env = child_env(home, {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"})
+    for command in (["run", "claude", "-p", "hi"], ["proxy", "--port", "0"]):
+        refused = subprocess.run([sys.executable, "-m", "contexto", *command], capture_output=True, text=True,
+                                 env=env, cwd=tmp_path, timeout=120)
+        assert refused.returncode == 2, (command, refused.stderr)
+        assert "--upstream URL" in refused.stderr and "contexto serve" in refused.stderr
+        assert "settings" in refused.stderr and len(refused.stderr.splitlines()) == 1  # where it came from
+        assert token not in refused.stderr + refused.stdout and "7911" not in refused.stderr
+    assert not ran.exists() and not (home / "sessions").exists()
+    # With an upstream of its own, neither is refused for the setting.
+    explicit = subprocess.run([sys.executable, "-m", "contexto", "run", "--upstream", "http://127.0.0.1:9", "claude",
+                               "-p", "hi"], capture_output=True, text=True, env=env, cwd=tmp_path, timeout=120)
+    assert ran.exists(), explicit.stderr
+
+
+@pytest.mark.parametrize("url, named", [
+    ("http://127.0.0.1:7837/TOKEN", True), ("http://127.0.0.1:9999/TOKEN/", True), ("http://localhost/TOKEN/v1", True),
+    ("http://[::1]:7837/TOKEN", True), ("http://127.1:7837/TOKEN", True), ("https://127.0.0.1/TOKEN", True),
+    ("http://127.0.0.1:7837", False), ("http://127.0.0.1:7837/", False), ("http://127.0.0.1:7837/other", False),
+    ("http://127.0.0.1:7837/v1/TOKEN", False), ("http://127.0.0.1:7837/TOKENx", False),
+    ("https://gateway.example/TOKEN", False), ("http://[::1", False), ("not a url", False),
+])
+def test_names_service_is_a_loopback_url_whose_first_segment_is_the_token(home, url, named):
+    assert servecontract.names_service(url.replace("TOKEN", "x" * 43), home) is False  # no token file: never read
+    assert not home.exists()
+    token = serve.ensure_token(home)
+    assert servecontract.names_service(url.replace("TOKEN", token), home) is named
+    (home / serve.TOKEN_FILE).chmod(0o644)  # a token file that cannot be used names nothing
+    assert servecontract.names_service(url.replace("TOKEN", token), home) is False

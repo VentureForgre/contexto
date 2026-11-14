@@ -913,7 +913,8 @@ class _LoopbackServer(ThreadingHTTPServer):
 class ContextoProxy:
     def __init__(self, upstream: str, log: SessionLog, transform: Transform = identity_transform, *,
                  observe_usage: ObserveUsage | None = None, observe_thinking: bool = False,
-                 upstream_source: str | None = None, affinity_key: str | None = None) -> None:
+                 upstream_source: str | None = None, affinity_key: str | None = None,
+                 on_tool_calls: Callable[[tuple[str, ...]], None] | None = None) -> None:
         parts = urlsplit(upstream)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("upstream must be an http(s) base URL")
@@ -927,6 +928,9 @@ class ContextoProxy:
         self.session_log = log
         self.transform = transform
         self.observe_usage = observe_usage
+        # Called with the ids of a response's client tool calls as they are read, before the bytes that
+        # carry them are written to the client (``_Handler._relay``); None for no hook.
+        self.on_tool_calls = on_tool_calls
         self.observe_thinking = observe_thinking
         self.upstream_source = upstream_source
         self.transform_lock = threading.Lock()
@@ -1353,6 +1357,22 @@ class _Handler(BaseHTTPRequestHandler):
             owner.log({"event": "hold_skipped", "path": entry["path"], "encoding": decoder.encoding or "identity",
                        "chunked": chunked})
         splitter = SSEEventSplitter()  # the hold path splits once, for both the reader and the hold
+        announced = 0
+
+        def announce() -> None:
+            """Hand the owner's ``on_tool_calls`` hook the client tool-call ids read since the last
+            call. It runs after each read of the side copy and before the write that follows, so the
+            hook has an id before the client has the bytes that carry it, whether the response is held,
+            relayed chunk by chunk or a JSON body, and whether or not it has usage."""
+            nonlocal announced
+            hook = owner.on_tool_calls
+            if hook is None or len(reader.call_ids) == announced:
+                return
+            new, announced = tuple(reader.call_ids[announced:]), len(reader.call_ids)
+            try:
+                hook(new)
+            except Exception as exc:
+                owner.log({"event": "tool_calls_hook_error", "error": type(exc).__name__})
 
         def read_upstream() -> bytes:
             try:
@@ -1386,9 +1406,11 @@ class _Handler(BaseHTTPRequestHandler):
                 if hold is not None:
                     for raw in splitter.feed(chunk):
                         reader.feed_event(raw)  # usage is read before the hold can trigger on it
+                        announce()
                         write_events(hold.feed(raw))
                     continue
                 reader.feed(decoder.decode(chunk))
+                announce()
                 if chunked:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 else:
@@ -1400,6 +1422,7 @@ class _Handler(BaseHTTPRequestHandler):
             if hold is not None:
                 if tail := splitter.flush():  # a final event without its blank line (see SSEEventSplitter)
                     reader.feed_event(tail)
+                    announce()
                     write_events(hold.feed(tail))
                 write_events(hold.eof())
             elif expected is not None and response_bytes < expected:
@@ -1435,6 +1458,7 @@ class _Handler(BaseHTTPRequestHandler):
         if hold is not None:
             entry["stream_hold"] = {"held_events": hold.held_events, "triggered": hold.triggered}
         reader.finish()
+        announce()  # a JSON body is read whole: its ids are known here, before its last bytes are written
         if entry.get("api") == "responses":
             usage = reader.usage or None  # Responses usage kept as given (see UsageReader)
         else:

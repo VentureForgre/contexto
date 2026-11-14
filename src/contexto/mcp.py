@@ -30,6 +30,7 @@ from typing import IO, Any, Protocol
 
 from contexto import serveclient
 from contexto.canonical import loads_bounded, utf8
+from contexto.servecontract import CLOUD_PROVIDER_VARIABLES, MAX_TOOL_USE_ID_CHARS
 from contexto.store import LockFileDamagedError, PageUnreadableError
 from contexto.store.ledger import LedgerCorruptError
 from contexto.store.pages import is_context_page
@@ -901,12 +902,11 @@ def serve_stdio(store: Store) -> int:
 # `contexto mcp --serve` (D70): one server for every conversation of a Claude Code process.
 
 META_TOOL_USE = "claudecode/toolUseId"  # in tools/call params._meta: the model response's tool_use id
-TOOL_USE_ID_MAX = 256  # Anthropic's ids are about 30 characters; a longer value is not an id
+TOOL_USE_ID_MAX = MAX_TOOL_USE_ID_CHARS  # a longer value is not an id, and the service would refuse it
 STORE_CACHE = 8  # session stores kept open, most recently used
 # Each of these makes Claude Code send its model requests to that provider's own base URL and none to
-# ANTHROPIC_BASE_URL, not even HEAD /api/hello (2.1.322, docs/research/D70-serve-probes.md section 4).
-PROVIDER_SWITCHES = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-                     "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS")
+# ANTHROPIC_BASE_URL (2.1.322, docs/research/D70-serve-probes.md section 4).
+PROVIDER_SWITCHES = CLOUD_PROVIDER_VARIABLES
 NOT_RUN = "{tool} was not run, and nothing was read or written: "
 NO_TOOL_USE_ID = (NOT_RUN + "this call carries no tool-use id, which `contexto mcp --serve` needs to find the "
                   "conversation's session. It needs a client that sends _meta[\"claudecode/toolUseId\"] with each "

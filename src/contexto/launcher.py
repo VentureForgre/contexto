@@ -248,6 +248,21 @@ def check_upstream(upstream: Upstream) -> None:
         raise LaunchError(f"invalid upstream {upstream.url!r} (from {upstream.source}): {problem}", EXIT_USAGE)
 
 
+def check_not_service(upstream: Upstream, home: Path, command: str) -> None:
+    """Refuse an upstream that is the address of this home's ``contexto serve`` (a loopback host whose
+    first path segment is the service's token; ``contexto.servecontract.names_service``). That is the
+    base URL a client of the service is given, so it is what the default upstream resolves to once it
+    is in the user's Claude Code settings, and requests would then pass two engines that open the
+    same store. The URL is never printed: it holds the token."""
+    from contexto.servecontract import names_service
+
+    if names_service(upstream.url, home):
+        raise LaunchError(
+            f"the upstream (from {upstream.source}) is this Contexto home's `contexto serve`, which bounds the "
+            f"requests it is sent itself. Pass --upstream URL (for example --upstream https://api.anthropic.com), "
+            f"or use the client through `contexto serve` instead of `{command}`.", EXIT_USAGE)
+
+
 def check_home(home: Path) -> None:
     """``$CONTEXTO_HOME`` must be a directory or not exist yet; it is never chmodded here (a home the user
     made is kept as it is; one Contexto creates is 0700)."""
@@ -1097,6 +1112,7 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     if options.claude_args in INFO_ARGS:  # nothing to bound, so no session or proxy (D57)
         return run_child([claude, *options.claude_args], stderr=stderr)
     upstream = resolve_upstream(options.upstream, cwd=Path.cwd())
+    check_not_service(upstream, contexto_home(), "contexto run claude")
     check_upstream(upstream)
     if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: as Claude Code -p, no project base URL (D52)
         print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', upstream.ignored, 'Pass --upstream', os.environ)}",
