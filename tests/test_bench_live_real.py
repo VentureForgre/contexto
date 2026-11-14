@@ -68,6 +68,40 @@ def test_claude_version_runs_isolated_from_the_checkout_and_the_users_home(tmp_p
     assert "ANTHROPIC_AUTH_TOKEN" not in env and "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 
+def test_the_benchmarks_own_claude_version_check_runs_with_the_arms_isolation(tmp_path, monkeypatch):
+    """#286 Reviewer B low 1 at 99ee7b07: ``cli.claude_version`` dropped every ``CLAUDE_`` variable and
+    added nothing, so the runner's own ``claude --version`` ran with no ``DISABLE_AUTOUPDATER`` and
+    without the caller's ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC``. A stand-in ``claude`` writes down
+    where and how it was started."""
+    from contexto.bench.arms import cli
+
+    seen = tmp_path / "seen.txt"
+    fake = tmp_path / "bin" / "claude"
+    fake.parent.mkdir()
+    fake.write_text(f"#!{sys.executable}\nimport os, sys\nopen({str(seen)!r}, 'w').write(repr((os.getcwd(), "
+                    "dict(os.environ), os.path.isdir(os.environ.get('CLAUDE_CONFIG_DIR', '')))))\n"
+                    "print('2.1.322 (Claude Code)')\n", encoding="utf-8")
+    fake.chmod(0o755)
+    environ = {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "home"),
+               "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_OAUTH_TOKEN": "inherited",
+               "CLAUDE_CONFIG_DIR": str(tmp_path / "users-config"), "ANTHROPIC_API_KEY": "inherited",
+               "ANTHROPIC_BASE_URL": "https://example.test", "DISABLE_PROMPT_CACHING": "1",
+               "CONTEXTO_HOME": "inherited", "DISABLE_AUTOUPDATER": "0"}
+    assert cli.claude_version(str(fake), environ) == "2.1.322"
+    cwd, env, config_existed = eval(seen.read_text())  # noqa: S307 - our own repr of a tuple
+    assert env["DISABLE_AUTOUPDATER"] == "1" and env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert {k: env[k] for k in cli.ENV} == cli.ENV  # the variables both arms get, as they get them
+    for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "DISABLE_PROMPT_CACHING",
+                 "CONTEXTO_HOME"):
+        assert name not in env, name
+    # Its own configuration directory and working directory, both temporary and gone afterwards, as each
+    # arm's session has its own: not the user's, and not the directory the benchmark was started from.
+    assert config_existed and env["CLAUDE_CONFIG_DIR"] != environ["CLAUDE_CONFIG_DIR"]
+    assert not Path(env["CLAUDE_CONFIG_DIR"]).exists() and not Path(cwd).exists()
+    assert Path(cwd).resolve() != Path.cwd().resolve()
+    assert env["HOME"] == environ["HOME"]
+
+
 @pytest.fixture(scope="module")
 def script():
     return bench_script.build(3, "v2", bound=4_000, turn_bytes=2_000)
