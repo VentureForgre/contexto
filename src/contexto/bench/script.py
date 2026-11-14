@@ -594,7 +594,8 @@ def score(probes: Sequence[Probe], answers_text: str) -> dict[str, Any]:
     yields to an answer for the same id outside any fence, so a note or file the reply quotes after
     its answers cannot override them (the spike read a line in a code fence like any other, and
     never a ``>`` line). A reply that puts all its answers in a code fence is still scored. Every
-    other line the spike read is read the same, and ``normalize`` also trims ``*`` and ``_``, which no generated answer contains.
+    other line the spike read is read the same, and ``normalize`` also trims ``*`` and ``_``, which
+    no generated answer contains.
     Table rows (``| q_a_01 | x |``) and headings are not read. Otherwise unchanged: a ``value``
     answer is right when it equals the expected answer after normalization, a ``set`` answer when
     its ids are the expected ids in any order, and a wrong ``value`` answer that equals one of the
