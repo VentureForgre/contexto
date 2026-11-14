@@ -58,7 +58,8 @@ FAILURE_EVENTS = (
 # test), held at its default for the length of a replay whatever the user's environment says, so a
 # setting such as CONTEXTO_RECALL_VARIANT=legacy cannot change what the pinned trace measures. The
 # default of each is "not set". Any other CONTEXTO_ variable is held unset too, so a knob added later is
-# covered before anyone lists it.
+# covered before anyone lists it. HOME and PATH are read as well, but only to find a CLI or a memory
+# file's ``@~/`` import, and a replay has neither, so they are left as they are.
 ENVIRONMENT = (
     "ANTHROPIC_BASE_URL", "CLAUDE_CODE_CUSTOM_OAUTH_URL", "CLAUDE_CODE_IGNORE_PERSISTED_TRUST", "CLAUDE_CONFIG_DIR",
     "CODEX_HOME", "CONTEXTO_CODEX_KEY_HELPER", "CONTEXTO_CODEX_UPSTREAM", "CONTEXTO_HOME", "CONTEXTO_NO_VERSION_CHECK",

@@ -689,7 +689,7 @@ def test_a_proxy_that_breaks_the_tool_loop_stops_the_replay_with_the_rule_named(
         err = capsys.readouterr().err
         assert err.startswith("contexto bench: error: the replay stopped: the proxy answered 400 "
                               "(invalid_request_error: messages."), err
-        assert "roles must alternate" in err or "unexpected `tool_use_id`" in err, err
+        assert "unexpected `tool_use_id` found in `tool_result` blocks" in err, err
 
 
 def test_a_session_that_stops_is_an_error(monkeypatch, capsys):
