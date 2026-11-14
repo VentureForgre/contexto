@@ -16,6 +16,11 @@ Three things are not scripted:
   ``/v1/messages/count_tokens`` (contract rule 11) and compares what the engine returns with what it
   forwarded: after every prefix rewrite, and after one request in ``COUNT_EVERY``.
 - ``engine`` can be replaced, so a test can run a scenario through an engine of its own.
+
+With ``check_wire`` (the target tests run with it) every forwarded request is also serialized as the
+proxy writes it, to prove the byte count, and the CLI's own history and head are digested again after
+the engine's call: an engine that edits them for the send and restores them before the next request
+fails the run.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from inturn.tokenizer import block_tokens, dumps, item_tokens
 from inturn.upstream import FakeUpstream
 
 LOOP_START = 50_000  # the room rules apply once a turn's own items pass this many tokens
+TRUTH_SHARE = 0.9  # a request-time room may count the request at this share of the upstream's tokens
 STUB_DEPTH = 8  # how many pages a chain of stubs is followed through
 COUNT_EVERY = 16
 SESSION = "inturn"
@@ -100,6 +106,11 @@ class Sent:
     stubbed_on_arrival: int  # of those results, how many are not whole in the forwarded request
     lost: int  # results delivered so far that are neither whole in this request nor byte for byte in a page
     violations: dict[str, int]
+    unnamed: int = 0  # results delivered so far, not whole in this request and named by no stub in it
+    estimate_before: int | None = None  # the engine's estimate of the request without this request's rewrite
+    output_tokens: int = 0  # the response, by the upstream's tokenizer
+    cache_read_any: int = 0  # the any-prefix read (upstream.py): on Messages an upper bound
+    resent_any: int = 0  # a rewrite: re-sent with that read; on Messages a lower bound
 
 
 class Stubs:
@@ -111,6 +122,7 @@ class Stubs:
         self.originals, self.own = originals, own
         self.field = "messages" if dialect == "claude" else "input"
         self.seen: dict[StubRef, bool] = {}
+        self.single: dict[tuple[str | None, str], bool] = {}
 
     def page_results(self, page: dict) -> dict[str, set[bytes]]:
         held: dict[str, set[bytes]] = {}
@@ -124,6 +136,24 @@ class Stubs:
         if known is None:
             known = self.seen[ref] = self.reachable(ref)
         return known
+
+    def names(self, found: list[StubRef]) -> set[str]:
+        """The calls the stubs and fold notes in ``found`` name, each counted only when its own original
+        is reachable from the page the reference names (a fold note naming ten calls whose page holds
+        nine names those nine)."""
+        named: set[str] = set()
+        for ref in found:
+            if not isinstance(ref.call_ids, tuple):
+                continue
+            for call_id in ref.call_ids:
+                if call_id in named or not isinstance(call_id, str):
+                    continue
+                known = self.single.get((ref.page_id, call_id))
+                if known is None:
+                    known = self.single[ref.page_id, call_id] = self.reachable(StubRef(ref.page_id, (call_id,)))
+                if known:
+                    named.add(call_id)
+        return named
 
     def reachable(self, ref: StubRef, depth: int = 0) -> bool:
         if not isinstance(ref.call_ids, tuple) or not ref.call_ids:
@@ -191,11 +221,24 @@ class Run:
             out.setdefault((sent.conversation, sent.turn), []).append(sent)
         return out
 
+    def loop_resent(self) -> dict[tuple[str, int], tuple[int, int]]:
+        """Per loop: the tokens its in-loop rewrites re-sent (the headline figure), and its own tokens."""
+        return {key: (sum(s.resent for s in sent if s.in_loop and s.rewrite), max(s.loop_tokens for s in sent))
+                for key, sent in self.loops().items()}
+
+    def truth(self, sent: Sent) -> tuple[int, int]:
+        """The most a request-time room and a response-time room may say for ``sent``: what the
+        upstream counted, less the headroom floor (``targets.room``)."""
+        config = self.config
+        return (max(0, int(config.bound - config.headroom_floor - TRUTH_SHARE * sent.tokens)),
+                max(0, config.bound - (sent.tokens + sent.output_tokens) - config.headroom_floor))
+
     def rooms(self, conversation: str) -> dict[str, int | None]:
         sent = [s for s in self.sent if s.conversation == conversation]
         rooms = [s.room for s in sent if s.room is not None]
         late = [s for s in sent if s.loop_tokens > LOOP_START]
         low = self.config.min_turn_room
+        truths = [self.truth(s) for s in sent]
         return {"published": len(rooms),
                 "published_at_request": sum(1 for s in sent if s.room_at_request is not None),
                 "min": min(rooms) if rooms else None,
@@ -205,7 +248,11 @@ class Run:
                 "request_under_min_past_50k": sum(1 for s in late
                                                   if s.room_at_request is not None and s.room_at_request < low),
                 "response_zero_past_50k": sum(1 for s in late if s.room == 0),
-                "response_under_half_min_past_50k": sum(1 for s in late if s.room is not None and s.room < low // 2)}
+                "response_under_half_min_past_50k": sum(1 for s in late if s.room is not None and s.room < low // 2),
+                "request_over_truth": sum(1 for s, (most, _) in zip(sent, truths)
+                                          if s.room_at_request is not None and s.room_at_request > most),
+                "response_over_truth": sum(1 for s, (_, most) in zip(sent, truths)
+                                           if s.room is not None and s.room > most)}
 
     def probe_counts(self, conversation: str) -> dict[str, dict[str, int]]:
         mine = [p for p in self.probes if p["conversation"] == conversation]
@@ -219,6 +266,7 @@ class Run:
         names = [c.name for c in self.scenario.conversations]
         estimates = [s.estimate for s in self.sent if s.estimate is not None]
         resent = sum(s.resent for s in rewrites)
+        loops = self.loop_resent()
         return {
             "scenario": self.scenario.name, "dialect": self.dialect, "bound": self.scenario.bound,
             "size": self.scenario.size,
@@ -234,10 +282,17 @@ class Run:
             "room": {n: self.rooms(n) for n in names},
             "input_tokens": total,
             "cache_read_share": round(sum(s.cache_read for s in self.sent) / total, 4),
+            "cache_read_any_share": round(sum(s.cache_read_any for s in self.sent) / total, 4),
             "rewrites": {"count": len(rewrites), "in_loop": sum(1 for s in rewrites if s.in_loop),
                          "invalidated": sum(s.invalidated for s in rewrites), "resent": resent,
                          "mean_resent": round(resent / len(rewrites)) if rewrites else 0,
-                         "resent_share": round(resent / total, 4)},
+                         "largest_resent": max((s.resent for s in rewrites), default=0),
+                         "resent_share": round(resent / total, 4),
+                         "resent_any": sum(s.resent_any for s in rewrites),
+                         "resent_any_share": round(sum(s.resent_any for s in rewrites) / total, 4),
+                         "loop_tokens": sum(own for _, own in loops.values()),
+                         "loop_resent_over_ceiling": sum(1 for spent, own in loops.values()
+                                                         if spent > max(own, self.scenario.bound))},
             "thinking": {"newest_missing": sum(s.latest_thinking_missing for s in self.sent)},
             "arrival": {"requests_with_a_stubbed_new_result": sum(1 for s in self.sent if s.stubbed_on_arrival),
                         "results_stubbed_on_arrival": sum(s.stubbed_on_arrival for s in self.sent)},
@@ -245,6 +300,7 @@ class Run:
             "scripted_tokens": self.scripted_tokens,
             "originals": self.originals,
             "requests_with_a_lost_result": sum(1 for s in self.sent if s.lost),
+            "requests_with_an_unnamed_result": sum(1 for s in self.sent if s.unnamed),
             "stubs": self.stubs,
             "probes": {n: self.probe_counts(n) for n in names if any(p["conversation"] == n for p in self.probes)},
             "count_tokens": self.count_tokens,
@@ -295,9 +351,12 @@ def _digest(item: dict) -> str:
     return scripts.digest(dumps(item))
 
 
-def _estimate(events: list[dict]) -> int | None:
+def _estimate(events: list[dict]) -> tuple[int | None, int | None]:
+    """The engine's pre-send estimates from its ``request`` event: of what it forwarded
+    (``sent_estimate``, else ``estimate``), and of the request without this request's rewrite
+    (``estimate``)."""
     request = next((e for e in reversed(events) if e.get("event") == "request"), {})
-    return request.get("sent_estimate", request.get("estimate"))
+    return request.get("sent_estimate", request.get("estimate")), request.get("estimate")
 
 
 def run(scenario: Scenario, dialect: str, *, find_stubs: StubFinder = stubs.find_stubs,
@@ -445,6 +504,8 @@ class _Play:
         rooms, sides = len(store.turn_rooms), len(store.side_published)
         forwarded, _, events = self.engine(request, dict(actor.cli.headers), self.endpoint)
         room_at_request = store.turn_rooms[-1] if len(store.turn_rooms) > rooms else None
+        if self.check_wire:
+            self.unchanged(actor)
         reply = upstream.respond(name, self.endpoint, forwarded, step, appended=actor.appended)
         if self.check_wire:
             assert reply.wire_bytes == len(serialize_request(forwarded)), "the byte count is wrong"
@@ -457,13 +518,15 @@ class _Play:
         if room is None:
             room = next((r for r in reversed(store.side_published[sides:]) if r is not None), None)
 
-        # What became of every result delivered so far: whole in this request, or in a page byte for byte.
+        # What became of every result delivered so far: whole in this request, or named in it by a stub
+        # or fold note whose page leads to it; and whether it is in some page at all.
         self.index_pages()
         view: dict[str, set[bytes]] = {}
         for item in reply.items:
             for call_id, content in zip(item.results, item.contents):
                 view.setdefault(call_id, set()).add(content)
         unstored: set[str] = set()  # the calls a stub in this request stands for without a stored copy
+        named: set[str] = set()
         if self.find is not None:
             try:
                 found = self.find(self.dialect, forwarded)
@@ -473,9 +536,11 @@ class _Play:
                 for ref in found:
                     if self.stubs.check(ref) and ref.page_id is None:
                         unstored.update(ref.call_ids)
-        lost = sum(1 for call_id, content in actor.results.items()
-                   if content not in view.get(call_id, ()) and content not in self.paged.get(call_id, ())
-                   and call_id not in unstored)
+                named = self.stubs.names(found)
+        missing = [call_id for call_id, content in actor.results.items() if content not in view.get(call_id, ())]
+        unnamed = sum(1 for call_id in missing if call_id not in named)
+        lost = sum(1 for call_id in missing
+                   if actor.results[call_id] not in self.paged.get(call_id, ()) and call_id not in unstored)
         stubbed = sum(1 for call_id in actor.fresh if actor.results[call_id] not in view.get(call_id, ()))
         unseen = (upstream.head_tokens(self.endpoint, request) + actor.prompt_tokens
                   + sum(actor.result_tokens[call_id] for call_id in actor.fresh))
@@ -483,11 +548,14 @@ class _Play:
         for event in (*events, *usage_events):
             result.events[event.get("event", "?")] += 1
         over = [e.get("source") for e in (*events, *usage_events) if e.get("event") == "over_bound"]
+        estimate, estimate_before = _estimate(events)
         sent = Sent(name, turn, in_loop, actor.loop_tokens, actor.appended_tokens, len(request[self.field]),
-                    len(forwarded.get(self.field) or []), _estimate(events), reply.input_tokens, reply.wire_bytes,
+                    len(forwarded.get(self.field) or []), estimate, reply.input_tokens, reply.wire_bytes,
                     reply.cache_read, reply.rewrite, reply.invalidated or 0, reply.resent or 0, reply.latest_missing,
                     "estimate" in over, "real" in over, room_at_request, room, reply.tool_calls, unseen, stubbed,
-                    lost, reply.violations)
+                    lost, reply.violations, unnamed=unnamed, estimate_before=estimate_before,
+                    output_tokens=reply.output_tokens, cache_read_any=reply.cache_read_any,
+                    resent_any=reply.resent_any or 0)
         result.sent.append(sent)
         actor.previous, actor.last_forwarded = sent, forwarded
         actor.requests += 1
@@ -505,6 +573,14 @@ class _Play:
             for call in step.calls:
                 if call.head:
                     actor.scripted[cli.CLIS[self.dialect].call_id(call.key)] = call.key
+
+    def unchanged(self, actor: _Actor) -> None:
+        """``check_wire``: the CLI's own history and head are as the CLI made them, right after the
+        engine's call (``finish`` checks again at the end, for every conversation)."""
+        if (actor.head_digest != _digest(actor.cli.head())
+                or any(_digest(item) != known for item, known in zip(actor.cli.items, actor.digests))):
+            raise RuntimeError(f"{actor.conversation.name}: the engine changed the CLI's own history in place "
+                               f"(request {len(self.result.sent) + 1})")
 
     def count_tokens(self, actor: _Actor, request: dict, forwarded: dict) -> None:
         """Rule 11: a count_tokens request with the same history gets the transform just forwarded, and
@@ -603,5 +679,5 @@ def script_size(scenario: Scenario, dialect: str) -> dict[str, int]:
 
 @functools.cache
 def cached(name: str, dialect: str, full: bool = False) -> Run:
-    """One run per scenario and dialect for a whole test session."""
-    return run(scripts.build(name, full=full), dialect)
+    """One run per scenario and dialect for a whole test session, with ``check_wire``."""
+    return run(scripts.build(name, full=full), dialect, check_wire=True)

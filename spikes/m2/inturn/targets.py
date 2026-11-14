@@ -15,17 +15,30 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from inturn.harness import LOOP_START, Run
+from inturn.harness import LOOP_START, TRUTH_SHARE, Run
 
 SHOW_SHARE = 0.8  # of bound - headroom_floor - min_turn_room: under it, a new result has to be shown once
+PRESSURE_SHARE = 0.6  # of the same line: a loop rewrite is allowed only when the request would pass it
 REWRITE_BATCH = 6  # a loop may rewrite its prefix twice, and once more per bound / REWRITE_BATCH of its own items
+ESTIMATE_MARGIN = 0.02  # of the bound: how far under the room line the engine's estimate may be for a second rewrite
 ROOM_PERCENT = 95  # of a loop's late requests: the response-time room is at least half of min_turn_room
+
+
+def room_line(run: Run) -> int:
+    """``bound - headroom_floor - min_turn_room`` (113,000 at the defaults): a request over it leaves the
+    turn less than ``min_turn_room``."""
+    config = run.config
+    return config.bound - config.headroom_floor - config.min_turn_room
 
 
 def show_ceiling(run: Run) -> int:
     """Head, prompt and new results under this many tokens fit in a request, so the results are shown."""
-    config = run.config
-    return int(SHOW_SHARE * (config.bound - config.headroom_floor - config.min_turn_room))
+    return int(SHOW_SHARE * room_line(run))
+
+
+def pressure_line(run: Run) -> int:
+    """Under this many tokens (67,800 at the defaults) a loop request may not rewrite its prefix."""
+    return int(PRESSURE_SHARE * room_line(run))
 
 
 def bound(run: Run) -> list[str]:
@@ -51,9 +64,17 @@ def violations(run: Run) -> list[str]:
 
 
 def storage(run: Run) -> list[str]:
-    """On every request, each result delivered so far is whole in the forwarded request or in a store
-    page byte for byte, and every stub leads to its originals (``stubs.py``)."""
+    """On every request, each result the CLI has delivered so far in that conversation is whole in the
+    forwarded request, or is named in that same request by a stub or fold note (``stubs.find_stubs``)
+    whose page holds it byte for byte or holds a stub for it that leads there within 8 pages; a result
+    of Contexto's own search, recall or state calls may be named by a reference with no page. Every
+    stub found leads to its originals, and at least one is found."""
     problems = run.check_stubs()
+    unnamed = sum(1 for s in run.sent if s.unnamed)
+    if unnamed:
+        worst = max(s.unnamed for s in run.sent)
+        problems.append(f"{unnamed} requests left out a tool result that no stub or fold note in that request names "
+                        f"(up to {worst} results at once)")
     lost = sum(1 for s in run.sent if s.lost)
     if lost:
         worst = max(s.lost for s in run.sent)
@@ -88,34 +109,66 @@ def seen_first(run: Run) -> list[str]:
 
 
 def cache(run: Run) -> list[str]:
-    """A loop has at most 2 prefix rewrites plus one per ``bound / 6`` tokens of its own items, and no
-    request in a loop is a rewrite right after another, unless without one it would leave the turn less
-    than ``min_turn_room`` (the room rule's line, ``bound - headroom_floor - min_turn_room``)."""
+    """Paging in a loop is paid for in prompt cache, so it is bounded four ways:
+
+    - Pressure: a loop request rewrites its prefix only when the previous forwarded request plus the
+      items added since is over ``pressure_line`` (0.6 of ``room_line``), by the upstream's count.
+    - Count: a loop has at most 2 prefix rewrites plus one per ``bound / 6`` tokens of its own items.
+    - Cost: the tokens a loop's rewrites re-send (the headline figure: on Messages by breakpoints) are
+      at most the loop's own tokens or the bound, whichever is larger: one extra send of the turn.
+    - In a row: a loop request is not a rewrite right after another rewrite, unless the engine's own
+      pre-send estimate of it without the rewrite (the ``estimate`` of its ``request`` event) is over
+      ``room_line`` less 2% of the bound, so the room rule would fail without it.
+    """
     problems = []
     config = run.config
     batch = config.bound / REWRITE_BATCH
-    line = config.bound - config.headroom_floor - config.min_turn_room  # over it, the room rule fails
+    line, pressure = room_line(run), pressure_line(run)
+    forced = line - ESTIMATE_MARGIN * config.bound
+    spent = run.loop_resent()
     for (conversation, turn), sent in run.loops().items():
         rewrites = sum(1 for s in sent if s.in_loop and s.rewrite)
-        allowed = 2 + sent[-1].loop_tokens / batch
+        own = max(s.loop_tokens for s in sent)
+        allowed = 2 + own / batch
         if rewrites > allowed:
             problems.append(f"{conversation}, turn {turn + 1}: {rewrites} prefix rewrites in a loop of "
-                            f"{sent[-1].loop_tokens:,} tokens; at most {int(allowed)}")
+                            f"{own:,} tokens; at most {int(allowed)}")
+        resent, _ = spent[conversation, turn]
+        if resent > max(own, config.bound):
+            problems.append(f"{conversation}, turn {turn + 1}: its rewrites re-sent {resent:,} tokens, more than "
+                            f"the loop's own {own:,} tokens or the bound")
     for conversation in run.scenario.conversations:
         sent = [s for s in run.sent if s.conversation == conversation.name]
+        early = [a.tokens + b.appended_tokens for a, b in zip(sent, sent[1:])
+                 if b.rewrite and b.in_loop and a.tokens + b.appended_tokens <= pressure]
+        if early:
+            problems.append(f"{conversation.name}: {len(early)} loop requests rewrote the prefix though without the "
+                            f"rewrite they came to at most {max(early):,} tokens, not over {pressure:,}")
         twice = [b for a, b in zip(sent, sent[1:]) if a.rewrite and b.rewrite and b.in_loop
-                 and a.tokens + b.appended_tokens <= line]
+                 and _estimate_before(a, b) <= forced]
         if twice:
             problems.append(f"{conversation.name}: {len(twice)} requests rewrote the prefix right after a rewrite, "
                             "though the request would have kept min_turn_room without it")
     return problems
 
 
+def _estimate_before(previous, sent) -> float:
+    """The engine's pre-send estimate of ``sent`` without its rewrite; the upstream's count of the
+    previous request and the items added since when the engine publishes none."""
+    if sent.estimate_before is not None:
+        return sent.estimate_before
+    return previous.tokens + sent.appended_tokens
+
+
 def room(run: Run) -> list[str]:
     """Every main request in a loop publishes a room before the send and after the response, and every
     subagent response with a tool call a side room. Once the turn's own items pass 50,000 tokens the
     request-time room is never under ``min_turn_room``, and the response-time room is never 0 and is at
-    least half of ``min_turn_room`` on 95% of those requests."""
+    least half of ``min_turn_room`` on 95% of those requests.
+
+    Every room published tells the truth, by the upstream's count: a response-time room (main's turn
+    room or a side room) is at most ``bound - (input + output) - headroom_floor`` from that response's
+    usage, and a request-time room at most ``bound - headroom_floor - 0.9 * the request's tokens``."""
     problems = []
     low = run.config.min_turn_room
     for conversation in run.scenario.conversations:
@@ -143,6 +196,16 @@ def room(run: Run) -> list[str]:
         if thin * 100 > len(late) * (100 - ROOM_PERCENT):
             problems.append(f"{name}: the response-time room was under {low // 2:,} on {thin} of {len(late)} "
                             f"requests after the turn passed {LOOP_START:,} tokens")
+        mine = [s for s in run.sent if s.conversation == name]
+        truths = [run.truth(s) for s in mine]
+        early = sum(1 for s, (most, _) in zip(mine, truths) if s.room_at_request is not None and s.room_at_request > most)
+        late_lies = sum(1 for s, (_, most) in zip(mine, truths) if s.room is not None and s.room > most)
+        if early:
+            problems.append(f"{name}: the request-time room was more than bound - headroom_floor - "
+                            f"{TRUTH_SHARE} x the request's tokens on {early} requests")
+        if late_lies:
+            problems.append(f"{name}: the response-time room was more than bound - (input + output) - "
+                            f"headroom_floor on {late_lies} requests")
     return problems
 
 

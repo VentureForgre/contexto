@@ -3,7 +3,7 @@
 The tests need two things the real engine cannot give before D63 exists: an engine that meets every
 target at once, to show the targets do not contradict each other, and engines that are wrong in one
 way each, to show the target written for that way fails them. ``ToyPager`` is the first; its
-``defect`` argument makes the others.
+``defect`` argument, and batch lines other than ``HIGH`` and ``LOW``, make the others.
 
 What it does, per conversation:
 
@@ -15,7 +15,8 @@ What it does, per conversation:
 - A batch whose first stubbed item is at index ``p`` of the CLI's history strips thinking (Codex:
   drops reasoning items) from ``p`` to the end of that request, on that request and every later one.
 - The main conversation publishes the retained snapshot and a room before the send and a room after
-  the response; a subagent publishes a side room after each response with a tool call.
+  the response; a subagent publishes a side room after each response with a tool call. Its ``request``
+  event gives ``estimate``, the request as it would be without the batch, and ``sent_estimate``.
 - A ``count_tokens`` request gets the current transform and changes nothing.
 
 Where it cheats, and what it lacks: it sizes requests with the fake upstream's tokenizer, so its
@@ -39,8 +40,21 @@ HIGH = 100_000  # a request that would pass this many tokens is batched first
 LOW = 38_000  # ... down to this: head, prompt and a result that has to be shown still fit under the room line
 STUB = "[toy pager: this result is stored as page {page} for call {call}; read it with contexto_recall]"
 STUB_FORM = re.compile(r"\[toy pager: this result is stored as page (\S+) for call (\S+); ")
-DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "no_room", "room_one")
-
+REMOVED = "[result removed]"
+LYING_ROOM = 100_000
+DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "no_room", "room_one",
+           "no_stub_text", "show_once", "lying_room", "in_place")
+# What each defect does (the reviewers' wrong engines among them):
+# - junk_page: every stub names one page that holds none of the results;
+# - strip_all: all thinking is stripped on every request;
+# - stub_on_arrival: every result is stubbed in the request that first carries it;
+# - rewrite_always: every request is a batch;
+# - no_room: no room is published; room_one: every room is 1 token; lying_room: every room is 100,000;
+# - no_stub_text: after the first page, a stubbed result is replaced by text that names no page or call;
+# - show_once: every 4th request of a conversation pages every result it is not the first to carry, and
+#   the others page none (reviewer A's "show once, then page");
+# - in_place: the CLI's own oldest whole result is cleared in place for the send and restored when the
+#   usage arrives.
 
 def find_stubs(dialect: str, request: dict) -> list[StubRef]:
     """``stubs.find_stubs`` for this pager's stub text."""
@@ -68,6 +82,8 @@ class _State:
         self.seen = 0  # items in the conversation's previous request
         self.pages = 0
         self.size = 0  # the last forwarded request, in tokens
+        self.first_page = ""
+        self.requests = 0
 
     def stripped(self, i: int) -> bool:
         return i < len(self.strip) and self.strip[i]
@@ -80,10 +96,11 @@ class _State:
 class ToyPager:
     preserves_input = True
 
-    def __init__(self, store: Any, config: Config, defect: str = "") -> None:
+    def __init__(self, store: Any, config: Config, defect: str = "", high: int = HIGH, low: int = LOW) -> None:
         if defect not in DEFECTS:
             raise ValueError(f"unknown defect {defect!r}")
-        self.store, self.config, self.defect = store, config, defect
+        self.store, self.config, self.defect, self.high, self.low = store, config, defect, high, low
+        self.cleared: list[tuple[dict, str, Any]] = []  # in_place: (object, key, original value)
         self.count = FakeUpstream()  # used as a tokenizer only
         self.states: dict[str, _State] = {}
         self.forms: dict[tuple[int, str, bool], tuple[dict, dict | None, int]] = {}
@@ -119,12 +136,13 @@ class ToyPager:
         if hit is not None and hit[0] is item:
             return hit[1], hit[2]
         out: dict | None = item
+        removed = self.defect == "no_stub_text" and page and page != state.first_page
         if page and claude:
             out = {**item, "content": [
-                {**b, "content": STUB.format(page=page, call=b["tool_use_id"])} if b.get("type") == "tool_result" else b
-                for b in item["content"]]}
+                {**b, "content": REMOVED if removed else STUB.format(page=page, call=b["tool_use_id"])}
+                if b.get("type") == "tool_result" else b for b in item["content"]]}
         elif page:
-            out = {**item, "output": STUB.format(page=page, call=item["call_id"])}
+            out = {**item, "output": REMOVED if removed else STUB.format(page=page, call=item["call_id"])}
         if strip and claude and item.get("role") == "assistant" and isinstance(item.get("content"), list):
             kept = [b for b in item["content"] if b.get("type") not in THINKING_TYPES]
             out = item if len(kept) == len(item["content"]) else {**item, "content": kept}
@@ -156,6 +174,7 @@ class ToyPager:
             call = next(j for j in range(i - 1, -1, -1) if items[j].get("call_id") == items[i]["call_id"])
             turn = [items[call], items[i]]
         (state.stubbed[i],) = self.store.page_out([turn], state.pages)
+        state.first_page = state.first_page or state.stubbed[i]
         state.pages += 1
 
     # The engine's two calls -------------------------------------------------------------------------
@@ -169,6 +188,11 @@ class ToyPager:
         items = request[field]
         if counting:  # rule 11: the current transform, nothing changed
             return {**request, field: self.transform(claude, state, items)[0]}, headers, [{"event": "count_tokens"}]
+        self.restore()
+        state.requests += 1
+        high, low = self.high, self.low
+        if self.defect == "show_once":
+            high = low = 0 if state.requests % 4 == 0 else 10**9
         n = len(items)
         head = self.count.head_tokens(endpoint, request)
         fresh = [i for i in range(state.seen, n) if self.results(claude, items[i])]
@@ -180,10 +204,11 @@ class ToyPager:
                 self.page(claude, state, items, i)
         forwarded, size = self.transform(claude, state, items)
         size += head
-        if size > HIGH or self.defect == "rewrite_always":
+        before = size
+        if size > high or self.defect == "rewrite_always":
             first = None
             for i in range(state.seen):  # the oldest first; never a result this request is the first to carry
-                if size <= LOW and self.defect != "rewrite_always":
+                if size <= low and self.defect != "rewrite_always":
                     break
                 if i not in state.stubbed and self.results(claude, items[i]):
                     before = self.form(claude, state, i, items[i])[1]
@@ -196,34 +221,55 @@ class ToyPager:
                 size += head
         state.seen, state.size = n, size
         self.sent = (request, main)
+        if self.defect == "in_place":
+            self.clear(claude, state, items)
         events: list[dict] = []
         if size > self.config.bound:
             events.append({"event": "over_bound", "source": "estimate"})
-        events.append({"event": "request", "estimate": size})
+        events.append({"event": "request", "estimate": before, "sent_estimate": size})
         if main:
             dialect = dialect_for(endpoint)
             self.store.set_retained(0, 0, retained_entries(forwarded, 0, dialect))
             self.publish(True, items, claude, size)
         return {**request, field: forwarded}, headers, events
 
+    def clear(self, claude: bool, state: _State, items: list[dict]) -> None:
+        """in_place: clear the CLI's own oldest whole result, which goes out as it is."""
+        for i in range(max(0, state.seen - 4)):
+            if i not in state.stubbed and self.results(claude, items[i]):
+                target = self.results(claude, items[i])[0]
+                key = "content" if claude else "output"
+                self.cleared.append((target, key, target[key]))
+                target[key] = "x"
+                return
+
+    def restore(self) -> None:
+        for target, key, value in reversed(self.cleared):
+            target[key] = value
+        self.cleared = []
+
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
+        self.restore()
         claude = endpoint == cli.MESSAGES
         real = usage_tokens(usage, dialect_for(endpoint))
         used = real + (usage.get("output_tokens") or 0)
         if self.sent is not None and self.sent[0] is request and self.sent[1]:
             self.publish(True, request["messages" if claude else "input"], claude, used)
         elif self.defect != "no_room":
-            room = max(0, self.config.bound - used - self.config.headroom_floor)
-            self.store.set_side_room("toy-subagent", (1 if self.defect == "room_one" else room) if tool_calls else None)
+            room = self.lie(max(0, self.config.bound - used - self.config.headroom_floor))
+            self.store.set_side_room("toy-subagent", room if tool_calls else None)
         return [{"event": "over_bound", "source": "real"}] if real > self.config.bound else []
 
     def publish(self, main: bool, items: list[dict], claude: bool, used: int) -> None:
         if self.defect == "no_room":
             return
-        room = max(0, self.config.bound - used - self.config.headroom_floor)
+        room = self.lie(max(0, self.config.bound - used - self.config.headroom_floor))
         turn = sum(1 for item in items if self.is_prompt(claude, item) and not self._context(claude, item))
-        self.store.set_turn_room(str(max(1, turn)), 1 if self.defect == "room_one" else room)
+        self.store.set_turn_room(str(max(1, turn)), room)
+
+    def lie(self, room: int) -> int:
+        return 1 if self.defect == "room_one" else LYING_ROOM if self.defect == "lying_room" else room
 
     @staticmethod
     def _context(claude: bool, item: dict) -> bool:
