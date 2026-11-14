@@ -57,6 +57,17 @@ def test_every_request_of_200_turns_stays_under_the_bound(short_run):
     assert short_run["events"].get("rotation", 0) >= 10 and short_run["pages"] >= short.TURNS // 2
 
 
+def test_the_driver_keeps_its_connections_open(short_run):
+    """One connection to the proxy for the session, one for the first-request sends, and one per client
+    of the burst. A connection per request left about 850 of this machine's local ports in TIME_WAIT
+    per run, and several runs at once failed with EADDRNOTAVAIL (README.md, "Connections")."""
+    assert short_run["driver_connections"] == short.CLIENTS + 2, short_run["connections"]
+    # The proxy opens a new upstream connection per request (contexto.proxy, by design): every request
+    # it forwarded, and the direct sends.
+    assert short_run["upstream_connections"] == short_run["requests"] + short.CLIENTS * short.PER_CLIENT \
+        + 2 * short.SMALL_SENDS, short_run["connections"]
+
+
 def test_added_time_per_request_and_its_growth_with_history(short_run):
     for key in ("added_median_ms", "added_p95_ms", "added_ms_per_mtok"):
         assert short_run[key] is not None and short_run[key] <= short.BUDGETS[key], short.report(short_run)
