@@ -716,8 +716,8 @@ Still open:
   [#291](https://github.com/VentureForgre/contexto/issues/291) (a restated question that is not
   word for word still overrides an answer; the replay's signal window after it ends; refusals for
   hand-damaged scripts; the journal line not synced to disk; a zoomed chart panel; the search-reach
-  note under a chart that plots no search). A reach column on the `contexto_search` tool's own
-  reply is not built and not in an issue. Also the owner's minimum live run (above, under
+  note under a chart that plots no search; a reach column on the `contexto_search` tool's own
+  reply, not built). Also the owner's minimum live run (above, under
   "Benchmark (D66)"), which would also confirm the plain arm's 33,000-token reserve live.
 - A head denser than the 3.5 text seed is estimated low until the first usage, on Codex and Claude
   alike, so tool-loop requests can still go over the bound unflagged when no response carries an

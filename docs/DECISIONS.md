@@ -3776,8 +3776,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
     search-reach paragraph printed under a chart that plots no search. The product findings are
     [#284](https://github.com/VentureForgre/contexto/issues/284) and
     [#285](https://github.com/VentureForgre/contexto/issues/285). A reach column on the
-    `contexto_search` tool's own reply, beside the strict search's, is not built and not in an
-    issue. The owner's minimum live run has not been made; it would also confirm the plain arm's
+    `contexto_search` tool's own reply, beside the strict search's, is not built; it is listed in
+    #291. The owner's minimum live run has not been made; it would also confirm the plain arm's
     33,000-token reserve live.
   - **Public benchmarks as a later arm** (not built). Compact-Bench (arXiv 2610.31710) scores a
     compactor's summary on histories of 13 to 53 KB: it does not fit. LongMemEval (arXiv
