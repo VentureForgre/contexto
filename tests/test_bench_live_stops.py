@@ -431,3 +431,50 @@ def test_a_dry_run_on_an_existing_run_prints_what_it_holds_and_changes_nothing(e
     assert "different --bound (30000, not 40000)" in capsys.readouterr().err
     after = {p.relative_to(run.out): p.read_bytes() for p in sorted(run.out.rglob("*")) if p.is_file()}
     assert after == before  # the dry run read the directory and wrote nothing
+
+
+def test_a_torn_last_line_is_moved_aside_or_completed_before_the_run_appends(env, tmp_path, script):
+    """A last line with no newline (a kill mid-write) never has the next record appended to it. A
+    fragment that is not a whole JSON object goes to <file>.torn-<n>; a whole record that only lost
+    its newline gets it back and is counted. Each is recorded in the manifest's torn_lines."""
+    import json
+
+    out = tmp_path / "out"
+    first = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, out=out)
+    assert first.code == 0
+    requests, probes = out / "requests.jsonl", out / "probes.jsonl"
+    records = requests.read_text().splitlines()
+    whole = json.loads(records[-1])
+    # The last record lost only its newline; a probe line was cut halfway.
+    requests.write_text("\n".join(records[:-1]) + "\n" + records[-1], encoding="utf-8")
+    cut = '{"arm": "plain", "seed": 3, "repe'
+    probes.write_text(probes.read_text() + cut, encoding="utf-8")
+    (out / "probes.jsonl.torn-1").write_text("an earlier fragment", encoding="utf-8")
+    spent = first.manifest["spent_tokens"]
+    second = bench_stubs.run_bench(env, tmp_path, [script], arms=("full", "plain"), bound=BOUND, out=out)
+    assert second.code == 0, second.printed
+    assert (out / "probes.jsonl.torn-2").read_text() == cut  # the next free name
+    assert (out / "probes.jsonl.torn-1").read_text() == "an earlier fragment"
+    for path in (requests, probes):
+        text = path.read_text()
+        assert text.endswith("\n") and all(json.loads(line) for line in text.splitlines())
+    assert json.loads(requests.read_text().splitlines()[len(records) - 1]) == whole  # kept and completed
+    torn = second.manifest["torn_lines"]
+    assert [(t["file"], t["action"], t.get("moved_to")) for t in torn] == [
+        ("requests.jsonl", "newline_added", None), ("probes.jsonl", "moved", "probes.jsonl.torn-2")]
+    assert all(t["found"].endswith("Z") and t["bytes"] > 0 for t in torn)
+    assert second.manifest["spent_tokens"] >= spent  # the completed record is still counted
+    # Nothing torn: nothing moved, and what was recorded stays.
+    third = bench_stubs.run_bench(env, tmp_path, [script], arms=("full", "plain"), bound=BOUND, out=out)
+    assert third.code == 0 and third.manifest["torn_lines"] == torn
+    assert sorted(p.name for p in out.glob("*.torn-*")) == ["probes.jsonl.torn-1", "probes.jsonl.torn-2"]
+
+
+def test_torn_lines_are_left_alone_in_a_directory_that_is_not_a_live_run(env, tmp_path, script):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "manifest.json").write_text('{"kind": "replay", "units": []}', encoding="utf-8")
+    (out / "requests.jsonl").write_text('{"half', encoding="utf-8")
+    run = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, out=out)
+    assert run.code == 2 and (out / "requests.jsonl").read_text() == '{"half'
+    assert not list(out.glob("*.torn-*"))

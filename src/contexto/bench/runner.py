@@ -49,7 +49,9 @@ a local upstream), ``budget_tokens``, ``spent_tokens``, ``credential_source``, `
 ``compaction_tokens``, ``compaction_max_input``, ``usage_unreadable``, ``token_cap``,
 ``toolloop_requests``, ``toolloop_max_input``, ``toolloop_tool_calls``, ``requests_unanswered`` and
 ``unanswered_tokens`` (also in each entry of ``attempts``: billed requests that got no response, and
-the reservations of those that were sent, counted as spent; see ``metering``). A unit's ``status`` may also
+the reservations of those that were sent, counted as spent; see ``metering``), and ``torn_lines``
+when a resumed run found a last line with no newline in ``requests.jsonl`` or ``probes.jsonl``
+(``repair_torn``). A unit's ``status`` may also
 be ``running`` while it runs. ``requests.jsonl``: ``attempt``, and ``usage_unreadable`` with
 ``reserved_tokens`` on a response whose usage could not be read (``contexto.bench.meter``).
 ``probes.jsonl``: ``given_truncated`` (the answer was longer than 200 characters; it was scored whole).
@@ -265,6 +267,48 @@ def write_scripts(out: Path, scripts: dict[int, Script]) -> None:
             script.write(path)
 
 
+TORN_FILES = ("requests.jsonl", "probes.jsonl")
+
+
+def repair_torn(out: Path) -> list[dict[str, Any]]:
+    """Make each JSONL file of the run end with a whole line before anything is appended to it, and
+    return what was done, for the manifest's ``torn_lines``. A last line with no newline is what a run
+    killed in the middle of a write leaves. When it is a whole JSON object (only the newline was lost),
+    the newline is added and the record counts as any other. Otherwise the fragment is copied to
+    ``<file>.torn-<n>`` (the first free ``n``) and then cut from the file, so the bytes are kept and
+    the next record starts a line of its own; a request whose record was torn is not counted in the
+    spend, since its usage cannot be read."""
+    done: list[dict[str, Any]] = []
+    for name in TORN_FILES:
+        path = out / name
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            continue
+        if not data or data.endswith(b"\n"):
+            continue
+        start = data.rfind(b"\n") + 1
+        last = data[start:]
+        try:
+            whole = isinstance(json.loads(last), dict)
+        except ValueError:  # UnicodeDecodeError included
+            whole = False
+        entry: dict[str, Any] = {"file": name, "bytes": len(last), "found": utc_now()}
+        if whole:
+            with path.open("ab") as f:
+                f.write(b"\n")
+            done.append({**entry, "action": "newline_added"})
+            continue
+        n = 1
+        while (out / f"{name}.torn-{n}").exists():
+            n += 1
+        aside = out / f"{name}.torn-{n}"
+        aside.write_bytes(last)  # first the copy, then the cut: a kill between them loses nothing
+        os.truncate(path, start)
+        done.append({**entry, "action": "moved", "moved_to": aside.name})
+    return done
+
+
 def drop_unrecorded_probes(out: Path, manifest: dict[str, Any]) -> int:
     """Remove ``probes.jsonl`` lines of units the manifest does not record ``complete``, and return how
     many. There are some only when an earlier run was killed between writing a unit's probe lines and
@@ -386,6 +430,8 @@ def merge_manifest(old: dict[str, Any], config: Config, claude_version: str | No
         manifest["plain_compaction"] = old.get("plain_compaction")
     manifest["cache_ttl"] = manifest["cache_ttl"] or old.get("cache_ttl")
     manifest["request_classes"] = old.get("request_classes")
+    if old.get("torn_lines"):
+        manifest["torn_lines"] = old["torn_lines"]
     return manifest
 
 
@@ -600,6 +646,11 @@ def run(config: Config, scripts: dict[int, Script] | None = None, *, stdout: Tex
                 raise Refused(f"--out cannot be made a directory ({type(exc).__name__})") from None
             stack.enter_context(out_lock(config.out))
             locked = True
+            # Before anything is read or appended: a last line torn by a killed run is set right, and
+            # the manifest says so at once (only in a live run's directory).
+            if (old := read_manifest(config.out)) is not None and (torn := repair_torn(config.out)):
+                old["torn_lines"] = [*(old.get("torn_lines") or []), *torn]
+                write_json_atomic(config.out / "manifest.json", old)
             ready = prepare(config, scripts)
             if config.budget is None:
                 raise Refused("a live run needs --budget-tokens; 'contexto bench --dry-run' with the same --model, "

@@ -32,7 +32,32 @@ def script():
     return bench_script.build(SEED, "v2", bound=BOUND, turn_bytes=TURN_KBYTES * 1_000)
 
 
-def start_runner(tmp: Path, url: str, arms: str, out: Path, **extra_env: str) -> subprocess.Popen:
+# Run as the runner instead of "python -m contexto": the nth request record is written in two halves,
+# and after the first half the runner creates the marker file and waits there to be killed.
+TEAR = """
+import json, runpy, sys, time
+from contexto.bench import meter
+marker, nth = sys.argv[1], int(sys.argv[2])
+sys.argv = ["contexto", *sys.argv[3:]]
+real, seen = meter.Ledger.settle, [0]
+def settle(self, reserved, record, kept=0):
+    if record is not None:
+        seen[0] += 1
+        if seen[0] == nth:
+            line = (json.dumps(record) + "\\n").encode()
+            with self.path.open("ab") as f:
+                f.write(line[: len(line) // 2])
+                f.flush()
+            open(marker, "w").close()
+            time.sleep(600)
+    return real(self, reserved, record, kept)
+meter.Ledger.settle = settle
+runpy.run_module("contexto", run_name="__main__")
+"""
+
+
+def start_runner(tmp: Path, url: str, arms: str, out: Path, *, prefix: list[str] | None = None,
+                 **extra_env: str) -> subprocess.Popen:
     home = tmp / bench_stubs.HOME_NAME
     home.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE", "CONTEXTO_"))}
@@ -40,8 +65,8 @@ def start_runner(tmp: Path, url: str, arms: str, out: Path, **extra_env: str) ->
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 "PATH": str(bench_stubs.install_stub_claude(tmp / "bin")) + os.pathsep + os.environ["PATH"],
                 **extra_env})
-    command = [sys.executable, "-m", "contexto", "bench", "--model", "claude-haiku-5-5", "--seed", str(SEED),
-               "--bound", str(BOUND), "--turn-kbytes", str(TURN_KBYTES), "--arms", arms, "--upstream", url,
+    command = [sys.executable, *(prefix or ["-m", "contexto"]), "bench", "--model", "claude-haiku-5-5",
+               "--seed", str(SEED), "--bound", str(BOUND), "--turn-kbytes", str(TURN_KBYTES), "--arms", arms, "--upstream", url,
                "--out", str(out), "--work", str(tmp / "work"), "--budget-tokens", "2000000000"]
     return subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE)
@@ -167,3 +192,41 @@ def test_no_process_the_run_started_outlives_a_sigkill_of_the_runner(tmp_path, s
         assert {r["attempt"] for r in lines(out / "requests.jsonl")} == {0}
     finally:
         stub.stop()
+
+
+def test_a_record_torn_by_a_kill_mid_write_is_moved_aside_and_the_next_run_appends_after_it(tmp_path, script):
+    """SIGKILL halfway through writing a request record leaves a last line with no newline. The resumed
+    run moves that fragment, byte for byte, to requests.jsonl.torn-1 and records it in the manifest
+    (torn_lines) before it appends anything, so its first record starts a line of its own."""
+    stub = bench_stubs.StubModel([script], key=bench_stubs.FAKE_KEY)
+    url = stub.start()
+    out = tmp_path / "out"
+    requests = out / "requests.jsonl"
+    marker = tmp_path / "torn"
+    tear = tmp_path / "tear.py"
+    tear.write_text(TEAR, encoding="utf-8")
+    try:
+        runner = start_runner(tmp_path, url, "full", out, prefix=[str(tear), str(marker), "5"])
+        reached = wait_for(lambda: marker.exists() or runner.poll() is not None)
+        runner.kill()
+        runner.wait(timeout=30)
+        assert reached and marker.exists(), runner.stderr.read().decode(errors="replace")[-2_000:]
+        data = requests.read_bytes()
+        assert not data.endswith(b"\n") and data.count(b"\n") == 4
+        fragment = data[data.rfind(b"\n") + 1:]
+        final = start_runner(tmp_path, url, "full", out)
+        _, err = final.communicate(timeout=300)
+        assert final.returncode == 0, err.decode(errors="replace")[-2_000:]
+    finally:
+        stub.stop()
+    assert (out / "requests.jsonl.torn-1").read_bytes() == fragment
+    text = requests.read_text(encoding="utf-8")
+    assert text.endswith("\n") and all(json.loads(line) for line in text.splitlines())  # every line whole
+    assert text.encode().startswith(data[: data.rfind(b"\n") + 1])  # the four whole records are kept as they were
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    (torn,) = manifest["torn_lines"]
+    assert {k: torn[k] for k in ("file", "action", "moved_to", "bytes")} == {
+        "file": "requests.jsonl", "action": "moved", "moved_to": "requests.jsonl.torn-1", "bytes": len(fragment)}
+    (unit,) = manifest["units"]
+    assert unit["status"] == "complete" and [a["attempt"] for a in unit["attempts"]] == [0, 1]
+    assert unit["attempts"][0]["requests"] == 4  # the torn record is not counted as one of the file's
