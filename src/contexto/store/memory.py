@@ -1,4 +1,7 @@
-"""In-memory ``SessionStore`` stand-in with the same methods, for tests (lane A imports this path)."""
+"""In-memory ``SessionStore`` stand-in with the same methods, for tests (lane A imports this path).
+
+It is in no project (D69): ``project()`` is None, ``carried()`` is empty and ``carried_text()`` is ``""``.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +9,7 @@ import json
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +30,8 @@ from contexto.store import (
     redact,
 )
 from contexto.store.ledger import MemoryLedger
-from contexto.store.pages import build_page, current_stub, render_index, same_content, search_entry
+from contexto.store.pages import build_page, current_stub, page_order, render_index, same_content, search_entry
+from contexto.store.project import merged_main_records
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 from contexto.store.search import Approximate, SearchEntry, rank, rank_approximate
@@ -56,6 +60,29 @@ class MemoryStore(LedgerOps):
 
     def workdir(self) -> Path | None:
         return self._workdir
+
+    def set_project_memory(self, on: bool) -> None:
+        """As ``SessionStore.set_project_memory``; a memory store has no project either way."""
+        if not isinstance(on, bool):
+            raise ValueError(f"project memory is on or off (a bool), not {on!r}")
+        self._project_memory = on
+
+    def add_main_records(self, record_ids: Iterable[str]) -> None:
+        """As ``SessionStore.add_main_records``, kept in memory; a memory store has no project."""
+        merged = merged_main_records(getattr(self, "_main_records", None), list(record_ids))
+        if merged is not None:
+            self._main_records = merged
+
+    def main_records(self) -> list[str]:
+        return list(getattr(self, "_main_records", ()))
+
+    def add_trusted_conversation(self, key: str) -> None:
+        """As ``SessionStore.add_trusted_conversation``, kept in memory."""
+        kept = [x for x in getattr(self, "_trusted_conversations", []) if x != key]
+        self._trusted_conversations = [*kept, key][-64:]
+
+    def trusted_conversations(self) -> list[str]:
+        return list(getattr(self, "_trusted_conversations", ()))
 
     def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None:
         check_window(window_tokens, bytes_per_token)
@@ -144,9 +171,18 @@ class MemoryStore(LedgerOps):
             return summary
 
     def page_out(self, turns: list[list[dict]], first_turn: int) -> list[str]:
+        return self._write_pages(build_page(self._key, turn, first_turn + offset) for offset, turn in enumerate(turns))
+
+    def page_parts(self, parts: list[list[dict]], turn: int, kind: str,
+                   seqs: list[int] | None = None, blocks: list[int] | None = None) -> list[str]:
+        """As ``SessionStore.page_parts`` (D63)."""
+        return self._write_pages(build_page(self._key, part, turn, kind, None if seqs is None else seqs[n],
+                                            None if blocks is None else blocks[n])
+                                 for n, part in enumerate(parts))
+
+    def _write_pages(self, pages: Iterable[dict[str, Any]]) -> list[str]:
         ids = []
-        for offset, turn in enumerate(turns):
-            page = build_page(self._key, turn, first_turn + offset)
+        for page in pages:
             existing = self.pages.get(page["id"])
             if existing is None:
                 self.pages[page["id"]] = page
@@ -178,7 +214,7 @@ class MemoryStore(LedgerOps):
         return [current_stub(p) for p in self.pages.values()]
 
     def page_ids(self) -> list[str]:
-        return [p["id"] for p in sorted(self.pages.values(), key=lambda p: (p["turn"], p["id"]), reverse=True)]
+        return [p["id"] for p in sorted(self.pages.values(), key=page_order, reverse=True)]
 
     def _search_entries(self) -> list[SearchEntry]:
         """Each page's searchable text, kept while the page object stays (D34)."""

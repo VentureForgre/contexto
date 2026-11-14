@@ -973,7 +973,10 @@ def test_only_events_that_mean_something_went_wrong_are_counted(tmp_path):
                                               "engine_unavailable", "websocket_rejected", "observe_usage_error",
                                               "encoded_body_rejected", "request_refused", "ledger_repaired",
                                               "pruned_while_opening", "search_cache_invalid", "watchdog_unavailable",
-                                              "affinity_salt_unavailable")]
+                                              "affinity_salt_unavailable", "project_unavailable",
+                                              "project_session_skipped", "start_text_unavailable",
+                                              "main_records_unavailable", "trusted_conversations_unavailable",
+                                              "tool_calls_hook_error")]
     wrong_nested = tuple({"event": name} for name in (
         "fallback_failed", "retained_stale", "epoch_record_stale", "mcp_tools_missing", "mcp_tools_denied",
         "toolcheck_error", "cli_version_error", "side_room_close_failed", "unclassified_system_message",
@@ -982,9 +985,9 @@ def test_only_events_that_mean_something_went_wrong_are_counted(tmp_path):
                                {"event": "mcp_tools_missing", "at": "exit", "repeated": False}])
     out = session_stats(tmp_path, "n2")
     assert out["faults"]["events"] == {**{e["event"]: 1 for e in [*wrong_top, *wrong_nested]}, "mcp_tools_missing": 2}
-    assert out["faults"]["total"] == 30
+    assert out["faults"]["total"] == 36
     assert set(out["faults"]["events"]) | {"degraded_enter", "store_error", "page_conflict"} == set(FAULT_EVENTS)
-    assert "30 events" in "\n".join(render(out)) and "transform_error 1" in "\n".join(render(out))
+    assert "36 events" in "\n".join(render(out)) and "transform_error 1" in "\n".join(render(out))
 
 
 def test_a_fault_nothing_else_warned_about_outlives_quiet(tmp_path):

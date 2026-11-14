@@ -103,6 +103,15 @@ FAULT_EVENTS = {
     "search_cache_invalid": "CONTEXTO_SEARCH_CACHE_MB was not a valid value, so the default was used",
     "watchdog_unavailable": "the watchdog that cleans up after a killed launch could not start",
     "affinity_salt_unavailable": "the cache-affinity key could not be read, so requests carried no affinity header",
+    "tool_calls_hook_error": "a response's tool calls could not be registered for contexto serve's MCP server",
+    # D69, project memory: each means a record may not be carried, or a carried one may be lost.
+    "project_unavailable": ("the project's other sessions could not be read, so a session start, a pin, a close "
+                            "or the text of the pins went without their records"),
+    "project_session_skipped": ("another session of the project could not be read, so its records, closures and "
+                                "replacements were not counted"),
+    "start_text_unavailable": "the records carried from earlier sessions could not be read for a request",
+    "main_records_unavailable": "a pin of the main conversation could not be recorded, so it may not be carried",
+    "trusted_conversations_unavailable": "the list of trusted main conversations could not be written",
 }
 # Deliberately not faults. The first group are the log's ordinary records, most with a number of their
 # own; the second happen in normal use; docs/stats.md gives the reason for each.
@@ -114,7 +123,12 @@ NOT_FAULT_EVENTS = frozenset({
     "epoch_not_resumed", "head_changed", "window_minimal", "side_room_expired", "hold_skipped", "upstream_retry",
     "stale_temp_removed", "estimate_error", "pdf_allowance", "pdf_pages_uncertain", "cli_version_untested",
     "proxy_stop_incomplete", "carried_text_growing", "sizing_not_restored", "window_budget_warning",
-    "hint_mismatch",
+    "hint_mismatch", "start_text", "start_text_changed", "project_memory", "main_record_unmatched",
+    "in_turn_batch", "in_turn_exhausted",
+    # contexto serve: its session records, then the events it writes to serve.log, which stats never reads.
+    "serve_open", "serve_close",
+    "serve_start", "serve_stop", "serve_error", "session_open", "session_open_failed", "session_close",
+    "session_discarded", "reap_error", "stopping_refused", "token_header_dropped", "tool_use_ambiguous", "unrouted",
 })
 
 DISK_FULL = frozenset({"ENOSPC", "EDQUOT"})
@@ -403,8 +417,8 @@ def log_unwritable_message(error: BaseException) -> str:
     code = errno.errorcode.get(getattr(error, "errno", None) or 0, type(error).__name__)
     advice = (f"Free space on the disk that holds {HOME_HINT}." if code in DISK_FULL
               else f"Check the session directory under {HOME_HINT}.")
-    return (f"the session log could not be written ({code}), so `contexto stats` and the summary below miss "
-            f"what happened from here on. {advice}")
+    return (f"the session log could not be written ({code}), so `contexto stats` and the exit summary of "
+            f"`contexto run` miss what happened from here on. {advice}")
 
 
 class _Tally:

@@ -11,7 +11,15 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
   Opening a store repairs a crash-truncated tail and logs ``ledger_repaired``; other damage is
   left for a human and logged as ``ledger_damaged`` (pins and closes then fail).
 - ``meta.json``: session metadata. ``workdir`` (the directory file sources are checked against,
-  recorded by lane A's launcher with ``set_workdir``) and ``window_tokens`` and ``bytes_per_token``
+  recorded by lane A's launcher with ``set_workdir``), ``project`` (D69: the project root, recorded with
+  it the first time and never changed), ``project_memory`` (false when project memory is off for the
+  session), ``forgotten`` (record ids ``contexto project forget`` took out of what later sessions carry)
+  and ``main_records`` (the record ids the engine saw pinned or closed in the main conversation, the only
+  ones carried or removed beyond this session; see ``contexto.store.project`` and
+  ``contexto.mainrecords``), ``trusted_conversations`` (the keys of the conversations an engine trusted as
+  main, the newest ``TRUSTED_CONVERSATIONS_KEPT`` by last trust, recorded by lane A's engine with
+  ``add_trusted_conversation``; a later engine trusts them again),
+  and ``window_tokens`` and ``bytes_per_token``
   (recorded by lane A's engine with ``set_window``; recall sizes chunks from them), and the recall
   rooms: ``turn_room`` (the main conversation's) and ``side_rooms`` (D40, one per side request
   lineage in a tool loop, keyed by an engine-chosen id, each with its publish time; expired after
@@ -30,8 +38,9 @@ it, as ``sessions list`` and prune refuse it (D58). Files in it are never opened
 FIFO or directory in a file's place is refused without blocking, and temporary files left by a process
 that died mid-write are removed when a writable store opens (``contexto.private``).
 
-Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``) come from
-``contexto.store.records.LedgerOps``; see that module for the API the MCP server uses.
+Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``, ``carried``,
+``carried_text``) come from ``contexto.store.records.LedgerOps``; see that module for the API the MCP
+server uses.
 
 ``contexto.store.memory.MemoryStore`` has the same methods and keeps everything in memory.
 """
@@ -48,7 +57,7 @@ import secrets
 import sys
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +76,8 @@ from contexto.private import (
 )
 from contexto.store.catalog import PageCatalog, load_page
 from contexto.store.ledger import Ledger, LedgerCorruptError
-from contexto.store.pages import build_page, render_index, same_content
+from contexto.store.pages import build_page, page_order, render_index, same_content
+from contexto.store.project import Project, merged_main_records, project_root, recorded_root, session_project
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
 from contexto.store.search import Approximate, rank, rank_approximate
@@ -87,6 +97,7 @@ def check_page_id(page_id: Any) -> str:
 KEY_BYTES = 32
 
 LIVE_LOCK = "live.lock"
+TRUSTED_CONVERSATIONS_KEPT = 64  # add_trusted_conversation: main conversations an engine trusted (D69)
 CLI_SESSIONS_KEPT = 64  # record_cli_session: CLI conversation ids kept per CLI (a /clear or a fork adds one)
 LIVE_ATTEMPTS = 8  # hold_live: tries before giving up on a session that keeps being deleted
 
@@ -104,9 +115,36 @@ def refuse_symlinked_session(session_path: Path) -> None:
                              "under sessions/", str(path))
 
 
-def hold_live(session_path: Path) -> tuple[int, bool]:
+def _open_live(path: Path, create: bool) -> int:
+    """``live.lock`` at ``path``, opened for ``hold_live``. Without ``create`` a missing file is made only
+    in a session directory that holds something else: ``FileNotFoundError`` for an empty one."""
+    flags = os.O_RDWR | os.O_NOFOLLOW
+    if create:
+        return open_private(path, flags)
+    try:
+        return open_private(path, flags, create=False)
+    except FileNotFoundError:
+        try:
+            with os.scandir(path.parent) as entries:
+                empty = next(entries, None) is None
+        except NotADirectoryError:
+            raise FileNotFoundError(errno.ENOENT, "session directory is not a directory", str(path.parent)) from None
+        if empty:
+            raise
+        return open_private(path, flags)
+
+
+def hold_live(session_path: Path, *, create: bool = True) -> tuple[int, bool]:
     """Take a shared ``flock`` on ``session_path/live.lock``; return its descriptor and whether a prune
     deleted the session while it was being opened (D37).
+
+    With ``create`` false the session directory is never made: a directory that is missing, or that a
+    prune removes while this waits for the lock, raises ``SessionNotFoundError`` instead of being made
+    again, and so does an empty directory, the state prune leaves between unlinking ``live.lock`` (its
+    last file) and removing the directory: filling it in would make prune's ``rmdir`` fail and keep
+    the session. A directory with other files and no ``live.lock`` (a session made before D37, or one
+    whose damaged lock file was deleted as its repair) gets the file, as with ``create``. The second
+    element is then always False.
 
     Creates the session directory if needed. Blocks while ``sessions prune`` holds the exclusive lock.
     Prune deletes the directory under that lock, so after waiting the descriptor can name an unlinked
@@ -123,8 +161,9 @@ def hold_live(session_path: Path) -> tuple[int, bool]:
         if attempt:
             time.sleep(min(0.01 * 2 ** (attempt - 1), 0.25))
         try:
-            private_dir(path.parent)
-            fd = open_private(path, os.O_RDWR | os.O_NOFOLLOW)
+            if create:
+                private_dir(path.parent)
+            fd = _open_live(path, create)  # in an existing directory, never makes one
         except NotRegularFileError as e:  # a symlink, FIFO or directory in its place (D59)
             raise LockFileDamagedError(path, e) from e
         except FileNotFoundError as e:
@@ -132,7 +171,13 @@ def hold_live(session_path: Path) -> tuple[int, bool]:
                 if path.parent.is_symlink():
                     raise FileNotFoundError(errno.ENOENT, "session directory is a symlink to a missing target",
                                             str(path.parent)) from e
+                if not create:  # empty: prune has unlinked the lock and is about to remove the directory
+                    raise SessionRemovedError(f"session {path.parent.name!r} is empty: it is being "
+                                              "removed") from None
                 raise
+            if not create:
+                raise SessionRemovedError(f"session {path.parent.name!r} was removed while it was being "
+                                          "opened") from None
             pruned = True  # prune removed the directory between the mkdir, the chmod, or the open
             continue
         try:
@@ -146,6 +191,8 @@ def hold_live(session_path: Path) -> tuple[int, bool]:
             os.close(fd)
             raise
         os.close(fd)
+        if not create:
+            raise SessionRemovedError(f"session {path.parent.name!r} was removed while it was being opened")
         pruned = True  # prune unlinked the lock file while this process waited for it
     raise TimeoutError(f"could not open session directory {path.parent}: it was deleted while opening, "
                        f"{LIVE_ATTEMPTS} times")
@@ -253,6 +300,7 @@ def read_retained(data: Any) -> tuple[int, int, int, list[dict[str, Any]]] | Non
 
 EPOCH_VERSION = 1
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+_HEX32 = re.compile(r"[0-9a-f]{32}")
 EPOCH_DIALECTS = ("anthropic", "responses")
 _CONVERSATION = re.compile(r"(?:anthropic|responses):[0-9a-f]{64}")  # rewrite.keyed(dialect, request)
 
@@ -298,8 +346,49 @@ EPOCH_FIELDS: dict[str, Callable[[Any], bool]] = {
     "config": lambda v: isinstance(v, dict),
     "anchor": lambda v: isinstance(v, dict) and set(v) == {"n", "hash"} and _nat(v["n"]) and _hex64(v["hash"]),
 }
-# Fields a record may leave out, so a record written before one was added still reads (D61: head_rule).
-EPOCH_OPTIONAL_FIELDS: dict[str, Callable[[Any], bool]] = {"head_rule": _nat}
+def _ranges(v: Any) -> bool:
+    return isinstance(v, list) and all(
+        isinstance(r, list) and len(r) == 2 and _nat(r[0]) and _nat(r[1]) and r[0] < r[1] for r in v)
+
+
+def _in_turn(v: Any) -> bool:
+    """D63: the epoch's in-turn edits (``contexto.inturn.to_record``): positions and page ids only."""
+    base = {"stubs", "folds", "strips", "batches", "rewrote"}
+    if (not isinstance(v, dict) or not base <= set(v) <= base | {"lists", "room_low"}
+            or not _nat(v["batches"]) or not _nat(v["rewrote"]) or not _nat(v.get("room_low", 0))):
+        return False
+    lists = v.get("lists", [])
+    if not (isinstance(lists, list) and all(
+            isinstance(x, list) and len(x) in (3, 4) and _nat(x[0]) and _nat(x[1]) and x[1] > 0
+            and isinstance(x[2], str) and bool(_PAGE_ID.fullmatch(x[2])) and (len(x) == 3 or _nat(x[3]))
+            for x in lists)):
+        return False
+    stubs, folds = v["stubs"], v["folds"]
+    return (isinstance(stubs, list) and all(
+                isinstance(s, list) and len(s) == 3 and _nat(s[0]) and _nat(s[1])
+                and (s[2] == "" or (isinstance(s[2], str) and bool(_PAGE_ID.fullmatch(s[2])))) for s in stubs)
+            and isinstance(folds, list) and all(
+                isinstance(f, list) and len(f) == 3 and _nat(f[0]) and _ranges(f[1]) and f[1]
+                and isinstance(f[2], str) and bool(_PAGE_ID.fullmatch(f[2])) for f in folds)
+            and _ranges(v["strips"]))
+
+
+def _document_costs(v: Any) -> bool:
+    """D63: the measured costs of PDFs whose pages are not certain: ``[size, digest, tokens]`` each, the
+    digest 32 hex digits, at most 64 (``contexto.rewrite.RECORDED_DOCUMENT_COSTS``)."""
+    return isinstance(v, list) and 0 < len(v) <= 64 and all(
+        isinstance(x, list) and len(x) == 3 and _nat(x[0]) and _nat(x[2]) and isinstance(x[1], str)
+        and bool(_HEX32.fullmatch(x[1])) for x in v)
+
+
+# Fields a record may leave out, so a record written before one was added still reads (D61: head_rule;
+# D63: in_turn, present only when the epoch has in-turn edits; D69: start_text, the carried records sent
+# before the first rotation, written only when there are some; D63: document_costs, present only when
+# usage has measured a PDF whose pages are not certain).
+EPOCH_OPTIONAL_FIELDS: dict[str, Callable[[Any], bool]] = {"head_rule": _nat, "in_turn": _in_turn,
+                                                           "start_text": lambda v: isinstance(v, str),
+                                                           "document_costs": _document_costs,
+                                                           "untrusted": lambda v: v is True}
 
 
 def check_epoch(record: Any) -> dict[str, Any]:
@@ -453,6 +542,11 @@ class SessionNotFoundError(LookupError):
     """``SessionStore.open_existing`` was asked for a session that does not exist."""
 
 
+class SessionRemovedError(SessionNotFoundError):
+    """A session opened without ``create`` was removed (by ``contexto sessions prune``, say) while it
+    was being opened."""
+
+
 class PageNotFoundError(LookupError):
     """``quarantine_page`` was given a page that is neither stored nor already quarantined."""
 
@@ -499,7 +593,10 @@ def redact(event: Any) -> Any:
 
 
 class SessionStore(LedgerOps):
-    def __init__(self, home: Path, session_id: str) -> None:
+    def __init__(self, home: Path, session_id: str, *, create: bool = True) -> None:
+        """Open session ``session_id`` under ``home``, making it when it does not exist. With ``create``
+        false nothing is made: ``SessionNotFoundError`` when the session directory is missing or is
+        removed while this open waits for its lock (``hold_live``)."""
         self.session_id = session_id
         self.home = Path(home)
         # Side-room publish times and expiry (D40): wall-clock, since the proxy and the MCP server are
@@ -510,12 +607,15 @@ class SessionStore(LedgerOps):
         # CONTEXTO_HOME is created 0700, but an existing one keeps the mode its user gave it (D55); a
         # home that is not a directory is refused before anything is changed. sessions/ and everything
         # under it is Contexto's own and is narrowed even when it exists.
+        if not create and not os.path.isdir(self.dir):  # checked before anything above it is made
+            refuse_symlinked_session(self.dir)
+            raise SessionNotFoundError(f"session {session_id!r} does not exist")
         private_dir(Path(home), narrow=False)
         private_dir(Path(home) / "sessions")
         refuse_symlinked_session(self.dir)
         # Creates the session directory and locks it before anything else is created in it, so prune
         # cannot remove it under us.
-        live, pruned = hold_live(self.dir)
+        live, pruned = hold_live(self.dir, create=create)
         self.release = weakref.finalize(self, os.close, live)  # release(): drop the lock before collection
         private_dir(self.pages_dir)
         removed = remove_stale_temps(self.dir) + remove_stale_temps(self.pages_dir)
@@ -545,8 +645,75 @@ class SessionStore(LedgerOps):
             self.log({"event": "ledger_repaired", "quarantine": quarantined.name})
 
     def set_workdir(self, path: Path) -> None:
-        """Record the session's working directory (absolute), which file sources are checked against."""
-        self._update_meta({"workdir": str(Path(path).resolve())})
+        """Record the session's working directory (absolute), which file sources are checked against,
+        and, once, the project it belongs to (D69): ``project``, the root of that directory's
+        repository, else the directory itself (``contexto.store.project.project_root``). A session that
+        records a project already (or, from an earlier release, a working directory to derive it from)
+        keeps it: a resume from another directory never moves the session or its records to another
+        project."""
+        workdir = Path(path).resolve()
+
+        def change(meta: dict[str, Any]) -> dict[str, Any]:
+            if recorded_root(meta) is not None:
+                return {"workdir": str(workdir), "project": str(recorded_root(meta))}
+            return {"workdir": str(workdir), "project": str(project_root(workdir))}
+
+        self._modify_meta(change)
+
+    def set_project_memory(self, on: bool) -> None:
+        """Record whether this session takes part in project memory (D69). Off (``project_memory``
+        false): it carries nothing from the project's earlier sessions and gives nothing to later ones."""
+        if not isinstance(on, bool):
+            raise ValueError(f"project memory is on or off (a bool), not {on!r}")
+        self._update_meta({"project_memory": on})
+
+    def add_main_records(self, record_ids: Iterable[str]) -> None:
+        """Record that the main conversation made these records (D69): the engine saw its own
+        ``contexto_pin`` or ``contexto_close`` call and the server's success reply. Kept in ``meta.json``
+        as ``main_records``, once each, the newest ``MAIN_RECORDS_KEPT``; only those are carried into
+        later sessions, and only those remove another session's records outside this one."""
+        new = list(record_ids)
+        if new:
+            self._modify_meta(lambda meta: (None if (merged := merged_main_records(meta.get("main_records"), new))
+                                            is None else {"main_records": merged}))
+
+    def main_records(self) -> list[str]:
+        """The record ids ``add_main_records`` kept, oldest first."""
+        kept = self._meta().get("main_records")
+        return [x for x in kept if isinstance(x, str)] if isinstance(kept, list) else []
+
+    def add_trusted_conversation(self, key: str) -> None:
+        """Record that an engine trusted the conversation ``key`` as the main one (D69): its own first
+        main, or one that took main by a trusted rule. A later engine on this store trusts that
+        conversation again when it is the first it sees (``RewriteEngine._first_trusted``), so a
+        ``--continue`` of the user's conversation carries pins though the epoch record names another
+        one. Kept in ``meta.json`` as ``trusted_conversations``, once each, the newest
+        ``TRUSTED_CONVERSATIONS_KEPT``."""
+        if not isinstance(key, str) or not key:
+            return
+
+        def change(meta: dict[str, Any]) -> dict[str, Any] | None:
+            kept = meta.get("trusted_conversations")
+            kept = [x for x in kept if isinstance(x, str)] if isinstance(kept, list) else []
+            if kept and kept[-1] == key:
+                return None
+            kept = [x for x in kept if x != key] + [key]
+            return {"trusted_conversations": kept[-TRUSTED_CONVERSATIONS_KEPT:]}
+
+        self._modify_meta(change)
+
+    def trusted_conversations(self) -> list[str]:
+        """The conversation keys ``add_trusted_conversation`` kept, oldest first."""
+        kept = self._meta().get("trusted_conversations")
+        return [x for x in kept if isinstance(x, str)] if isinstance(kept, list) else []
+
+    def project(self) -> Project | None:
+        """This session's view of its project (D69, ``contexto.store.project``): its earlier sessions
+        and the records it carries from them. None when no project is recorded or can be derived from
+        the working directory, or when project memory is off for this session. Other sessions are read
+        without changing them, and a store opened read-only logs nothing in its own either."""
+        log = None if getattr(self, "_read_only", False) else self.log
+        return session_project(self.home, self.session_id, self._meta(), self.ledger.records, log)
 
     def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None:
         """Record the engine's window budget W (tokens) and the session's measured bytes per token.
@@ -872,7 +1039,17 @@ class SessionStore(LedgerOps):
         path = self.dir / "page.key"
         if not path.exists():
             # A losing racer's write_new returns False and reads the winner's complete key below.
-            write_new(path, secrets.token_bytes(KEY_BYTES).hex().encode("ascii"))
+            if write_new(path, secrets.token_bytes(KEY_BYTES).hex().encode("ascii")):
+                # The key's modification time is the session's creation time (``sessions list``, and
+                # D69: a later session carries only records pinned before it was created). A file's
+                # time comes from the kernel's coarse clock, which on Linux can be milliseconds behind
+                # the clock a record's ``created_at`` is read from, so a pin made just before this
+                # session would look newer than it. Stamp the key from the same clock as the records.
+                now = time.time_ns()
+                try:
+                    os.utime(path, ns=(now, now))
+                except OSError:
+                    pass  # the coarse time stands
         try:
             key = bytes.fromhex(read_regular(path).decode("ascii").strip())
         except NotRegularFileError as e:
@@ -891,9 +1068,22 @@ class SessionStore(LedgerOps):
         ``{turn, messages}`` differ under the same id (contract PR #47), or when the stored file cannot be
         read as a page record with that id (rule 18).
         """
+        return self._write_pages(build_page(self._key, turn, first_turn + offset) for offset, turn in enumerate(turns))
+
+    def page_parts(self, parts: list[list[dict]], turn: int, kind: str,
+                   seqs: list[int] | None = None, blocks: list[int] | None = None) -> list[str]:
+        """Write one in-turn page per part (D63): each holds its messages exactly, the turn number
+        ``turn`` (the same for all: the turn they are part of) and ``kind`` (``result``: a tool call and
+        its result; ``rounds``: tool rounds folded out of a running turn). ``seqs`` and ``blocks``: each
+        page's message index and block index in the turn, for ordering. Ids, immutability and conflicts
+        are ``page_out``'s; ``kind``, ``seqs`` and ``blocks`` are not part of the id."""
+        return self._write_pages(build_page(self._key, part, turn, kind, None if seqs is None else seqs[n],
+                                            None if blocks is None else blocks[n])
+                                 for n, part in enumerate(parts))
+
+    def _write_pages(self, pages: Iterable[dict[str, Any]]) -> list[str]:
         ids = []
-        for offset, turn in enumerate(turns):
-            page = build_page(self._key, turn, first_turn + offset)
+        for page in pages:
             path = self.pages_dir / f"{page['id']}.json"
             data = canonical_bytes(page)
             if not write_new(path, data):
@@ -978,12 +1168,12 @@ class SessionStore(LedgerOps):
 
     def page_ids(self) -> list[str]:
         """Every page id in this store, newest turn first."""
-        return [e.id for e in sorted(self._catalog.entries(), key=lambda e: (e.turn, e.id), reverse=True)]
+        return [e.id for e in sorted(self._catalog.entries(), key=lambda e: page_order(e.view), reverse=True)]
 
     def page_list(self) -> list[dict[str, Any]]:
         """``{id, turn, line}`` for every page, newest turn first; ``line`` is its index line without the
         identifiers (``contexto sessions show``, D57)."""
-        entries = sorted(self._catalog.entries(), key=lambda e: (e.turn, e.id), reverse=True)
+        entries = sorted(self._catalog.entries(), key=lambda e: page_order(e.view), reverse=True)
         return [{"id": e.id, "turn": e.turn, "line": self._catalog.line(e, False)} for e in entries]
 
     def search(self, query: str) -> list[str]:

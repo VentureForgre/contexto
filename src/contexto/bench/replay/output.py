@@ -82,10 +82,24 @@ def manifest(script: Script, turns: int, measured: Any, version: str, pinned: bo
     }
 
 
-def notes(script: Script, pinned: bool) -> list[str]:
+def drops_note(rotations: int, compactions: int, peaks: dict[str, int]) -> str:
+    """Why each line of the request-size chart drops, and each line's largest request. The two drops
+    look alike on the chart and are not: a rotation keeps the old turns, a compaction replaces them.
+    The full-context line sets the y axis, so the other two peaks are given in numbers."""
+    return (f"The Contexto line drops at each of its {_plural(rotations, 'rotation')}: the proxy moves the oldest "
+            "turns out of the request to its store, where they stay searchable, and summarises nothing. The plain "
+            f"Claude Code line drops at each of its {compactions} modelled "
+            f"compaction{'' if compactions == 1 else 's'}, where Claude Code replaces the old turns with a summary. "
+            f"Largest request: Contexto {peaks['contexto']:,} tokens (estimated), plain Claude Code "
+            f"{peaks['plain']:,} and full context {peaks['full']:,} (modelled).")
+
+
+def notes(script: Script, pinned: bool, drops: str | None = None) -> list[str]:
+    """The notes printed under the chart and in ``results.json``; ``drops`` is ``drops_note``."""
     out = [
         "Synthetic: a generated session replayed through the real Contexto proxy against a local fake upstream. "
         "No model was called.",
+        *([drops] if drops else []),
         f"Request sizes are estimates, not token counts: {RATES_TEXT}, with no tokenizer.",
         "The full-context and plain Claude Code lines are modelled from the script, not run: one request per turn "
         f"on the script's own estimate ({lines.RATES_TEXT}).",
@@ -115,9 +129,13 @@ def results(script: Script, manifest_data: dict[str, Any], rows: list[dict[str, 
                                   for r in part]}
     plain = [r for r in rows if r["arm"] == "plain"]
     sizes = bench_script.estimate(script)
+    drops = None
+    if all(series[arm]["points"] for arm in series):
+        drops = drops_note(measured.rotations, lines.compactions(plain),
+                           {arm: max(y for _, y in series[arm]["points"]) for arm in series})
     return {
         "format": FORMAT, "kind": "replay", "manifest": manifest_data, "request_series": series,
-        "bound": script.bound, "notes": notes(script, pinned),
+        "bound": script.bound, "notes": notes(script, pinned, drops),
         "replay": {
             "turns": measured.turns, "requests": len(measured.requests), "max_input_estimated": measured.max_input,
             "over_bound": measured.over_bound, "rotations": measured.rotations,
@@ -197,8 +215,11 @@ FALLBACK_UNCOUNTED = ("The search tool's approximate fallback, which this replay
 # session, not measurements this command makes or checks; the replay tests check each of them against the run
 # (check_the_pinned_fallback_sentence_holds_in_the_run), so a change to the proxy that alters them fails there.
 FALLBACK_EMPTY = 18  # rule queries the strict search finds nothing for
-FALLBACK_ANSWERED = 1  # of those, the queries whose tool reply holds approximate matches
+FALLBACK_ANSWERED = 3  # of those, the queries whose tool reply holds approximate matches
 FALLBACK_PROBE, FALLBACK_CLASS = "q_r_02", "paraphrase"
+# D63: the other answered queries, of this class, show only a page of an earlier probe turn, which a later
+# probe turn's tool loop paged (in-turn paging) and which holds no plant.
+FALLBACK_OTHER_CLASS = "toolloop"
 TOOL_LOOP_NOTE = ("Every request of a turn, the rounds of a tool loop included, is plotted at that turn's history "
                   "length, so a turn with a tool loop (the file reads of the toolloop turn, the searches of a probe "
                   "turn) shows as a vertical run of points.")
@@ -209,7 +230,8 @@ def pinned_fallback(code: Any = str) -> str:
     return (f"On the pinned session the tool's fallback answers {FALLBACK_ANSWERED} of the {FALLBACK_EMPTY} queries "
             f"the strict search finds nothing for: for {code(FALLBACK_PROBE)} ({code(FALLBACK_CLASS)}) its reply "
             "shows the plant's line on the second of the three pages it shows in detail, beside two of the "
-            "service's decoy lines.")
+            f"service's decoy lines; for the other {FALLBACK_ANSWERED - 1} ({code(FALLBACK_OTHER_CLASS)} probes) it "
+            "shows only a page of an earlier probe turn, which holds no plant.")
 
 
 def _reach_table(totals: dict[str, Any]) -> list[tuple[str, ...]]:

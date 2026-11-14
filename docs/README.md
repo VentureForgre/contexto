@@ -13,6 +13,9 @@ install it and how to start it.
   and the `CODEX_HOME` Contexto sets up.
 - [run-reference.md](run-reference.md): the options of `contexto run`, what the launcher does,
   `contexto proxy`, the environment variables, and the supported upstreams.
+- [serve.md](serve.md): `contexto serve`, the engine as a local service for clients Contexto does
+  not launch (IDE extensions, the desktop app, the Agent SDK, CI): the token, client settings,
+  routing, the files it writes, and its limits.
 - [cliproxyapi.md](cliproxyapi.md): running Contexto with a CLIProxyAPI instance as the upstream:
   setup, checks, and what was tested.
 - [sessions.md](sessions.md): how to tell that Contexto is working, what a session stores and
@@ -21,8 +24,14 @@ install it and how to start it.
   what it means, and its fields.
 - [stats.md](stats.md): the summary `contexto run` prints at exit and `contexto stats`: every
   number defined, which are measured and which estimated, and what counts as a fault.
+- [statusline.md](statusline.md): Contexto's numbers in Claude Code's status line, when Contexto adds
+  it, how to turn it off, and how to call `contexto statusline` from a status line of your own.
 - [standing-rules.md](standing-rules.md): how a rule you give once stays in view after its turn is
   paged out.
+- [in-turn-paging.md](in-turn-paging.md): how a long tool loop or a subagent stays under the bound:
+  what a paged tool result looks like, how the model reads it back, and how to turn it off.
+- [project-memory.md](project-memory.md): what a new session carries from the earlier sessions of
+  its project, what the model is shown, and how to see, remove or turn it off.
 - [mcp-tools.md](mcp-tools.md): the five MCP tools the model gets, how search ranks, and the recall
   budget.
 - [search.md](search.md): what a search query matches, the approximate matches search falls back to
@@ -38,6 +47,9 @@ install it and how to start it.
 - [troubleshooting.md](troubleshooting.md): the warnings and errors you are most likely to see, each
   with its cause and what to do.
 - [exit-codes.md](exit-codes.md): the exit codes of every command.
+- [bench.md](bench.md): `contexto bench`, the benchmark that runs Contexto, full context and plain
+  Claude Code set to compact at the same bound on the same generated session: how to run it, what
+  it measures, and what it cannot show.
 - [cli-updates.md](cli-updates.md): how a new Claude Code or Codex version is tested.
 - [dialect.md](dialect.md): the `Dialect` contract, for adapting the engine to another client's API.
 
@@ -117,6 +129,8 @@ New CLI versions and upstream checks:
   Claude Code 2.1.310.
 - [research/M2-claude-code-2.1.318.md](research/M2-claude-code-2.1.318.md): the version checks for
   Claude Code 2.1.314 and 2.1.318, and codex-cli 0.166.0.
+- [research/D70-serve-probes.md](research/D70-serve-probes.md): what Claude Code 2.1.322 sends a
+  gateway and an MCP server, measured against stubs for `contexto serve`.
 - [research/O6-thinking-check.md](research/O6-thinking-check.md): a live check for dropped
   thinking after each session was pinned to one credential.
 
@@ -134,6 +148,4 @@ Scale and cost proposals:
   the search rounds in a turn, from an analysis of live run #3.
 - [research/M2-seat-bound.md](research/M2-seat-bound.md): a modeled choice of bound for Claude Code
   with Opus 5.5 when the fixed part of every request is large (82,000 or 92,000 tokens).
-- [research/D70-serve-probes.md](research/D70-serve-probes.md): what Claude Code 2.1.322 sends a
-  gateway and an MCP server, measured against loopback stubs at zero spend.
 - `research/data/`: the CSV files behind the usage and seat-bound notes.

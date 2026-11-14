@@ -264,7 +264,9 @@ def test_codex_input_image_is_priced_by_pixels():
 # The session -------------------------------------------------------------------------------------
 
 def _engine(tmp_path, **config):
-    return RewriteEngine(SessionStore(tmp_path, "img"), config=Config(**config))
+    # In-turn paging is off (D63): these sessions test the estimate and the ratio of tool loops that grow
+    # to the bound and past it, which only an unpaged loop does. tests/test_inturn.py pages such loops.
+    return RewriteEngine(SessionStore(tmp_path, "img"), config=Config(**{"in_turn_paging": False, **config}))
 
 
 def _real_usage(body: dict) -> int:

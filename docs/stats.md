@@ -447,6 +447,12 @@ that is in neither.
 | `search_cache_invalid` | `CONTEXTO_SEARCH_CACHE_MB` was not a valid value, so the default was used. |
 | `watchdog_unavailable` | The helper that removes a launch's temporary files if the launcher is killed could not start. |
 | `affinity_salt_unavailable` | The key for the cache-affinity header could not be read, so requests went out without the header and a gateway may route them to different caches. |
+| `tool_calls_hook_error` | Under `contexto serve`, the tool calls in a response could not be registered, so a Contexto tool call from that response may not find its session. |
+| `project_unavailable` | Project memory could not read the project's other sessions when a session started, or for a pin, a close or the text of the pins (at a rotation or for `contexto_state`), so that step went without their records: nothing was carried, and their closures and replacements were not applied ([project memory](project-memory.md)). A failed read at a turn start is `start_text_unavailable` alone, with `project_session_skipped` once per session when the cause is another session that could not be read. |
+| `project_session_skipped` | Another session of the project could not be read (damaged, too large or unreadable), so its records, closures and replacements were not counted. |
+| `start_text_unavailable` | The records carried from earlier sessions could not be read for a request; the text already sent was kept. |
+| `main_records_unavailable` | A pin the main conversation made could not be recorded as the main conversation's, so a later session may not carry it. |
+| `trusted_conversations_unavailable` | The list of main conversations the proxy trusted could not be written, so a later launch may not trust this one. |
 
 A launch opens its session before it starts the proxy, so `ledger_repaired`, `pruned_while_opening`
 and `affinity_salt_unavailable` are logged just before a run's proxy start. They are counted in
@@ -489,6 +495,18 @@ Events that are **not** counted, because they happen in normal use:
   fault is `carried_over_budget`, logged when they pass their budget.
 - `sizing_not_restored`: the bytes-per-token ratio of the last run was not reused, usually because
   the first request of this run was on another model. The ratio is measured again.
+- `start_text`, `start_text_changed`, `project_memory`: project memory's ordinary records: how many
+  tokens a new session carried, a turn start that sent fewer carried records after one was closed or
+  forgotten, and the counts at launch ([project memory](project-memory.md)). When the counts could not
+  be read at launch, `project_memory` holds `error` with the error's class in their place; a project
+  that still cannot be read at the first request is also `project_unavailable`.
+- `main_record_unmatched`: a signal for whoever updates Contexto for a new CLI: Contexto's own pin
+  or close call had a reply of a shape it does not read, so that record is not carried. It is not a
+  fault of the session.
+- `in_turn_batch`, `in_turn_exhausted`: in-turn paging's records (D63,
+  [in-turn paging](in-turn-paging.md)). A batch is paging working as designed. `in_turn_exhausted`
+  comes with an `over_bound` for the same request, which the bound line already counts, so it is
+  not counted twice.
 - `proxy_stop_incomplete`: the proxy stopped (Ctrl+C) with requests still in a handler. It is not
   a fault, but those requests may have no request line: `requests.in_flight_at_stop` counts them
   and the `requests` line says so.
@@ -501,7 +519,13 @@ The log's ordinary records are not faults either, and most have a number of thei
 `launch`, `exit`, `proxy_start`, `proxy_stop`, `mcp_call`, `count_tokens`, `rotation`, `page_out`,
 `carried_paged`, `carried_reclassified`, `over_bound`, `main_changed`, `degraded_leave`,
 `epoch_resumed`, `sizing_restored`, `side_room_closed`, `mcp_tools_found`,
-`cli_version`, `cli_version_check`.
+`cli_version`, `cli_version_check`, and `serve_open` and `serve_close`, which `contexto serve` writes
+where a launch writes `proxy_start` and `proxy_stop`.
+
+`contexto serve` writes its other events to `serve.log` in `$CONTEXTO_HOME`, not to a session's log,
+so `contexto stats` never reads them: `serve_start`, `serve_stop`, `serve_error`, `session_open`,
+`session_open_failed`, `session_close`, `session_discarded`, `reap_error`, `stopping_refused`,
+`token_header_dropped`, `tool_use_ambiguous` and `unrouted` ([docs/serve.md](serve.md)).
 
 ## What the numbers cannot show
 

@@ -10,6 +10,7 @@ import argparse
 import sys
 
 from contexto.launcher import BOUND_GUARD, DEFAULT_BOUND, options_from_args, run_claude
+from contexto.paths import PROJECT_MEMORY_ENV
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -47,6 +48,19 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--quiet", action="store_true",
                         help="do not print the summary when the CLI exits; warnings are still printed "
                              "(also CONTEXTO_QUIET=1)")
+    parser.add_argument("--no-statusline", action="store_true",
+                        help="claude only: do not add Contexto's status line to Claude Code (it is added only "
+                             "when no settings file has a statusLine; also CONTEXTO_NO_STATUSLINE=1)")
+    parser.add_argument("--no-project-memory", action="store_true",
+                        help="keep this session out of project memory: it carries nothing from the earlier "
+                             "sessions of this directory's project (a resumed session stops sending what it "
+                             "carried: at once before its first rotation; after it, from its next rotation) and "
+                             "gives nothing to "
+                             f"later ones (also {PROJECT_MEMORY_ENV}=0, false, off or no). The session records "
+                             "it, so resuming it later stays off without this option")
+    parser.add_argument("--no-in-turn-paging", action="store_true",
+                        help="do not page inside a running turn: a tool loop that outgrows the bound is sent "
+                             "whole, as before v0.6.0 (also CONTEXTO_IN_TURN_PAGING=0)")
     parser.add_argument("cli", choices=["claude", "codex"], help="the CLI to run")
     parser.add_argument("cli_args", nargs=argparse.REMAINDER, help="arguments passed to the CLI unchanged")
     try:

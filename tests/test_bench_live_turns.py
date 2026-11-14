@@ -486,6 +486,9 @@ def test_the_manifest_states_the_label_the_full_arms_scripted_steps_and_how_comp
     manifest = run.manifest
     assert manifest["upstream"] == "local" and manifest["label"] == runner.STUB_LABEL
     assert len(manifest["label"]) <= 200 and manifest["label"].isprintable() and "stub" in manifest["label"]
+    from contexto.bench import report
+
+    assert ".." not in report.render(report.build([run.out]))  # #273 B nit 5: the report adds the period
     assert manifest["full_arm"]["scripted"] == ["decision replies", "tool-loop file reads"]
     assert manifest["full_arm"]["not_applicable"] == ["concluded_ok", "toolloop_reads"]
     assert "compaction_requests" in manifest["compaction_counting"]

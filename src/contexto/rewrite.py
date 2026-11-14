@@ -94,6 +94,24 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   Within one engine call each message is hashed once and the request's turn starts are found once
   (``request_scope``), since the input is never mutated.
 - ``count_tokens`` (rule 11) gets the current epoch's transform with no side effects.
+- Project memory at a session's start (rule 19, D69). When the engine creates the state of the main
+  conversation at a request the dialect judges a session start by, it reads
+  ``store.carried_text(pin_budget)`` once (the records carried from the project's earlier sessions) and
+  keeps it as the state's ``start_text``. While ``k == 0`` the first turn-start message gets it ahead of
+  its own content on every request, ``count_tokens`` included, so the prefix is byte-identical until the
+  first rotation, except that a turn start (or a resume from the epoch record) that finds the carried
+  text changed by a removal sends the new one from then on (``start_text_changed``, one cache miss);
+  items before that message stay as sent. Past ``k == 0`` it is not sent: the preamble's
+  pinned text holds the same records. It is sized as part of that message, so the pre-send estimate, the
+  over-bound check, the published room and the rotation conditions count it, and the head measured from
+  the first usage does not hold it (it is in the window that measurement takes off the input), so ``F``
+  counts the records once, in the preamble. A state that already exists never gets one (an epoch resumed
+  from a record without it, a conversation that becomes main later), since the cached prefix would
+  change; it gets the records in the preamble at its first rotation. A store without the method carries
+  nothing; one that fails there reads as nothing carried, logs ``start_text_unavailable`` and neither
+  fails the request nor enters degraded mode. The epoch record holds ``start_text`` only when it is not
+  empty and ``k == 0``. Degraded mode sends it (the same transform); ``fallback_failed`` sends the CLI's request, which
+  has none.
 - Transform failures (rule 14, PR #52; manager-1 2026-10-16 02:00Z): a ``PageConflictError`` is a
   ``page_conflict``; ``OSError``, ``LedgerError``, ``KeyFileError``, ``SessionNotFoundError`` and
   ``PageNotFoundError`` (from ``quarantine_page``) are a ``store_error``. Either one at a turn start
@@ -129,20 +147,24 @@ from __future__ import annotations
 import bisect
 import errno
 import hashlib
+import inspect
 import math
 import os
 import posixpath
 import re
 import secrets
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, ClassVar, NamedTuple, Protocol
 
+from contexto import inturn
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
 from contexto.hints import AGENT_CLASSES, MAIN_CLASSES, NO_HINTS, SIDE_CLASSES, GatewayHints, gateway_hints
+from contexto.mainrecords import MainRecords
 from contexto.pdfpages import PDF_MAX_PAGES
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
@@ -150,14 +172,17 @@ from contexto.store.render import is_own_block, is_own_item, own_call_ids, rende
 from contexto.tokens import (
     PDF_PAGE_TOKENS,
     TEXT_BYTES_PER_TOKEN,
+    UNCERTAIN_DOCUMENT_TOKENS,
     MediaCost,
     TokenEstimator,
     estimate_tokens,
+    measured_documents,
     media_cost,
     media_keys,
     pdf_allowance,
     prime_media,
     split_media,
+    uncertain_document_keys,
     uncertain_documents,
 )
 from contexto.toolcheck import ToolCheck
@@ -169,8 +194,14 @@ THINKING_OMITTED = "[thinking omitted]"
 CONTEXT_TAG = "<system-reminder>"
 STORE_ERRORS = (OSError, LedgerError, KeyFileError, SessionNotFoundError, PageNotFoundError)  # rule 14 store_error
 STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
+RECORDED_DOCUMENT_COSTS = 64  # D63: the measured PDF costs an epoch (and its record) keeps, newest last
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
+# D69: the reasons a conversation takes main (D50) after which its own history confirms its pins and
+# closures (all but ``compacted`` only when ``_first_trusted`` also holds: ``_trusted_takeover``);
+# ``more_turn_starts`` is not one of them (a subagent without its header, a Codex child), and trusts only a
+# conversation in ``trusted_conversations``.
+TRUSTED_MAIN_REASONS = frozenset({"new_cli_session", "resumed_cli_session", "compacted", "after_side_request"})
 RETAINED_ROLES = ("user", "assistant", "tool_result")  # A14: the roles set_retained accepts (lane B PR #128)
 # D48: before a ratio is measured, a request whose text would measure above this many bytes a token once
 # its media floor is taken off had a floor above the media's real cost; its floor is dropped instead.
@@ -213,6 +244,7 @@ class Store(Protocol):
     def window_model(self) -> str | None: ...
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None: ...
     # Optional (D40): set_side_room(room_id, room_tokens | None); without it side rooms are not published.
+    # Optional (D69): carried_text(budget_tokens) -> str; without it a session starts with nothing carried.
     def quarantine_page(self, page_id: str) -> Any: ...
     def set_retained(self, epoch: int, k: int, turns: list[dict]) -> None: ...  # lane B PR #128, contract PR #125
 
@@ -239,6 +271,9 @@ class Config:
     recall_example: str = ""  # one line placed after the rule
     preamble_first: bool = True  # V2 (intake 03:26Z): the preamble block goes before carried context blocks
     turn_reminder: str = ""  # appended to each retained turn-start user message while turns are paged
+    # D63 (rule 5): page inside a running turn so the bound holds in a tool loop (contexto.inturn). A record
+    # written before it has no such setting and still resumes (resume_state).
+    in_turn_paging: bool = True
 
 
 @dataclass(frozen=True)
@@ -291,6 +326,27 @@ class EpochState:
     # Rule 3: (messages, hash of the last message) of the newest request sent whose usage has not arrived;
     # only that request's usage is paired with last_sent_bytes and last_estimate. Per-request, never recorded.
     pending_usage: tuple[int, str] | None = None
+    # D63 (rule 5): the epoch's in-turn edits: stubbed results, folded rounds and the thinking they cost.
+    inturn: inturn.InTurn = inturn.EMPTY
+    # D63: what the newest request's tool results that arrived with it may add to its estimate (counted at
+    # inturn.FRESH_BYTES_PER_TOKEN); the request-time room counts it, so a room is never published from an
+    # estimate a dense result has not yet corrected. Per-request, never recorded.
+    room_margin: int = 0
+    # D63: (content key, tokens) for each PDF whose pages are not certain once usage has measured it: the
+    # real input of the first request that carried it less the estimate of everything else in that request,
+    # never under 0, shared among the request's unmeasured ones by size. The estimate counts it at that
+    # cost from then on, and stubbing it frees that cost. In the epoch record (``document_costs``), written
+    # when usage measures one too; a cost a restarted engine lacks is measured again, as on first sending.
+    document_costs: tuple[tuple[Any, int], ...] = ()
+    # D63: (the keys of the unmeasured uncertain PDFs the newest request carried, the estimate of everything
+    # else in that request). Per-request, never recorded.
+    pending_documents: tuple[tuple, int] | None = None
+    # D63: an in-turn batch ran and no response's usage has arrived since; the next batch then rewrites the
+    # prefix only when the request is over the bound. Per engine, never recorded.
+    batch_unmeasured: bool = False
+    # D69 (rule 19): the records carried from the project's earlier sessions, read once when the main
+    # conversation's state is created and sent while k == 0; past that the preamble's pinned text holds them.
+    start_text: str = ""
 
 
 # Message classification -------------------------------------------------------------------------
@@ -319,6 +375,18 @@ def _anthropic_is_turn_start(message: dict) -> bool:
 
 def turn_starts(messages: list[dict]) -> list[int]:
     return _turn_starts(messages, _dialect())
+
+
+def _strict_read(reader: Callable[..., Any], budget: int) -> Any:
+    """D69: ``reader(budget, strict=True)``, so a project that cannot be read raises, or
+    ``reader(budget)`` for a ``carried_text`` that takes no ``strict``."""
+    try:
+        parameters = inspect.signature(reader).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    if any(p.name == "strict" or p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters):
+        return reader(budget, strict=True)
+    return reader(budget)
 
 
 def _turn_starts(messages: list[dict], dialect: Dialect) -> list[int]:
@@ -436,6 +504,9 @@ class Dialect:
     # D48: whether media's floor cost (MediaCost.floor) is at or under what this API charges, so the ratio
     # can take it off real usage. True for Claude's pixel prices.
     media_floor = True
+    # D63 (rule 5): this API's in-turn paging primitives (contexto.inturn.MessagesInTurn), or None for a
+    # dialect that does not page inside a turn.
+    in_turn: Any = inturn.MESSAGES
 
     def is_context_block(self, block: Any) -> bool:
         return _anthropic_is_context_block(block)
@@ -528,12 +599,13 @@ class _RequestMemo:
     call a message's normalised hash and the request list's turn starts do not change: each is computed
     once and reused by history matching, the epoch's hashes, usage attribution, and the turn scans."""
 
-    __slots__ = ("root", "hashes", "starts")
+    __slots__ = ("root", "hashes", "starts", "sent")
 
     def __init__(self, root: Any) -> None:
         self.root = root  # the request's message list, the only list whose turn starts are cached
         self.hashes: dict[int, tuple[Any, Dialect, str]] = {}  # id(message) -> (message, dialect, hash)
         self.starts: dict[int, tuple[Dialect, int, tuple[int, ...]]] = {}  # id(dialect) -> (dialect, len, starts)
+        self.sent: tuple | None = None  # D63: (in-turn edits, dialect, the root list's view under them)
 
 
 _MEMO: ContextVar[_RequestMemo | None] = ContextVar("contexto_rewrite_memo", default=None)
@@ -1085,6 +1157,8 @@ def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
     out = []
     for i in range(start, end):
         m = messages[i]
+        if m is inturn.FOLDED:  # D63: a view's folded message is in its rounds page
+            continue
         if is_system_like(m) and classify_system(messages, i) != HOOK_OUTPUT:
             continue
         start = is_turn_start(m)
@@ -1133,13 +1207,24 @@ def _with_reminder(message: dict, reminder: str) -> dict:
 
 def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
     d = _dialect()
+    sent = inturn.view(messages, state, d)  # rule 5: the epoch's stubs and folds; the list itself without any
+    edits = state.inturn
     out = []
     for i in range(state.k, len(messages)):
-        m = messages[i]
-        if i < state.strip_upto:
+        m = sent[i]
+        if m is inturn.FOLDED:
+            continue
+        if i < state.strip_upto or (edits.strips and inturn.strips_thinking(edits, i)):
             m = strip_thinking(m)
         if m is not None:  # a dialect may drop an item entirely (Responses reasoning items)
             out.append(m)
+    if state.k == 0 and state.start_text:
+        # D69 (rule 19): before the first rotation there is no preamble, so the carried records go ahead of
+        # the first turn-start message's own content, where the preamble goes later. The lead items before
+        # it stay as sent, and the message's form is the same on every request, so the prefix is stable.
+        start = next((i for i, m in enumerate(out) if d.is_turn_start(m)), None)
+        if start is not None:
+            out[start] = d.merge_first(out[start], [], state.start_text)
     if state.k == 0 or not out:
         return out
     lead = list(messages[: d.lead_count(messages)])  # items before the first turn start stay first
@@ -1170,11 +1255,54 @@ def headroom(state: EpochState, config: Config) -> int:
 
 def estimate_upstream(request: dict, messages: list[dict], previous_n: int, state: EpochState,
                       estimator: TokenEstimator) -> int:
-    """Rule 3: last real input plus the messages added since, else an estimate of the whole request."""
+    """Rule 3: last real input plus the messages added since, else an estimate of the whole request. A PDF
+    whose pages are not certain counts at its measured cost once usage has measured it (D63)."""
+    costs = dict(state.document_costs)
     if state.last_input_tokens is not None and previous_n <= len(messages):
-        return state.last_input_tokens + estimate_items(estimator, messages[previous_n:])
+        added = inturn.view(messages, state, _dialect())[previous_n:]  # as sent (rule 5)
+        return state.last_input_tokens + estimate_items(estimator, added) - measured_documents(added, costs)[0]
     head = estimator.estimate(canonical_json(_dialect().head_estimate_source(request)))
-    return head + estimate_items(estimator, transform_messages(messages, state))
+    items = transform_messages(messages, state)
+    return head + estimate_items(estimator, items) - measured_documents(items, costs)[0]
+
+
+def pending_documents(sent_items: list[dict], sent_estimate: int, state: EpochState) -> tuple[tuple, int] | None:
+    """D63: the uncertain PDFs this request carries that usage has not measured, and the estimate of
+    everything else in it (each counted at ``UNCERTAIN_DOCUMENT_TOKENS`` in ``sent_estimate``), for
+    ``observe_usage`` to measure them by."""
+    costs = dict(state.document_costs)
+    keys = tuple(key for key in uncertain_document_keys(sent_items) if key not in costs)
+    return (keys, sent_estimate - UNCERTAIN_DOCUMENT_TOKENS * len(keys)) if keys else None
+
+
+def measured_costs(state: EpochState, real: int) -> tuple[tuple[Any, int], ...]:
+    """D63: ``document_costs`` with the PDFs of the request ``real`` measures: the real input less the
+    estimate of everything else in it, never under 0, shared among them in proportion to their size as
+    sent (``document_key``: the length of the base64 data; Reviewer A at 26cba5ad, finding 1: an even
+    share counted a 122,000-token PDF read with a 10,000-token one at 66,018). Only the newest
+    ``RECORDED_DOCUMENT_COSTS`` are kept."""
+    if state.pending_documents is None:
+        return state.document_costs
+    keys, others = state.pending_documents
+    total = max(0, real - others)
+    whole = sum(max(1, size) for size, _ in keys)  # a PDF sent twice counts twice, each copy at its share
+    costs = dict(state.document_costs)
+    for key in keys:
+        costs.setdefault(key, total * max(1, key[0]) // whole)
+    return tuple(costs.items())[-RECORDED_DOCUMENT_COSTS:]
+
+
+def recorded_costs(value: Any) -> tuple[tuple[Any, int], ...]:
+    """D63: the measured document costs of an epoch record's optional ``document_costs`` field (a list of
+    ``[size, digest, tokens]``); a record written before the field has none."""
+    if value is None:
+        return ()
+    if not (isinstance(value, list) and len(value) <= RECORDED_DOCUMENT_COSTS and all(
+            isinstance(x, list) and len(x) == 3 and all(isinstance(n, int) and not isinstance(n, bool)
+                                                       and n >= 0 for n in (x[0], x[2]))
+            and isinstance(x[1], str) for x in value)):
+        raise ValueError("epoch record field document_costs")
+    return tuple(((size, digest), tokens) for size, digest, tokens in value)
 
 
 def window_items(messages: list[dict], start: int = 0) -> list[dict]:
@@ -1252,7 +1380,8 @@ def new_epoch(messages: list[dict], request: dict, state: EpochState, store: Sto
     new = replace(state, epoch=state.epoch + 1, k=k, pinned_text=store.pinned_text(config.pin_budget),
                   index_text=store.index_text(config.index_budget), head_fingerprint=head_fingerprint(request),
                   head_tokens=measured_head(request, state, estimator), head_size=head_size(request),
-                  strip_upto=strip_upto, turns_paged=turns_paged, head_changed=False, last_input_tokens=None)
+                  strip_upto=strip_upto, turns_paged=turns_paged, head_changed=False, last_input_tokens=None,
+                  inturn=inturn.after_epoch(state.inturn, k, strip_upto))
     rotation = {"event": "rotation", "epoch": new.epoch, "reason": reason, "k": k,
                 "retained_messages": len(messages) - k, "turns_paged": turns_paged}
     if sizing is not None:
@@ -1633,7 +1762,8 @@ def forward_original(request: dict, messages: list[dict], state: EpochState, rea
     return request, replace(state, degraded=True, last_sent_bytes=sent, last_sent_media=media,
                             last_sent_media_keys=media_keys(split_media(messages)[1]), last_sent_appends=False,
                             last_sent_anchor=(0, ""),
-                            last_estimate=None, last_input_tokens=None, pending_usage=usage_identity(messages)), events
+                            last_estimate=None, last_input_tokens=None, pending_usage=usage_identity(messages),
+                            pending_documents=None), events
 
 
 def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str, state: EpochState, store: Store,
@@ -1660,12 +1790,17 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
         events.append({"event": "usage_missing", "epoch": state.epoch})
         state = replace(state, last_input_tokens=None)
     estimate = estimate_upstream(request, messages, previous_n, state, estimator)
+    # Rule 5 (D63): everything that sizes or pages the window sees the messages as the epoch sends them,
+    # with a stubbed result as its stub and a folded round gone, not the CLI's raw history.
+    sent_view = inturn.view(messages, state, _dialect())
+    in_tool_loop = bool(turn_starts(messages)) and not at_turn_start(messages)
+    paged = None
     if n > previous_n and at_turn_start(messages):
         count = len(turn_starts(messages))
         if state.last_turn_start_n is not None and count > state.last_turn_count and n > state.last_turn_start_n:
             # Per-turn growth: the messages added since the previous turn start, estimated at the current
             # ratio, averaged when several turns arrive at once (a resume or a missed request).
-            added = estimate_items(estimator, messages[state.last_turn_start_n:])
+            added = estimate_items(estimator, sent_view[state.last_turn_start_n:])
             growth = added // (count - state.last_turn_count)
             # Rule 17: the previous maximum decays once per turn start that measures growth, before the
             # rotation decision. A retry or a resumed engine's first request (the turn start that wrote
@@ -1684,15 +1819,22 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
         else:
             streak = 0
         state = replace(state, last_carried_text_count=texts, carried_text_streak=streak)
-        state = guarded_rotation(request, messages, n, estimate, state, store, config, estimator, events)
+        state = guarded_rotation(request, sent_view, n, estimate, state, store, config, estimator, events)
+    elif n > previous_n and in_tool_loop:
+        # Rule 5 (D63): inside a tool loop, a batch of in-turn paging when the estimate passes its trigger.
+        state, paged = inturn.page(request, messages, previous_n, estimate, state, store, config, estimator,
+                                   events)
     rotated = any(e["event"] == "rotation" for e in events)
     # The estimate observe_usage compares with real usage must describe what is actually sent: after a
-    # rotation that is the transformed request, not the history that triggered it (A2b review).
-    sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
+    # rotation that is the transformed request, not the history that triggered it (A2b review); after an
+    # in-turn batch, the batch's own anchored estimate (D63).
+    if paged is not None:
+        sent_estimate = paged
+    else:
+        sent_estimate = estimate_upstream(request, messages, len(messages), state, estimator) if rotated else estimate
     # Pre-send over-bound, checked on every request forwarded, rotated or not (D49). Inside a tool loop it
-    # is rule 5's allowed exception and in degraded mode rule 14's; at a turn start it goes with
-    # bound_too_small, or means the rotation's sizing did not hold.
-    in_tool_loop = bool(turn_starts(messages)) and not at_turn_start(messages)
+    # means in-turn paging had nothing left to page (rule 5), is off, or the store failed (rule 14); at a
+    # turn start it goes with bound_too_small, or means the rotation's sizing did not hold.
     over = sent_estimate > config.bound
 
     upstream = {**request, field_name: transform_messages(messages, state)}
@@ -1707,13 +1849,21 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     # Within one epoch, window, degraded state and head the transform is a function of the request's own
     # messages, so their rule 10 hashes (computed once per request) stand for what is sent (D48).
     scope = (state.epoch, state.k, state.degraded, fingerprint)
+    if state.inturn.batches:  # D63: a batch changes what is sent without a new epoch or window
+        scope = (*scope, state.inturn.batches)
     hashes = tuple(message_hash(m) for m in messages)
-    state = replace(state, hashes=hashes, last_sent_bytes=sent,
+    room_margin = 0
+    if in_tool_loop and n > previous_n and config.in_turn_paging and _dialect().in_turn is not None:
+        room_margin = inturn.fresh_margin(inturn.view(messages, state, _dialect())[previous_n:], estimator,
+                                          _dialect())
+        state = inturn.note_room_low(messages, state, config, sent_estimate + room_margin, events)
+    state = replace(state, hashes=hashes, last_sent_bytes=sent, room_margin=room_margin,
                     last_sent_media=sent_media(sent_items), last_estimate=sent_estimate,
                     last_sent_media_keys=media_keys(split_media(sent_items)[1]),
                     last_sent_appends=appends_to(state.last_measured, scope, hashes), last_sent_scope=scope,
                     last_sent_anchor=(len(hashes), anchor_hash(hashes)),
-                    pending_usage=usage_identity(messages))
+                    pending_usage=usage_identity(messages),
+                    pending_documents=pending_documents(sent_items, sent_estimate, state))
     uncertain = uncertain_documents(messages[previous_n:]) if n > previous_n else 0
     if uncertain:
         # D60: a PDF whose pages are not certain counts as the API's maximum; say so when it arrives.
@@ -1721,14 +1871,15 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
                        "pages": PDF_MAX_PAGES})
     event = {"event": "request", "epoch": state.epoch, "k": state.k, "messages": n,
              "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
-    if rotated:
+    if rotated or paged is not None:
         event["sent_estimate"] = sent_estimate
+    if in_tool_loop and state.inturn.strips:
+        event["in_turn_thinking"] = inturn.thinking_shape(messages, state, _dialect())  # D63, content-free
     if state.degraded:
         event["degraded"] = True
     if over:
-        # Pre-send over-bound: with in_tool_loop (rule 5: a turn that grows past the bound inside a tool
-        # loop) the allowed, logged exception for acceptance 1, kept distinct from observe_usage's source
-        # "real" record.
+        # Pre-send over-bound: with in_tool_loop, a turn that grew past the bound inside a tool loop with
+        # nothing left to page (rule 5), kept distinct from observe_usage's source "real" record.
         event["over_bound"] = True
         bound_event = {"event": "over_bound", "source": "estimate", "in_tool_loop": in_tool_loop, "epoch": state.epoch,
                        "estimate": sent_estimate, "bound": config.bound}
@@ -1744,26 +1895,28 @@ def names_of(events: list[dict]) -> list[str]:
 
 
 def rewrite(request: dict, state: EpochState | None, store: Store, config: Config,
-            estimator: TokenEstimator, dialect: Dialect | None = None) -> tuple[dict, EpochState, list[dict]]:
+            estimator: TokenEstimator, dialect: Dialect | None = None,
+            start_text: str = "") -> tuple[dict, EpochState, list[dict]]:
     """Return (upstream_request, new_state, events) for one request (``/v1/messages`` by default;
-    pass ``dialect`` for another API)."""
+    pass ``dialect`` for another API). ``start_text`` (D69) is kept by a state created here; a state
+    that exists keeps its own."""
     token = _DIALECT.set(dialect or ANTHROPIC)
     try:
         with request_scope(request.get(_dialect().field)):
-            return _rewrite(request, state, store, config, estimator)
+            return _rewrite(request, state, store, config, estimator, start_text)
     finally:
         _DIALECT.reset(token)
 
 
 def _rewrite(request: dict, state: EpochState | None, store: Store, config: Config,
-             estimator: TokenEstimator) -> tuple[dict, EpochState, list[dict]]:
+             estimator: TokenEstimator, start_text: str = "") -> tuple[dict, EpochState, list[dict]]:
     field_name = _dialect().field
     messages = request.get(field_name) or []
     n = len(messages)
     events: list[dict] = []
     fingerprint = head_fingerprint(request)
     if state is None:
-        state = EpochState(head_fingerprint=fingerprint, head_size=head_size(request))
+        state = EpochState(head_fingerprint=fingerprint, head_size=head_size(request), start_text=start_text)
     previous_n = len(state.hashes)
 
     # Rule 10: the stored messages must still match.
@@ -1781,7 +1934,8 @@ def _rewrite(request: dict, state: EpochState | None, store: Store, config: Conf
             events.append({"event": "resync", "epoch": state.epoch, "kind": "paged_changed",
                            "matched": match, "previous_messages": previous_n, "messages": n,
                            "inflight_thinking_kept": inflight})
-            fresh = replace(state, k=0, turns_paged=state.turns_paged)
+            # D63: the in-turn edits name positions in the history that changed; none of them stands.
+            fresh = replace(state, k=0, turns_paged=state.turns_paged, inturn=inturn.EMPTY)
             calls, attempt = StoreCalls(store), []
             try:
                 resynced = new_epoch(messages, request, fresh, calls, config, estimator, current, current, attempt,
@@ -1797,7 +1951,14 @@ def _rewrite(request: dict, state: EpochState | None, store: Store, config: Conf
         else:
             events.append({"event": "resync", "epoch": state.epoch, "kind": "window_changed",
                            "matched": match, "previous_messages": previous_n, "messages": n})
-            state = replace(state, last_input_tokens=None)
+            # D63: the in-turn edits before the change stand; a fold keeps only its whole rounds before it.
+            edits = inturn.clipped(state.inturn, match, messages, _dialect())
+            state = replace(state, last_input_tokens=None, inturn=edits)
+            calls = StoreCalls(store)
+            try:  # the note back within its cap (D63, Reviewer A at 15293e9c, finding 2)
+                state = inturn.relisted(messages, state, calls)
+            except STORE_FAILURES as error:
+                state = enter_degraded(state, store_failure(error, calls, state), events)
         previous_n = match
 
     try:
@@ -1820,6 +1981,9 @@ def count_tokens_view(request: dict, state: EpochState | None, dialect: Dialect 
         messages = request.get(field_name) or []
         if state.k and (state.k >= len(messages) or matching_prefix(state.hashes, messages) < state.k):
             return request  # history no longer matches the epoch; count what the CLI sent
+        edited = inturn.extent(state.inturn)
+        if edited and matching_prefix(state.hashes, messages) < min(edited, len(state.hashes)):
+            return request  # D63: nor the messages the in-turn edits name
         return {**request, field_name: transform_messages(messages, state)}
     finally:
         _DIALECT.reset(token)
@@ -2185,15 +2349,23 @@ def epoch_record(state: EpochState, request: dict, messages: list[dict], key: st
                  config: Config) -> dict:
     """The record ``set_epoch`` writes: every field of ``state`` that decides later request bytes or
     rotation decisions, the configuration, and the anchor. Per-request values (the previous request's
-    hashes, sizes, and estimates) are not in it."""
+    hashes, sizes, and estimates) are not in it. ``start_text`` (D69) is in it only when there is one and
+    it can still be sent (``k == 0``), so a session that carries nothing, or has rotated, writes the record
+    of the releases before it."""
     hashes = state.hashes if len(state.hashes) == len(messages) else tuple(message_hash(m) for m in messages)
-    return {**{name: getattr(state, name) for name in RECORD_INT},
-            "pinned_text": state.pinned_text, "index_text": state.index_text,
-            "preamble_sha256": preamble_sha256(config, state.pinned_text, state.index_text),
-            "head_fingerprint": state.head_fingerprint, "dialect": dialect.name, "conversation": key,
-            "model": request.get("model") if isinstance(request.get("model"), str) else None,
-            "paged_carried": sorted(state.paged_carried), "config": asdict(config),
-            "anchor": {"n": len(messages), "hash": anchor_hash(hashes)}, "head_rule": HEAD_RULE}
+    record = {**({"start_text": state.start_text} if state.start_text and state.k == 0 else {}),
+              **{name: getattr(state, name) for name in RECORD_INT},
+              "pinned_text": state.pinned_text, "index_text": state.index_text,
+              "preamble_sha256": preamble_sha256(config, state.pinned_text, state.index_text),
+              "head_fingerprint": state.head_fingerprint, "dialect": dialect.name, "conversation": key,
+              "model": request.get("model") if isinstance(request.get("model"), str) else None,
+              "paged_carried": sorted(state.paged_carried), "config": asdict(config),
+              "anchor": {"n": len(messages), "hash": anchor_hash(hashes)}, "head_rule": HEAD_RULE}
+    if inturn.extent(state.inturn):  # D63: only an epoch with in-turn edits carries the field
+        record["in_turn"] = inturn.to_record(state.inturn)
+    if state.document_costs:  # D63: only an epoch that measured a PDF's cost carries the field
+        record["document_costs"] = [[size, digest, tokens] for (size, digest), tokens in state.document_costs]
+    return record
 
 
 def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dialect,
@@ -2212,7 +2384,12 @@ def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dia
     model = request.get("model") if isinstance(request.get("model"), str) else None
     if record.get("model") != model:
         return None, "model_changed"
-    if record.get("config") != asdict(config):
+    recorded = record.get("config")
+    if isinstance(recorded, dict) and "in_turn_paging" not in recorded:
+        # D63: a record written before in-turn paging has no such setting and no in-turn edits, so it
+        # resumes under either value; every other setting must match.
+        recorded = {**recorded, "in_turn_paging": config.in_turn_paging}
+    if recorded != asdict(config):
         return None, "settings_changed"
     if record.get("preamble_sha256") != preamble_sha256(config, record["pinned_text"], record["index_text"]):
         return None, "preamble_changed"
@@ -2227,9 +2404,15 @@ def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dia
     state = EpochState(pinned_text=record["pinned_text"], index_text=record["index_text"],
                        head_fingerprint=record["head_fingerprint"], head_size=head_size(request), hashes=hashes,
                        paged_carried=frozenset(record["paged_carried"]),
+                       inturn=inturn.from_record(record.get("in_turn"), n),
                        **{name: record[name] for name in RECORD_INT})
     if record.get("head_rule") != HEAD_RULE:
         state = replace(state, head_tokens=None, window_budget=None)
+    state = replace(state, document_costs=recorded_costs(record.get("document_costs")))
+    if "start_text" in record:  # D69: optional, so a record written before it resumes with none
+        if not isinstance(record["start_text"], str):
+            raise ValueError("epoch record field start_text")
+        state = replace(state, start_text=record["start_text"])
     return state, ""
 
 
@@ -2292,6 +2475,37 @@ class RewriteEngine:
         # D38: which CLI version sends the requests, and was the session start recognised?
         self.clients = ClientVersions()
         self._side_rooms: dict[str, _SideRoom] = {}  # D40: the side rooms this engine opened, by id
+        # D63: per conversation key, the number its running turn gets when it is paged; a side
+        # conversation's in-turn pages carry main's.
+        self._turn_numbers: dict[str, int] = {}
+        self._main_records = MainRecords()  # D69: the main conversation's own pins and closures
+        # D69: the keys whose history is the main conversation's evidence (TRUSTED_MAIN_REASONS)
+        self._trusted: set[str] = set()
+        # D69: per conversation key, whether its latest request carried X-Claude-Code-Agent-Id (D70's
+        # _classify reads it), so a request without a session id is still told apart (review B round 4, N10)
+        self._agent_header: dict[str, bool] = {}
+        # D69: the Claude Code sessions this store served before this engine started (the launcher records
+        # each one as it first sees it, before the engine runs, so this is read now). After a restart, a
+        # first conversation in a session id not among them is a new CLI session, which no subagent of an
+        # earlier conversation can be: it carries its parent's id (review B round 5, N13).
+        served = getattr(self.store, "cli_sessions", None)
+        try:
+            self._served_before: frozenset[str] | None = (frozenset(served("claude")) if callable(served)
+                                                          else frozenset())
+        except Exception:  # a store that cannot say: no session counts as new
+            self._served_before = None
+        # D69: the conversations an earlier engine on this store trusted as main (review A round 6, finding 1),
+        # read now for the same reason; a later continue or resume of one is trusted though the epoch record
+        # names another. A conversation's key is the hash of its first message (for a subagent, its task),
+        # so the list names whatever an engine trusted: the user's conversations, a new session's first
+        # request, and what the stated residues let through (D69).
+        known = getattr(self.store, "trusted_conversations", None)
+        try:
+            self._trusted_before: frozenset[str] = frozenset(known()) if callable(known) else frozenset()
+        except Exception:
+            self._trusted_before = frozenset()
+        self._listed: set[str] = set()  # the keys this engine wrote to that list (or tried to), once each
+        self._trust_events: list[dict] = []  # a failed list write's event, for the request that made it
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -2313,8 +2527,10 @@ class RewriteEngine:
             return count_tokens_view(request, state), headers, [{"event": "count_tokens", "epoch": epoch}]
         restore = self._restore(window_model_name(request)) if self._restore_pending else None
         resumed: list[dict] = []
+        from_record = False
         if state is None and not self._record_consumed:
             state, resumed = self._resume(key, request, dialect)
+            from_record = state is not None
         # Only the main conversation publishes the window (W, ratio, model): the store holds one, which
         # sizes contexto_recall's per-call limit and the next engine's restore. Main is committed before
         # the transform, whose turn-start rotation may publish the window, so a request that fails after
@@ -2325,6 +2541,8 @@ class RewriteEngine:
         resumed += mismatches
         previous = self._main
         main = self.publishes(key, request.get(dialect.field) or [], dialect)
+        resumed += self._trust_events  # D69: a failed list write, at _resume or here
+        self._trust_events.clear()
         self._idle[key] = False  # in flight until a response without a client tool call
         if previous is not None and previous != self._main:  # content-free: a reason and a count, no id
             resumed.append({"event": "main_changed", "reason": self._main_reason,
@@ -2332,12 +2550,21 @@ class RewriteEngine:
         session = self._cli_sessions.get(key)
         if not main and session and session.id in self._displaced and self._session_mains.get(session.id) == key:
             self._displaced[session.id] = False  # still running beside the new main: not a /resume later
+        start_text = ""
+        if state is None and main and dialect.judges_session_start(request):
+            start_text, started = self._start_text()  # D69: a new main conversation at a real session start
+            resumed.extend(started)
+        elif state is not None and main and state.k == 0 and state.start_text:
+            state = self._refresh_start_text(state, request, dialect, from_record, resumed)
         owner = _WINDOW_OWNER.set(main)
+        turn = inturn.TURN.set(None if main else self._turn_numbers.get(self._main))
         try:
             upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator,
-                                                         dialect)
+                                                         dialect, start_text)
         finally:
+            inturn.TURN.reset(turn)
             _WINDOW_OWNER.reset(owner)
+        self._turn_numbers[key] = inturn.current_turn(request.get(dialect.field) or [], self.states[key], dialect)
         events[0:0] = resumed
         # The CLI's own request (rewrite() leaves it unchanged); the engine's request event stays last.
         # A diagnostic: if it ever raised, the proxy's catch-all would discard this successful rewrite.
@@ -2364,6 +2591,17 @@ class RewriteEngine:
         if main and endpoint != COUNT_TOKENS:
             closes: list[dict] = []
             self._close_finished_side_rooms(request.get(dialect.field) or [], dialect, closes)
+            # D69 with D70: a request classed subagent, workflow or auxiliary is never the main
+            # conversation's evidence, also while it is main for having arrived first. Nor is a request
+            # that carries a subagent's X-Claude-Code-Agent-Id or a parent_session_id, whatever its class
+            # or the hint headers' setting: a fork of main has main's conversation key and is main's for
+            # the room (D40), but its own pins are not the main conversation's (review B round 3, N5).
+            # The scan position stays where it was, so main's next request is read from there.
+            session = self._cli_sessions.get(key)
+            if (key in self._trusted and self._classes.get(key) not in SIDE_CLASSES
+                    and not self._agent_header.get(key)
+                    and not (session and (session.agent or session.parent))):
+                self._confirm_main_records(key, request.get(dialect.field) or [], closes)
             events[-1:-1] = closes  # the engine's request event stays last
         # Per-turn recall budget, request-time publish (contract PR #69, kept by 367916a): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
@@ -2376,8 +2614,9 @@ class RewriteEngine:
                 # Contract PR #125: the snapshot first, so the store's request sequence stamps it and
                 # both of this request's room publishes alike.
                 self._publish_retained(state, messages, dialect, failures)
-                self.states[key] = self._publish_room(state, turn_id(messages, dialect), state.last_estimate,
-                                                      failures)
+                # D63: a fresh tool result counts at its margin, as in-turn paging counts it.
+                self.states[key] = self._publish_room(state, turn_id(messages, dialect),
+                                                      state.last_estimate + state.room_margin, failures)
                 events[-1:-1] = failures  # the engine's request event stays last
         self._write_epoch(key, request, dialect, events)
         return upstream, headers, [restore, *events] if restore else events
@@ -2467,6 +2706,7 @@ class RewriteEngine:
         if judged:
             self._judged.add(key)
         agent = any(name.lower() == CLAUDE_CODE_AGENT_HEADER and value for name, value in headers.items())
+        self._agent_header[key] = agent  # D69: read for pins also when the request has no session id (N10)
         found: list[tuple[str, str, str]] = []
         if request_class in MAIN_CLASSES:
             found += [("request_class", request_class, "agent_id")] if agent else []
@@ -2481,6 +2721,144 @@ class RewriteEngine:
                   for header, value, signature in found if (header, value, signature) not in self._mismatches]
         self._mismatches.update(found)
         return hints, judged, events
+    def _first_trusted(self, key: str) -> bool:
+        """D69: whether the engine's first main conversation is trusted. Only when the store is new (no
+        readable epoch record and no Claude Code session served before this engine started), when an
+        earlier engine on this store trusted this conversation (``trusted_conversations``), when the record
+        names it and does not say ``untrusted``, or when this is a Claude Code request in a session id the
+        store had not served before this engine started, with no agent id and no parent (a new CLI session;
+        a store with no served ids counts none as new). A store that served sessions and has no readable
+        record (a failed record write, a damaged ``epoch.json``, another version's record) is not new: only
+        the list and the new-session test trust there (review B round 8, N21). Otherwise a restart would
+        trust whichever conversation reached it first, such as a subagent without its agent id or a Codex
+        child, while the user's conversation waits on it (review B round 5, N13); such a first main is not
+        trusted until it takes main by a trusted rule, which costs a carry and never gains one."""
+        record = self._record
+        # A store with no readable record counts as new only when it has served no Claude Code session and
+        # has no trusted list either: a list means an earlier engine ran (review B on #288, N24).
+        if key in self._trusted_before or (record is None and not self._served_before
+                                           and not self._trusted_before):
+            return True
+        if record is not None and record.get("conversation") == key:
+            return record.get("untrusted") is not True
+        # A record with no served session ids (a store from before D55, an unreadable meta.json) cannot say
+        # which session ids are new, so none is (review A round 6, finding 3).
+        if not self._served_before:
+            return False
+        session = self._cli_sessions.get(key)
+        return bool(session and session.id and not session.agent and not session.parent
+                    and not self._agent_header.get(key) and session.id not in self._served_before)
+
+    def _trusted_takeover(self, key: str) -> bool:
+        """D69: whether ``key``, which has just taken main from another conversation, is trusted. By a
+        compaction (``compacted``). By ``after_side_request``, ``new_cli_session`` or
+        ``resumed_cli_session`` only when the first-main rules trust it (``_first_trusted``), which in a
+        new store's engine they always do: after a restart a tool-less side request is main untrusted, and
+        the next conversation seen with a tool list could be a subagent without its agent id (review B
+        round 7, N17); and the engine knows no session's owner from before it started, so a subagent
+        without its agent id in a session that was cleared before the restart takes main as a new or
+        resumed session (review B round 8, N21). A genuine ``/clear`` after a restart is a session id the
+        store had not served, and a ``/resume`` target is listed. By ``more_turn_starts`` only when an
+        earlier engine trusted it (``trusted_conversations``): the user's conversation retaking main after
+        a restart where something else came first (review A round 7, finding 2)."""
+        if self._main_reason in ("after_side_request", "new_cli_session", "resumed_cli_session"):
+            return self._first_trusted(key)
+        return self._main_reason in TRUSTED_MAIN_REASONS or key in self._trusted_before
+
+    def _trust(self, key: str) -> None:
+        """D69: trust ``key`` as the main conversation and record it for later engines on this store, once
+        per engine: a key already listed moves to the end, so the list keeps the conversations trusted
+        last (review A round 7, finding 6; review B round 7, N20). A failed write is not fatal: it is the
+        content-free ``trusted_conversations_unavailable`` with the error's class, and that conversation
+        is then trusted by a later engine only by the other rules."""
+        self._trusted.add(key)
+        if key in self._listed:
+            return
+        self._listed.add(key)
+        writer = getattr(self.store, "add_trusted_conversation", None)
+        try:
+            if callable(writer):
+                writer(key)
+        except Exception as error:
+            self._trust_events.append({"event": "trusted_conversations_unavailable", "error": type(error).__name__})
+
+    def _confirm_main_records(self, key: str, messages: list, events: list[dict]) -> None:
+        """D69: record in the store the ids of the records the main conversation's own history shows it
+        made (``contexto.mainrecords``), reading only the messages it has not read before. Called only
+        for a trusted main conversation: the engine's first main (``_first_trusted``), or one that took
+        main by a trusted rule (``_trusted_takeover``: D50's session rules and ``after_side_request``
+        when ``_first_trusted`` holds, ``more_turn_starts`` for a listed conversation). One that took main by
+        ``more_turn_starts`` from a known main and is not listed (a subagent without
+        ``X-Claude-Code-Agent-Id``, a Codex child conversation) is not read until it takes main by a
+        trusted rule; a trusted conversation stays trusted when it takes main back by turn starts. A store
+        without the method records nothing; a failure is the content-free ``main_records_unavailable``
+        with the error's class, never a failed request or degraded mode, and the messages stay unread,
+        so the next request of the conversation tries the same ids again. A pin or close call whose
+        result is not a success reply is one content-free ``main_record_unmatched`` event."""
+        add = getattr(self.store, "add_main_records", None)
+        if not callable(add):
+            return
+        try:
+            found = self._main_records.read(key, messages)
+            events.extend(found.unmatched)
+            if found.ids:
+                add(found.ids)
+            found.commit()  # only after the write: a failed one finds the same ids at the next request
+        except Exception as error:
+            events.append({"event": "main_records_unavailable", "error": type(error).__name__})
+
+    def _refresh_start_text(self, state: EpochState, request: dict, dialect: Dialect, from_record: bool,
+                            events: list[dict]) -> EpochState:
+        """D69 (rule 19): a removal reaches a running or resumed session. At a turn start of the main
+        conversation while ``k == 0``, and at the request that resumed it from an epoch record, the
+        carried text is read again; when it differs (a record closed, replaced or forgotten, project
+        memory turned off, or a conflict mark changed) the state sends the new one from this request on,
+        at the price of one cache miss, and ``start_text_changed`` says so with its estimated tokens.
+        Additions are frozen at the session's start, so the text never gains a record (but a late
+        confirmation can add one, rule 19). A store that fails here, its own ledger or the project
+        (``carried_text(..., strict=True)``: a sessions directory that cannot be listed, anything the
+        project part raises), keeps what it sent and logs ``start_text_unavailable`` with the error's
+        class; only a successful read that gives another text replaces it. A store whose
+        ``carried_text`` takes no ``strict`` is read without it."""
+        if not from_record:
+            token = _DIALECT.set(dialect)
+            try:
+                due = at_turn_start(request.get(dialect.field) or [])
+            finally:
+                _DIALECT.reset(token)
+            if not due:
+                return state
+        reader = getattr(self.store, "carried_text", None)
+        try:
+            text = _strict_read(reader, self.config.pin_budget) if callable(reader) else ""
+        except Exception as error:
+            events.append({"event": "start_text_unavailable", "epoch": state.epoch, "error": type(error).__name__})
+            return state
+        if not isinstance(text, str) or text == state.start_text:
+            return state
+        events.append({"event": "start_text_changed", "epoch": state.epoch,
+                       "tokens": self.estimator.estimate(text) if text else 0})
+        # The incremental estimate adds only new messages to the previous request's real input, which
+        # held the old text: this request takes the full estimate, so a text that grew is counted.
+        return replace(state, start_text=text, last_input_tokens=None)
+
+    def _start_text(self) -> tuple[str, list[dict]]:
+        """D69 (rule 19): the records the session carries from its project's earlier sessions
+        (``store.carried_text``, within the pin budget), for the state about to be created, and the
+        content-free event that says so (``start_text`` with its estimated tokens). A store without the
+        method carries nothing. A store that fails here reads as nothing carried and logs
+        ``start_text_unavailable`` with the error's class: it never fails the request and is not degraded
+        mode, since nothing is paged and nothing sent depends on it."""
+        reader = getattr(self.store, "carried_text", None)
+        if not callable(reader):
+            return "", []
+        try:
+            text = reader(self.config.pin_budget)
+        except Exception as error:
+            return "", [{"event": "start_text_unavailable", "epoch": 0, "error": type(error).__name__}]
+        if not isinstance(text, str) or not text:
+            return "", []
+        return text, [{"event": "start_text", "epoch": 0, "tokens": self.estimator.estimate(text)}]
 
     def tools_verdict(self) -> dict | None:
         """At exit: ``mcp_tools_missing`` if the main conversation ended without Contexto's tools and that
@@ -2548,6 +2926,12 @@ class RewriteEngine:
         if not self._pages_present(state.turns_paged):
             return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": "pages_missing"}]
         self._set_main(key)
+        # D69: the resumed conversation is the one the previous engine recorded as main, and it is this
+        # engine's first main, so it is trusted (review A round 3, finding 1: publishes() sees it main
+        # already and would otherwise never trust it, so a resumed session's pins were never carried),
+        # unless the record says the previous engine did not trust it (review B round 4, N9).
+        if self._record.get("untrusted") is not True or key in self._trusted_before:
+            self._trust(key)
         self._resumed = True
         events = [{"event": "epoch_resumed", "epoch": state.epoch, "k": state.k}]
         if reclassified:
@@ -2575,10 +2959,12 @@ class RewriteEngine:
         count = self._record.get("last_turn_count")
         return isinstance(count, int) and turn_starts > count
 
-    def _write_epoch(self, key: str, request: dict, dialect: Dialect, events: list[dict]) -> None:
+    def _write_epoch(self, key: str, request: dict, dialect: Dialect, events: list[dict],
+                     measured: bool = False) -> None:
         """Rule 16, record: the main conversation, at every turn start and on leaving degraded mode,
-        after the transform and before the send. A degraded engine writes nothing; a failed write logs
-        ``epoch_record_stale`` and never blocks the request or degrades the engine."""
+        after the transform and before the send; with ``measured``, when a response's usage has measured
+        a PDF's cost (D63), from the request it answers. A degraded engine writes nothing; a failed write
+        logs ``epoch_record_stale`` and never blocks the request or degrades the engine."""
         state = self.states[key]
         writer = getattr(self.store, "set_epoch", None)
         if state.degraded or not callable(writer):
@@ -2586,10 +2972,17 @@ class RewriteEngine:
         messages = request.get(dialect.field) or []
         token = _DIALECT.set(dialect)
         try:
-            due = at_turn_start(messages) or "degraded_leave" in names_of(events)
+            # D63: an in-turn batch changes what later requests send, so it writes the record too.
+            due = (measured or at_turn_start(messages) or "degraded_leave" in names_of(events)
+                   or "in_turn_batch" in names_of(events))
             if not (due and key == self._main and self._may_write(self._turn_starts.get(key, 0))):
                 return
             record = epoch_record(state, request, messages, key, dialect, self.config)
+            if key not in self._trusted:
+                # D69: a main conversation the engine did not trust (it took main only by turn starts)
+                # says so, so a new engine that resumes it does not trust it either (review B round 4,
+                # N9). A trusted main's record is unchanged, so engines before D69 still read it.
+                record["untrusted"] = True
         finally:
             _DIALECT.reset(token)
         try:
@@ -2626,6 +3019,8 @@ class RewriteEngine:
         previous = self._main
         main, self._turn_starts[key] = self._main_after(key, messages, dialect)
         self._set_main(main)
+        if (previous is None and self._first_trusted(main)) or (previous != main and self._trusted_takeover(main)):
+            self._trust(main)  # D69: its pins and closures are confirmed (_confirm_main_records)
         session = self._cli_sessions.get(main)
         if previous is not None and previous != main:
             lost = self._cli_sessions.get(previous)
@@ -2747,7 +3142,9 @@ class RewriteEngine:
         checked"): it logs the content-free retained_stale, exactly once, and is not degraded mode
         (lane B PR #128 removes the old snapshot, so ``retained_current()`` serves none)."""
         try:
-            self.store.set_retained(state.epoch, state.k, retained_entries(messages, state.k, dialect))
+            # D63: the window as sent: a stubbed result is its stub, a folded round is in its page.
+            sent = inturn.view(messages, state, dialect)
+            self.store.set_retained(state.epoch, state.k, retained_entries(sent, state.k, dialect))
         except STORE_FAILURES as error:
             events.append({"event": "retained_stale", "epoch": state.epoch, "error": type(error).__name__})
 
@@ -2924,6 +3321,7 @@ class RewriteEngine:
             return []
         events: list[dict] = []
         estimate = None
+        before_costs = state.document_costs
         if identity != state.pending_usage:
             pending = state.pending_usage
             events.append({"event": "usage_unattributed", "epoch": state.epoch, "messages": identity[0],
@@ -2945,7 +3343,9 @@ class RewriteEngine:
                     self.estimator.observe(text_bytes, text_tokens)
             measured = (Measured(state.last_sent_scope, *state.last_sent_anchor, text_bytes, real, keys)
                         if state.last_sent_anchor[0] else None)
-            state = replace(state, last_input_tokens=real, pending_usage=None, last_measured=measured)
+            state = replace(state, last_input_tokens=real, pending_usage=None, last_measured=measured,
+                            document_costs=measured_costs(state, real), pending_documents=None,
+                            batch_unmeasured=False)
             if state.head_tokens is None and state.k == 0:
                 # Rule 4: the first measured request gives the head (its input minus its non-carried
                 # messages, which also covers a resumed first request with a long history). The messages
@@ -3000,4 +3400,8 @@ class RewriteEngine:
             # the next turn start retries it. The event reaches the log with the others, via the proxy.
             state = enter_degraded(state, store_failure(error, calls, state), events)
         self.states[key] = state
+        if state.document_costs != before_costs:
+            # D63 (Reviewer A at 26cba5ad, finding 2): a cost lost on a restart sent the next request over
+            # the bound, so the record keeps it from the usage that measured it.
+            self._write_epoch(key, request, dialect, events, measured=True)
         return events

@@ -11,6 +11,29 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
+- New: `contexto bench`, a benchmark you can run yourself. It runs one generated session through
+  Contexto, as full context sent straight to the model, and as plain Claude Code set to compact at
+  the same bound (its auto-compact window is moved so that compaction fires near the bound; at its
+  defaults it would compact near 967,000 tokens and not at all in this session), scores every
+  answer by exact match, and reports accuracy with 95% intervals, paired tests, tokens and cost at
+  published prices ([docs/bench.md](docs/bench.md)). `contexto bench --replay` needs no key, no
+  `claude` and no network: it replays a pinned synthetic session through the real proxy and checks
+  that every request stayed under the bound, by sizes estimated from bytes. `contexto bench
+  --dry-run` prints what a live run would spend; a live run uses your own key and refuses to start
+  without a `--budget-tokens` ceiling. The output directory holds no key, hostname or home path, so
+  it can be published.
+- `contexto serve` runs the engine as a standing service on `127.0.0.1:7837` for clients Contexto
+  does not launch (the IDE extensions, the desktop app, the Agent SDK, `claude -p` in CI): each
+  Claude Code session gets its own store. It requires a token, the first path segment of the base
+  URL `--print-settings` prints. The printed settings turn on Claude Code's gateway hint headers,
+  which the engine reads and the service removes before forwarding (`--forward-hint-headers`
+  passes them on). See [docs/serve.md](docs/serve.md).
+- `contexto mcp --serve` gives those clients Contexto's tools: one MCP server for every
+  conversation, which asks the service which session each tool call belongs to.
+  `--print-mcp-config` prints its config.
+- `contexto run claude` and `contexto proxy` refuse an upstream that is this home's `contexto
+  serve` (as it is once the service's URL is in your Claude Code settings) and say to pass
+  `--upstream URL`.
 - Search finds more. When no paged-out turn holds every word of a query, `contexto_search` and
   `contexto search` now give approximate matches and say so: question words are dropped,
   `refresh_token` finds `refreshToken`, a turn holding enough of the query (rarer words count more)
@@ -18,6 +41,44 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   ones it did not. A query that some turn holds every word of gets the same result as before
   ([docs/search.md](docs/search.md)). `contexto search --json` marks such a result `approximate` and
   gives each hit's `matched` and `missing` words.
+- A new session starts with the open obligations and active decisions the model pinned in earlier
+  sessions of the same project, so a standing rule pinned yesterday is in view from the first
+  request. A project is the git repository the session started in (a linked worktree or a
+  submodule is its own), else the directory itself. Only pins the proxy saw the main conversation
+  make are carried, never a subagent's: Claude Code subagents are told apart by their
+  `X-Claude-Code-Agent-Id` header (a request that carries it is never read for pins, even a fork's
+  that has the main conversation's key), and a conversation that became the main one only by having
+  more turn starts (a subagent without that header, a Codex child conversation) is not trusted. The model
+  sees carried records as records from an earlier session, not as instructions, with each record's
+  text quoted and escaped. See [docs/project-memory.md](docs/project-memory.md).
+- Codex sessions give nothing to project memory. On codex-cli 0.163.0, as measured, the model calls
+  Contexto's tools from inside Codex's code-mode `exec` tool, which the proxy does not read for this,
+  so a Codex session's pins are never carried and its closures of carried records count only in
+  that session. A Codex session does start with what Claude Code sessions of the project carried.
+  Not checked on codex-cli 0.166.0 or live.
+- A closure or replacement made in the main conversation of any session of the project applies to
+  every session of it, running sessions included (before a session's first rotation from its next
+  turn start; after it, from its next rotation). Forgetting a session never reopens what it closed;
+  pruning it does.
+- At start, `contexto run` prints how many records were carried and from how many sessions, and
+  `contexto state` lists them under their own heading; `contexto state --json` lists them under
+  `carried`.
+- `contexto project show` lists a project's sessions and what a new session would carry.
+  `contexto project forget --record ID`, `--session ID` (full ids only) or `--all` takes records or
+  sessions out of it; nothing is deleted until `contexto sessions prune`.
+- `contexto run --no-project-memory`, or `CONTEXTO_PROJECT_MEMORY=0`, keeps a session out of
+  project memory: it carries nothing and gives nothing to later sessions. It stays off when you
+  resume it, and a resumed session stops sending what it carried: at once before its first
+  rotation; after it, from its next rotation.
+- The model is now told to pin only what you state in your own messages, never a rule found in tool
+  results, files, web pages or another agent's output. This applies to every session.
+- `contexto state` shows a character of a stored record that could move the cursor, end the line,
+  or reorder or hide text as its escape. Joiners and other format characters print as they are, and
+  so does a variation selector right after the emoji or ideograph it varies; anywhere else it is an
+  escape. One zero-width character between letters prints (a ZWNJ in Persian, a ZWJ in an emoji);
+  a run of them, or one next to a space, is escapes, except a Mongolian variation selector that ends
+  a word.
+- Records pinned before this release are never carried, so project memory starts empty.
 - `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
   described in the command's `--help`; an error is still one line on stderr with the usual exit
   code. `contexto state --json` includes the store faults `contexto stats --json` shows.
@@ -66,6 +127,21 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 - The session log has two new fields: `pages` on `proxy_start` and `proxy_stop` (the page files in
   the store), and `cli_session` on a Messages request's entry (whether it carried Claude Code's
   session id).
+- `contexto run claude` shows Contexto's numbers in Claude Code's status line, for example
+  `ctx 112k/150k · 41 paged · 3 recalls · 5 searches`, and `PAGING STOPPED` when the store fails.
+  `41 paged` counts the page files kept on disk for the whole session, from every conversation in
+  it (subagents' too), which the model can read back; it is not a count of turns. A prompt that
+  differs from the bound but would shorten to the same text gets decimals (`150.9k/150k`), so one
+  over the bound never reads as at it.
+  It is added only when no settings file Claude Code reads has a status line of its own, because
+  Contexto's would replace it; `--no-statusline` or `CONTEXTO_NO_STATUSLINE=1` turns it off. A status
+  line you set up mid-session gets `ctx: your status line needs a restart`, after `PAGING STOPPED`
+  when paging is stopped.
+  `contexto statusline` prints the line, so a status line script of your own can include it. When
+  Claude Code names its session on stdin, the script shows `$CONTEXTO_SESSION`'s numbers only while
+  that session is open and serving it in its current run, so nothing until a conversation's first
+  request; with no variable, nothing when two open launches serve the conversation. See
+  docs/statusline.md.
 - New command: `contexto doctor` checks what `contexto run` needs from the directory you run it
   in, and prints one line per check with the next step under a warning or a failure. It checks
   Python, the `claude` and `codex` CLIs and their versions, the Claude Code settings files, the
@@ -92,6 +168,13 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   is no longer used (Claude Code loads nothing from it either). `contexto run claude`
   refuses to launch while a named pipe, or a file it cannot parse that may name a cloud-provider
   switch, is in a settings file's place (D70).
+- On Claude Code a long tool loop, in the main conversation or a subagent, no longer goes over the
+  bound: Contexto now pages inside the running turn. Older tool results become stubs that name a
+  page, which `contexto_recall` returns word for word, and the oldest tool rounds of a very long
+  loop fold into one page with a note. What you type mid-turn stays in view. See
+  [docs/in-turn-paging.md](docs/in-turn-paging.md).
+- Codex tool loops are sent as before.
+- `contexto run --no-in-turn-paging` or `CONTEXTO_IN_TURN_PAGING=0` turns it off.
 
 ## 0.5.24 (2026-11-06)
 

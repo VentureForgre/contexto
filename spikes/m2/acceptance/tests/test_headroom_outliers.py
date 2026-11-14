@@ -125,10 +125,13 @@ def test_the_engines_rule_17_reproduces_the_recommended_row():
     # seat session with the 149,140-token read (92,000 head, bound 150,000).
     from acceptance import seat_bound as sb
 
-    config = Config(bound=150_000)
+    config = Config(bound=150_000, in_turn_paging=False)  # A33 was measured with a tool loop sent whole (D63)
     s = sb.summarize(sb.replay(sb.session(92_000, 56, big_read_at=28), config), config)
     assert (s["rotations"], s["window_minimal"], s["bound_too_small"]) == (15, 1, 0)
     # 18,907 and $7.3125 before D51: its pin sentence in the preamble is 69 tokens of the window. 18,594
     # since D49's amendment: rule 4 counts the first prompt at its measured 4 bytes per token, not the 3.5
-    # seed, so the head is no longer 244 tokens low (18,838 before)
-    assert s["window_budget"][0] == 18_594 and s["usd"] == 7.3187
+    # seed, so the head is no longer 244 tokens low (18,838 before). 18,569 and $7.3209 since D69: the pin
+    # line says only the user's own words are pinned (18,594 and $7.3187 before). 18,533 and $7.3242 since
+    # D63: the example line says a hit can come from the running turn, 141 bytes, 36 tokens at 4 a token.
+    # 18,536 and $7.3239 since it names the turn a page was written in instead: 9 bytes shorter.
+    assert s["window_budget"][0] == 18_536 and s["usd"] == 7.3239

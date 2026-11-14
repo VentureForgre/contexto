@@ -1054,7 +1054,7 @@ def test_head_follows_contexto_tool_bytes():
     assert measured == budget.CONTEXTO_TOOL_BYTES, f"Contexto's tool definitions are {measured} bytes; update budget.HEAD"
     instructions = len(INSTRUCTIONS.encode("utf-8"))  # in Claude Code's system prompt, so in the head too (D51)
     assert instructions == budget.CONTEXTO_INSTRUCTIONS_BYTES, f"the MCP instructions are {instructions} bytes"
-    assert budget.HEAD == budget.Params().head == 47_816
+    assert budget.HEAD == budget.Params().head == 47_982
     assert budget.HEAD == budget.HEAD_MEASURED + math.ceil(
         (budget.CONTEXTO_TOOL_BYTES - budget.CONTEXTO_TOOL_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN) + math.ceil(
         (budget.CONTEXTO_INSTRUCTIONS_BYTES - budget.CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / budget.OTHER_BYTES_PER_TOKEN)
@@ -1064,7 +1064,7 @@ def test_the_preamble_base_follows_the_fixed_lines():
     from contexto.store.recall import DEFAULT_LINES
     from contexto.tokens import estimate_tokens
 
-    assert budget.Params().preamble_base == estimate_tokens("\n".join(DEFAULT_LINES)) == 380
+    assert budget.Params().preamble_base == estimate_tokens("\n".join(DEFAULT_LINES)) == 446
 
 
 def test_tool_rounds_are_calibrated_on_live_run_3():

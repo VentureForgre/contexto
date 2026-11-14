@@ -69,6 +69,7 @@ declares them. `ResponsesDialect` overrides every one of them.
 | `name` | attribute | yes |
 | `field` | attribute | yes |
 | `media_floor` | attribute | yes |
+| `in_turn` | attribute | yes |
 | `is_context_block` | method | yes |
 | `is_turn_start` | method | yes |
 | `is_assistant` | method | yes |
@@ -148,6 +149,27 @@ under-estimated.
 - Anthropic: `True`, "for Claude's pixel prices" (the comment on the attribute).
 - Responses: `False`, because "OpenAI prices images by tiles (85 tokens at low detail), under
   Claude's floor".
+
+### `in_turn`
+
+`in_turn: MessagesInTurn | None`. `contexto.inturn.MESSAGES` on the base class, `None` on
+`ResponsesDialect`. D63 (rule 5).
+
+The primitives in-turn paging needs from this API: where the running turn's tool results are and
+which call each answers, what a stub may stand for (`stubbable`) and what it says the result was
+(`size`, `describe`), how a result's content is replaced by a stub (`with_stubs`) and a fold note
+added after the turn-start message's own content (`with_note`), what the user wrote mid-turn
+(`user_authored`, never folded) and where whole tool rounds begin and end (`rounds`). The engine
+pages inside a running turn only when it is not `None` and `in_turn_paging` is on; with `None`, a
+tool loop is sent as before D63.
+
+- Anthropic: `MessagesInTurn` (`tool_use` and `tool_result` blocks, text, image and document
+  content).
+- Responses: `None`. Codex tool loops are not paged inside the turn yet; the replay harness keeps
+  its Codex targets marked `NOT_BUILT`.
+
+A new dialect starts with `None`. Writing one means the same primitives for its item shapes, and the
+replay harness's targets (`spikes/m2/inturn`) for its scripts.
 
 ### `is_context_block`
 
@@ -721,8 +743,12 @@ D53).
   a compressed request body (rule 15). The launcher must keep the client on plain HTTP with
   compression off. Codex: yes (`supports_websockets = false` and
   `enable_request_compression = false` in `api_key_config` and `chatgpt_overrides`).
-- [ ] **A launcher.** `contexto run <cli>` is the only path that wires the engine in:
-  `src/contexto/commands/run.py` lists the CLIs in `choices` and dispatches, and the launcher shares
+- [ ] **A launcher.** `contexto run <cli>` is the path that wires the engine in for a client
+  Contexto starts. `contexto serve` (`src/contexto/serve.py`, [serve.md](serve.md)) also runs the
+  engine, as a standing service for clients started by something else, but it serves Claude Code
+  only: it routes by Claude Code's session ids and resolves tool calls by
+  `_meta["claudecode/toolUseId"]`. A new client still needs its Dialect and either a launcher or a
+  route of its own in `serve`. The launcher path: `src/contexto/commands/run.py` lists the CLIs in `choices` and dispatches, and the launcher shares
   `options_from_args`, `check_options`, `open_session`, `engine_config`, `start_proxy`,
   `check_cli_version`, `start_warning`, `run_child` and `report_missing_tools` from
   `src/contexto/launcher.py`. `start_proxy` builds the `RewriteEngine`, passes its `observe_usage` to
@@ -739,7 +765,8 @@ D53).
   the interpreter Contexto runs on (`sys.executable`) as `<python> -P -m contexto mcp --session=<id>`,
   with `CONTEXTO_HOME` set (`paths.mcp_env`). `-P` keeps the project directory, where the client
   starts its servers, off `sys.path`, so a project's own `contexto` package cannot run in its place.
-  Pass the session as one argument, `--session=<id>`, as `mcp_payload` does. Every value written into
+  Pass the session as one argument, `--session=<id>`, as `mcp_payload` does. The other mode,
+  `contexto mcp --serve`, serves the clients of `contexto serve` and, like it, Claude Code only. Every value written into
   the client's config must be quoted for that config's format, and refused when the client would
   expand it (Claude Code expands `${`: `check_mcp_values`, D55). Where the client runs unattended it
   must be allowed to call the tools without a prompt, and no more than that: Contexto's own tools by

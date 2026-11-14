@@ -91,13 +91,22 @@ def test_a_record_from_an_engine_without_the_new_settings_does_not_resume():
     assert reasons == ["settings_changed"]
 
 
-def test_rule_5_is_unchanged_nothing_rotates_inside_a_tool_loop():
-    config = Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=300)
+@pytest.mark.parametrize("paging", [False, True])
+def test_headroom_never_enters_the_tool_loop(paging):
+    # Rule 17's headroom sizes the turn-start rotation only. Inside a tool loop the over-bound check
+    # compares with the bound and rule 5's trigger (D63) with the headroom floor; neither rotates for it.
+    config = Config(bound=4_000, headroom_floor=500, pin_budget=200, index_budget=200, min_turn_room=300,
+                    in_turn_paging=paging)
     engine = RewriteEngine(MemoryStore(key=b"k" * 32), config=config)
     msgs = [user("p0"), assistant("a0"), user("p1")]
     engine(request(msgs), {}, MESSAGES)
     loop = msgs + [tool_use(1), tool_result(1, FILL * 20)]  # a large tool result inside the loop
     _, _, events = engine(request(loop), {}, MESSAGES)
     names = [e["event"] for e in events]
+    sent = next(e for e in events if e["event"] == "request")
     assert "rotation" not in names
-    assert next(e for e in events if e["event"] == "request").get("over_bound") is True
+    if paging:  # the result the model has not read is stubbed; nothing else changes
+        batch = next(e for e in events if e["event"] == "in_turn_batch")
+        assert batch["trigger"] == "result" and "over_bound" not in sent and sent["sent_estimate"] <= config.bound
+    else:  # before D63: sent as is and flagged
+        assert sent.get("over_bound") is True and "in_turn_batch" not in names

@@ -241,6 +241,9 @@ def test_seed_level_gives_no_interval_where_it_would_mislead(differences, note):
     assert result["mean"] == pytest.approx(sum(differences) / len(differences))
     assert result["interval_method"] == stats.SEED_INTERVAL_METHOD
     assert stats.seed_level([2 / 72, 2 / 72, 3 / 72])["interval_note"] is None
+    # #255 Reviewer A nit 1: the same 2 in 72, computed two ways, differs in its last bit; still no spread.
+    assert stats.seed_level([70 / 72 - 68 / 72, 69 / 72 - 67 / 72, 2 / 72])["interval_note"] == SAME
+    assert stats.seed_level([0.1 + 0.2, 0.3, 0.3])["interval_note"] == SAME
 
 
 def _benchmark_seed(rnd, only_a: float, only_b: float, probes: int = 72) -> float:
