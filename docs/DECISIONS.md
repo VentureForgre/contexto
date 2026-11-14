@@ -3091,9 +3091,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
   with facts planted under unique keys, the baseline is a raw API replay answering with
   `tool_choice: none`, plain Claude Code with its own compaction was never run, and only someone
   with the owner's key helper and private transcripts could rerun or audit the scoring. The owner
-  asked for one command anyone can run. Built in PRs #255 (foundation), #262 (scale harness), #264
-  (report and charts), #269 (replay) and #273 (live runner), each with two reviewer agents, at zero
-  model spend: every test runs against stub CLIs and fake upstreams on 127.0.0.1. The guide is
+  asked for one command anyone can run. Built in PRs #255 (foundation, merged as f826c464), #262
+  (scale harness, c46de5b4), #264 (report and charts, 6e4e6b12), #273 (live runner, 66336669) and
+  #269 (replay, c476834f), each with two reviewer agents, at zero model spend: every test runs
+  against stub CLIs and fake upstreams on 127.0.0.1. Docs in #282. The guide is
   [docs/bench.md](bench.md).
   - **In the package.** `src/contexto/bench/` and `contexto bench`, standard library only, no new
     runtime dependency. Reason: an outsider who installed a release runs `contexto bench --replay`
@@ -3126,7 +3127,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
     Messages API requests built from the script alone, scripted replies and file reads,
     `tool_choice: none`, one request per probe turn carrying earlier probe turns with its own
     answers, `not_run` with a reason when it does not fit); `plain` (the same headless Claude Code
-    with no Contexto). Every difference is listed in the manifest's `arm_differences`.
+    with no Contexto). Every difference is listed in the manifest's `arm_differences`. Both Claude
+    Code arms run with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`; on 2.1.322 it removes
+    `run_in_background` and about 771 characters from the Agent and Bash tool definitions, in both
+    arms alike. It does not cover the Monitor tool or MCP background tasks; a `result` from either,
+    or any `result` that answers no turn, stops the unit as `desync`.
   - **Plain arm's compaction.** Every documented control sets the auto-compact window (100,000 to
     1,000,000 tokens, capped at the model's window), and Claude Code compacts 33,000 below it. The
     33,000 was read in the installed 2.1.322 bundle, not documented, and is not confirmed live. The
@@ -3141,7 +3146,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
     `--budget-tokens` is required and covers the output directory; the first 401 or 403 stops the
     run. Per unit: 60 answered requests per script turn (recorded runs needed at most 6, the
     tool-loop turn needs 11), `--max-turn-failures` (default 200) and twice the unit's planned worst
-    case; a turn with no metered request stops the unit as `unmetered`. A watchdog stops a unit's
+    case; a turn with no metered request stops the unit as `unmetered`. A unit stops as `desync`,
+    `runaway`, `api_error` or `unmetered` (among others) when it must, and writes no probe lines. A
+    request sent that got no upstream response is counted (`requests_unanswered`,
+    `unanswered_tokens`) and keeps its reservation as spent, since it may have been billed. On
+    resume, a torn last line is set aside in `<file>.torn-<n>`. A watchdog stops a unit's
     processes if the runner dies (all gone within 1.7 s of SIGKILL). Managed Claude Code settings
     that would change routing, compaction, permissions, the model, MCP servers, hooks or the system
     prompt refuse the run. Outputs record the upstream only as `anthropic`, `custom` or `local`; no
@@ -3177,12 +3186,17 @@ the owner's delegation. Open decisions are listed at the end with the options an
     Messages API's structural rules; every environment variable the package reads held at its
     default; the store's real search for each planted fact. Pinned session (seed 20261016, `v2`,
     bound 150,000, 48 content and 8 probe turns, 952,971 estimated tokens of history, 6.35 times the
-    bound): 138 requests, largest 116,278 estimated tokens, 0 over the bound by both counts, 14
-    rotations, 47 pages, no failure event, no compaction marker. Search reach under mechanical
-    queries: 48 of 72 by the fixed rule (54 with facts still in view), 60 of 72 by the best query
-    from the question's own words; `paraphrase` 0 and 6, `concluded` 0 and 0, `toolloop` 0 and 6.
-    Modelled, not run: full context's last request 977,381 estimated tokens; plain Claude Code
-    compacting 8 times with a largest request of 140,412 (summary 7,920 tokens from
+    bound, 956,104 with the probe turns; synthetic head 21,306): 138 requests, the first 44,302
+    estimated tokens and the largest 116,306, 0 over the bound by both counts, 14 rotations, 47
+    pages, no failure event, no compaction marker. Search reach under mechanical queries, counted
+    with the store's strict search (`SessionStore.search`), not the search tool's reply: 48 of 72 by
+    the fixed rule (54 with facts still in view), 60 of 72 by the best query from the question's own
+    words (whole-word matches, top 3); `paraphrase` 0 and 6, `concluded` 0 and 0, `toolloop` 0 and
+    6, every `d27` class equal in both columns. Since D65 the tool's fallback also answers 1 of the
+    18 queries the strict rule misses (`q_r_02`, `paraphrase`): its reply shows the plant on the
+    second of the three pages it shows in detail, beside two decoy lines. Modelled, not run: full
+    context's last request 977,410 estimated tokens; plain Claude Code compacting 8 times with a
+    largest request of 140,441 (summary 7,920 tokens from
     `docs/research/M0-proxy-measurements.md`; what survives a compaction is assumed, erring toward
     plain Claude Code). A replay cannot show answer accuracy, cache reads, real token counts, or
     what a real CLI or model does, and says so.
@@ -3211,10 +3225,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
     the ceiling is `--budget-tokens`.
   - **Departures from the brief.** (1) The `d27` script's JSON digest changed, though every turn
     text and probe field is the spike's: each probe's stored `overlap` annotation now follows the
-    one overlap rule. (2) Scoring differs from the spike's in two ways, in every arm: an unanswered
-    probe is never correct (the spike scored an unanswered `set` probe whose answer is `none` as
-    correct), and answer lines written in markdown (bold or backticked ids, numbered or bulleted
-    items) are read (#273). The brief named only the first. (3) Both Claude Code arms run with
+    one overlap rule. (2) Scoring differs from the spike's in three ways, in every arm: an
+    unanswered probe is never correct (the spike scored an unanswered `set` probe whose answer is
+    `none` as correct); answer lines written in markdown (bold or backticked ids, numbered or
+    bulleted items) are read; a blockquote line is never read, and a line in a fenced code block
+    yields to an answer for the same id outside any fence (#273). The brief named only the first. (3) Both Claude Code arms run with
     `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: a background subagent's second `result` desynchronised
     scoring, 0 of 72 answers counted while the unit said complete. Any extra result now stops the
     unit as `desync`. (4) Merge rule: the ruleset does not require branches to be up to date
@@ -3228,7 +3243,17 @@ the owner's delegation. Open decisions are listed at the end with the options an
     real streamed response waits per chunk was not tested [inferred: Claude Code users on Linux see
     it on each request]. (b) The proxy opens a new upstream connection for every request (914 in one
     short scale run); on an HTTPS upstream each also pays a TCP connect, a TLS handshake and about
-    2.5 ms to build the SSL context [the SSL context measured; the handshake not].
+    2.5 ms to build the SSL context [the SSL context measured; the handshake not]. Issues: (a)
+    [#284](https://github.com/VentureForgre/contexto/issues/284), (b)
+    [#285](https://github.com/VentureForgre/contexto/issues/285).
+  - **Open follow-ups.** A follow-up code pull request is in progress for the reviewers' remaining
+    low findings: notes on the request-size chart (Contexto's drops are rotations, not compactions;
+    the full-context line squeezes the y axis); a reach column on the `contexto_search` tool's own
+    reply beside the strict search's; wording nits in the report; the scale harness's lows (its
+    30 s port pool shared across burst threads, a `TCP_NODELAY` test that passes without the
+    driver's line, a docstring and a README sentence on the Linux wait); and a test that runs the
+    real `claude --version` with the user's `HOME`, to be isolated. The owner's minimum live run
+    has not been made; it would also confirm the plain arm's 33,000-token reserve live.
   - **Public benchmarks as a later arm** (not built). Compact-Bench (arXiv 2610.31710) scores a
     compactor's summary on histories of 13 to 53 KB: it does not fit. LongMemEval (arXiv
     2410.10813, ICLR 2025, MIT): 500 questions, S variant about 115,000 tokens per history (below

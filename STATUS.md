@@ -76,9 +76,10 @@ Claude Code compacting on its own near the bound. Guide: `docs/bench.md`; decisi
 Claude Code was never run, and nobody outside could rerun the scoring. No model was called to build
 it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
 
-- Merged: #255 (script generator, statistics, `--script-only`) and #262 (scale harness). Open, near
-  merge: #264 (`--report`, `--chart`, cost at published prices), #269 (`--replay`) and #273 (the
-  live runner, `--dry-run`). The benchmark is not in a release yet (D67: releases are batched).
+- Merged into `main`: #255 (script generator, statistics, `--script-only`) as f826c464, #262 (scale
+  harness) as c46de5b4, #264 (`--report`, `--chart`, cost at published prices) as 6e4e6b12, #273
+  (the live runner, `--dry-run`) as 66336669 and #269 (`--replay`) as c476834f; docs in #282. The
+  benchmark is not in a release yet (D67: releases are batched).
 - Protocols: `d27`, the 54 probes of runs #3 and #4, byte-identical to the spike's script; `v2`
   (default), 72 probes, adding 18 whose questions name no key (`paraphrase`, `concluded`,
   `toolloop`). Seed 20261016 at bound 150,000: `v2` is 34 turns and 467,012 estimated tokens, 3.09
@@ -86,11 +87,17 @@ it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
 - Verdict rule: a direction is named only when the pooled difference is significant (Tango interval
   excludes 0 and exact McNemar p < 0.05) and the seed-level sign-flip p < 0.05, both the same way.
   Fewer than 6 seeds cannot reach 0.05 (2 / 2^5 = 0.0625).
+- Scoring: exact match, three deliberate differences from the spike's: an unanswered probe is never
+  correct; answer lines in markdown are read; a blockquote line is never read, and a fenced line
+  yields to an answer for the same id outside any fence.
 - Replay, keyless (`contexto bench --replay`), pinned session of 952,971 estimated tokens (6.35
-  times the bound): 138 requests, largest 116,278 estimated tokens, 0 over the bound, 14 rotations,
-  47 pages, no failure event, no compaction marker. Search reach under mechanical queries: 48 of
-  72 by the fixed rule (54 with facts still in view), 60 by the best query from the question's
-  words. It cannot show accuracy or cache reads.
+  times the bound; head 21,306): 138 requests, the first 44,302 estimated tokens and the largest
+  116,306, 0 over the bound, 14 rotations, 47 pages, no failure event, no compaction marker.
+  Search reach under mechanical queries, by the store's strict search: 48 of 72 by the fixed rule
+  (54 with facts still in view), 60 by the best query from the question's words; the search tool's
+  D65 fallback also answers 1 of the 18 the strict rule misses (`q_r_02`). Modelled, not run: full
+  context's last request 977,410; plain Claude Code 8 compactions, largest request 140,441. It
+  cannot show accuracy or cache reads. Chart: `docs/bench/request-size-synthetic.svg`.
 - Plain arm: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` = bound + 33,000 (183,000 at 150,000); the 33,000
   was read in the Claude Code 2.1.322 bundle, not documented, not confirmed live. Stub runs with
   the real 2.1.322 compacted at `pre_tokens` 147,140 to 168,178.
@@ -640,19 +647,25 @@ PR #250 (D61, v0.5.24) fixed the low findings the fix round's reviews left:
 
 Still open:
 
-- Found by D66's scale harness, not fixed: on Linux each proxy response on a kept-open connection
-  waits about 41 ms for a delayed ACK, because the proxy leaves Nagle on and writes headers and
-  chunks separately (CI: 41.3 to 41.5 ms for a 104-byte request; 0.6 to 1.5 ms with Nagle off in a
-  harness-only experiment; macOS has no wait). Whether a real streamed response waits per chunk was
-  not tested [inferred: Claude Code users on Linux see it on each request].
-- Found by D66's scale harness, not fixed: the proxy opens a new upstream connection for every
-  request (914 in one short run); on an HTTPS upstream each also pays a TCP connect, a TLS handshake
-  and about 2.5 ms to build the SSL context (the handshake cost not measured).
-- D66 follow-ups: merge #264, #269 and #273; then generate the replay's request-size chart for
-  `docs/bench.md` and the README; the owner's minimum live run (above, under "Benchmark (D66)"),
-  which would also confirm the plain arm's 33,000-token reserve live; the scale harness's review
-  lows (its 30 s port pool is shared across burst threads; the `TCP_NODELAY` test passes without
-  the driver's line; a docstring and a README sentence on the Linux wait).
+- Found by D66's scale harness, not fixed
+  ([#284](https://github.com/VentureForgre/contexto/issues/284)): on Linux each proxy response on a
+  kept-open connection waits about 41 ms for a delayed ACK, because the proxy leaves Nagle on and
+  writes headers and chunks separately (CI: 41.3 to 41.5 ms for a 104-byte request; 0.6 to 1.5 ms
+  with Nagle off in a harness-only experiment; macOS has no wait). Whether a real streamed response
+  waits per chunk was not tested [inferred: Claude Code users on Linux see it on each request].
+- Found by D66's scale harness, not fixed
+  ([#285](https://github.com/VentureForgre/contexto/issues/285)): the proxy opens a new upstream
+  connection for every request (914 in one short run); on an HTTPS upstream each also pays a TCP
+  connect, a TLS handshake and about 2.5 ms to build the SSL context (the handshake cost not
+  measured).
+- D66 follow-ups: a code pull request in progress for the reviewers' remaining lows: notes on the
+  request-size chart (Contexto's drops are rotations, not compactions; the full-context line
+  squeezes the y axis); a reach column on the `contexto_search` tool's own reply; report wording
+  nits; the scale harness's lows (its 30 s port pool is shared across burst threads; the
+  `TCP_NODELAY` test passes without the driver's line; a docstring and a README sentence on the
+  Linux wait); a test that runs the real `claude --version` with the user's `HOME`, to be isolated.
+  Also the owner's minimum live run (above, under "Benchmark (D66)"), which would also confirm the
+  plain arm's 33,000-token reserve live.
 - A head denser than the 3.5 text seed is estimated low until the first usage, on Codex and Claude
   alike, so tool-loop requests can still go over the bound unflagged when no response carries an
   input count (12 of 32 synthetic Codex sessions in D61's measurement, 445 requests in reviewer A's).
