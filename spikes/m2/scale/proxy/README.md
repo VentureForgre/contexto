@@ -660,6 +660,11 @@ was found later by Reviewer B: local ports ran out (see "Connections" below). A 
 exits now puts the end of its log in the error, and a run that raises prints the step it was in
 and what it had measured.
 
+On the final code of fix round 1 (2026-11-13) the three test files ran 20 times in a row: 20 of
+20 passed, each in 12.4 to 14.1 s, at loads of 5.7 to 8.0 (median 11.0 to 15.0 ms, p95 17.3 to
+22.5 ms, growth 15.1 to 19.5 ms per million tokens, startup 49.6 to 70.3 ms, peak RSS 51.0 to 56.9
+MB, 273 to 444 req/s).
+
 The spread of the first 39 measured runs (smallest, median, largest), from `short.py --spread`:
 added time median 31.7, 43.3, 79.2 ms; p95 50.3, 127.3, 388.2 ms; growth 20.4, 55.5, 164.6 ms per
 million tokens; startup 133, 336, 1,049 ms; peak RSS 51.6, 55.5, 62.8 MB; RSS growth 6.4, 9.9,
@@ -707,11 +712,12 @@ What changed, in the harness only:
 - `test_the_driver_keeps_its_connections_open` checks the counts on every run (103 driver
   connections, and one upstream connection per forwarded request and direct send).
 
-After the change, twelve copies at once and then twelve more as soon as they ended: 24 of 24
-passed, none with EADDRNOTAVAIL, at loads of 12 to 24. The machine's TIME_WAIT count peaked at
-26,046, more than the 16,384 local ports, which shows that the sockets on the fake upstream's
-listening port do not use them up. The copies' added time was 21.4 to 24.3 ms (median), p95 59.9 to
-78.4 ms, growth 27.8 to 34.9 ms per million tokens.
+After the change, twelve copies at once and then twelve more as soon as they ended, done twice
+(the second time on the final code, with the 104-byte sends): 24 of 24 passed each time, none with
+EADDRNOTAVAIL, at loads of 9 to 24. The machine's TIME_WAIT count peaked at 26,046 and 26,365,
+more than the 16,384 local ports, which shows that the sockets on the fake upstream's listening
+port do not use them up. The copies' added time was 17.4 to 24.3 ms (median), p95 31.6 to 78.4 ms,
+growth 22.7 to 34.9 ms per million tokens.
 
 Other test files on this machine have failed with the same error under load
 (`tests/test_launcher.py`). [Inference] The old harness plausibly contributed: each whole-suite run
