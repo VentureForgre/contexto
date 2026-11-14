@@ -17,7 +17,7 @@ import json
 import sys
 from collections.abc import Iterator
 
-from contexto.commands._common import EXIT_OK, add_session_option, fail, say_session
+from contexto.commands._common import EXIT_OK, add_session_option, fail, safe_text, say_session
 from contexto.paths import contexto_home
 from contexto.store import PageUnreadableError, SessionNotFoundError, SessionStore
 from contexto.store.pages import current_stub, index_line
@@ -62,8 +62,8 @@ def register(subparsers) -> None:
     parser.add_argument("--project", action="store_true",
                         help=f"also search the earlier sessions of the session's project (the newest "
                              f"{EARLIER_SESSIONS}), read-only: the best {EARLIER_HITS} matches of each, under a "
-                             "line with the session's label and date, lines in view at its last request first; "
-                             "`contexto recall PAGE_ID --from LABEL` prints a page")
+                             "line with the session's label and date, lines in view at its last request first, "
+                             "control characters as escapes; `contexto recall PAGE_ID --from LABEL` prints a page")
     parser.set_defaults(func=run)
 
 
@@ -135,7 +135,10 @@ def search_earlier(store: SessionStore, query: str, after_hits: bool) -> None:
     """Print what the earlier sessions of the session's project hold of ``query`` (D69): for each with a
     match, newest first, a line with its label and date as the MCP tool shows them, then its lines in
     view at its last request and its best pages. Those sessions are only read: nothing is locked, logged
-    or created in them."""
+    or created in them. Their text is any text (tool output and web pages included), so each line is
+    printed through ``safe_text``: a terminal control, a direction override or a line separator in it
+    is shown as its escape and cannot forge a line or act on the terminal (review B on D69, finding 2).
+    The session's own hits are printed as they were before D69."""
     session_id = store.session_id
     found = store.search_earlier(query)
     if found is None:
@@ -148,13 +151,14 @@ def search_earlier(store: SessionStore, query: str, after_hits: bool) -> None:
         count, total = len(hits.pages) + len(hits.in_view), hits.found + hits.in_view_found
         best = "" if total <= count else (f", the best {count} of {total} matches" if hits.in_view_found
                                           else f", the best {count} of {total} matching pages")
-        print(f"[session {hits.label}, {hits.date}{best}:]")
+        print(safe_text(f"[session {hits.label}, {hits.date}{best}:]"))
         for line in hits.in_view:
-            print(f"> in view at its last request (turn {shown_turn(line)}, {line.shown_role}): {line.line}")
+            print(safe_text(f"> in view at its last request (turn {shown_turn(line)}, {line.shown_role}): "
+                            f"{line.line}"))
         if hits.pages:
             if hits.in_view:
                 print()
-            print("\n\n".join("\n".join(hit_lines(page_id, page, query, session_id, hits.label))
+            print("\n\n".join("\n".join(map(safe_text, hit_lines(page_id, page, query, session_id, hits.label)))
                               for page_id, page in hits.pages))
         after_hits = True
     if not found.hits:
