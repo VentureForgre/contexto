@@ -112,10 +112,10 @@ def test_the_size_limit_of_direct_url_json_is_65536_characters(installed, fill, 
 
 def test_version_goes_to_stderr_when_stdout_is_closed(installed, capsys, monkeypatch):
     installed(vcs(commit_id=COMMIT))
-    monkeypatch.setattr(sys, "stdout", None)
-    with pytest.raises(SystemExit) as exc:
+    # Scoped, so that only this patch is undone: `installed` patched the metadata lookup.
+    with monkeypatch.context() as m, pytest.raises(SystemExit) as exc:
+        m.setattr(sys, "stdout", None)
         cli.main(["--version"])
-    monkeypatch.undo()
     assert exc.value.code == 0
     assert capsys.readouterr().err == f"{PLAIN} (git commit d38e87d2)\n"
 
