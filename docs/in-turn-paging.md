@@ -150,9 +150,12 @@ The model's newest thinking was removed only on the batch requests themselves, 1
 
 How much a batch costs in cache depends on what the API still reads back. The cache keeps a prefix
 only at a `cache_control` mark; Claude Code marks its system prompt and the newest message, so after a
-batch only the system prompt and tools are read back and the messages are sent again. In the
-120-round replay the 11 batches re-sent 259,787 tokens that way, about a third of the loop's own
-803,268 and 2.9% of all input tokens. Each batch pages deep (a quarter of the way up to the line, not
+batch only the system prompt and tools are read back and the messages are sent again. The 120-round
+replay measures that two ways. Counted request by request, the 11 batch requests sent 259,798 tokens
+uncached beyond their new results (23,618 a batch on average): 2.9% of the 9,072,693 input tokens of
+the whole replay. Under the replay harness's cache model, where a prefix is kept only at a
+`cache_control` mark, the loop re-sent 331,232 tokens in all, which is 0.41 of its cost ceiling: the
+larger of the bound and the loop's own 803,477 tokens. Each batch pages deep (a quarter of the way up to the line, not
 halfway) because that cost is the request's size after the batch: halfway re-sent about 60% more,
 with two more batches. Contexto does not rewrite the prefix on two requests in a row unless the second would
 leave less than 12,000 tokens of room, and not at all for less than 12,000 tokens.

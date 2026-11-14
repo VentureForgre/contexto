@@ -3768,13 +3768,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
 
   | Scenario | `over_bound` before (estimate / real) | Largest before | `over_bound` after | Largest after | In-loop rewrites (allowed) | Cache invalidated per rewrite, mean / largest | Re-sent per rewrite, mean / largest | Re-sent share of all input | Share of the ceiling | Requests with any of the turn's thinking missing / newest thinking missing | Smallest room, request / response | Search and recall late in the loop |
   |---|---|---|---|---|---|---|---|---|---|---|---|---|
-  | loop120 | 104 / 104 | 812,479 | 0 / 0 | 108,417 | 11 (34.1) | 72,176 / 92,573 | 23,617 / 37,745 | 2.9% | 0.41 | 110 / 11 of 125 | 15,093 / 16,405 | 2 of 2 paged, 2 of 2 returned |
-  | large | 9 / 9 | 406,486 | 0 / 0 | 86,910 | 0 | none | none | 0% | none | 0 / 0 of 15 | 33,703 / 37,796 | 1 of 1 in view |
-  | small, 1,500 rounds | 1,274 / 1,274 | 891,553 | 0 / 0 | 109,703 | 10 (37.8) | 93,880 / 94,602 | 9,157 / 24,578 | 0.1% | 0.12 | 1,343 / 10 of 1,505 | 15,167 / 15,149 | 2 of 2, 2 of 2 |
-  | subagent | 128 / 128 | 796,856 | 0 / 0 | 108,321 | 11 (33.6) | 71,145 / 93,869 | 29,335 / 47,128 | 2.2% | 0.48 | 136 / 11 of 214 | main 27,053; subagent side rooms / 16,501 | 2 of 2, 2 of 2 (subagent) |
-  | images | 71 / 71 | 401,800 | 0 / 0 | 107,355 | 5 (17.6) | 72,541 / 85,901 | 27,152 / 37,567 | 1.8% | 0.39 | 82 / 5 of 105 | 17,282 / 17,465 | 2 of 2, 2 of 2 |
-  | multiturn | 81 / 81 | 551,852 | 0 / 0 | 107,441 | 7 (23.2) | 74,320 / 90,069 | 23,223 / 33,348 | 2.0% | 0.37 | 89 / 7 of 120 | 16,387 / 17,369 | 2 of 2, 2 of 2 |
-  | mixed | 25 / 25 | 259,321 | 0 / 0 | 108,128 | 3 (11.9) | 82,470 / 92,172 | 20,169 / 25,220 | 1.8% | 0.31 | 32 / 3 of 50 | 15,919 / 16,694 | 2 of 2, 2 of 2 |
+  | loop120 | 104 / 104 | 812,479 | 0 / 0 | 108,417 | 11 (34.1) | 72,176 / 92,573 | 23,618 / 37,749 | 2.9% | 0.41 | 110 / 11 of 125 | 15,093 / 16,405 | 2 of 2 paged, 2 of 2 returned |
+  | large | 9 / 9 | 406,486 | 0 / 0 | 86,909 | 0 | none | none | 0% | none | 0 / 0 of 15 | 33,703 / 37,797 | 1 of 1 in view |
+  | small, 1,500 rounds | 1,274 / 1,274 | 891,553 | 0 / 0 | 109,720 | 10 (37.8) | 93,877 / 94,619 | 9,238 / 25,100 | 0.1% | 0.12 | 1,343 / 10 of 1,505 | 15,149 / 15,132 | 2 of 2, 2 of 2 |
+  | subagent | 128 / 128 | 796,856 | 0 / 0 | 108,323 | 11 (33.6) | 71,146 / 93,869 | 29,336 / 47,132 | 2.2% | 0.48 | 136 / 11 of 214 | main 27,053; subagent side rooms / 16,499 | 2 of 2, 2 of 2 (subagent) |
+  | images | 71 / 71 | 401,800 | 0 / 0 | 107,357 | 5 (17.6) | 72,542 / 85,901 | 27,153 / 37,569 | 1.8% | 0.39 | 82 / 5 of 105 | 17,280 / 17,463 | 2 of 2, 2 of 2 |
+  | multiturn | 81 / 81 | 551,852 | 0 / 0 | 107,443 | 7 (23.2) | 74,320 / 90,069 | 23,224 / 33,350 | 2.0% | 0.37 | 89 / 7 of 120 | 16,385 / 17,367 | 2 of 2, 2 of 2 |
+  | mixed | 25 / 25 | 259,321 | 0 / 0 | 108,128 | 3 (11.9) | 82,471 / 92,172 | 20,172 / 25,225 | 1.8% | 0.31 | 32 / 3 of 50 | 15,919 / 16,694 | 2 of 2, 2 of 2 |
 
   Every Claude scenario meets every target of the harness (`targets.unmet` empty): no violation at
   its upstream, every stub's and note's chain leading to the original byte for byte, every result
@@ -3783,9 +3783,9 @@ the owner's delegation. Open decisions are listed at the end with the options an
   (`subagent`), under the 0.8 margin a reviewer's folding engine missed (0.89 there at a 66,000
   target). Reviewer B's two cases, full size, through `tests/inturn_harness.py`'s upstream (3.2
   bytes a token) with the harness's rules applied by hand (`d63_measure.py --cases`): a 92,184-token
-  head at bound 150,000 with 20 KB results for 400 rounds: 0 `over_bound`, largest 116,248 (the
+  head at bound 150,000 with 20 KB results for 400 rounds: 0 `over_bound`, largest 116,247 (the
   tight bound's line), 133 rewrites against the head-scaled allowance of 286 (2 + 2,955,564 /
-  10,408), share of the ceiling 0.38, smallest room 8,762 (tight bound, `turn_room_low` once). A
+  10,408), share of the ceiling 0.38, smallest room 8,763 (tight bound, `turn_room_low` once). A
   10-page PDF in every result for 1,000 rounds: 0 `over_bound`, largest 112,572, 997 rewrites
   (allowance 1,834), share of the ceiling 1.30. That one is over the ceiling, and no engine that
   keeps the bound can meet it there: a round is 45,799 tokens (the PDF by rule 3's page estimate),
