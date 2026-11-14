@@ -309,6 +309,10 @@ All under `$CONTEXTO_HOME`, all mode 0600:
 | `serve.log`, `serve.log.1` | The service log: JSON lines with event names, reasons, counts, request paths without the token, and status codes. Never header values, request or response bodies, the token, or the upstream URL. At 5 MB `serve.log` is renamed to `serve.log.1`, replacing the last one. |
 | `sessions/<id>/` | One session store per conversation, the same files as under `contexto run`. |
 
+A session's own `log.jsonl` also gets a `serve_open` line each time the service opens the session
+and a `serve_close` line when it closes it; see
+[Service events](events.md#service-events).
+
 ## Connections before the token check
 
 Everything the service answers before a request has passed its checks is one 403, byte for byte:

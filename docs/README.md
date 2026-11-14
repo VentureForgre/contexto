@@ -21,6 +21,8 @@ install it and how to start it.
   setup, checks, and what was tested.
 - [sessions.md](sessions.md): how to tell that Contexto is working, what a session stores and
   where, and the commands that inspect and remove sessions.
+- [events.md](events.md): every event in a session's `log.jsonl`: who writes it, where it appears,
+  what it means, and its fields.
 - [stats.md](stats.md): the summary `contexto run` prints at exit and `contexto stats`: every
   number defined, which are measured and which estimated, and what counts as a fault.
 - [statusline.md](statusline.md): Contexto's numbers in Claude Code's status line, when Contexto adds
