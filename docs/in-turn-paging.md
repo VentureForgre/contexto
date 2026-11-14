@@ -97,7 +97,7 @@ turn has. Each fold rewrites it:
 [Contexto folded 52 earlier tool rounds of this turn into page pg_8e04b6d1c57a9f30 to keep the request under its bound. They are stored in page pg_8e04b6d1c57a9f30.
 tools: Grep x40, Read x12
 calls: Grep pattern: TODO (in src/a.py); Grep pattern: TODO (in src/b.py); Read file_path: src/c.py; ...; and 12 more calls
-call ids: toolu_01Ab... toolu_01Cd... (each call of this fold)
+call ids: toolu_01Ab... toolu_01Cd...; and 9 more, in the same page
 was: 48,224 bytes
 earlier folds of this turn: rounds 1 to 160 in 4 pages listed in page pg_51c0e2a9d8b74f13 (ids: ...); rounds 161 to 212 in pg_2b7d... (ids: ...)
 If you have the contexto_recall tool, call it with a page_id named here to read them (pass the next offset to continue; a page is long); contexto_search finds lines in them. Without it, run the calls again.]
@@ -105,11 +105,13 @@ If you have the contexto_recall tool, call it with a page_id named here to read 
 
 The newest fold is described in full: the `calls:` line lists its first 40 calls (at most 1,600
 characters), each with what it ran or read, so a conversation without Contexto's tools can run them
-again. Earlier folds are listed by their rounds and page. When the note would pass about 2,000
-tokens, the earlier folds' own notes go into one page (listed in the index as nothing; search and
-recall reach it) and the note names that page instead. Every folded call's id stays in the note, so
-the request itself says which page holds each result; that list grows by about 31 bytes per folded
-call.
+again. Earlier folds are listed by their rounds and page. The note is never more than 6,000 bytes
+(about 2,000 tokens), call ids included: it lists the ids of the newest folds only, and each page it
+names holds, or leads to, every result of the rounds it stands for. When the note would pass that
+size, the earlier folds' own notes, each with every call id and its page, go into one folds page
+(not listed in the index; search and recall reach it) and the note names that page instead. The
+note then grows again by one short item a fold until the next folds page, so over 2,000 folded rounds
+it stays under 6,000 bytes.
 
 ## Reading a result back
 

@@ -7,11 +7,16 @@ own batch figures and the proof that paging off changes nothing.
     uv run python spikes/m2/inturn/d63_measure.py            # one JSON line per scenario, paging off and on
     uv run python spikes/m2/inturn/d63_measure.py --digest   # a hash of every forwarded body, paging off
     uv run python spikes/m2/inturn/d63_measure.py --replay   # the PR table, from the replay harness (#268)
+    uv run --with pytest python spikes/m2/inturn/d63_measure.py --cases   # the large head and the PDFs
 
 ``--replay`` runs the replay harness's seven Claude Code scenarios (``small`` at 1,500 rounds) through the
 real engine and prints one JSON line each with the numbers D63's table gives, two of which the harness
 does not report: the largest cost of one rewrite, and the requests sent with any thinking of the running
 turn missing (the harness counts only those whose newest response lost its thinking).
+
+``--cases`` runs Reviewer B's two cases the replay harness cannot script, a 92,000-token head (400
+rounds of 20 KB) and a 10-page PDF in every result (1,000 rounds), through ``tests/inturn_harness.py``,
+and applies the harness's rewrite allowance and breakpoint cost ceiling to them by hand.
 
 ``--digest`` runs on any checkout from v0.5.24 on (it never names the new setting when the engine has
 none), so the same command with ``PYTHONPATH`` at a v0.5.24 ``src`` and at this one shows whether paging

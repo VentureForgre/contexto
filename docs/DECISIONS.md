@@ -3600,7 +3600,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
   headroom_floor - min_turn_room / 4` instead of the line, and a new result is shown once if it fits
   there by the session's ratio; the room on such requests may be under `min_turn_room`, logged
   once per turn as `turn_room_low` with `reason: "in_turn_small_bound"`. Before (Reviewer B, finding
-  3) bound 60,000 with a 20,000-token head stubbed 60 of 60 results unread.
+  3) bound 60,000 with a 20,000-token head stubbed 60 of 60 results unread. What the engine adds that
+  no batch can page counts with the head here: D69's carried records while `k = 0`, the preamble
+  after the first rotation. Before (merging D69): a bound too small for the carried records was not
+  seen as tight, so with records carried it logged no `turn_room_low` where the same session whose
+  head alone did not fit did (`tests/test_project_start_bound.py`).
   (b) The room at response time. The line is `T` less a quarter of `min_turn_room` (3,000), an
   allowance for the output: an output of up to 9,000 tokens still leaves half of `min_turn_room`.
   (c) The estimate of a result that has just arrived. For the trigger and every decision of a
@@ -3639,14 +3643,21 @@ the owner's delegation. Open decisions are listed at the end with the options an
   and order, with nothing to merge. A round with nested memory (D46) is not folded either, and a
   carried system message in a folded round stays in place. Before (A2): an instruction typed after
   Esc in round 5 of 150 left the request at the first fold.
-  (h) One fold note per turn (B1). The turn-start message carries one note, rebuilt at each fold:
-  the newest fold in detail (rounds, tools, the first 40 calls with what each ran or read, its
-  size, its page), then each earlier fold as its round numbers, page and call ids; when the note
-  without its ids would pass 6,000 bytes (about 2,000 tokens), the earlier folds' own notes are
-  written to a folds page (kind `folds`, byte-exact and searchable) and the note names that page
-  instead of each of them. Every folded call's id is in the note, so a reader of the request alone
-  can tell which page leads to each result; the ids are the one part that grows, about 31 bytes a
-  folded call. A note is built only when a fold is added. Before: one note per fold piled up (82
+  (h) One fold note per turn (B1), at most 6,000 bytes (about 2,000 tokens) with its call ids. The
+  turn-start message carries one note, rebuilt at each fold: the newest fold in detail (rounds,
+  tools, the first 40 calls with what each ran or read, its size, its page), then each earlier fold
+  as its round numbers and page. Call ids are listed within 1,200 bytes, the newest fold's first and
+  then the folds just before it, each whole or not at all; an older fold is named by its rounds page
+  alone, a reference to the page as a whole that covers every call reachable from it. When the note
+  would pass 6,000 bytes, a folds page (kind `folds`, byte-exact and searchable) takes every fold but
+  the newest, each as its own note with every call id and its rounds page, and the note names that
+  page instead of each of them; when the note fills again, a new folds page takes them all again,
+  so a result is always within three pages of the note (folds page, rounds page, its result page).
+  The orchestrator's decision: before it, every folded call's id stayed in the note, about 31 bytes
+  a folded call, the one part that grew. Measured over 2,000 folded rounds (334 folds): the note
+  peaks at 5,996 bytes in every cycle, three folds pages of 77, 150 and 221 KB beside 1.66 MB of
+  rounds pages, and every folded result reachable from the note (`tests/test_inturn.py`). A note
+  is built only when a fold is added. Before: one note per fold piled up (82
   notes, 31,478 bytes after 400 rounds with a 92,000-token head), and past 256 folds every note
   was rebuilt on every request.
   (i) Documents. A result holding a document is stubbed once the model has seen it; the page keeps
@@ -3708,41 +3719,52 @@ the owner's delegation. Open decisions are listed at the end with the options an
   lists the 24 result pages too, and it reads the record as no record (`epoch_not_resumed`,
   `no_record`), since its store refuses an unknown field; a record without `in_turn` would be
   `settings_changed`. Either way a downgrade starts from epoch 0.
-  **Measured** (zero spend). The replay harness of PR #268 at `claude/d63-replay-harness` 0e41361c
+  **Measured** (zero spend). The replay harness of PR #268 at `claude/d63-replay-harness` 9fe691ef
   (`spikes/m2/inturn/`): the real engine, a real `SessionStore`, the Claude Code dialect, bound
   150,000, `check_wire` on, its upstream counting tool output at 2.2 bytes a token and other text
-  at 3.1, with a breakpoint cache model. Before is v0.5.24 (`docs/research/M2-in-turn-paging-
-  baseline.md`); after is `spikes/m2/inturn/d63_measure.py --replay` (`small` at 1,500 rounds).
-  "Re-sent" is the harness's breakpoint count: what a rewrite sends again beyond what the cache
-  reads back.
+  at 3.1, with a breakpoint cache model. Before is this branch with `in_turn_paging` off (main's
+  engine; 178 tokens a request above `docs/research/M2-in-turn-paging-baseline.md`'s v0.5.24, from
+  the tool text D65, D69 and D63 added); after is `spikes/m2/inturn/d63_measure.py --replay`
+  (`small` at 1,500 rounds). "Re-sent" is the harness's breakpoint count: what a rewrite sends again
+  beyond what the cache reads back. "Share of the ceiling" is a loop's re-sent tokens over its cost
+  ceiling, max(the loop's own tokens, bound).
 
-  | Scenario | `over_bound` before (estimate / real) | Largest before | `over_bound` after | Largest after | In-loop rewrites (allowed) | Cache invalidated per rewrite, mean / largest | Re-sent per rewrite, mean / largest | Re-sent share of all input | Requests with any of the turn's thinking missing / newest thinking missing | Smallest room, request / response | Search and recall late in the loop |
-  |---|---|---|---|---|---|---|---|---|---|---|---|
-  | loop120 | 104 / 104 | 812,301 | 0 / 0 | 108,417 | 11 (34.1) | 72,176 / 92,573 | 23,617 / 37,745 | 2.9% | 110 / 11 of 125 | 15,093 / 16,405 | 2 of 2 paged, 2 of 2 returned |
-  | large | 9 / 9 | 406,397 | 0 / 0 | 86,910 | 0 | none | none | 0% | 0 / 0 of 15 | 33,703 / 37,796 | 1 of 1 in view |
-  | small, 1,500 rounds | 1,274 / 1,274 | 891,375 | 0 / 0 | 109,854 | 11 (38.2) | 94,474 / 94,753 | 16,561 / 28,788 | 0.2% | 1,343 / 11 of 1,505 | 15,017 / 14,998 | 2 of 2, 2 of 2 |
-  | subagent | 128 / 128 | 796,678 | 0 / 0 | 108,321 | 11 (33.6) | 71,145 / 93,869 | 29,335 / 47,128 | 2.2% | 136 / 11 of 214 | main 27,053; subagent side rooms / 16,501 | 2 of 2, 2 of 2 (subagent) |
-  | images | 71 / 71 | 401,622 | 0 / 0 | 107,355 | 5 (17.6) | 72,541 / 85,901 | 27,152 / 37,567 | 1.8% | 82 / 5 of 105 | 17,282 / 17,465 | 2 of 2, 2 of 2 |
-  | multiturn | 81 / 81 | 551,674 | 0 / 0 | 107,441 | 7 (23.2) | 74,320 / 90,069 | 23,223 / 33,348 | 2.0% | 89 / 7 of 120 | 16,387 / 17,369 | 2 of 2, 2 of 2 |
-  | mixed | 25 / 25 | 259,143 | 0 / 0 | 108,128 | 3 (11.9) | 82,470 / 92,172 | 20,169 / 25,220 | 1.8% | 32 / 3 of 50 | 15,919 / 16,694 | 2 of 2, 2 of 2 |
+  | Scenario | `over_bound` before (estimate / real) | Largest before | `over_bound` after | Largest after | In-loop rewrites (allowed) | Cache invalidated per rewrite, mean / largest | Re-sent per rewrite, mean / largest | Re-sent share of all input | Share of the ceiling | Requests with any of the turn's thinking missing / newest thinking missing | Smallest room, request / response | Search and recall late in the loop |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | loop120 | 104 / 104 | 812,479 | 0 / 0 | 108,417 | 11 (34.1) | 72,176 / 92,573 | 23,617 / 37,745 | 2.9% | 0.41 | 110 / 11 of 125 | 15,093 / 16,405 | 2 of 2 paged, 2 of 2 returned |
+  | large | 9 / 9 | 406,486 | 0 / 0 | 86,910 | 0 | none | none | 0% | none | 0 / 0 of 15 | 33,703 / 37,796 | 1 of 1 in view |
+  | small, 1,500 rounds | 1,274 / 1,274 | 891,553 | 0 / 0 | 109,703 | 10 (37.8) | 93,880 / 94,602 | 9,157 / 24,578 | 0.1% | 0.12 | 1,343 / 10 of 1,505 | 15,167 / 15,149 | 2 of 2, 2 of 2 |
+  | subagent | 128 / 128 | 796,856 | 0 / 0 | 108,321 | 11 (33.6) | 71,145 / 93,869 | 29,335 / 47,128 | 2.2% | 0.48 | 136 / 11 of 214 | main 27,053; subagent side rooms / 16,501 | 2 of 2, 2 of 2 (subagent) |
+  | images | 71 / 71 | 401,800 | 0 / 0 | 107,355 | 5 (17.6) | 72,541 / 85,901 | 27,152 / 37,567 | 1.8% | 0.39 | 82 / 5 of 105 | 17,282 / 17,465 | 2 of 2, 2 of 2 |
+  | multiturn | 81 / 81 | 551,852 | 0 / 0 | 107,441 | 7 (23.2) | 74,320 / 90,069 | 23,223 / 33,348 | 2.0% | 0.37 | 89 / 7 of 120 | 16,387 / 17,369 | 2 of 2, 2 of 2 |
+  | mixed | 25 / 25 | 259,321 | 0 / 0 | 108,128 | 3 (11.9) | 82,470 / 92,172 | 20,169 / 25,220 | 1.8% | 0.31 | 32 / 3 of 50 | 15,919 / 16,694 | 2 of 2, 2 of 2 |
 
   Every Claude scenario meets every target of the harness (`targets.unmet` empty): no violation at
   its upstream, every stub's and note's chain leading to the original byte for byte, every result
   of the running turn whole or named in each request, the cost ceiling per loop, truthful rooms.
-  Codex is unchanged (its targets stay `xfail`). Reviewer B's two cases, full size, with
-  `tests/inturn_harness.py`'s upstream (3.2 bytes a token): a 92,000-token head at bound 150,000
-  with 20 KB results for 400 rounds: 0 `over_bound`, largest 113,744, 0 results stubbed unread,
-  one note of 631 bytes plus ids (a folds page lists 132 earlier folds), smallest late room 11,266
-  (tight bound, `turn_room_low` once), but 133 rewrites where the harness's allowance would be about
-  105: the space between that head and the line is less than `bound / 6`, so while every result is
-  read once the allowance cannot be met there. A 10-page PDF in every result for 1,000 rounds:
-  0 `over_bound`, largest 112,543, 0 unread stubs, one note of 2,957 bytes, 997 rewrites (each
-  stubs the previous PDF, about 45,000 tokens by rule 3's page estimate; allowance about 1,800).
-  Engine time per request in the large-head loop at rounds 350 to 400: 35.4 ms with paging, 47.2 ms
-  with it off (the history is longer), so it does not grow with the number of folds. With
-  `in_turn_paging` off, every forwarded message list and every event of four scenarios
-  (`d63_measure.py --digest`) hash the same on this branch and on the v0.5.24 code (measured at
-  51b6b7d2; the off path is unchanged since).
+  Codex is unchanged (its targets stay `xfail`). The largest share of the ceiling is 0.48
+  (`subagent`), under the 0.8 margin a reviewer's folding engine missed (0.89 there at a 66,000
+  target). Reviewer B's two cases, full size, through `tests/inturn_harness.py`'s upstream (3.2
+  bytes a token) with the harness's rules applied by hand (`d63_measure.py --cases`): a 92,184-token
+  head at bound 150,000 with 20 KB results for 400 rounds: 0 `over_bound`, largest 116,248 (the
+  tight bound's line), 133 rewrites against the head-scaled allowance of 286 (2 + 2,955,564 /
+  10,408), share of the ceiling 0.38, smallest room 8,762 (tight bound, `turn_room_low` once). A
+  10-page PDF in every result for 1,000 rounds: 0 `over_bound`, largest 112,572, 997 rewrites
+  (allowance 1,834), share of the ceiling 1.30. That one is over the ceiling, and no engine that
+  keeps the bound can meet it there: a round is 45,799 tokens (the PDF by rule 3's page estimate),
+  and two whole ones beside the 20,184-token head come to 111,782, over the page line of 110,000,
+  so every request has to stub the PDF before it and rewrites. The breakpoint model then re-sends
+  everything after the head, the new round included, so the floor is about one ceiling (the loop's
+  own tokens); the 0.30 above it is the earlier rounds' stubs and the note, about 14,100 tokens a
+  request. Folding those stubbed rounds at every rewrite would bring it toward 1.0, not under 0.8,
+  and would change every other scenario's folds, so it is left as is. Engine time per request
+  (the scripted CLI, the engine and the fake upstream): 18.0 ms in the large-head loop, 13.7 ms
+  in the PDF loop; in a 2,000-round loop with a fold every 6 rounds it grows with the history, not
+  with the folds (a folded message builds no stub in the view). With `in_turn_paging` off, every
+  forwarded message list and every event of four scenarios (`d63_measure.py --digest`) hash the
+  same on this branch and on the v0.5.24 code (measured at 51b6b7d2; the off path is unchanged
+  since), and D69's twelve-turn script (`tests/test_project_start.py`) sends main's requests and
+  events byte for byte.
   **Existing tests changed**, each because it relied on a tool loop reaching the bound unpaged:
   `test_rewrite.py::test_no_rotation_inside_a_tool_loop_marks_over_bound` asserted the old rule 5
   and is now two tests (paged in place; sent as is with the switch off);

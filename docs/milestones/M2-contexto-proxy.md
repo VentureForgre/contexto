@@ -535,7 +535,9 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
      The count applies to the sum of the unread results of a request: never going over the bound
      outranks reading every result once. Measured: two parallel 100 KB reads of prose, 81,854 real
      tokens at bound 150,000, one stubbed unread (step 0 stubs only as many as needed, largest first).
-   - **Tight bound.** When `T - (head + the turn-start message) < 2 * min_turn_room`, the line is
+   - **Tight bound.** When `T - (head + fixed + the turn-start message) < 2 * min_turn_room`, where
+     `fixed` is what the engine adds that no batch can page (rule 19's carried records while `k = 0`,
+     the preamble after), the line is
      `bound - headroom_floor - min_turn_room / 4` for the trigger, the batch and step 0, a fresh
      result is tested at the session's ratio, and the room may fall under `min_turn_room`
      (`turn_room_low`, `reason: "in_turn_small_bound"`, once per turn).
@@ -576,10 +578,14 @@ emptied, only its form changes (one text block with `cache_control` becomes a pl
         own content, one note per turn however many folds, rebuilt at each fold: the newest fold
         in detail (how many rounds, which tools, the first 40 calls with what each ran or read
         within 1,600 characters, the rest counted, its call ids, its size in bytes, its page id),
-        then each earlier fold as its round numbers, page id and call ids. When the note without
-        its call ids would pass 6,000 bytes, the earlier folds' own notes are written to a folds
-        page (kind `folds`) and the note names it, with their call ids, instead of each. Every
-        folded call of the running turn is so named in the request. The page holds the rounds as sent (a stubbed result as its stub), except
+        then each earlier fold as its round numbers and page id. The note is at most 6,000 bytes,
+        call ids included: it lists ids within 1,200 bytes, the newest fold's first and then whole
+        folds before it, newest first, and names any other fold's rounds page as a whole, which
+        covers every call reachable from it. When the note would pass 6,000 bytes, every fold but
+        the newest is written to a folds page (kind `folds`) as its own note, with every call id
+        and its rounds page, and the note names that page instead of each; when it fills again, a
+        new folds page takes them all. Every folded call of the running turn is so reachable from
+        the request within three pages. The page holds the rounds as sent (a stubbed result as its stub), except
         that a result of Contexto's own tools, which has no page, is held whole.
         A note goes on the turn-start message only, never into a results message, where the API
         wants the `tool_result` blocks first. The turn-start message and the newest round always
