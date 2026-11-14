@@ -4,7 +4,9 @@ It reads ``manifest.json``, ``probes.jsonl`` and ``requests.jsonl`` from each di
 ``results.json``, ``results.md`` and the charts: all of them or none, so a report that fails
 leaves the files of an earlier report as they were. No calls are made. With one directory it
 writes into that directory unless ``--out`` is given; with several (one per model, or one run
-split across shells) it needs ``--out``. ``--prices FILE`` replaces the shipped price table.
+split across shells) it needs ``--out``. ``--prices FILE`` replaces the shipped price table; it
+belongs to this mode alone (``OWN_OPTIONS``), so without ``--report`` it is a usage error and not
+a live run.
 """
 
 from __future__ import annotations
@@ -13,9 +15,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from contexto.bench.modes import add_option
-
 FLAG = "--report"
+OWN_OPTIONS = ("--prices",)
 
 
 def add_arguments(parser) -> None:
@@ -23,7 +24,7 @@ def add_arguments(parser) -> None:
                         help="recompute results.json, results.md and the charts from the records in one or more "
                              "existing output directories, making no calls; several directories are reported per "
                              "model and need --out")
-    add_option(parser, "--prices", type=Path, default=None, metavar="FILE",
+    parser.add_argument("--prices", type=Path, default=None, metavar="FILE",
                help="a price table to use in place of the published prices shipped with contexto (the same JSON "
                     "shape as src/contexto/bench/data/prices.json)")
 
@@ -38,7 +39,7 @@ def run(args: argparse.Namespace) -> int:
         return 2
     out = Path(args.out) if args.out is not None else sources[0]
     try:
-        table = prices.load(args.prices) if getattr(args, "prices", None) is not None else None
+        table = prices.load(args.prices) if args.prices is not None else None
         results = report.write(out, sources=sources, prices=table)
     except (records.RecordError, report.ReportError, prices.PriceError, charts.ChartError) as exc:
         print(f"contexto bench: error: {exc}", file=sys.stderr)
