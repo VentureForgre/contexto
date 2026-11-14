@@ -23,6 +23,8 @@ install it and how to start it.
   paged out.
 - [mcp-tools.md](mcp-tools.md): the five MCP tools the model gets, how search ranks, and the recall
   budget.
+- [search.md](search.md): what a search query matches, the approximate matches search falls back to
+  when no turn holds every word, and its limits.
 - [faq.md](faq.md): subscription logins, API keys, cost, what is sent where, and continuing a
   session later.
 - [troubleshooting.md](troubleshooting.md): the warnings and errors you are most likely to see, each
