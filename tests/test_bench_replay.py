@@ -252,24 +252,76 @@ def test_instruction_words_come_from_the_generators_tables(small, pinned):
         return set(re.findall(r"[a-z0-9]+", text.casefold()))
 
     for script in (small, pinned):
-        by_class: dict[str, set[frozenset[str]]] = {}
+        by_class: dict[str, list[tuple[frozenset[str], set[str]]]] = {}
         for probe in (p for p in script.probes if p.cls in NEW_CLASSES):
             dropped = reach.instruction_words(probe)
             own = reach._table_part(probe.question)
             assert own is not None, probe.question  # every new question holds the text of its table row
-            assert {"answer", "only"} <= dropped <= tokens(probe.question) and not dropped & tokens(own)
-            if probe.cls != "concluded":
-                assert "earlier" in dropped
+            assert {"answer", "only", "earlier"} <= dropped <= tokens(probe.question) and not dropped & tokens(own)
             queries = reach.question_queries(probe)
             assert not any(set(re.split(r"[ -]", q)) & dropped for q in queries), probe.id
-            by_class.setdefault(probe.cls, set()).add(dropped)
+            by_class.setdefault(probe.cls, []).append((dropped, tokens(own)))
         # The wrapper is fixed per class: what one question drops is the class's wrapper less the tokens
-        # its own table text shares with it, so every set is part of the largest.
+        # its own table text shares with it.
         for found in by_class.values():
-            largest = max(found, key=len)
-            assert all(dropped <= largest for dropped in found)
+            wrapper = frozenset().union(*(dropped for dropped, _ in found))
+            assert all(dropped == wrapper - own for dropped, own in found)
         assert set(by_class) == set(NEW_CLASSES)
     assert reach.instruction_words(_probe(small, "chain")) == frozenset()
+
+
+def test_the_fixed_question_every_concluded_probe_asks_is_wrapper(small, pinned):
+    """Reviewer B's medium finding: the frame of a ``concluded`` question ("Earlier you had to pick
+    the ..., and you replied with your pick. What did you pick?") sits inside each SCENARIOS row, and
+    was searched as if it were the question's own words ("did" matched inside "candidates"). The frame
+    is the text every SCENARIOS question shares; it is dropped from the rule's query and from every
+    query the best-query column tries."""
+    head, tail = reach.scenario_frame()
+    assert all(q.startswith(head) and q.endswith(tail) for *_, q in bench_script.SCENARIOS)
+    assert head == "Earlier you had to pick the " and tail == ", and you replied with your pick. What did you pick?"
+    frame = {"earlier", "you", "had", "pick", "and", "replied", "with", "your", "what", "did"}
+    for script in (small, pinned):
+        for probe in (p for p in script.probes if p.cls == "concluded"):
+            own = reach._table_part(probe.question)
+            assert not own.startswith("Earlier") and "replied" not in own and own in probe.question
+            # A frame word that the question's own text also has ("had" in "a copy that had fallen
+            # furthest behind") is the question's word, and stays.
+            frame_only = frame - set(own.casefold().replace(",", " ").split())
+            assert {"earlier", "pick", "replied", "did"} <= frame_only <= reach.instruction_words(probe)
+            for query in reach.question_queries(probe):
+                assert not set(query.replace("-", " ").split()) & frame_only, (probe.id, query)
+            assert not set(reach.first_query(probe).split()) & frame_only
+
+
+def test_the_best_query_counts_only_whole_words_on_the_page(small):
+    """Reviewer A low 2: the store's search may match a word inside a longer one; the column counts a
+    query only when each of its words is on the page as a whole word."""
+    probe = _probe(small, "concluded")
+    statement = reach.needed_statements(probe)[0]
+    word = next(w for w in reach.rule_words(probe) if w not in statement.casefold())
+    # The page holds the plant and the word only inside a longer token, on a line of its own (in the
+    # page's JSON text the newline before it is "\n", which a tokenizer of the JSON would glue on).
+    inside = {"pg_1": _page(statement + "\nun" + word + "ish")}
+    (row,) = _measure([probe], inside, _find(inside))
+    assert _find(inside)(word) == ["pg_1"]  # the search, matching substrings, does return the page
+    assert (row["best_rank"], row["best_query"]) == (None, None)
+    whole = {"pg_1": _page(statement + "\n" + word + "\nmore")}
+    (row,) = _measure([probe], whole, _find(whole))
+    assert (row["best_rank"], row["best_query"]) == (1, word)
+    # A hyphen pair counts when both its words are whole words: "relay-mesh" is the words relay and mesh.
+    assert reach.whole_words("relay-mesh", reach.page_words(_page("svc relay-mesh up")))
+    assert not reach.whole_words("relay-mesh", reach.page_words(_page("svc relay-meshes up")))
+    assert reach.page_words(_page("a line\nverified", "Second")) >= {"line", "verified", "second"}
+    # The first five classes: the column takes the rule's key, under the same whole-word check. A key
+    # found only inside a longer token on the page (here on a newer page that does not hold the plant
+    # whole) does not count; the plant's own page, which names the key whole, does.
+    paged = _probe(small, "paged_only")
+    key = paged.subjects[0]
+    pages = {"pg_1": _page(paged.statements[0]), "pg_2": _page("x" + key + "y")}
+    (row,) = _measure([paged], pages, _find(pages))
+    assert row["reachable"] and row["rank"] == 2 and (row["best_rank"], row["best_query"]) == (2, key)
+    assert reach.whole_words(key, reach.page_words(pages["pg_1"]))
+    assert not reach.whole_words(key, reach.page_words(pages["pg_2"]))
 
 
 def test_question_queries_are_singles_then_pairs_with_a_space_and_a_hyphen():
@@ -388,6 +440,44 @@ def _system_before_a_user_message(body):
     body["messages"] += [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}]
 
 
+def _effort(level="high"):
+    """The effort-only message Claude Code 2.1.314 and later send on claude-opus-5-5 when the effort
+    changes (docs/research/M2-claude-code-2.1.318.md; tests/test_rewrite.py's settings message)."""
+    return {"role": "system", "content": [], "output_config": {"effort": level}}
+
+
+def _carried_after_a_rotation(body):
+    """What ``rewrite.transform_messages`` makes of a 5.x session after a rotation: every carried
+    system message together after the first retained turn start, the text one and then the effort-only
+    one, then the assistant's turn (Reviewer A low 1)."""
+    body["messages"][1:1] = [{"role": "system", "content": [{"type": "text", "text": "# Environment\nx"}],
+                              "output_config": {"effort": "medium"}}, _effort()]
+
+
+def _two_system_messages_in_a_row(body):
+    """Two text system messages between a user's tool results and the assistant's reply."""
+    body["messages"][3:3] = [{"role": "system", "content": "a"}, {"role": "system", "content": "b"}]
+
+
+def _after_server_tool_use(body):
+    """A system message after an assistant turn that ends in a server tool's use, the last message."""
+    body["messages"][3]["content"].append({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+                                           "input": {"query": "x"}})
+    body["messages"][4:] = [{"role": "system", "content": "Settings changed."}]
+
+
+def _breakpoints(count):
+    """A change that leaves exactly ``count`` blocks marked with ``cache_control`` in the request."""
+    def change(body):
+        places = [*body["tools"], *body["system"],
+                  *(b for m in body["messages"] if isinstance(m["content"], list) for b in m["content"])]
+        for block in places:
+            block.pop("cache_control", None)
+        for block in places[:count]:
+            block["cache_control"] = {"type": "ephemeral"}
+    return change
+
+
 @pytest.mark.parametrize("change, said", [
     (lambda b: b.pop("model"), "model: Field required"),
     (lambda b: b.update(max_tokens=0), "max_tokens: Field required"),
@@ -426,6 +516,21 @@ def _system_before_a_user_message(body):
     (lambda b: b["messages"][3].update(content=[]), "messages.3: all messages must have non-empty content"),
     (lambda b: b["messages"][4].update(content=""), "messages.4: all messages must have non-empty content"),
     (lambda b: b["messages"][4].update(content="text"), None),  # a string is valid content
+    # Reviewer A low 1: what Claude Code 2.1.314 and later send on claude-opus-5-5, and what the proxy makes
+    # of it after a rotation. The API takes each; a validator stricter than the API fails the replay on them.
+    (lambda b: b["messages"].append(_effort()), None),
+    (lambda b: b["messages"].insert(4, _effort()), None),  # before a user's prompt: no placement rule
+    (lambda b: b["messages"].insert(1, _effort("low")), None),
+    (_carried_after_a_rotation, None),
+    (_two_system_messages_in_a_row, None),
+    (_after_server_tool_use, None),
+    # Several system messages in a row are checked as one: their neighbours are the messages around the run.
+    (lambda b: b["messages"].__setitem__(slice(2, 2), [_effort(), {"role": "system", "content": "x"}]),
+     "messages.3.role: a system message must follow a user message"),
+    (lambda b: b["messages"].append({"role": "system", "content": [], "effort": "high"}),
+     "messages.5: all messages must have non-empty content"),  # empty, and not an effort-only message
+    (_breakpoints(4), None),
+    (_breakpoints(5), "A maximum of 4 blocks with cache_control may be provided. Found 5."),
     (lambda b: b["messages"][3]["content"][0].update(text=""), "messages.3.content.0: text content blocks must be "
                                                                "non-empty"),
     (_drop_tool_use, "messages.2.content: unexpected `tool_use_id` found in `tool_result` blocks: toolu_a. Each "
@@ -451,6 +556,33 @@ def test_the_fake_upstream_refuses_what_the_messages_api_refuses(change, said):
     assert upstream.check_request(_valid_body()) is None
     found = upstream.check_request(_broken(change))
     assert found is None if said is None else said in found, found
+
+
+def test_what_claude_code_and_the_proxy_send_passes_the_validator():
+    """Reviewer A low 1: the recorded Claude Code 2.1.314 and 2.1.318 requests, and what the proxy makes
+    after a rotation of a 5.x session with its environment message and an effort change."""
+    base = client.request_body(client.head("s"), [client.user_message("x", first=True)])
+    recorded = json.loads((Path(__file__).parent / "fixtures" / "compaction_shapes_2_1_31x.json").read_text("utf-8"))
+    requests = [r for groups in recorded.values() for part in groups.values() for r in part]
+    assert len(requests) >= 20 and any(m["role"] == "system" for r in requests for m in r["messages"])
+    for request in requests:
+        assert upstream.check_request(dict(base, messages=request["messages"])) is None
+
+    def user(text):
+        return {"role": "user", "content": [{"type": "text", "text": text}]}
+
+    def assistant(text):
+        return {"role": "assistant", "content": [{"type": "text", "text": text}]}
+
+    environment = {"role": "system", "content": [{"type": "text", "text": "# Environment\nWorking directory: x"}],
+                   "output_config": {"effort": "medium"}}
+    session = [user("p1"), environment, assistant("r1"), user("p2"), _effort(), assistant("r2"), user("p3"),
+               assistant("r3"), user("p4")]
+    for k in (3, 6):  # the first retained turn start after a rotation
+        sent = rewrite.transform_messages(copy.deepcopy(session), rewrite.EpochState(k=k))
+        roles = [m["role"] for m in sent]
+        assert roles[:4] == ["user", "system", "system", "assistant"] and upstream.effort_only(sent[2]), roles
+        assert upstream.check_request(dict(base, messages=sent)) is None
 
 
 def test_repeated_tool_use_ids_are_refused():

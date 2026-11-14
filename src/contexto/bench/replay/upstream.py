@@ -201,16 +201,68 @@ def _check_content(where: str, content: Any) -> str | None:
     return _check_text_blocks(f"{where}.content", content)
 
 
+def effort_only(message: dict[str, Any]) -> bool:
+    """A settings-only ``system`` message: empty content and ``output_config``, as Claude Code 2.1.314
+    and later send on claude-opus-5-5 when the effort changes (``{"role": "system", "content": [],
+    "output_config": {"effort": ...}}``, docs/research/M2-claude-code-2.1.318.md)."""
+    return (message.get("role") == "system" and message.get("content") in ([], "")
+            and isinstance(message.get("output_config"), dict))
+
+
+def _ends_in_server_tool_use(message: dict[str, Any]) -> bool:
+    content = message.get("content")
+    return isinstance(content, list) and bool(content) and isinstance(content[-1], dict) \
+        and content[-1].get("type") == "server_tool_use"
+
+
 def _check_system_message(messages: list[dict[str, Any]], i: int) -> str | None:
     """A ``system`` message inside ``messages`` (Claude Code on 5.x model ids sends them): never the
-    first message, after a user message, and the last message or followed by an assistant message."""
+    first message, after a user message, and the last message or followed by an assistant message.
+
+    Accepting rather than refusing where the API's documentation does not settle it: a validator
+    stricter than the API makes the replay fail on valid traffic, which hides what it is there to show.
+    So, without a documented refusal to point to: an effort-only message (``effort_only``) has no
+    placement rule (it carries settings, not text); a run of system messages, as the proxy produces
+    after a rotation (``rewrite.transform_messages`` puts every carried system message together), is
+    placed by the messages around the run, not by its own members; and a system message may follow an
+    assistant turn that ends in a server tool's use (Reviewer A read the API as taking one there)."""
     where = f"messages.{i}"
+    if effort_only(messages[i]):
+        return None
     if i == 0:
         return f"{where}.role: a system message cannot be the first message"
-    if messages[i - 1]["role"] != "user":
+    before = next((m for m in reversed(messages[:i]) if m["role"] != "system"), None)
+    after = next((m for m in messages[i + 1:] if m["role"] != "system"), None)
+    if before is None:
+        return f"{where}.role: a system message cannot be the first message"
+    if before["role"] != "user" and not _ends_in_server_tool_use(before):
         return f"{where}.role: a system message must follow a user message"
-    if i + 1 < len(messages) and messages[i + 1]["role"] != "assistant":
+    if after is not None and after["role"] != "assistant":
         return f"{where}.role: a system message must be the last message or be followed by an assistant message"
+    return None
+
+
+MAX_BREAKPOINTS = 4  # the Messages API refuses a request with more blocks marked cache_control
+
+
+def _check_breakpoints(body: dict[str, Any]) -> str | None:
+    """No more than ``MAX_BREAKPOINTS`` blocks with ``cache_control``: in ``tools``, in ``system``, and
+    in the content of every message (a tool result's own content blocks included)."""
+    def marked(blocks: Any) -> int:
+        if not isinstance(blocks, list):
+            return 0
+        found = 0
+        for block in blocks:
+            if isinstance(block, dict):
+                found += "cache_control" in block
+                if block.get("type") == "tool_result":
+                    found += marked(block.get("content"))
+        return found
+
+    count = marked(body.get("tools")) + marked(body.get("system"))
+    count += sum(marked(m.get("content")) for m in body.get("messages") or [] if isinstance(m, dict))
+    if count > MAX_BREAKPOINTS:
+        return f"A maximum of {MAX_BREAKPOINTS} blocks with cache_control may be provided. Found {count}."
     return None
 
 
@@ -239,7 +291,7 @@ def _check_messages(body: dict[str, Any]) -> str | None:
             return f"messages.{i}.role: Input should be 'user', 'assistant' or 'system'"
         if i == 0 and message["role"] == "assistant":
             return "messages.0.role: the first message must use the user role"
-        problem = _check_content(f"messages.{i}", message.get("content"))
+        problem = None if effort_only(message) else _check_content(f"messages.{i}", message.get("content"))
         if not problem and message["role"] == "system":
             problem = _check_system_message(messages, i)
         if problem:
@@ -291,12 +343,14 @@ def check_request(body: dict[str, Any]) -> str | None:
     break: ``model`` named and ``max_tokens`` a positive whole number; ``system`` a string or a list of
     non-empty text blocks; ``tools`` well formed with unique names; ``tool_choice`` of a known type that
     names a listed tool; at least one message, the first from the user, no empty content or empty
-    text block; a ``system`` message inside ``messages`` never first, after a user message, and last or
-    before an assistant message; every ``tool_result`` answering a ``tool_use`` of the assistant turn
+    text block (an effort-only ``system`` message excepted); a ``system`` message inside ``messages``
+    never first, after a user message, and last or before an assistant message (``_check_system_message``
+    says where it accepts more); every ``tool_result`` answering a ``tool_use`` of the assistant turn
     just before it, every ``tool_use`` answered by a ``tool_result`` at the start of the next turn, ids
-    unique, and tools defined when the messages use them. The real API refuses each of these with a
-    400 ``invalid_request_error``. Consecutive messages of one role are not refused: the API combines
-    them into one turn, and the rules are checked on the combined turns.
+    unique, and tools defined when the messages use them; at most 4 blocks marked ``cache_control``.
+    The real API refuses each of these with a 400 ``invalid_request_error``. Consecutive messages of
+    one role are not refused: the API combines them into one turn, and the rules are checked on the
+    combined turns.
     """
     if not isinstance(body.get("model"), str) or not body["model"]:
         return "model: Field required"
@@ -315,7 +369,7 @@ def check_request(body: dict[str, Any]) -> str | None:
             problem = _check_text_blocks("system", system)
             if problem:
                 return problem
-    return _check_tools(body) or _check_tool_choice(body) or _check_messages(body)
+    return _check_tools(body) or _check_tool_choice(body) or _check_messages(body) or _check_breakpoints(body)
 
 
 def _texts(content: Any) -> list[str]:

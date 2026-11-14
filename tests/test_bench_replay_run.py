@@ -161,9 +161,12 @@ def check_the_terminal_text(run):
                  "Compaction: a replay has no CLI, so it cannot show this. What it shows: no request was over the "
                  "bound of 150,000 by the estimate, and none carried a compaction summary or marker.",
                  f"Search: under one fixed query per fact, the store's search returns {totals['reachable']} of "
-                 f"{totals['probes']} planted facts and {totals['covered'] - totals['reachable']} more are still in "
-                 "view. This is a floor under one mechanical rule, not what a model can reach. The best query made "
-                 f"from each question's own words puts {totals['best_query']} in the top 3.",
+                 f"{totals['probes']} planted facts, {totals['shown']} of them in the top 3, and "
+                 f"{totals['covered'] - totals['reachable']} more are still in view. This is a floor under one "
+                 "mechanical rule, not what a model can reach. The best query made from each question's own words "
+                 f"puts {totals['best_query']} in the top 3. The best-query figure counts a page for a query only "
+                 "when every word of the query is on the page as a whole word, not only inside a longer one, as the "
+                 "store's search may match it.",
                  "What it cannot show:", "Answer accuracy, cache reads, real token counts, what a real CLI or a real "
                  "model does, and what the proxy does with what only Claude Code sends."):
         assert said in joined, said
@@ -205,6 +208,8 @@ def check_results_md(run):
                  f"| Largest request, estimated tokens | {expected['max_input_estimated']:,} |",
                  f"| Rotations | {expected['rotations']} |", "| Failure events | none |",
                  "a floor under mechanical queries, not what a model can reach",
+                 "every `concluded` question shares: \"Earlier you had to pick the ..., and you replied with your "
+                 "pick. What did you pick?\")", output.WHOLE_WORDS,
                  "| class | probes | paged | by search | in the top 3 | by search or in view | best query from the "
                  "question's words |",
                  "## Modelled lines (not run)", "errs toward plain Claude Code", "They are not a run of Claude Code",
@@ -309,7 +314,9 @@ def check_reach_jsonl(run):
             assert row["best_query"] is None or row["best_query"] in reach.question_queries(probe)
             assert (row["best_query"] is None) == (row["best_rank"] is None)
         else:
-            assert row["best_rank"] == row["rank"]  # the rule's query already comes from the question
+            # The rule's query already comes from the question; the column counts it under its whole-word check.
+            assert row["best_rank"] is None or (row["reachable"] and row["best_rank"] >= row["rank"])
+            assert row["best_query"] in (None, row["query"])
     totals = reach.totals(rows)
     assert totals == run["results"]["replay"]["reach"] == run["expected"]["reach"]
     assert totals["covered"] + totals["neither"] == totals["probes"] == len(script.probes)
@@ -332,6 +339,7 @@ def check_results_json(run):
     notes = " ".join(data["notes"])
     for said in ("Synthetic", "No model was called", "estimates, not token counts", "modelled from the script, not run",
                  "is an assumption, and it errs toward plain Claude Code", "floor under mechanical queries",
+                 output.WHOLE_WORDS,
                  "Which query a model makes is for the live run", "cannot show answer accuracy, cache reads, real "
                  "token counts"):
         assert said in notes, said

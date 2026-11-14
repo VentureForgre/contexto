@@ -94,8 +94,8 @@ def notes(script: Script, pinned: bool) -> list[str]:
         "nothing else survives is an assumption, and it errs toward plain Claude Code: anything re-attached would "
         "make its requests larger and its compactions more frequent.",
         "Search reach is a floor under mechanical queries, not what a model can reach: one fixed query per fact, "
-        "and beside it the best query made from the question's own words. Which query a model makes is for the "
-        "live run.",
+        "and beside it the best query made from the question's own words. " + WHOLE_WORDS + " Which query a model "
+        "makes is for the live run.",
         "A replay cannot show " + ", ".join(CANNOT_SHOW) + ".",
     ]
     if not pinned:
@@ -184,6 +184,8 @@ def failures(script: Script, measured: Any, differences: list[str]) -> list[str]
 
 
 BEST_QUERY_COLUMN = "best query from the question's words"
+WHOLE_WORDS = ("The best-query figure counts a page for a query only when every word of the query is on the page as "
+               "a whole word, not only inside a longer one, as the store's search may match it.")
 
 
 def _reach_table(totals: dict[str, Any]) -> list[tuple[str, ...]]:
@@ -200,10 +202,11 @@ def _unreached(totals: dict[str, Any]) -> list[str]:
 
 
 def _search_headline(totals: dict[str, Any]) -> str:
+    """Both figures at the same cut, the top 3, and the rule's figure at any rank beside it."""
     return (f"under one fixed query per fact, the store's search returns {totals['reachable']} of {totals['probes']} "
-            f"planted facts and {totals['covered'] - totals['reachable']} more are still in view. This is a floor "
-            "under one mechanical rule, not what a model can reach. The best query made from each question's own "
-            f"words puts {totals['best_query']} in the top 3.")
+            f"planted facts, {totals['shown']} of them in the top 3, and {totals['covered'] - totals['reachable']} "
+            "more are still in view. This is a floor under one mechanical rule, not what a model can reach. The best "
+            f"query made from each question's own words puts {totals['best_query']} in the top 3. " + WHOLE_WORDS)
 
 
 def _unreached_text(totals: dict[str, Any], code: Any = str) -> str | None:
@@ -392,14 +395,16 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
         "turn. The figures are a floor under mechanical queries, not what a model can reach. The rule's query is "
         "fixed per class: the key term the question names for the first five classes (a multi-hop probe follows its "
         "hops), and for `paraphrase`, `concluded` and `toolloop` the question's content words without its "
-        "instruction words (the fixed phrases the generator wraps every such question in). \"By search\" counts the "
+        "instruction words (the fixed phrases the generator wraps every such question in, including the frame "
+        "every `concluded` question shares: \"Earlier you had to pick the ..., and you replied with your pick. What "
+        "did you pick?\"). \"By search\" counts the "
         "probes for which the store's search returned a page holding every statement the answer needs; \"in the top "
         "3\" those whose page is among the three the search tool shows in detail; \"by search or in view\" adds the "
         "statements still in the request. \"Best query from the question's words\" tries each single content word "
         "of the question and each pair of adjacent content words, every pair with a space and with a hyphen, and "
         "counts the probe when the best of them puts the page in the top 3; for the first five classes the rule's "
-        "query is already taken from the question, so there it repeats \"in the top 3\". Which query a model makes "
-        "is for the live run.",
+        "query is already taken from the question, so there the column takes the rule's query. " + WHOLE_WORDS + " "
+        "Which query a model makes is for the live run.",
         "",
         "| " + " | ".join(table[0]) + " |", "|" + "---|" * len(table[0]),
         *["| " + " | ".join(row) + " |" for row in table[1:]],

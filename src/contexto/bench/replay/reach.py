@@ -21,9 +21,11 @@ Queries (``needs`` returns them with the statement each must find):
   of three or more characters, without the function words and the words of the generator's fixed
   texts), in the order they appear, without its instruction words (``instruction_words``: the
   tokens of the fixed phrases the generator wraps every such question in, such as "earlier in this
-  conversation" and "Answer with the name only"). They
+  conversation", "Answer with the name only" and the frame every ``concluded`` question shares,
+  "Earlier you had to pick the ..., and you replied with your pick. What did you pick?"). They
   are found from the generator's own tables (``ATTRIBUTES``, ``SCENARIOS``): what of the question is
-  not the table's text is the wrapper. Contexto's search returns a page only when it holds every word
+  not the table's text is the wrapper, and of a ``SCENARIOS`` question the text all of them share
+  (``scenario_frame``) is wrapper too. Contexto's search returns a page only when it holds every word
   of the query, so a question whose words are not all on the plant's page finds nothing, and that is
   what the rule reports. For ``concluded`` the statement to find is the assistant's ``DECISION``
   reply.
@@ -34,9 +36,14 @@ query from the question's words (``question_queries``). Each single content word
 each pair of adjacent content words, every pair tried with a space and with a hyphen (``relay mesh``,
 ``relay-mesh``), is searched; ``best_rank`` is the best rank a page holding the needed statement gets
 over all of them, and ``best_query`` the query that gives it. A probe counts when that rank is within
-the ``SHOWN_IN_DETAIL`` pages the search tool shows in detail. For the first five classes the rule's
-query already comes from the question (the key it names), so there the column repeats the rule's
-figure. Which query a model makes is for the live run.
+the ``SHOWN_IN_DETAIL`` pages the search tool shows in detail. The store's search matches a word
+inside a longer one (it is a substring search, D34), which is right for identifiers and paths but
+would let "did" find a page through "candidates"; so the column has a check of its own: a page counts
+for a query only when every word of the query (runs of letters and digits after case folding, so a
+hyphen pair is its two words) is a whole word of the page's text (``page_words``, ``whole_words``).
+The rule's figure keeps the store's search as it is. For the first five classes the column's query is
+the rule's (the key the question names) under the same whole-word check. Which query a model makes is
+for the live run.
 
 Results. ``reachable`` means the store's search (``SessionStore.search``, the function the
 ``contexto_search`` MCP tool calls) returned a page that holds the needed statement, for every
@@ -51,6 +58,7 @@ its next hop when the hop's statement is either.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -76,16 +84,47 @@ def content_words(question: str) -> list[str]:
     return list(dict.fromkeys(w for w in _TOKEN.findall(question.casefold()) if w in counted))
 
 
+def _word_cut(text: str, keep: int, from_end: bool = False) -> int:
+    """``keep`` shortened so that the kept prefix (or suffix) of ``text`` ends (or starts) between
+    words: a frame never ends in the middle of a word two questions happen to share."""
+    def inside(i: int) -> bool:
+        return 0 < i < len(text) and text[i - 1].isalnum() and text[i].isalnum()
+
+    cut = len(text) - keep if from_end else keep
+    while inside(cut):
+        cut += 1 if from_end else -1
+    return len(text) - cut if from_end else cut
+
+
+def scenario_frame() -> tuple[str, str]:
+    """The fixed head and tail every ``SCENARIOS`` question shares, cut between words: the frame of a
+    ``concluded`` question, which is not the question's own text."""
+    from contexto.bench import script as bench_script
+
+    questions = [scenario[3] for scenario in bench_script.SCENARIOS]
+    first = questions[0]
+    head = len(os.path.commonprefix(questions))
+    tail = len(os.path.commonprefix([q[::-1] for q in questions]))
+    head = _word_cut(first, head)
+    tail = _word_cut(first, tail, from_end=True)
+    return first[:head], first[len(first) - tail:] if tail else ""
+
+
 def _table_part(question: str) -> str | None:
     """The part of a new-class question the generator took from its tables: an ``ATTRIBUTES`` clause
-    (with the service filled in) or a ``SCENARIOS`` question. None when no table text is in it."""
+    (with the service filled in) or a ``SCENARIOS`` question without the frame they all share
+    (``scenario_frame``). None when no table text is in it."""
     from contexto.bench import script as bench_script
 
     for _, clause in bench_script.ATTRIBUTES:
         found = re.search(re.escape(clause).replace(re.escape("{svc}"), ".+?"), question)
         if found:
             return found.group(0)
-    return next((scenario[3] for scenario in bench_script.SCENARIOS if scenario[3] in question), None)
+    scenario = next((s[3] for s in bench_script.SCENARIOS if s[3] in question), None)
+    if scenario is None:
+        return None
+    head, tail = scenario_frame()
+    return scenario[len(head):len(scenario) - len(tail)]
 
 
 def instruction_words(probe: Probe) -> frozenset[str]:
@@ -163,6 +202,33 @@ def first_query(probe: Probe) -> str:
     return pairs[0][0] if pairs else ""
 
 
+def page_words(text: str) -> frozenset[str]:
+    """The whole words of a page (``page_text``): runs of letters and digits, after case folding, of
+    every string in its messages. Read from the strings, not the JSON text, so that a word after a
+    newline is not glued to the ``n`` of its ``\\n`` escape."""
+    found: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            found.update(_TOKEN.findall(value.casefold()))
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(json.loads(text))
+    return frozenset(found)
+
+
+def whole_words(query: str, on_page: frozenset[str]) -> bool:
+    """Whether every word of ``query`` is a whole word of the page (``page_words``): the best-query
+    column's own check, beside the store's search, which also matches a word inside a longer one."""
+    wanted = _TOKEN.findall(query.casefold())
+    return bool(wanted) and all(word in on_page for word in wanted)
+
+
 def _quoted(statement: str) -> str:
     """The statement as it appears inside JSON text."""
     return json.dumps(statement, ensure_ascii=False)[1:-1]
@@ -186,6 +252,7 @@ def measure(probes: Iterable[Probe], pages: dict[str, str], search: Callable[[st
     ``view`` is the JSON text of the messages the proxy sent upstream at the moment of measuring.
     """
     cache: dict[str, list[str]] = {}
+    vocabulary: dict[str, frozenset[str]] = {}
 
     def run(query: str) -> list[str]:
         if query not in cache:
@@ -195,6 +262,13 @@ def measure(probes: Iterable[Probe], pages: dict[str, str], search: Callable[[st
     def holders(statement: str) -> list[str]:
         quoted = _quoted(statement)
         return [page_id for page_id, text in pages.items() if quoted in text]
+
+    def whole(query: str, page_ids: list[str]) -> list[str]:
+        """The pages among ``page_ids`` that hold every word of ``query`` as a whole word."""
+        for page_id in page_ids:
+            if page_id not in vocabulary:
+                vocabulary[page_id] = page_words(pages[page_id])
+        return [page_id for page_id in page_ids if whole_words(query, vocabulary[page_id])]
 
     rows = []
     for probe in probes:
@@ -216,12 +290,16 @@ def measure(probes: Iterable[Probe], pages: dict[str, str], search: Callable[[st
             for _, statement in pairs:
                 on = holders(statement)
                 tried = [(rank, query) for query in question_queries(probe)
-                         if (rank := _rank(run(query), on)) is not None]
+                         if (rank := _rank(run(query), whole(query, on))) is not None]
                 per_statement.append(min(tried) if tried else None)
             if all(per_statement):
                 best_rank, best_query = max(per_statement)
         elif reachable:
-            best_rank, best_query = max(r for r in ranks if r is not None), queries[0]
+            # The rule's queries, each counted only on a page that holds its words whole.
+            whole_ranks = [_rank(run(query), whole(query, holders(statement)))
+                           for query, (_, statement) in zip(queries, pairs)]
+            if all(r is not None for r in whole_ranks):
+                best_rank, best_query = max(r for r in whole_ranks if r is not None), queries[0]
         rows.append({
             "seed": seed, "id": probe.id, "cls": probe.cls, "overlap": probe.overlap,
             "plant_turns": plant_turns(probe),
