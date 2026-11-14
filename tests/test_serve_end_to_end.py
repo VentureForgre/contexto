@@ -234,16 +234,39 @@ def mcp_servers_of(root: int) -> set[int]:
 
 
 class Watch:
-    """Reads a stream-json ``claude -p`` stdout line by line, and lists the process's MCP servers
-    while it runs. ``wait_for`` waits on what was printed, never for a length of time."""
+    """Reads a stream-json ``claude -p`` stdout line by line and its stderr, and lists the process's
+    MCP servers while it runs. ``wait_for`` waits on what was printed, never for a length of time.
+    ``finish`` ends it without ``communicate``, which would read stdout beside the reader thread and,
+    on Python 3.12, raises ``ValueError`` once stdin is closed."""
 
     def __init__(self, proc: subprocess.Popen) -> None:
         self.proc = proc
         self.lines: list[dict] = []
+        self.err: list[str] = []
         self.servers: set[int] = set()
         self.changed = threading.Condition()
-        threading.Thread(target=self._read, daemon=True).start()
+        self.readers = [threading.Thread(target=self._read, daemon=True),
+                        threading.Thread(target=self._read_err, daemon=True)]
+        for reader in self.readers:
+            reader.start()
         threading.Thread(target=self._servers, daemon=True).start()
+
+    def _read_err(self) -> None:
+        for line in self.proc.stderr:
+            self.err.append(line)
+
+    def finish(self, timeout: float = TURN_TIMEOUT_S) -> tuple[int, str]:
+        """Close stdin, wait for the process to exit (killed after ``timeout``) and for both readers
+        to reach the end of their pipes. The exit status and stderr."""
+        self.proc.stdin.close()
+        try:
+            self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+        for reader in self.readers:
+            reader.join(timeout=10)
+        return self.proc.returncode, "".join(self.err)
 
     def _read(self) -> None:
         for line in self.proc.stdout:
@@ -326,8 +349,7 @@ def test_claude_with_the_printed_settings_and_mcp_config_pins_into_each_conversa
             proc.stdin.write(user_line("PIN:afterclear please"))
             proc.stdin.flush()
             watch.wait_for(lambda: watch.count("result") > results, "the second turn's result")
-            proc.stdin.close()
-            status, _, stream_err = finish(proc)
+            status, stream_err = watch.finish()
         finally:
             if proc.poll() is None:
                 proc.kill()

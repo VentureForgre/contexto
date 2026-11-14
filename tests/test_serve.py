@@ -1375,7 +1375,7 @@ def test_print_settings_is_a_claude_code_settings_file(home):
     token = (home / serve.TOKEN_FILE).read_text().strip()  # created on first use
     assert json.loads(printed.stdout) == {
         "env": {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{serve.DEFAULT_PORT}/{token}",
-                "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"},
+                "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1", "CONTEXTO_HINT_HEADERS": "stripped"},
         "permissions": {"allow": contexto_tool_rules()}}
     assert serve.DEFAULT_PORT == 7837
     other = run_cli(home, "--print-settings", "--port", "9001")

@@ -12,8 +12,16 @@ from pathlib import Path
 
 import pytest
 
-from contexto import codex
-from contexto.hints import GATED_HINT_HEADERS, HINT_HEADERS_KEY, HINT_MARKER_KEY
+from contexto import codex, serve
+from contexto.hints import (
+    FORWARDED,
+    GATED_HINT_HEADERS,
+    HINT_HEADERS_KEY,
+    HINT_MARKER_KEY,
+    OFF,
+    STRIPPED,
+    hint_headers_state,
+)
 from contexto.launcher import EXIT_USAGE, LaunchError, check_cloud_provider, settings_payload
 from contexto.upstream import CLOUD_PROVIDER_KEYS, cloud_provider, cloud_provider_note
 from test_launcher import FAKE_CLAUDE, launch, session_log
@@ -217,7 +225,8 @@ def test_a_nested_launch_forwards_when_the_outer_launch_did(launch_env, recordin
 
 
 def test_a_nested_launch_still_forwards_for_the_user_s_settings_file(launch_env, recording, tmp_path):
-    """The marker only discounts the process environment. A settings file's value is the user's."""
+    """The marker in the process environment discounts only the process environment. A settings file
+    that sets the variable without the marker is the user's."""
     nested(launch_env, "stripped")
     user_settings(launch_env, **{HINT_HEADERS_KEY: "1"})
     received, events = run_with_hints(launch_env, recording, tmp_path)
@@ -232,6 +241,75 @@ def test_a_nested_launch_under_an_outer_off_stays_off(launch_env, recording, tmp
     assert launch_env[HINT_HEADERS_KEY] == "0"  # the outer env block did not set it
     _, events = run_with_hints(launch_env, recording, tmp_path)
     assert next(e for e in events if e["event"] == "launch")["hint_headers"] == "off"
+
+
+# The settings contexto serve prints -----------------------------------------------------------------------
+
+
+def serve_client_block() -> dict[str, str]:
+    """The ``env`` block ``contexto serve --print-settings`` prints."""
+    return serve.settings_payload(7837, "t" * 43)["env"]
+
+
+def test_the_printed_serve_settings_carry_the_marker_a_launch_strips_by():
+    """Reviewers of #272: the printed settings turned the hints on with no marker, so a ``contexto run
+    claude`` that saw them took the ``1`` for the user's own and forwarded the hints upstream."""
+    block = serve_client_block()
+    assert block[HINT_HEADERS_KEY] == "1" and block[HINT_MARKER_KEY] == STRIPPED
+
+
+def test_a_launch_inside_a_serve_client_s_session_strips(launch_env, recording, tmp_path):
+    """A serve client started with the printed file as ``--settings``: Claude Code applied its ``env``
+    block to itself, and a ``contexto run claude`` started by one of its tools inherits it."""
+    launch_env.update({name: value for name, value in serve_client_block().items() if name != "ANTHROPIC_BASE_URL"})
+    received, events = run_with_hints(launch_env, recording, tmp_path)
+    assert not set(received) & GATED_HINT_HEADERS
+    assert next(e for e in events if e["event"] == "launch")["hint_headers"] == "stripped"
+
+
+def test_a_launch_with_the_printed_settings_merged_into_the_user_file_strips(launch_env, recording, tmp_path):
+    """The VS Code recipe merges the printed ``env`` block into the user settings file. That file's
+    ``1`` is the service's, not the user's, so ``contexto run claude`` strips."""
+    user_settings(launch_env, **serve_client_block())
+    received, events = run_with_hints(launch_env, recording, tmp_path)
+    assert not set(received) & GATED_HINT_HEADERS
+    assert next(e for e in events if e["event"] == "launch")["hint_headers"] == "stripped"
+    assert child_settings_env(launch_env)[HINT_MARKER_KEY] == STRIPPED
+
+
+def write_settings(path: Path, block: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"env": block}))
+
+
+@pytest.mark.parametrize(("block", "state"), [
+    ({HINT_HEADERS_KEY: "1", HINT_MARKER_KEY: STRIPPED}, STRIPPED),  # contexto serve's own on
+    ({HINT_HEADERS_KEY: True, HINT_MARKER_KEY: [STRIPPED]}, STRIPPED),  # read as Claude Code reads values
+    ({HINT_HEADERS_KEY: "1", HINT_MARKER_KEY: FORWARDED}, FORWARDED),
+    ({HINT_HEADERS_KEY: "1", HINT_MARKER_KEY: "Stripped"}, FORWARDED),  # not the marker: the user's
+    ({HINT_HEADERS_KEY: "1"}, FORWARDED),
+    ({HINT_HEADERS_KEY: "0", HINT_MARKER_KEY: STRIPPED}, OFF),  # an off value is never Contexto's
+    ({HINT_MARKER_KEY: STRIPPED}, STRIPPED),
+])
+def test_a_settings_file_carrying_the_stripped_marker_is_not_the_user_s_on(tmp_path, block, state):
+    home, cwd = tmp_path / "home", tmp_path / "work"
+    cwd.mkdir()
+    write_settings(home / ".claude" / "settings.json", block)
+    assert hint_headers_state(env={}, cwd=cwd, home=home, managed=tmp_path / "none.json") == state
+
+
+def test_a_file_with_the_marker_falls_through_to_the_next_source(tmp_path):
+    """Skipping the service's file leaves what the user set elsewhere: their own ``1`` in the
+    environment still forwards, and their ``1`` in a project file too."""
+    home, cwd = tmp_path / "home", tmp_path / "work"
+    cwd.mkdir()
+    write_settings(home / ".claude" / "settings.json", serve_client_block())
+    managed = tmp_path / "none.json"
+    assert hint_headers_state(env={HINT_HEADERS_KEY: "1"}, cwd=cwd, home=home, managed=managed) == FORWARDED
+    write_settings(cwd / ".claude" / "settings.json", serve_client_block())
+    assert hint_headers_state(env={}, cwd=cwd, home=home, managed=managed) == STRIPPED
+    write_settings(cwd / ".claude" / "settings.local.json", {HINT_HEADERS_KEY: "yes"})
+    assert hint_headers_state(env={}, cwd=cwd, home=home, managed=managed) == FORWARDED
 
 
 # The cloud-provider guard -------------------------------------------------------------------------------
@@ -388,7 +466,9 @@ def test_version_and_help_alone_run_without_the_check(launch_env, tmp_path, info
     launch_env.update(CLAUDE_CODE_USE_BEDROCK="1", FAKE_VERSION="2.1.322 (Claude Code)")
     proc = launch(launch_env, "claude", info, cwd=tmp_path)
     out, err = proc.communicate(timeout=30)
-    assert "contexto run:" not in err and "CLAUDE_CODE_USE_BEDROCK" not in err
+    # Launch errors are printed as lines starting "contexto: " (D64): none here, so nothing refused.
+    assert not [line for line in err.splitlines() if line.startswith("contexto:")], err
+    assert "CLAUDE_CODE_USE_BEDROCK" not in err
     if info == "--version":
         assert proc.returncode == 0 and out.strip() == "2.1.322 (Claude Code)"
     else:
