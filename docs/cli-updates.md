@@ -31,11 +31,23 @@ Hook-output signatures were measured on Claude Code 2.1.301 and re-measured on 2
 | deferred-tool listings and MCP notices | `src/contexto/toolcheck.py` | zero-spend captures described in its docstring |
 | the refusal of a tool no permission rule allows ("... but you haven't granted it yet.", D44) | `src/contexto/toolcheck.py` | `spikes/m2/permissions/permstub.py` (D44) |
 | `CONTEXT_SECTION` (Codex section tags), `CONTEXT_SECTIONS_CODEX_VERSION` | `src/contexto/codex.py` | `spikes/m2/codex/probe.sh` |
+| the compaction summary's first line (`CLAUDE_CODE_COMPACTION_SUMMARY`, D50, D59) | `src/contexto/rewrite.py` | `tests/fixtures/make_compaction_shapes.py` |
+| gateway hint headers: the six names, the request classes and the compaction triggers (D70) | `src/contexto/hints.py` | `spikes/m2/serve/http_probe.py` ([D70-serve-probes.md](research/D70-serve-probes.md)) |
+| the cloud-provider switches (`CLOUD_PROVIDER_KEYS`), the values read as on (`env_truthy`) and how a settings value that is not a string is read (`js_string`, D70) | `src/contexto/upstream.py` | `spikes/m2/serve/q10_truthy.sh` |
+| that Claude Code applies the `--settings` `env` block to its own environment, which the marker `CONTEXTO_HINT_HEADERS` exists for (D70) | `src/contexto/hints.py`, `src/contexto/launcher.py` | `tests/test_hint_headers_real_client.py` (the nested tests) |
 | subagent shapes (`AGENT_TOOLS`, `ASYNC_LAUNCH`, `HAND_BACK`, `NOTICE_OPENINGS`, the `<task-notification>`, `resumedAgentId` and `<tools-used-before-summary>` patterns), gated by `SUBAGENT_SHAPES_TESTED` (D40, D56) | `src/contexto/rewrite.py`, `src/contexto/cliversions.py` | `spikes/m2/subagents` |
 
 The subagent shapes are gated by version: when the latest Claude Code version seen in a request's
 `User-Agent` is not in `SUBAGENT_SHAPES_TESTED`, side rooms only expire (15 minutes) and none closes
 early. Step 5 of the routine below re-measures them.
+
+The hint headers are documented by Claude Code, not read from its text, and `contexto run claude` asks
+for them (D70). Where a request carries one, it decides in place of the signature beside it: the
+request class in place of "has a tool list" and of the agent id's absence, and
+`x-claude-code-context-compacted` in place of the summary's first line. The signatures stay as the
+fallback for `contexto proxy`, for a Claude Code older than 2.1.273, and for a request without the
+header. If Claude Code renamed a header or a class, the engine would read no class and fall back to
+the signatures without an error; step 6 of the routine below is what notices that.
 
 If the `# Environment` heading changes, the session-start message becomes a settings change or
 carried text and can be paged once superseded (D33). If a context block's first line changes, the
@@ -68,6 +80,14 @@ fallback no longer keeps its latest copy (D32). If Codex renames its section tag
   message of context sections before the first prompt. If neither is there, the session log gets one
   `session_start_unrecognised` event (`dialect`, `signature_version`, `cli_version`). A request with
   tools but no injected context leaves the check open, for up to 8 such requests.
+
+- When a hint header and the signature beside it disagree, the engine logs one `hint_mismatch` event
+  per pair and engine (`header`, `value`, `signature`; D70). It is the early warning that a signature
+  drifted while the header still decides: `context_compacted` with `compaction_summary` means the
+  summary's first line changed; `request_class` `main` with `no_tool_list`, or `auxiliary` with
+  `tool_list`, means the tool list no longer tells main from a side request; `subagent` or `workflow`
+  with `no_agent_id` means the agent id header is gone from an agent's requests; `main` with `agent_id`
+  means the two documented headers contradict each other.
 
 These runtime events go to the session log only (`contexto sessions show <id>`), since a line printed
 mid-run can be drawn over by the CLI's interface.
@@ -159,7 +179,32 @@ Everything here is zero spend unless marked.
    `tests/fixtures/subagent_shapes_2_1_31x.json`, written and scrubbed by
    `tests/fixtures/make_subagent_shapes.py`), and record a decision. Leaving the version out is safe:
    side rooms then only expire.
-6. The suite: `pytest -q`.
+6. The suite: `pytest -q`, with the new `claude` first on PATH. Besides the package tests this runs
+   the tests against the real binary, which are skipped without it. For the hint headers (D70),
+   `tests/test_hint_headers_real_client.py` runs `contexto run claude -p` against a fake upstream
+   (zero tokens): a prompt that launches a subagent, `/compact`, and one more prompt. It fails if
+   the upstream received a gated hint header, if a request's class is missing from the session log,
+   if the request after the compaction does not carry `context_compacted` and take main over, or
+   if any `hint_mismatch` was logged. A failure there means a header was renamed or a signature
+   drifted: capture the new requests with `spikes/m2/serve/http_probe.py` (`--hint env`, in `print`,
+   `streamjson` and `pty` modes, as [D70-serve-probes.md](research/D70-serve-probes.md) lists) and
+   compare the header names, the class on each kind of request, and the two compaction headers with
+   `src/contexto/hints.py`. The same file runs a launch with the environment a nested
+   `contexto run claude` inherits (the hint variable at `1` and `CONTEXTO_HINT_HEADERS=stripped`):
+   the upstream must get no gated header. Also run `spikes/m2/serve/q10_truthy.sh` (about 6 minutes,
+   zero tokens,
+   macOS: it uses `sandbox-exec`): each cloud-provider switch must still send every request to the
+   provider stub and none to the base URL for `1` and `true`, and none to the provider for `0`,
+   `false` and the empty string, and a settings file's value must still win over the environment's;
+   `CLAUDE_CODE_GATEWAY_HINT_HEADERS` must still be on for `1`, `true`, `yes` and `on`. Its `shapes`
+   group must still read `1.0`, `1e0`, `["1"]`, `[1]`, `[["1"]]`, `[true]`, `" On "` and a file with a
+   byte order mark as on, and `false`, `1.5`, `[]`, `["1","1"]`, `null`, an object and `"1.0"` as off
+   (`js_string`). Its `project` group must still show a project file's switch and hint setting
+   applied by `claude -p`, a project file's value winning over the environment's and the user
+   file's, and a project file's `env` dropped while `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set. A
+   value that changes sides there changes what the guard may let through: the guard refuses on any
+   place a switch is on, so a value newly read as on must be added before the version is listed. A
+   new provider switch in Claude Code's documentation goes into `CLOUD_PROVIDER_KEYS`.
 7. If nothing changed: append the version to `TESTED_VERSIONS["claude"]` and bump
    `SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION` and `CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION` to it,
    in the same commit. Both constants need steps 1, 2 and 6. `tests/test_cliversions.py` fails if the
@@ -173,7 +218,7 @@ Everything here is zero spend unless marked.
    sentence was captured on (the note above `CLAUDE_CODE_COMPACTION_SUMMARY` in
    `src/contexto/rewrite.py`). Add a version to both only after capturing a `/compact` on it; a
    test fails when the two lists differ. Until then stats prints "cannot be told" for that version.
-8. If something changed: update the signatures and their tests, re-run step 2 to measure what is
+8. If something changed (a `hint_mismatch` in step 6 counts): update the signatures and their tests, re-run step 2 to measure what is
    carried and paged with the new text, and record a decision in `docs/DECISIONS.md`.
 9. Live acceptance (spends tokens, needs the owner's approval): `spikes/m2/acceptance`, as in live run
    #3 (`docs/research/M2-acceptance-run3.md`). Only for a change in step 8. When the full run is not

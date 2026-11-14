@@ -142,6 +142,7 @@ from typing import Any, ClassVar, NamedTuple, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
+from contexto.hints import AGENT_CLASSES, MAIN_CLASSES, NO_HINTS, SIDE_CLASSES, GatewayHints, gateway_hints
 from contexto.pdfpages import PDF_MAX_PAGES
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
@@ -2261,7 +2262,15 @@ class RewriteEngine:
         # that conversation has stayed quiet since; and why main last moved, for main_changed.
         self._cli_sessions: dict[str, ClaudeCodeSession | None] = {}
         self._judged: set[str] = set()
-        self._compacted: set[str] = set()  # the keys whose first message is Claude Code's compaction summary
+        # The keys of Claude Code's compactions: the first message is its compaction summary, or a
+        # request carried x-claude-code-context-compacted (D70).
+        self._compacted: set[str] = set()
+        # D70: per conversation key, the x-claude-code-request-class of its latest request (None without
+        # the header), and the header and signature pairs already logged as disagreeing.
+        self._classes: dict[str, str | None] = {}
+        self._mismatches: set[tuple[str, str, str]] = set()
+        # D70: the key of the request being handled when it carries x-claude-code-context-compacted.
+        self._context_compacted: str | None = None
         # D50: per conversation key, whether it is idle: the response to its newest request released no
         # client tool call, no response since may have, and it has sent no request since (a headless
         # /clear qualifies; a nested claude -p, run inside one of main's calls, never does).
@@ -2312,12 +2321,8 @@ class RewriteEngine:
         # that publish (a genuine bug, or degraded mode's forwarded original) still leaves it recorded
         # as main and the previous main's publish forgotten. This is the request's one decision: the
         # request-time publish, the epoch record, and the response-time publish all read self._main.
-        if dialect.name == "anthropic":
-            self._cli_sessions[key] = claude_code_session(request, headers)
-            if compaction_summary(request.get(dialect.field) or []):
-                self._compacted.add(key)
-        if dialect.judges_session_start(request):
-            self._judged.add(key)
+        hints, judged, mismatches = self._classify(key, request, headers, dialect)
+        resumed += mismatches
         previous = self._main
         main = self.publishes(key, request.get(dialect.field) or [], dialect)
         self._idle[key] = False  # in flight until a response without a client tool call
@@ -2337,11 +2342,14 @@ class RewriteEngine:
         # The CLI's own request (rewrite() leaves it unchanged); the engine's request event stays last.
         # A diagnostic: if it ever raised, the proxy's catch-all would discard this successful rewrite.
         try:
-            checked = self.tools.observe(request, dialect.name, main=main)
+            # D70: a request whose class says subagent, workflow or side request is not main's tool list
+            # to judge, also while it is main for having arrived first.
+            checked = self.tools.observe(request, dialect.name,
+                                         main=main and hints.request_class not in SIDE_CLASSES)
         except Exception as exc:
             checked = [{"event": "toolcheck_error", "error": type(exc).__name__}]  # content-free
         try:
-            checked = [*checked, *self.clients.observe(request, headers, dialect)]
+            checked = [*checked, *self.clients.observe(request, headers, dialect, judged=judged)]
         except Exception as exc:  # a diagnostic, like the tool check
             checked = [*checked, {"event": "cli_version_error", "error": type(exc).__name__}]
         events[-1:-1] = checked
@@ -2351,6 +2359,8 @@ class RewriteEngine:
             # compaction (a Claude Code session id and the User-Agent's entrypoint). ``contexto stats``
             # says "Claude Code did not compact" only for a log in which every request did.
             events[-1]["cli_session"] = bool(session and session.entrypoint)
+        # D70: the hints the request carried, already reduced to their fixed vocabularies.
+        events[-1].update({name: value for name, value in hints._asdict().items() if value is not None})
         if main and endpoint != COUNT_TOKENS:
             closes: list[dict] = []
             self._close_finished_side_rooms(request.get(dialect.field) or [], dialect, closes)
@@ -2371,6 +2381,106 @@ class RewriteEngine:
                 events[-1:-1] = failures  # the engine's request event stays last
         self._write_epoch(key, request, dialect, events)
         return upstream, headers, [restore, *events] if restore else events
+
+    def _classify(self, key: str, request: dict, headers: dict[str, str],
+                  dialect: Dialect) -> tuple[GatewayHints, bool, list[dict]]:
+        """D70: what kind of request this is, from Claude Code's gateway hint headers where it sent
+        them and from the signatures where it did not. Records it for ``publishes`` and returns the
+        hints, whether the request is one the dialect judges, and any ``hint_mismatch`` events.
+
+        The signatures (a tool list, the compaction summary's text, the agent id header) were each
+        measured on some Claude Code versions and can drift with the next. The hint headers are
+        documented (``contexto.hints``; measured on 2.1.322), but Claude Code sends them only when
+        ``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` is on, which ``contexto run claude`` asks for and
+        ``contexto proxy`` does not, and ``x-claude-code-context-compacted`` only once per compaction.
+        So each header decides when it is present with a known value, and the signature decides
+        otherwise, request by request:
+
+        ========================================  =======================================  ============================
+        Header and value                          What it decides                          Without it (the fallback)
+        ========================================  =======================================  ============================
+        ``x-claude-code-request-class: main``     Judged, with or without a tool list:     Judged when it has a tool
+                                                  its session start is checked (D38) and   list
+                                                  it may take over main by D50's rules     (``judges_session_start``)
+        ``...-request-class: compaction``         The same as ``main`` (see below)         The same: it has main's
+                                                                                           tools
+        ``...-request-class: subagent`` or        Not judged, never takes over main by     The agent id header or
+        ``workflow``                              any rule, never checked for Contexto's   ``parent_session_id`` keeps
+                                                  tools                                    it out; without them, only
+                                                                                           its turn-start count
+        ``...-request-class: auxiliary``          The same, with or without a tool list    Not judged without a tool
+                                                                                           list; judged with one
+        any other class value                     Nothing: read as no header               The signatures
+        ``x-claude-code-context-compacted``       The conversation is Claude Code's        The first message is the
+        (any value)                               compaction of main, whatever its         compaction summary
+                                                  summary says (``_compacts`` still needs  (``compaction_summary``)
+                                                  main's session id and entrypoint). A
+                                                  compaction that keeps a pending call     Such a compaction hands
+                                                  hands over at the request carrying it,   over only at its key's
+                                                  also when its key was seen before        first request (D59)
+        ``x-claude-code-compaction``              Nothing; its trigger is logged           Nothing
+        ========================================  =======================================  ============================
+
+        ``compaction`` is the request that summarizes the conversation. Measured on 2.1.314, 2.1.318
+        and 2.1.322 it is main's own history with the instructions appended, with main's tools and
+        system, so it has main's conversation key and is main's request: it goes through main's epoch
+        and is paged under the bound like any main turn, and it publishes main's room. It gets no path
+        of its own, since a summary request forwarded unchanged would carry the whole history over
+        the bound. It does not mark anything compacted; ``x-claude-code-context-compacted`` on the
+        next main request does that. On another key it is a conversation like any other, bounded by
+        its own epoch.
+
+        When a header and a signature disagree the header decides, with one exception, and the pair is
+        logged once per engine as a content-free ``hint_mismatch`` (the header, its value from the
+        fixed vocabulary, and the signature): the early warning that a signature drifted.
+
+        - class ``main`` or ``compaction`` with ``X-Claude-Code-Agent-Id`` (``agent_id``): the
+          exception. The agent id is a documented header too, and the answer that leaves main where it
+          is wins, so the request never takes over.
+        - class ``main`` or ``compaction`` without a tool list (``no_tool_list``): judged.
+        - class ``subagent`` or ``workflow`` with neither an agent id nor a ``parent_session_id``
+          (``no_agent_id``): never takes over.
+        - class ``auxiliary`` with a tool list (``tool_list``): not judged.
+        - ``x-claude-code-context-compacted`` on a request whose first message is not the summary
+          Contexto knows (``compaction_summary``): marked compacted.
+
+        The summary text without the header is not a disagreement: the header is sent once, and a
+        resumed session's compacted transcript has the text and no header. The first conversation an
+        engine sees is main whatever its class, as before; a side class is only kept from taking main
+        over, and the main conversation's first turn start then takes it (``after_side_request``).
+        Codex requests carry no hint headers and are judged by their dialect alone."""
+        tools = dialect.judges_session_start(request)
+        self._context_compacted = None
+        if dialect.name != "anthropic":
+            if tools:
+                self._judged.add(key)
+            return NO_HINTS, tools, []
+        hints = gateway_hints(headers)
+        session = self._cli_sessions[key] = claude_code_session(request, headers)
+        self._classes[key] = request_class = hints.request_class
+        summary = compaction_summary(request.get(dialect.field) or [])
+        if summary or hints.context_compacted:
+            self._compacted.add(key)
+        if hints.context_compacted:
+            self._context_compacted = key
+        judged = request_class in MAIN_CLASSES if request_class else tools
+        if judged:
+            self._judged.add(key)
+        agent = any(name.lower() == CLAUDE_CODE_AGENT_HEADER and value for name, value in headers.items())
+        found: list[tuple[str, str, str]] = []
+        if request_class in MAIN_CLASSES:
+            found += [("request_class", request_class, "agent_id")] if agent else []
+            found += [("request_class", request_class, "no_tool_list")] if not tools else []
+        elif request_class in AGENT_CLASSES and not agent and not (session and session.parent):
+            found.append(("request_class", request_class, "no_agent_id"))
+        elif request_class == "auxiliary" and tools:
+            found.append(("request_class", request_class, "tool_list"))
+        if hints.context_compacted and not summary:
+            found.append(("context_compacted", hints.context_compacted, "compaction_summary"))
+        events = [{"event": "hint_mismatch", "header": header, "value": value, "signature": signature}
+                  for header, value, signature in found if (header, value, signature) not in self._mismatches]
+        self._mismatches.update(found)
+        return hints, judged, events
 
     def tools_verdict(self) -> dict | None:
         """At exit: ``mcp_tools_missing`` if the main conversation ended without Contexto's tools and that
@@ -2545,22 +2655,29 @@ class RewriteEngine:
             reason = self._takes_over(key, main, len(starts))
             if reason:
                 main, self._main_reason = key, reason
-        elif (key != main and key not in self._turn_starts and self._compacts(key, main)
-              and self._idle.get(main, False)):
+        elif (key != main and (key not in self._turn_starts or self._context_compacted == key)
+              and self._compacts(key, main) and self._idle.get(main, False)):
             # D59: a compaction that keeps a pending tool_use and its result after the summary sends them
             # under the new key with no turn start. It continues main's own loop, and main's newest
             # request (the summary request) was answered with no client tool call, so no call of the old
             # conversation is outstanding to be charged to the new room. Only at the compacted
-            # conversation's first request: a late request of an older compaction keeps out.
+            # conversation's first request: a late request of an older compaction keeps out. D70: or at
+            # the request that itself carries x-claude-code-context-compacted, which Claude Code sends
+            # once, on the first main request after the compaction, so a side request that used the key
+            # first does not delay the hand-over and a late request of an older compaction never has it.
             main, self._main_reason = key, "compacted"
         return main, len(starts)
 
     def _compacts(self, key: str, main: str) -> bool:
         """D50: ``key`` is Claude Code's compaction of ``main``: seen with a request the dialect judges,
-        its first message the compaction summary, in main's own session id and entrypoint, and neither a
-        child session nor a subagent."""
+        its first message the compaction summary or a request of it carrying
+        ``x-claude-code-context-compacted`` (D70, ``_classify``), in main's own session id and
+        entrypoint, and neither a child session nor a subagent, by its ids or by its class: a request
+        classed ``subagent``, ``workflow`` or ``auxiliary`` never hands main over, also when its key was
+        judged by an earlier ``main`` request and it carries ``x-claude-code-context-compacted``."""
         session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
         return bool(key in self._judged and key in self._compacted and session and current
+                    and self._classes.get(key) not in SIDE_CLASSES
                     and not session.parent and not session.agent and session.entrypoint
                     and session.entrypoint == current.entrypoint and session.id == current.id)
 
@@ -2600,10 +2717,13 @@ class RewriteEngine:
         In the interactive CLI main may be mid-call when another interactive process on the same
         proxy (not a supported setup) is prompted; that call is then charged against the new room.
         A child session (``parent_session_id``: an agent-team teammate) and a subagent's request
-        (``X-Claude-Code-Agent-Id``) never take over at all, by any rule.
+        (``X-Claude-Code-Agent-Id``) never take over at all, by any rule. Neither does a request whose
+        ``x-claude-code-request-class`` is ``subagent``, ``workflow`` or ``auxiliary`` (D70), and a
+        request whose class is ``main`` or ``compaction`` is judged whatever its tool list
+        (``_classify`` has the table).
         Codex requests carry no Claude Code session id, so only the turn-start rule applies to them."""
         session, current = self._cli_sessions.get(key), self._cli_sessions.get(main)
-        if session and (session.parent or session.agent):
+        if (session and (session.parent or session.agent)) or self._classes.get(key) in SIDE_CLASSES:
             return None
         if key in self._judged:
             same_mode = bool(session and current and session.entrypoint and session.entrypoint == current.entrypoint)
