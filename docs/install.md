@@ -56,16 +56,32 @@ What it does, in order:
    against `SHA256SUMS`. The directory is removed when the script exits.
 4. With `--attest`, checks the wheel's build attestation.
 5. When an earlier Contexto is installed, runs the checked wheel once with the tool that will
-   install it (`uv tool run` or `pipx run`, then `contexto --version`), without installing it.
+   install it (`uv tool run` or `pipx run`, then `contexto --version`), without installing it. It
+   must print the release's version; if it prints another, the message quotes what it printed.
 6. Removes an earlier Contexto install that provides the same `contexto` command: one under the
    other distribution name, or one made by the other tool. A package that only shares the name
-   `contexto` and has no `contexto` command is left alone.
+   `contexto` and has no `contexto` command is left alone. The exception is a pipx too old to
+   answer `pipx environment --value PIPX_LOCAL_VENVS`: the script cannot look inside its packages,
+   so a pipx package named `contexto` or `contexto-proxy` counts by its name. pipx refuses to
+   install a package that has no command, so the unrelated `contexto` library from PyPI is never
+   one of them.
 7. Installs the checked wheel file with `uv tool install` or `pipx install`.
 8. Runs `contexto --version` and prints the result.
 
 Until step 5 has passed, nothing is installed or removed. A failed check stops the script with a
-message and a non-zero exit status. If step 7 fails after step 6 removed an install, no `contexto`
-is installed, and the message gives the command that brings the earlier release back.
+message and a non-zero exit status.
+
+If step 7 fails after step 6 removed an install, no `contexto` is installed. The message then gives
+the way back to the earlier release, with the tool whose install was removed (the one the script
+used, when both tools had one):
+
+- Normally, the piped command:
+  `curl -fsSL https://raw.githubusercontent.com/VentureForgre/contexto/main/install.sh | sh -s -- --version <earlier> --with <tool>`.
+- With `CONTEXTO_INSTALL_BASE_URL` set, it says to run the script again the same way with those
+  two options and that base URL. The script cannot know where your copy of it came from.
+- For a release before v0.5.13, which the script refuses, it gives the install of that release's
+  wheel by URL, `uv tool install --python '>=3.12' <url>` or `pipx install <url>`, and says that
+  download is not checksum-verified.
 
 Step 5 takes a second or two. It leaves nothing in the tool's install or command directories. uv
 and pipx each keep that run's environment in their own cache.
@@ -78,8 +94,8 @@ data in `~/.contexto` (or `$CONTEXTO_HOME`). It installs no Python itself, but u
 see [Python](#python).
 
 It needs `curl`, and `sha256sum` or `shasum`. Downloads are https only. Each one gives up when the
-server does not answer within 15 seconds, sends less than 1024 bytes a second for 30 seconds, takes
-more than 10 minutes, or sends more than the script allows for that file.
+server cannot be reached within 15 seconds, or sends less than 1024 bytes a second for 30 seconds,
+or the download takes more than 10 minutes, or it is larger than the script allows for that file.
 
 ### Options
 
@@ -91,7 +107,7 @@ curl -fsSL https://raw.githubusercontent.com/VentureForgre/contexto/main/install
 
 | Option | What it does |
 |---|---|
-| `--version X.Y.Z` | Installs that release, not the latest. `vX.Y.Z` works too. Releases before v0.5.13 have no `SHA256SUMS`, so the script refuses them. |
+| `--version X.Y.Z` | Installs that release, not the latest. `vX.Y.Z` works too. It skips the lookup of the latest release. Releases before v0.5.13 have no `SHA256SUMS`, so the script refuses them. |
 | `--with uv` or `--with pipx` | Installs with that tool. Without it, the script uses the tool that already has Contexto, else uv if it is on `PATH`, else pipx. |
 | `--attest` | Also requires `gh attestation verify` to pass for the wheel. Needs the GitHub CLI and `gh auth login`. |
 | `--force` | Reinstalls when that release is already installed, and lets uv or pipx overwrite a `contexto` command they do not own. |
@@ -101,7 +117,7 @@ curl -fsSL https://raw.githubusercontent.com/VentureForgre/contexto/main/install
 | Environment variable | What it does |
 |---|---|
 | `CONTEXTO_VERSION` | Same as `--version`. The option wins. |
-| `CONTEXTO_INSTALL_BASE_URL` | Where the releases are, for a mirror or a test. Default `https://github.com/VentureForgre/contexto`. It must be https; plain http is accepted only for `127.0.0.1` and `localhost`. The script says so in its output when this is set. `--attest` still checks against `VentureForgre/contexto`, and without `--attest` the script tells you to run it again with `--attest`, because that checks the file that came from this URL. |
+| `CONTEXTO_INSTALL_BASE_URL` | Where the releases are, for a mirror or a test. Default `https://github.com/VentureForgre/contexto`. It must be https; plain http is accepted only for `127.0.0.1` and `localhost`. The script says so in its output when this is set. A mirror must have GitHub's layout: `<base>/releases/latest` answers a HEAD request with a redirect to `<base>/releases/tag/vX.Y.Z` on the same base (not needed when `--version` is given), and `<base>/releases/download/vX.Y.Z/` holds `SHA256SUMS` and the wheel. `--attest` still checks against `VentureForgre/contexto`, and without `--attest` the script tells you to run it again with `--attest`, because that checks the file that came from this URL. |
 
 ### Python
 
@@ -162,10 +178,19 @@ uvx --from contexto-proxy contexto --version
 ```
 
 Before you install from PyPI, open
-[pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/) and check that the
-project page links to this repository, `VentureForgre/contexto`. If the page does not exist, no
-release has been published to PyPI. If it exists and links somewhere else, it is not this project.
-In both cases use the script or a release wheel.
+[pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/). In the sidebar, under
+"Project links", PyPI puts the links it verified in a group labeled "Data verified by PyPI on",
+followed by the upload date. Install from PyPI only if `github.com/VentureForgre/contexto` is a link in that group
+(point at a link to see its address).
+
+Anyone can upload a package whose metadata names this repository, but PyPI marks a GitHub link
+verified only when the files were uploaded by trusted publishing from that repository's workflow.
+So a verified link means this repository's release workflow uploaded the release you see. It is
+checked once, at upload.
+
+If the page does not exist, no release has been published to PyPI. If the link is missing or is
+not in the verified group, the upload did not come from this repository. In both cases use the
+script or a release wheel.
 
 Releases under the name `contexto` were never published to PyPI. Never install `contexto` from
 PyPI: that is the unrelated library.
@@ -198,11 +223,13 @@ A git install builds from source, so it has the same limitation as a checkout: t
 is the placeholder `0.0.0+checkout`, whatever tag you asked for. What `contexto --version` prints
 depends on the code you installed:
 
-- Releases after 0.5.24 name the revision of a git install, on one line, with the commit in
-  lowercase. `uv tool install` and `pipx install` both record the revision you asked for, and the
-  command prints `contexto 0.0.0+checkout (git v0.6.0, commit 1a2b3c4d)` (here for the tag
-  `v0.6.0`). When only the commit was recorded, or the revision you asked for is itself a commit,
-  it prints `contexto 0.0.0+checkout (git commit 1a2b3c4d)`.
+- `main` since the distribution was renamed, and releases after 0.5.24, name the revision of a
+  git install, on one line, with the commit in lowercase. `uv tool install` and `pipx install` both
+  record the revision you asked for. For `@main` the command prints
+  `contexto 0.0.0+checkout (git main, commit 49c54ee4)`, and for a tag
+  `contexto 0.0.0+checkout (git v0.6.0, commit 1a2b3c4d)`. When only the commit was recorded, or
+  the revision you asked for is itself a commit, it prints
+  `contexto 0.0.0+checkout (git commit 1a2b3c4d)`.
 - v0.5.24 and anything earlier, including commits from before the distribution was renamed, print
   plain `contexto 0.0.0+checkout`.
 
@@ -231,10 +258,15 @@ URL, which includes an install made by the script. Measured with uv 0.13.5 and p
 | Installed by | `uv tool upgrade` | `pipx upgrade` |
 |---|---|---|
 | The script | fails: "Distribution not found", because the wheel was in a temporary directory | fails: "Unable to parse package spec", for the same reason |
-| A wheel URL | "Nothing to upgrade" | "no package index was checked", and it suggests `pipx install --force contexto` |
+| A wheel URL | "Nothing to upgrade" | "no package index was checked", and it suggests reinstalling by package name |
 
-Run the script again instead, or install the newer wheel. Do not run the command pipx suggests: it
-fetches the unrelated library from PyPI.
+Run the script again instead, or install the newer wheel. What pipx suggests depends on the
+release you have:
+
+- Up to 0.5.24 it suggests `pipx install --force contexto`. Do not run it: it fetches the unrelated
+  library from PyPI.
+- For later releases it suggests `pipx install --force contexto-proxy`, which is the PyPI install.
+  Check the PyPI page first, as [From PyPI](#from-pypi) says.
 
 ### From the earlier distribution name
 
