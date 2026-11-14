@@ -25,6 +25,11 @@ benchmark session directly or under ``contexto run``:
   upstream is gone then lives on for minutes, as the real one does.
 - With ``STUB_CLAUDE_DIRECT_URL`` set it ignores its base URL and sends every request there, as
   organization-managed settings could make Claude Code do: the benchmark's meter sees nothing.
+- Like Claude Code 2.1.322 it prints a ``system`` ``init`` event at the start of every run, that is
+  every user turn. With ``STUB_CLAUDE_EXTRA_RESULT=<n>`` it prints one more run after turn n's result
+  (an ``init``, an assistant message and a second ``result``), as Claude Code does when a background
+  subagent reports back; with ``<n>:late`` that run comes when the next turn arrives, before it is
+  served (or when stdin ends).
 
 What it does not imitate: Claude Code's real system prompt and tool list (its head is a few hundred
 bytes, not tens of thousands of tokens), tool search and deferred tools, thinking, permission prompts
@@ -136,6 +141,10 @@ class Session:
         window = os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")
         self.trigger = int(window) - RESERVE if window.isdecimal() else None
         self.hints = bool(os.environ.get("CLAUDE_CODE_GATEWAY_HINT_HEADERS"))
+
+    def init(self) -> None:
+        emit({"type": "system", "subtype": "init", "session_id": self.session, "model": self.model,
+              "tools": [t["name"] for t in self.tools], "cwd": os.getcwd()})
 
     def headers(self, request_class: str) -> dict[str, str]:
         headers = {"content-type": "application/json", "anthropic-version": "2023-06-01",
@@ -258,6 +267,17 @@ class Session:
             emit({"type": "user", "session_id": self.session, "message": {"role": "user", "content": results}})
 
 
+def extra_run(session: Session) -> bool:
+    """One run that answers no turn the caller sent: what a background subagent's report starts."""
+    session.init()
+    emit({"type": "assistant", "session_id": session.session,
+          "message": {"role": "assistant", "model": session.model,
+                      "content": [{"type": "text", "text": "The background task finished."}]}})
+    emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+          "result": "The background task finished.", "session_id": session.session})
+    return False
+
+
 def parse_sse(response: Any) -> tuple[list[dict[str, Any]], dict[str, int]]:
     blocks: dict[int, dict[str, Any]] = {}
     partial: dict[int, str] = {}
@@ -306,18 +326,31 @@ def main(argv: list[str]) -> int:
         with open(record, "a", encoding="utf-8") as f:
             f.write(json.dumps(argv) + "\n")
     session = Session(args)
-    emit({"type": "system", "subtype": "init", "session_id": session.session, "model": session.model,
-          "tools": [t["name"] for t in session.tools], "cwd": os.getcwd()})
+    extra = (os.environ.get("STUB_CLAUDE_EXTRA_RESULT") or "").split(":")
+    extra_turn = int(extra[0]) if extra[0].isdecimal() else None
+    late = extra[1:] == ["late"]
+    pending = False
     code = 0
+    turns = 0
     try:
         for line in sys.stdin:
             try:
                 event = json.loads(line)
             except ValueError:
                 continue
-            if event.get("type") == "user" and not session.turn(event.get("message") or {}):
+            if event.get("type") != "user":
+                continue
+            if pending:
+                pending = extra_run(session)
+            session.init()
+            turns += 1
+            if not session.turn(event.get("message") or {}):
                 code = 1
                 break
+            if turns == extra_turn:
+                pending = True if late else extra_run(session)
+        if pending:
+            extra_run(session)
     finally:
         for server in session.servers:
             server.close()

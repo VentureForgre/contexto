@@ -101,6 +101,10 @@ ARM_DIFFERENCES = (
     "send the x-cc-context-compacted and x-cc-compaction-request headers it sends to the vendor's host around a "
     "compaction), and it does so in both arms alike; a plain session without the meter, straight to the vendor, "
     "would not.",
+    "Both Claude Code arms alike run with CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1: Claude Code runs no subagent or "
+    "shell command in the background, so a subagent the model starts runs in the foreground within its turn. "
+    "Without it a background task's report starts a run of its own with its own result, and the replies of every "
+    "later turn would be matched to the wrong turn; a unit where that still happens stops as desync.",
     "full is not Claude Code: its requests carry a one-line system prompt, the script's turns with scripted "
     "replies, one declared tool with tool_choice none when the script has a tool-loop turn, no thinking parameter, "
     "no beta header, and max_tokens 8,192. It answers each probe turn in one request with no tools, where the "

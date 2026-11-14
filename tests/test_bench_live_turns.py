@@ -92,6 +92,11 @@ def test_cli_session_text_is_every_top_level_assistant_text_of_the_turn():
     session._events = queue.Queue()
     for event in events:
         session._events.put(event)
+    # The events stand for what the child prints after the turn is sent; what was read before it is
+    # taken first (Session.drain), so here nothing is.
+    session.drain = lambda until_eof=None: None
+    session.sent = session.results = 0
+    session.compaction_pre_tokens = []
     unit = type("U", (), {"meter": Meter(), "turn_timeout": 5.0})()
     turn = session.send(0, "turn text", unit)
     session.proc.stdin.close()
@@ -171,6 +176,9 @@ def test_the_default_token_cap_is_twice_the_units_planned_worst_case(env, tmp_pa
 
 
 def test_a_turn_with_no_request_through_the_meter_stops_the_unit(env, tmp_path, script):
+    from contexto.bench.arms import cli
+
+    env.setattr(cli, "UNMETERED_GRACE_S", 1.0)  # how long it waits for a sign that the result answered no turn
     stub = stub_for(script)
     url = stub.start()
     try:

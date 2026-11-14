@@ -251,6 +251,31 @@ def test_a_cli_error_a_cli_exit_and_a_silent_turn_each_stop_one_unit(env, tmp_pa
     assert run.manifest["claude_code_version"] == "9.9.9"
 
 
+@pytest.mark.parametrize(("arm", "extra", "says"), [
+    ("plain", "3", "answered no turn"),  # the extra run ends before the next turn goes out
+    ("contexto", "3", "answered no turn"),
+    ("plain", "3:late", "answered no turn"),  # it takes the next turn's place, so it is found later
+    ("plain", "20", "after the script's last turn"),  # found when the session ends
+])
+def test_a_result_that_answers_no_turn_stops_the_unit_as_desync(env, tmp_path, script, arm, extra, says):
+    """Claude Code prints one more run, with its own result, when a background task reports back. From
+    then on every reply would be scored against the wrong turn, so the unit stops and is never complete."""
+    env.setenv("STUB_CLAUDE_EXTRA_RESULT", extra)
+    run = bench_stubs.run_bench(env, tmp_path, [script], arms=(arm, "full"), bound=BOUND)
+    unit = run.unit(arm)
+    assert (unit["status"], unit["stop"]) == ("stopped", "desync"), unit
+    assert says in unit["reason"] and "none of the unit's answers are scored" in unit["reason"]
+    assert {p["arm"] for p in run.lines("probes.jsonl")} == {"full"}  # nothing of the unit is scored
+    assert run.unit("full")["status"] == "complete" and run.code == 1
+    assert all(child.poll() is not None for child in run.children)
+
+
+def test_each_turn_has_one_result_without_a_background_task(env, tmp_path, script):
+    run = bench_stubs.run_bench(env, tmp_path, [script], arms=("plain",), bound=BOUND)
+    assert run.unit("plain")["status"] == "complete" and run.code == 0
+    assert len(run.lines("probes.jsonl")) == len(script.probes)
+
+
 def test_a_wrong_decision_reply_is_recorded_per_probe(env, tmp_path, script):
     turn = script.decisions[1].turn
     stub = stub_for(script, wrong_decisions={turn})

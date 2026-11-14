@@ -125,3 +125,45 @@ def test_answers_on_both_sides_of_a_tool_call_are_all_scored_with_the_real_claud
         assert len(lines) == len(script.probes)
         assert [p["given"] for p in lines] == [split_run.stub.answered[(arm, script.seed, p["id"])] for p in lines]
         assert not any(p["given"] in (None, "unsure") for p in lines)
+
+
+def _background_run(script, tmp, *, arms, keep_variable):
+    """The session with the stub answering every decision and probe turn with its answer and a call of
+    Claude Code's subagent tool asking for a background run (``StubModel.background``)."""
+    from contexto.bench.arms import cli
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        bench_stubs.bench_environment(monkeypatch, tmp, real_claude=True)
+        if not keep_variable:
+            monkeypatch.delitem(cli.ENV, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
+        stub = bench_stubs.StubModel([script], key=bench_stubs.FAKE_KEY, background=True, read_paths="absolute")
+        result = bench_stubs.run_bench(monkeypatch, tmp, [script], arms=arms, bound=BOUND, stub=stub,
+                                       upstream=stub.start(), turn_timeout=300.0)
+        stub.stop()
+    finally:
+        monkeypatch.undo()
+    return result
+
+
+def test_a_subagent_the_model_starts_runs_in_its_turn_with_the_real_claude(script, tmp_path):
+    """With CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 (set for both arms) the subagent runs in the foreground,
+    so each turn has one result and every reply is scored against its own turn."""
+    run = _background_run(script, tmp_path, arms=("contexto", "plain"), keep_variable=True)
+    assert run.code == 0, run.printed
+    assert any(r["tools"] and "Agent" in r["tools"] for r in run.stub.messages_requests())
+    for arm in ("contexto", "plain"):
+        unit = run.unit(arm)
+        assert unit["status"] == "complete" and unit["concluded_ok"] == {d.probe: True for d in script.decisions}
+        lines = [p for p in run.lines("probes.jsonl") if p["arm"] == arm]
+        assert [p["given"] for p in lines] == [run.stub.answered[(arm, script.seed, p["id"])] for p in lines]
+        assert len(lines) == len(script.probes)
+
+
+def test_a_background_task_with_the_real_claude_stops_the_unit_as_desync(script, tmp_path):
+    """Without the variable the subagent runs in the background, its report starts a run with a result
+    of its own, and the unit stops instead of being recorded complete with every reply on the wrong turn."""
+    run = _background_run(script, tmp_path, arms=("plain",), keep_variable=False)
+    unit = run.unit("plain")
+    assert (unit["status"], unit["stop"]) == ("stopped", "desync"), unit
+    assert not run.lines("probes.jsonl") and run.code == 1

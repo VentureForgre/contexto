@@ -26,9 +26,10 @@ CLI_ARMS = ("contexto", "plain")
 # Why a unit stopped. "budget", "auth" and "managed_settings" end the whole run; after any other the next
 # unit runs. "runaway": the unit passed a per-turn request cap or its token cap (contexto.bench.meter).
 # "unmetered": a Claude Code turn ended with no request through the meter, so something sent Claude Code
-# around it. "interrupted": Ctrl+C, SIGTERM, or (found on resume) a run killed while the unit ran.
+# around it. "desync": Claude Code printed a result that answered no turn, so its replies could not be matched
+# to the turns. "interrupted": Ctrl+C, SIGTERM, or (found on resume) a run killed while the unit ran.
 STOPS = ("budget", "auth", "cli_exit", "cli_error", "thrashing", "timeout", "api_error", "interrupted", "error",
-         "runaway", "unmetered", "managed_settings")
+         "runaway", "unmetered", "desync", "managed_settings")
 RUN_STOPS = ("budget", "auth", "managed_settings")
 
 

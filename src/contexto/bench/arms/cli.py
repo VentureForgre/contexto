@@ -32,6 +32,10 @@ What is read from the stream:
   line for an id win;
 - the ``result`` event's error flag, and ``compact_boundary`` events with
   ``compact_metadata.pre_tokens``;
+- how many ``result`` events there were. Each turn sent must get exactly one: a run that answers no
+  turn (Claude Code starts one when a background task reports back, which ``ENV`` turns off) would
+  shift every later reply onto the wrong turn. A result beyond the turns sent, seen at any point up to
+  the session's exit, stops the unit (``desync``), so such a unit is never ``complete``;
 - the tool calls of a turn: how many, and the ``file_path`` of each file-read call.
 
 Nothing of it is written anywhere except the parsed probe answers and those counts.
@@ -69,12 +73,15 @@ STRIPPED_NAMES = frozenset({"DISABLE_AUTO_COMPACT", "DISABLE_COMPACT", "FORCE_PR
 KEPT_NAMES = frozenset({"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"})
 # Set for both arms. DISABLE_AUTOUPDATER: no update in the middle of a run. The hint headers let the
 # meter tell main requests, side requests and compactions apart without reading a request's content;
-# the meter removes them again (contexto.bench.meter).
-ENV = {"DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"}
+# the meter removes them again (contexto.bench.meter). CLAUDE_CODE_DISABLE_BACKGROUND_TASKS (documented
+# on Claude Code's environment-variable page; read in the 2.1.322 bundle): no subagent or shell command
+# runs in the background, so no background task reports back with a run, and a result, of its own.
+ENV = {"DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 READ_TOOL = "Read"
 THRASHING = "Autocompact is thrashing"
 CLAUDE_ARGS = ("-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose")
 CLOSE_TIMEOUT_S = 60
+UNMETERED_GRACE_S = 30  # how long a result with no metered request waits for a sign that it answered no turn
 KILL_TIMEOUT_S = 10
 _EOF = object()
 # The watchdog of a session's process group. Lines from the benchmark: "group <n>" once the child has
@@ -226,6 +233,8 @@ class Session:
         # The watchdog first, so the child cannot inherit its pipe (close_fds does that too).
         self.watchdog = Watchdog()
         self._reaped = False
+        self.sent = 0  # turns written to the child
+        self.results = 0  # result events read from it
         try:
             self.proc = subprocess.Popen(self.command, cwd=self.cwd, env=self.env, stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
@@ -271,13 +280,17 @@ class Session:
             except (OSError, ValueError):
                 pass  # the child is gone, or the session was closed: the loop below says why
 
+        number = index + 1
+        self.drain()
+        if self.results > self.sent:
+            raise self.desync(f"found before turn {number} was sent")
         # In a thread: a turn is larger than a pipe's buffer, and a child that has stopped reading must
         # not hold the run past the turn's timeout.
         threading.Thread(target=write, name="contexto-bench-stdin", daemon=True).start()
+        self.sent += 1
         turn = Turn()
         texts: list[str] = []
         deadline = time.monotonic() + unit.turn_timeout
-        number = index + 1
         while True:
             if stop_pending(unit) and (stop := ledger_stop(unit)) is not None:
                 raise stop
@@ -314,6 +327,9 @@ class Session:
                         if block.get("name") == READ_TOOL and isinstance(path, str):
                             turn.read_paths.append(path)
             elif kind == "result":
+                self.results += 1
+                if self.results > self.sent:
+                    raise self.desync(f"found while turn {number} was in flight")
                 text = str(event.get("result") or "")
                 if event.get("is_error") or THRASHING in text:
                     if (stop := ledger_stop(unit)) is not None:
@@ -323,11 +339,72 @@ class Session:
                     subtype = event.get("subtype") if isinstance(event.get("subtype"), str) else "error"
                     raise Stop("cli_error", f"Claude Code reported an error on turn {number} ({subtype[:40]})")
                 if unit.meter.turn_requests(index) == 0:
-                    raise Stop("unmetered", f"turn {number} ended with no request through the benchmark's meter: "
-                                            "something sent Claude Code around it (organization-managed settings "
-                                            "can), so its tokens could not be counted")
+                    raise self.unmetered_or_desync(index, unit)
                 turn.text = "\n".join(texts) if texts else text
                 return turn
+
+    def _note(self, event: dict[str, Any]) -> None:
+        """What is kept of an event read between turns or after the last: compactions and results."""
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "compact_boundary":
+            metadata = event.get("compact_metadata") if isinstance(event.get("compact_metadata"), dict) else {}
+            pre = metadata.get("pre_tokens")
+            self.compaction_pre_tokens.append(pre if isinstance(pre, int) and not isinstance(pre, bool) else None)
+        elif kind == "result":
+            self.results += 1
+
+    def drain(self, until_eof: float | None = None) -> None:
+        """Take the events already read; with ``until_eof``, wait up to that many seconds for the end of
+        the child's output. The end-of-file marker is put back for the turn loop."""
+        deadline = None if until_eof is None else time.monotonic() + until_eof
+        while True:
+            try:
+                if deadline is None:
+                    event = self._events.get_nowait()
+                else:
+                    event = self._events.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                return
+            if event is _EOF:
+                self._events.put(_EOF)
+                return
+            self._note(event)
+
+    def unmetered_or_desync(self, index: int, unit: Unit) -> Stop:
+        """The stop for a result that came with no request through the meter in its turn. Either Claude
+        Code went around the meter, or the result answered no turn: a run of its own, printed before the
+        turn's own. In the second case the turn's own request reaches the meter, or its result arrives,
+        within ``UNMETERED_GRACE_S``."""
+        number = index + 1
+        deadline = time.monotonic() + UNMETERED_GRACE_S
+        while time.monotonic() < deadline:
+            if unit.meter.turn_requests(index) > 0:
+                return self.desync(f"found when turn {number}'s own request followed its result")
+            seen = self.results
+            self.drain(until_eof=0.1)
+            if self.results > seen:
+                return self.desync(f"found while turn {number} was in flight")
+        return Stop("unmetered", f"turn {number} ended with no request through the benchmark's meter: something "
+                                 "sent Claude Code around it (organization-managed settings can), so its tokens "
+                                 "could not be counted")
+
+    def desync(self, where: str) -> Stop:
+        return Stop("desync", f"Claude Code printed a result that answered no turn of the script ({self.results} "
+                              f"results for {self.sent} turns sent, {where}; a background task's report starts "
+                              "a run of its own), so its replies could not be matched to the turns and none of the "
+                              "unit's answers are scored")
+
+    def finish(self) -> None:
+        """After the last turn: end the session and read the rest of its output. Raises ``Stop``
+        (``desync``) when it held a result beyond the turns sent."""
+        if self.proc.stdin:
+            with contextlib.suppress(OSError):
+                self.proc.stdin.close()
+        if self._wait(CLOSE_TIMEOUT_S) is None:
+            self.kill()
+        self.drain(until_eof=5.0)
+        if self.results > self.sent:
+            raise self.desync("found after the script's last turn")
 
     def _wait(self, timeout: float) -> int | None:
         try:
@@ -392,6 +469,7 @@ def run_session(unit: Unit, command: list[str], env: dict[str, str]) -> UnitResu
                 result.answers[index] = turn.text
                 result.probe_turns_completed += 1
             result.turns_completed += 1
+        session.finish()
     except Stop as stop:
         session.kill()
         result.stopped(stop.code, stop.reason)

@@ -14,7 +14,9 @@ and can answer chosen requests with an error status, cut a stream short, or repo
 does not fit. With ``split`` it answers a Claude Code arm's decision and probe turns in two messages
 around a file-read tool call, as a model that checks something before it finishes: the decision line
 and half the answers (in markdown, one of them wrong) first, then the rest and the corrected answer.
-With ``tool_forever`` it answers every request of a Claude Code arm with another tool call.
+With ``tool_forever`` it answers every request of a Claude Code arm with another tool call. With
+``background`` it answers a Claude Code arm's decision and probe turns with the answer and a call of
+Claude Code's subagent tool asking for a background run, then "Done." to everything after it.
 
 ``install_stub_claude`` writes a ``claude`` executable that runs ``tests/fixtures/bench/stub_claude.py``.
 """
@@ -109,6 +111,7 @@ class StubModel:
     split: bool = False  # answer decision and probe turns in two messages around a tool call (Claude Code arms)
     tool_forever: set[str] = field(default_factory=set)  # arms whose every request is answered with a tool call
     long_answers: bool = False  # put 250 backticks before each right answer
+    background: bool = False  # answer a Claude Code arm's decision and probe turns with a background subagent call
     requests: list[dict[str, Any]] = field(default_factory=list)
     answered: dict[tuple[str, int, str], str] = field(default_factory=dict)  # (arm, seed, probe id) -> answer given
     searches: int = 0
@@ -182,6 +185,11 @@ class StubModel:
             return [{"type": "tool_use", "id": f"toolu_again_{len(after):04d}", "name": READ_TOOL,
                      "input": {"file_path": "does-not-exist.txt"}}]
         split = self.split and arm != "full"
+        background = self.background and arm != "full" and kind in ("decision", "probe")
+        if background and any(b.get("type") == "tool_use" and str(b.get("id", "")).startswith("toolu_bg")
+                              for m in after if m.get("role") == "assistant" and isinstance(m.get("content"), list)
+                              for b in m["content"] if isinstance(b, dict)):
+            return [{"type": "text", "text": "Done."}]  # after the launch, and again when the subagent reports
         checked = split and any(b.get("type") == "tool_use" and str(b.get("id", "")).startswith("toolu_split")
                                 for m in after if m.get("role") == "assistant" and isinstance(m.get("content"), list)
                                 for b in m["content"] if isinstance(b, dict))
@@ -194,7 +202,7 @@ class StubModel:
             if split:  # the decision first, a check, then a last message with no decision line in it
                 return [{"type": "text", "text": "Noted, nothing else to add."}] if checked else [
                     {"type": "text", "text": f"**Decision**\n\n- {right}"}, _split_read(index)]
-            return [{"type": "text", "text": right}]
+            return [{"type": "text", "text": right}, *([_background_agent(index)] if background else [])]
         if kind == "toolloop":
             done = len(_tool_results(after))
             if done < len(script.reads):
@@ -229,7 +237,7 @@ class StubModel:
                 self.answered[(arm, script.seed, probe.id)] = given
             lines.append(f"{probe.id}: {given}")
         if not split:
-            return [{"type": "text", "text": "\n".join(lines)}]
+            return [{"type": "text", "text": "\n".join(lines)}, *([_background_agent(index)] if background else [])]
         half = len(lines) // 2
         if not checked:  # the first half, and the last probe's id with a wrong answer it corrects later
             first = ["**Answers so far**", "", *(f"- {line}" for line in lines[:half]), f"- {asked[-1].id}: unsure",
@@ -385,6 +393,14 @@ class StubModel:
 def _split_read(index: int) -> dict[str, Any]:
     return {"type": "tool_use", "id": f"toolu_split_{index:03d}", "name": READ_TOOL,
             "input": {"file_path": "notes-that-do-not-exist.md"}}
+
+
+def _background_agent(index: int) -> dict[str, Any]:
+    """A call of Claude Code's subagent tool that asks for a background run: Claude Code answers it at
+    once, and when the subagent ends it reports back with one more main request and one more result."""
+    return {"type": "tool_use", "id": f"toolu_bg_{index:03d}", "name": "Agent",
+            "input": {"description": "Check the notes", "prompt": "Say the word ready and nothing else.",
+                      "subagent_type": "general-purpose", "run_in_background": True}}
 
 
 def _query(script: Script, probe: Probe) -> str:
