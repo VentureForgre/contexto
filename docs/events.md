@@ -289,8 +289,9 @@ The model reads a paged turn back:
   The nested `request` event's `main` says whether the engine took the line's conversation for the
   main one when it sent the request.
 - **Turn**: a user prompt and everything up to the next one. A **turn start** is a request whose
-  newest turn has no assistant message yet. The engine pages at turn starts. The one exception is a
-  [`resync`](#resync) with `paged_changed`, which pages at whatever request finds the change.
+  newest turn has no assistant message yet. The engine pages at turn starts. The exceptions are a
+  [`resync`](#resync) with `paged_changed`, which pages at whatever request finds the change, and
+  in-turn paging inside a Claude Code tool loop (next point).
 - **Tool loop**: the requests of a turn after its turn start. The model called a tool, and the CLI
   sends the result back with the turn so far. For Claude Code the engine pages inside a tool loop
   too ([in-turn paging](in-turn-paging.md), D63; see [`in_turn_batch`](#in_turn_batch)). A Codex
@@ -320,8 +321,9 @@ The model reads a paged turn back:
   start with less makes the engine rotate if a rotation would restore it.
 - **Degraded mode**: after a store failure in one conversation, the engine stops paging that
   conversation and sends its last good transform, extended with the new messages, until the store
-  works again at one of its turn starts or at a `paged_changed` resync of it, or the run ends. It
-  belongs to that conversation alone: the others keep paging until a store call of their own fails.
+  works again at one of its turn starts, at a `paged_changed` resync of it or at an in-turn batch in
+  one of its Claude Code tool loops, or the run ends. It belongs to that conversation alone: the
+  others keep paging until a store call of their own fails.
 
 The design contract, [milestones/M2-contexto-proxy.md](milestones/M2-contexto-proxy.md), defines
 these and the rules the entries cite.
@@ -347,10 +349,12 @@ conversation, and each run starts a new engine. Under `contexto serve`, each ope
 - A [`resync`](#resync) with `paged_changed` pages everything before the current turn again within
   one run, and counts those turns again in `turns_paged`.
 - A [`degraded_enter`](#degraded_enter) is the conversation of its line entering degraded mode, and a
-  [`degraded_leave`](#degraded_leave) is one conversation leaving it, at that conversation's next turn
-  start that finds the store working, or at a `paged_changed` [`resync`](#resync) of it that finds the
-  store working, which can come inside a tool loop. A conversation that sends no further turn start
-  and no such resync, such as a subagent that has finished, never logs a leave. So a `degraded_enter`
+  [`degraded_leave`](#degraded_leave) is one conversation leaving it, at the first of these that
+  finds the store working: that conversation's next turn start, a `paged_changed`
+  [`resync`](#resync) of it, which can come inside a tool loop, or, with in-turn paging on, a request
+  in one of its Claude Code tool loops that is due an [`in_turn_batch`](#in_turn_batch). That last
+  case covers a subagent too, inside its own tool loop. A conversation that sends none of these
+  again, such as a subagent that has finished, never logs a leave. So a `degraded_enter`
   with no `degraded_leave` after it does not mean the session stopped paging: other conversations, the
   main one included, can go on paging and rotating on the lines that follow.
 - A new run starts every conversation out of degraded mode, and no `degraded_leave` is logged for
@@ -774,11 +778,15 @@ A `count_tokens` request has a [`count_tokens`](#count_tokens) event in its plac
 - `over_bound`: true when the estimate of what was sent exceeds the bound. An
   [`over_bound`](#over_bound) event precedes it.
 - `degraded`: true when the request was sent in degraded mode.
-- `in_turn_thinking`: only on a request inside a tool loop after in-turn paging has removed thinking
-  in the turn (D63): counts of the thinking blocks in the messages from `k` on, with no content.
-  `kept_before` (before the first stretch whose thinking is removed), `stripped` (removed),
-  `kept_between` (between two such stretches) and `kept_after` (after the last one). Messages folded
-  into a page are not counted.
+- `in_turn_thinking`: on each request inside a tool loop from an [`in_turn_batch`](#in_turn_batch)
+  on (D63), whether or not there was thinking to remove. Each batch marks a stretch, from the first
+  message it changed to the end of the request, whose thinking is removed. The conversation's next
+  rotation clears the stretches, and the field is absent until a batch marks one again (a batch
+  whose `rotation` has reason `in_turn` marks one on the same request). Counts of the thinking blocks
+  in the messages from `k` on, with no content: `kept_before` (before the first stretch), `stripped`
+  (removed: in a stretch, or in a message that already existed when the epoch began, as rule 2
+  strips), `kept_between` (between two stretches) and `kept_after` (after the last one). All four
+  are 0 when those messages hold no thinking. Messages folded into a page are not counted.
 - `fallback_failed`: true when the CLI's request was sent unchanged (see
   [`fallback_failed`](#fallback_failed)).
 - `main`: whether this request belongs to the main conversation.
@@ -1052,7 +1060,7 @@ the `transform_events` of the same `request` line.
 
 | The event | Kind | What it means |
 | --- | --- | --- |
-| `estimate` with `in_tool_loop: true` and no `degraded` | notice | The allowed case (contract rule 5). The turn grew past the bound inside a tool loop, and in-turn paging could not bring it back under or did not run (Codex, or `--no-in-turn-paging` or `CONTEXTO_IN_TURN_PAGING=0`). The next turn start rotates. |
+| `estimate` with `in_tool_loop: true` and no `degraded` | notice | The allowed case (contract rule 5). The turn grew past the bound inside a tool loop, and in-turn paging could not bring it back under or did not run (Codex, or `--no-in-turn-paging` or `CONTEXTO_IN_TURN_PAGING=0`). The next turn start rotates. An [`in_turn_exhausted`](#in_turn_exhausted) on the same line says in-turn paging tried and could not bring the request under the bound, which is a problem: classify the event by it. |
 | `estimate` with `degraded: true` | problem | A consequence of degraded mode, in which the conversation pages nothing. The fault to look at is the [`store_error`](#store_error) or [`page_conflict`](#page_conflict) that started it. |
 | `estimate` with `in_tool_loop: false` and no `degraded` | problem | Over the bound at a turn start. A [`bound_too_small`](#bound_too_small) or [`pdf_allowance`](#pdf_allowance) on the same line says why. With neither, the rotation's sizing did not hold. |
 | `real`, with an `estimate` event on the same line | that event's kind | The real input confirms the estimate. |
@@ -1121,6 +1129,8 @@ Writer: engine. Where: `transform_events`. Kind: problem.
 A page already in the store differs from the turn being paged under the same id, or its file is not
 a page record. Either means a corrupted page. The conversation on the line enters degraded mode; at
 its next turn start the engine has the store move that page to quarantine and pages the turn again.
+An in-turn batch that writes its pages inside a tool loop before then leaves degraded mode with no
+page quarantined (a [`degraded_leave`](#degraded_leave) with no `quarantined`).
 
 - `epoch`: the current epoch.
 - `operation`: the store operation that failed.
@@ -1135,10 +1145,14 @@ Writer: engine. Where: `transform_events`, `usage_events`. Kind: problem.
 The conversation on this line entered degraded mode. Until it leaves, the engine pages nothing of it
 and never rotates it, so its requests can exceed the bound; each is marked `degraded` and, when
 over, `over_bound`. Nothing is lost, because no turn of it is paged while the store is broken. The
-store is tried again at each of its turn starts and at a `paged_changed` [`resync`](#resync) of it.
-Other conversations keep paging, and each enters degraded mode on a line of its own when a store call
-of its own fails. Degraded mode ends with the run, with no `degraded_leave` (see
-[What the counters count](#what-the-counters-count)).
+store is tried again at each of its turn starts, at a `paged_changed` [`resync`](#resync) of it,
+and, in a Claude Code tool loop with in-turn paging on, at each request whose estimate passes the
+line in-turn paging holds requests under and that has a batch to run
+([in-turn-paging.md](in-turn-paging.md#when-it-runs)). Each retry that fails logs a
+[`store_error`](#store_error) or [`page_conflict`](#page_conflict) with `degraded: true` and no
+second `degraded_enter`. Other conversations keep paging, and each enters degraded mode on a line
+of its own when a store call of its own fails. Degraded mode ends with the run, with no
+`degraded_leave` (see [What the counters count](#what-the-counters-count)).
 
 - `epoch`: the current epoch.
 - `reason`: `store_error` or `page_conflict`: the event just before it.
@@ -1148,11 +1162,14 @@ of its own fails. Degraded mode ends with the run, with no `degraded_leave` (see
 Writer: engine. Where: `transform_events`. Kind: notice.
 
 The store works again for the conversation on this line, which left degraded mode at this request:
-a turn start, or a `paged_changed` [`resync`](#resync), which can come inside a tool loop and is
-logged just before this event. Its rotation resumes at this request. Each conversation leaves with
-its own `degraded_leave`, so pair this event with the `degraded_enter` of the same conversation. A
-conversation that sends no further turn start or such resync never logs one, and a new run ends
-degraded mode without one (see [What the counters count](#what-the-counters-count)).
+a turn start, a `paged_changed` [`resync`](#resync), which can come inside a tool loop and is
+logged just before this event, or a request in a Claude Code tool loop whose in-turn batch wrote
+its pages, a subagent's included; that batch's events, its [`in_turn_batch`](#in_turn_batch)
+among them, follow this event on the same line. Its paging resumes at this request. Each
+conversation leaves with its own `degraded_leave`, so pair this event with the `degraded_enter` of
+the same conversation. A conversation that sends no further turn start, such resync or in-turn
+batch never logs one, and a new run ends degraded mode without one (see
+[What the counters count](#what-the-counters-count)).
 
 - `epoch`: the current epoch.
 - `quarantined`: present when the engine left by quarantining a corrupted page: its id.
@@ -1539,8 +1556,10 @@ The proxy is up and the CLI is about to start.
 - `cli`: `claude` or `codex`.
 - `session`: the session id. A new session gets 32 random hex characters; with `--session` it is
   the name the user gave.
-- `config`: the engine settings given on the command line: `bound`, `window_fraction` and
-  `headroom_floor` when set, and `in_turn_paging: false` when in-turn paging is off.
+- `config`: the engine settings: `bound` always (150,000 when no `--bound` was given),
+  `window_fraction` and `headroom_floor` when given on the command line, and `in_turn_paging: false`
+  when in-turn paging is off (`--no-in-turn-paging`, or `CONTEXTO_IN_TURN_PAGING` set to `0`,
+  `false`, `off` or `no`).
 - `engine`: `rewrite`, or `identity` when the paging engine could not be loaded.
 - `upstream_source`: as in [`proxy_start`](#proxy_start).
 - `observe_thinking`: whether `--observe-thinking` is on.
