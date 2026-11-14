@@ -1240,13 +1240,18 @@ unknown page, never read. Tools:
   the lacked words, and one of three holds: one of them is a specific word on at most half the pages;
   or they weigh at least half the weight of a word on no page (`SECOND_BAR` 0.5), a word matched
   through a typo counted here at its full weight, not halved; or one of them stands next to its
-  neighbour from the query, in the query's order (a pair of neighbouring query words that the page
-  holds side by side). The 30 percent keeps out a common specific word when the page lacks the
+  neighbour from the query, in the query's order (a pair of neighbouring query words, stop words
+  included, that the page holds with one space between them, matched as a substring). A specific
+  word whose own weight reaches the bar needs no 30 percent: words that no page holds outweigh it
+  otherwise (`staging database port e4127 replica cutover` at 1,000 pages shows the `e4127` page
+  third). The 30 percent keeps out a common specific word when the page lacks the
   rarer words: with `2024` on 40 of 100 pages and `retention` on 10, a page holding only `2024`
   gets no place for `deploy pipeline 2024 retention`. The bar keeps out a leftover common word: one
   word passes it on at most `sqrt((n + 1) / 2) - 1/2` of `n` pages, 6 of 100 and 54 of 6,000, so a
   word on more than about 6.6 percent of 100 pages or 0.9 percent of 6,000 gets no place unless it
-  stands next to its query neighbour. The pair rule lets through a second fact of fairly common
+  stands next to its query neighbour. A common word next to its neighbour by accident passes too
+  (a log line `listening port server api-1 started` for `staging database port server`). The pair
+  rule lets through a second fact of fairly common
   words said as the query says them: with `rate` and `limit` each on 30 of 100 pages, the page
   that says `API rate limit` takes the place for `webhook signing secret and API rate limit`.
   Among the pages that qualify the best is, in order: a turn page before a context block, the
@@ -1289,7 +1294,7 @@ unknown page, never read. Tools:
   and 0.87, 2.9; a 7-word question with a typo 0.35 and 0.87, 3.5; six unknown words 1.13 and
   1.61, 2.4. So a miss costs about 2 times a strict miss without a typo try and about 3 with one.
   With every page held in memory a strict miss is cheaper still (it stops at the first missing
-  word), and the ratio is higher: 2.0 to 10.1 times at 1,000 synthetic pages (reviewer B on PR
+  word), and the ratio is higher: 2.0 to 11 times at 1,000 synthetic pages on a busy machine (reviewer B on PR
   #267), at most 0.13 CPU seconds a miss. A strict hit costs what it did: it runs the same code, and the
   fallback is not called. Limits: no stemming beyond the typo step, no synonyms, no embeddings
   (`database` does not find `DB`); stop words are dropped even where they are code (`for loops`

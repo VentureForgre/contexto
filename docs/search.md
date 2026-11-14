@@ -158,18 +158,24 @@ turn 40 says `backups run at 02:00`, `staging database port bakcups` shows turn 
 this place it is not returned at all.
 
 A turn takes this place when the lacked words it holds weigh at least 30 percent of all the lacked
-words, and one of these is true:
+words, and one of these is true (an identifier, a number or a path that is rare enough to pass the
+second rule on its own needs no 30 percent):
 
 - One of them is an identifier, a number or a path that half the turns or fewer hold.
 - They weigh at least half as much as a word that no turn holds. A word matched through a typo
   counts at its full weight here, not at half.
-- One of them stands next to its neighbour from the query, in the query's order. In a 100-turn
+- One of them stands next to its neighbour from the query, in the query's order, with one space
+  between them on the turn. A stop word between them, in the query or on the turn, breaks the pair:
+  for `restart the nginx`, a turn that says `restart nginx` holds no pair. In a 100-turn
   session where `rate` and `limit` are each on 30 turns, `webhook signing secret and API rate limit`
   shows the turn that says `the API rate limit is 600 a minute` third.
 
 The 30 percent keeps out a common identifier or number when the turn lacks the rarer words. If 40
 of 100 turns say `2024` and 10 say `retention`, then for `deploy pipeline 2024 retention` a turn that
-holds only `2024` gets no place: it holds 0.91 of the lacked 3.18, under the 0.95 needed.
+holds only `2024` gets no place: it holds 0.91 of the lacked 3.18, under the 0.95 needed. A rare
+identifier needs no such share. In a 1,000-turn session where turns 10 to 29 say `staging database
+port` and turn 600 says `error e4127 came from shard seven`, `staging database port e4127 replica
+cutover` shows turn 600 third, although `replica` and `cutover` are on no turn and outweigh it.
 
 The second rule keeps out a leftover common word. One word passes it when it is on at most
 `sqrt((n + 1) / 2) - 1/2` of `n` turns: 6 of 100 turns, and 54 of 6,000. So a word on more than
@@ -272,6 +278,10 @@ case.
   10 to 12 hold `staging database port`, turn 13 says `staging prod host is db1` and the newer
   turn 15 `prod host is now db2`, then `staging database port prod host` shows turn 13 first and
   puts turn 15 fifth, in the list.
+- A common word takes the third place when any turn has it next to its query neighbour, even by
+  accident. With `server` on 12 of 100 turns, a log line `listening port server api-1 started` takes
+  the place for `staging database port server`, and the staging turn it displaces is listed fourth.
+  The pair is matched as a substring, like any word: `an accurate limits table` holds `rate limit`.
 - One identifier typed in two styles in one query counts as two words: `refresh_token refreshToken`
   weighs twice as much as one of them and takes two of the 6 words searched.
 - Two facts on two turns are both shown when the second passes the rules for the third place.
@@ -295,7 +305,7 @@ case.
   more for the fallback; a seven-word question with a typo: 0.35 and 0.87 more). Those turns were
   read from disk. When every turn is held in memory (a session whose search text fits in the 64 MB
   budget), a strict miss is cheaper, because it stops at a turn's first missing word, so the ratio
-  is higher: 2.0 to 10.1 times on 1,000 synthetic turns. Those misses took at most 0.13 CPU seconds.
+  is higher: 2.0 to 11 times on 1,000 synthetic turns on a busy machine. Those misses took at most 0.13 CPU seconds.
   A query that matches strictly costs what it did before.
 
 The exact rules are in the design contract,

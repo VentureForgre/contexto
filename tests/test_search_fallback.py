@@ -753,6 +753,17 @@ def test_a_specific_word_takes_the_place_only_with_30_percent_of_the_lacked_weig
     assert found(rank_approximate(sized_pages(100, extra), "deploy pipeline 2024 retention"))[:3] == [31, 30, 47]
 
 
+@pytest.mark.parametrize("n, first", [(1000, range(10, 30)), (100, range(10, 15))])
+def test_a_rare_identifier_takes_the_place_when_the_query_has_words_no_page_holds(n, first):
+    # Reviewer B on PR #267, round 4: two words on no page make the lacked weight large, so the 30 percent
+    # gate refused the page holding the rarest word of the query. A specific word that clears the bar by
+    # itself is shown whatever share of the lacked weight it holds.
+    extra = {i: f"; staging database port is 65{i:02d}" for i in first}
+    extra[n * 6 // 10] = "; error e4127 came from shard seven"
+    hits = rank_approximate(sized_pages(n, extra), "staging database port e4127 replica cutover")
+    assert found(hits)[2] == n * 6 // 10
+
+
 def test_a_turn_page_takes_the_place_before_a_context_block():
     texts = [f"page {i} ran the build" for i in range(100)]
     for i, line in STAGING.items():

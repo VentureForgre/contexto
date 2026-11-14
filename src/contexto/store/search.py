@@ -833,7 +833,8 @@ def _second_page(first: int, rows: dict[int, tuple[SearchEntry, list[tuple[str, 
     second fact of a query whose two facts sit on two pages (D65). None when no page qualifies.
 
     A page qualifies when the lacked words it holds weigh at least ``APPROX_FLOOR`` of all the lacked
-    words, so it is about them, and one of three things holds, so that what it adds is not a leftover
+    words, so it is about them (a specific word whose own weight reaches ``SECOND_BAR`` of ``nowhere``
+    needs no such share), and one of three things holds, so that what it adds is not a leftover
     common word: one of those words is specific (``telling``: on at most half the pages); or they weigh
     at least ``SECOND_BAR`` of ``nowhere``, the weight of a word on no page, with the word matched
     through a typo (``typo``) counted at its full weight; or one of them stands next to its neighbour
@@ -850,7 +851,9 @@ def _second_page(first: int, rows: dict[int, tuple[SearchEntry, list[tuple[str, 
         if i == first or not held:
             continue
         share = sum(weight[j] for j in held)
-        if share < APPROX_FLOOR * rest:
+        # A specific word that clears the bar by itself is shown whatever share of the lacked weight it
+        # holds: words that no page holds weigh the most and would otherwise hide the rarest word asked for.
+        if share < APPROX_FLOOR * rest and not any(telling[j] and weight[j] >= SECOND_BAR * nowhere for j in held):
             continue
         full = sum(weight[j] / (TYPO_WEIGHT if j == typo else 1.0) for j in held)  # the typo word unhalved
         bits = together.get(i, 0)
