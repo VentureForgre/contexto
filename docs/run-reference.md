@@ -37,7 +37,7 @@ For Claude Code, the launcher:
 3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets
    `env.ANTHROPIC_BASE_URL` to the proxy and the two hint-header variables below, allows Contexto's
    five MCP tools by name (`permissions.allow`; see [Troubleshooting](troubleshooting.md)), and adds
-   Contexto's `statusLine` when none of your settings files has one (see
+   Contexto's `statusLine` only when none of your settings files has one and it is not turned off (see
    [Status line](statusline.md)), and an `--mcp-config` file that
    starts Contexto's MCP server (`python -P -m contexto mcp --session=<id>` with the same Python, and
    `CONTEXTO_HOME`, plus `CONTEXTO_SEARCH_CACHE_MB` when set, in its environment; `-P` keeps your
