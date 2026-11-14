@@ -58,6 +58,41 @@ def accuracy_results() -> dict:
 # Request size against history length
 
 
+def _bound_label(root: ET.Element) -> ET.Element:
+    (label,) = [t for t in root.iter(f"{SVG}text") if t.get("data-bound-label")]
+    return label
+
+
+def test_the_bound_label_goes_where_no_series_crosses_it():
+    """Reviewer B nit 2 on #269: a series drawn through the bound's label hid part of it. The label stays
+    at the left end of the bound line when nothing crosses it there, moves to the right end when a series
+    crosses the left place and not the right, and stays left when series cross both."""
+    free = line_results()
+    free["request_series"]["full"]["points"] = [[0, 0], [500, 50], [1000, 1000]]  # crosses 100 near the middle
+    label = _bound_label(parse(charts.request_size_svg(free)))
+    assert (label.get("x"), label.get("y"), label.get("text-anchor")) == ("84.0", "337.0", None)
+    # The full line crosses 100 tokens at x = 76 + 100 / 1000 * 700 = 146, inside the left place.
+    label = _bound_label(parse(charts.request_size_svg(line_results())))
+    assert (label.get("x"), label.get("y"), label.get("text-anchor")) == ("768.0", "337.0", "end")
+    assert label.text == "bound: 100 tokens"
+    both = line_results()
+    both["request_series"]["plain"] = {"basis": "measured", "label": "Plain Claude Code",
+                                       "points": [[0, 105], [1000, 105]]}
+    label = _bound_label(parse(charts.request_size_svg(both)))
+    assert (label.get("x"), label.get("text-anchor")) == ("84.0", None)
+
+
+def test_a_series_meets_a_box_only_when_it_enters_it():
+    box = (10.0, 10.0, 20.0, 20.0)
+    assert charts._meets(box, [(0.0, 15.0), (30.0, 15.0)])  # straight through
+    assert charts._meets(box, [(15.0, 15.0)])  # a single point inside
+    assert charts._meets(box, [(0.0, 0.0), (5.0, 5.0), (15.0, 30.0)])  # the second segment enters through the left side
+    assert not charts._meets(box, [(0.0, 0.0), (30.0, 5.0)])  # passes above
+    assert not charts._meets(box, [(0.0, 25.0), (5.0, 40.0)])
+    assert not charts._meets(box, [(25.0, 15.0)])
+    assert not charts._meets(box, [])
+
+
 def test_axis_top_is_the_next_round_tick():
     assert charts.axis_top(1000) == (1000, 200)
     assert charts.axis_top(20_711) == (25_000, 5_000)

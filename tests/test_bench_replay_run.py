@@ -486,6 +486,9 @@ def check_the_chart_of_a_replay_names_each_basis_once(run):
         assert "estimated" not in words or "modelled" not in words, words
     notes = " ".join("".join(t.itertext()) for t in root.iter(f"{svg}text") if t.get("font-size") == "11")
     assert "vertical run of points" in notes
+    # Reviewer B nit 2: the full-context line crosses the bound at the left, so the label is at the right end.
+    (label,) = [t for t in root.iter(f"{svg}text") if t.get("data-bound-label")]
+    assert (label.text, label.get("text-anchor")) == ("bound: 150,000 tokens", "end")
 
 
 PINNED_CHECKS =[check_equals_the_trace, check_the_bound_held, check_the_engine_ran_as_in_a_launch,
