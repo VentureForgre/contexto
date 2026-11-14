@@ -10,6 +10,7 @@ parse back to the same value (D58).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 # The deepest nesting of objects and arrays Contexto reads, the outermost counted as level 1 (rule 18).
@@ -59,12 +60,15 @@ def nesting_exceeds(value: Any, limit: int = MAX_JSON_DEPTH) -> bool:
     return False
 
 
-def loads_bounded(data: str | bytes | bytearray) -> Any:
+def loads_bounded(data: str | bytes | bytearray, *, parse_int: Callable[[str], Any] | None = None,
+                  parse_constant: Callable[[str], Any] | None = None) -> Any:
     """``json.loads`` for a document from outside Contexto (a request or response body, an SSE event,
     an MCP line, tool output, a page file). Raises ``JSONTooDeepError`` when the document is nested
-    deeper than ``MAX_JSON_DEPTH``, including when json.loads itself runs out of recursion."""
+    deeper than ``MAX_JSON_DEPTH``, including when json.loads itself runs out of recursion.
+    ``parse_int`` and ``parse_constant`` go to ``json.loads`` (``contexto.upstream.read_settings_file``
+    reads a settings file as Claude Code reads it)."""
     try:
-        value = json.loads(data)
+        value = json.loads(data, parse_int=parse_int, parse_constant=parse_constant)
     except RecursionError:
         raise JSONTooDeepError(f"nested deeper than {MAX_JSON_DEPTH} levels") from None
     if nesting_exceeds(value):

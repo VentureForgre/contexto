@@ -29,6 +29,7 @@ from contexto import cli
 from contexto.cliversions import TESTED_VERSIONS
 from contexto.commands import doctor
 from contexto.mcp import TOOLS
+from contexto.upstream import CLOUD_PROVIDER_KEYS
 
 CHECK_IDS = ["python", "claude", "codex", "settings", "claude-upstream", "codex-upstream", "claude-key",
              "codex-key", "store", "mcp", "provider"]
@@ -163,7 +164,7 @@ def test_text_and_json_report_the_same_results(both, capsys, fast_mcp, monkeypat
     monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
     code_text, out, _ = run(capsys)
     code_json, data = checks(capsys)
-    assert code_text == code_json == 0
+    assert code_text == code_json == 1  # the provider check fails, as `contexto run claude` refuses (D70)
     marks = {"pass": "[ok]", "warn": "[warn]", "fail": "[FAIL]", "skip": "[skip]"}
     lines = out.splitlines()
     for check in data.values():
@@ -735,49 +736,65 @@ def settings_line(capsys) -> tuple[int, dict, str]:
 def test_settings_files_that_are_read_are_named_by_scope(both, capsys, fast_mcp):
     code, check, line = settings_line(capsys)
     assert check["status"] == "pass" and "no settings file" in line
-    assert check["details"] == {"files": [{"kind": kind, "state": "absent"} for kind in ("local", "project", "user")]}
+    assert check["details"] == {"files": [{"kind": kind, "state": "absent"}
+                                          for kind in ("local", "project", "user", "managed")]}
     write_settings(both.home / ".claude" / "settings.json", {})
     (both.cwd / ".claude").mkdir()
     (both.cwd / ".claude" / "settings.json").write_bytes(b"\xef\xbb\xbf{}")  # a byte order mark is fine
     code, check, line = settings_line(capsys)
     assert check["status"] == "pass" and line.endswith("read .claude/settings.json and ~/.claude/settings.json")
-    assert [f["state"] for f in check["details"]["files"]] == ["absent", "read", "read"]
+    assert [f["state"] for f in check["details"]["files"]] == ["absent", "read", "read", "absent"]
     assert str(both.home) not in line and str(both.cwd) not in line
 
 
 @pytest.mark.parametrize("fault,problem", [
-    ("not-json", "cannot be read as JSON"), ("not-utf8", "cannot be read as JSON"), ("list", "is not a JSON object"),
-    ("env-list", "env block"), ("directory", "is a directory"), ("mode-000", "Permission denied")])
+    ("not-json", "is not valid JSON"), ("not-utf8", "is not valid JSON"),
+    ("env-list", "has an env that is not a JSON object")])
 @pytest.mark.parametrize("scope", ["user", "project"])
 def test_an_unusable_settings_file_is_a_warning_that_names_it_and_what_is_wrong(both, capsys, fast_mcp, scope,
                                                                                  fault, problem):
     """Reviewer B, PR #258: with a broken file that sets a base URL, doctor said "nothing sets
     ANTHROPIC_BASE_URL" and nothing more. That is what the launcher does with the file, so the other
     checks stay as they are, and this one names the file."""
-    if fault == "mode-000" and os.geteuid() == 0:
-        pytest.skip("root can read anything")
     path = (both.home if scope == "user" else both.cwd) / ".claude" / "settings.json"
     name = "~/.claude/settings.json" if scope == "user" else ".claude/settings.json"
     usable = json.dumps({"env": {"ANTHROPIC_BASE_URL": f"https://broken.example/{URL_SECRET}"}})
     path.parent.mkdir(parents=True)
+    path.write_bytes({"not-json": (usable + ",").encode(), "not-utf8": b"\xfe\xff" + usable.encode(),
+                      "env-list": b'{"env": []}'}[fault])
+    code, check, line = settings_line(capsys)
+    _, found = checks(capsys)
+    assert code == 0 and check["status"] == "warn" and line.startswith("[warn]"), line
+    assert f"{name} {problem}" in line and str(path.parent.parent) not in line
+    assert "Fix or remove it" in check["action"] and URL_SECRET not in json.dumps(check)
+    assert {"kind": scope, "state": "unusable", "problem": problem} in check["details"]["files"]
+    assert found["claude-upstream"]["details"]["source"] == "default"  # as the launcher reads it
+    assert found["provider"]["status"] == "pass"  # the file cannot name a provider switch, so the launch goes on
+
+
+@pytest.mark.parametrize("fault,state", [("directory", "absent"), ("mode-000", "absent"), ("list", "read")])
+def test_a_settings_file_claude_code_cannot_read_either_is_absent(both, capsys, fast_mcp, fault, state):
+    """``contexto.upstream.read_settings_file``: a directory and a file this user cannot open are absent,
+    since Claude Code runs as the same user and cannot read them either; a document that is not an
+    object sets nothing. None of them stops `contexto run claude` (#271, D70)."""
+    if fault == "mode-000" and os.geteuid() == 0:
+        pytest.skip("root can read anything")
+    path = both.cwd / ".claude" / "settings.json"
+    path.parent.mkdir()
     if fault == "directory":
         path.mkdir()
     else:
-        path.write_bytes({"not-json": (usable + ",").encode(), "not-utf8": b"\xff\xfe" + usable.encode(),
-                          "list": b"[]", "env-list": b'{"env": []}', "mode-000": usable.encode()}[fault])
+        path.write_text({"list": "[]", "mode-000": json.dumps({"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}})}[fault])
     if fault == "mode-000":
         path.chmod(0)
     try:
-        code, check, line = settings_line(capsys)
+        code, check, _ = settings_line(capsys)
         _, found = checks(capsys)
     finally:
         path.chmod(0o700)
-    assert code == 0 and check["status"] == "warn" and line.startswith("[warn]"), line
-    assert f"{name} " in line and problem in line and str(path.parent.parent) not in line
-    assert "Fix or remove it" in check["action"] and URL_SECRET not in json.dumps(check)
-    assert {"kind": scope, "state": "unusable", "problem": check["details"]["files"][-1 if scope == "user" else 1]
-            ["problem"]} in check["details"]["files"]
-    assert found["claude-upstream"]["details"]["source"] == "default"  # as the launcher reads it
+    assert code == 0 and check["status"] == "pass"
+    assert check["details"]["files"][1] == {"kind": "project", "state": state}
+    assert found["provider"]["status"] == "pass"
 
 
 def test_a_settings_symlink_that_leads_nowhere_is_an_absent_file(both, capsys, fast_mcp):
@@ -788,13 +805,34 @@ def test_a_settings_symlink_that_leads_nowhere_is_an_absent_file(both, capsys, f
     assert check["details"]["files"][1] == {"kind": "project", "state": "absent"}
 
 
-def test_a_fifo_in_place_of_a_settings_file_is_named_without_being_opened(both):
-    path = both.cwd / ".claude" / "settings.json"
-    path.parent.mkdir()
-    os.mkfifo(path)
-    started = time.monotonic()
-    assert "FIFO" in doctor.settings_problem(path)  # opening it would block until something writes to it
-    assert time.monotonic() - started < 5
+def test_the_managed_settings_file_is_read_and_named_as_the_guard_reads_it(both, capsys, fast_mcp, monkeypatch):
+    """The cloud-provider guard reads Claude Code's managed settings file (D70), so the settings line
+    names it too."""
+    from contexto import upstream
+
+    managed = both.tmp / "managed-settings.json"
+    managed.write_text("{")
+    monkeypatch.setitem(upstream.MANAGED_SETTINGS_FILES, sys.platform, str(managed))
+    _, check, line = settings_line(capsys)
+    assert check["status"] == "warn"
+    assert "Claude Code's managed settings file (managed-settings.json) is not valid JSON" in line
+    assert check["details"]["files"][-1] == {"kind": "managed", "state": "unusable", "problem": "is not valid JSON"}
+    managed.write_text("{}")
+    _, check, line = settings_line(capsys)
+    assert check["status"] == "pass"
+    assert line.endswith("read Claude Code's managed settings file (managed-settings.json)")
+
+
+def test_source_text_names_the_place_and_never_a_path(tmp_path):
+    assert doctor.source_text("env") == "the environment"
+    assert doctor.source_text("settings:project") == "the env block of .claude/settings.json"
+    assert doctor.source_text("settings:local") == "the env block of .claude/settings.local.json"
+    assert doctor.source_text("settings:user") == "the env block of ~/.claude/settings.json"
+    config = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+    assert doctor.source_text("settings:user", config) == "the env block of $CLAUDE_CONFIG_DIR/settings.json"
+    assert str(tmp_path) not in doctor.source_text("settings:user", config)
+    assert doctor.source_text("settings:managed") == ("the env block of Claude Code's managed settings file "
+                                                      "(managed-settings.json)")
 
 
 # The MCP server -------------------------------------------------------------------------------------
@@ -1028,47 +1066,79 @@ def test_the_server_is_started_the_way_the_launcher_starts_it(world, monkeypatch
     assert seen["cwd"] == world.cwd  # the project directory, where the CLI starts it
 
 
-# Provider variables ---------------------------------------------------------------------------------
+# Cloud providers ------------------------------------------------------------------------------------
 
 
-def test_no_provider_variable_passes(both, capsys, fast_mcp, monkeypatch):
+def launcher_message(both) -> str:
+    """What `contexto run claude` says from the same directory: the launcher's own check."""
+    from contexto.launcher import LaunchError, check_cloud_provider
+
+    with pytest.raises(LaunchError) as raised:
+        check_cloud_provider(both.cwd, os.environ, home=both.home)
+    assert raised.value.code == 2
+    return str(raised.value)
+
+
+def test_no_switch_on_passes(both, capsys, fast_mcp, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "0")
     _, found = checks(capsys)
-    assert found["provider"]["status"] == "pass" and found["provider"]["details"] == {"variables": []}
+    assert found["provider"]["status"] == "pass"
+    assert found["provider"]["details"] == {"variables": [], "unread": []}
 
 
-def test_a_provider_variable_in_the_environment_is_a_warning_naming_it(both, capsys, fast_mcp, monkeypatch):
-    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+@pytest.mark.parametrize("variable", list(CLOUD_PROVIDER_KEYS))
+def test_a_switch_in_the_environment_fails_as_the_launcher_refuses(both, capsys, fast_mcp, monkeypatch, variable):
+    """D70 (#271): `contexto run claude` refuses this launch with exit 2, so doctor fails it, with the
+    launcher's words: the summary is ``cloud_provider_note`` and the next step the rest of the message."""
+    monkeypatch.setenv(variable, "1")
     code, found = checks(capsys)
     provider = found["provider"]
-    assert code == 0 and provider["status"] == "warn"
-    assert "CLAUDE_CODE_USE_VERTEX is set in the environment" in provider["summary"]
-    assert "Google Vertex AI" in provider["summary"] and "Unset CLAUDE_CODE_USE_VERTEX" in provider["action"]
-    assert provider["details"] == {"provider": "Google Vertex AI",
-                                   "variables": [{"variable": "CLAUDE_CODE_USE_VERTEX", "source": "env"}]}
+    assert code == 1 and provider["status"] == "fail"
+    assert provider["summary"].startswith(f"{variable} is set in the process environment. With it on, Claude Code "
+                                          f"sends its requests to {CLOUD_PROVIDER_KEYS[variable]}")
+    assert provider["summary"].endswith("`contexto run claude` refuses to launch (exit 2)")
+    assert f"env -u {variable} contexto run" in provider["action"]
+    note = provider["summary"].removesuffix(": `contexto run claude` refuses to launch (exit 2)")
+    assert f"{note}. {provider['action']}" == launcher_message(both)
+    assert provider["details"] == {"variables": [{"variable": variable, "provider": CLOUD_PROVIDER_KEYS[variable],
+                                                  "sources": ["env"]}], "unread": []}
 
 
-def test_a_provider_variable_in_a_settings_env_block_names_the_file(both, capsys, fast_mcp):
+def test_a_switch_in_a_settings_env_block_names_the_file(both, capsys, fast_mcp):
     write_settings(both.cwd / ".claude" / "settings.local.json", {"env": {"CLAUDE_CODE_USE_BEDROCK": "true"}})
-    _, found = checks(capsys)
+    code, found = checks(capsys)
     provider = found["provider"]
-    assert provider["status"] == "warn"
+    assert code == 1 and provider["status"] == "fail"
     assert "CLAUDE_CODE_USE_BEDROCK is set in the env block of .claude/settings.local.json" in provider["summary"]
-    assert provider["details"]["variables"] == [{"variable": "CLAUDE_CODE_USE_BEDROCK", "source": "settings:local"}]
+    assert "remove CLAUDE_CODE_USE_BEDROCK from that env block" in provider["action"]
+    assert provider["details"]["variables"] == [{"variable": "CLAUDE_CODE_USE_BEDROCK", "provider": "Amazon Bedrock",
+                                                 "sources": ["settings:local"]}]
+    assert str(both.cwd) not in json.dumps(provider)
 
 
-def test_a_project_variable_under_ignored_trust_is_a_warning_that_says_may(both, capsys, fast_mcp, monkeypatch):
-    """Reviewer B, PR #258: with CLAUDE_CODE_IGNORE_PERSISTED_TRUST set, a project file that turns a
-    provider variable on got no warning. Claude Code -p drops it; interactively it may apply (D52)."""
+def test_a_project_switch_fails_also_while_persisted_trust_is_ignored(both, capsys, fast_mcp, monkeypatch):
+    """#258 warned "may apply" here; the launcher refuses whichever file Claude Code would apply (D70),
+    so doctor fails as it does."""
     monkeypatch.setenv("CLAUDE_CODE_IGNORE_PERSISTED_TRUST", "1")
     write_settings(both.cwd / ".claude" / "settings.json", {"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}})
     code, found = checks(capsys)
+    assert code == 1 and found["provider"]["status"] == "fail"
+    assert found["provider"]["details"]["variables"][0]["sources"] == ["settings:project"]
+
+
+def test_a_settings_file_that_may_name_a_switch_and_cannot_be_read_fails(both, capsys, fast_mcp):
+    """D70 errs toward refusing: a file that is there, could not be read and may turn a switch on."""
+    path = both.cwd / ".claude" / "settings.json"
+    path.parent.mkdir()
+    path.write_text('{"env": {"CLAUDE_CODE_USE_BEDROCK": "1",}}')
+    code, found = checks(capsys)
     provider = found["provider"]
-    assert code == 0 and provider["status"] == "warn"
-    assert "CLAUDE_CODE_USE_BEDROCK is set in the env block of .claude/settings.json" in provider["summary"]
-    assert "may apply it once its trust dialog is accepted" in provider["summary"]
-    assert provider["details"] == {"provider": "Amazon Bedrock", "variables": [
-        {"variable": "CLAUDE_CODE_USE_BEDROCK", "source": "settings:project", "after_trust_dialog": True}]}
+    assert code == 1 and provider["status"] == "fail" and found["settings"]["status"] == "warn"
+    assert provider["summary"].startswith("Contexto could not read .claude/settings.json (it is not valid JSON)")
+    assert provider["details"] == {"variables": [], "unread": [{"source": "settings:project",
+                                                                 "problem": "is not valid JSON"}]}
+    note = provider["summary"].removesuffix(": `contexto run claude` refuses to launch (exit 2)")
+    assert f"{note}. {provider['action']}" == launcher_message(both)
 
 
 # No network -----------------------------------------------------------------------------------------
@@ -1140,7 +1210,8 @@ def test_doctor_connects_to_nothing_resolves_no_name_and_never_contacts_the_upst
     try:
         for argv in ((), ("--json",)):
             done, events = audited(both, "-m", "contexto", "doctor", *argv, **env)
-            assert done.returncode == 0, done.stdout + done.stderr
+            assert done.returncode == 1, done.stdout + done.stderr  # only the provider check fails (D70)
+            assert "CLAUDE_CODE_USE_BEDROCK is set" in done.stdout
             assert f"http://localhost:{port}" in done.stdout  # reported, not contacted
             assert "MCP server started and listed its 5 tools" in done.stdout  # the real server ran, audited
             assert events == []
@@ -1230,7 +1301,7 @@ def test_a_settings_file_with_a_very_long_number_is_read_by_every_check(both, ca
     _, found = checks(capsys)
     assert found["settings"]["status"] == "pass", found["settings"]
     assert found["claude-upstream"]["details"]["origin"] == "http://long-number.invalid"
-    assert found["provider"]["status"] == "warn"
+    assert found["provider"]["status"] == "fail"  # its CLAUDE_CODE_USE_BEDROCK is read, as Claude Code reads it
 
 
 @pytest.mark.parametrize("env_block", [None, [], "x"])
@@ -1242,23 +1313,24 @@ def test_a_file_whose_env_is_not_an_object_is_not_read_at_all(both, capsys, fast
                    {"env": env_block, "apiKeyHelper": f"echo {HELPER_SECRET}"})
     code, found = checks(capsys)
     settings = found["settings"]
-    assert settings["status"] == "warn" and "env block that is not a JSON object" in settings["summary"]
-    assert "Claude Code loads nothing from it" in settings["summary"]
+    assert settings["status"] == "warn" and "has an env that is not a JSON object" in settings["summary"]
     assert found["claude-key"]["status"] == "warn" and found["claude-key"]["details"] == {"found": []}
 
 
 def test_a_fifo_settings_file_is_named_and_the_other_checks_go_on(both, capsys, fast_mcp):
-    """Reviewer A's re-review: Contexto now skips a named pipe at a settings path, as Claude Code does,
-    so doctor names it and finishes, and the provider check is not blocked by it."""
+    """Reviewer A's re-review: a named pipe at a settings path is never opened for reading
+    (``read_settings_file``), so doctor names it and finishes. The launcher refuses on it (D70: a file
+    that is there and cannot be read may turn on a provider), so the provider check fails as it does."""
     pipe = both.cwd / ".claude" / "settings.json"
     pipe.parent.mkdir()
     os.mkfifo(pipe)
     started = time.monotonic()
     code, found = checks(capsys)
     assert time.monotonic() - started < 60
-    assert found["settings"]["status"] == "warn" and "FIFO" in found["settings"]["summary"]
-    assert "skipped" in found["settings"]["summary"] and "does not finish" not in found["settings"]["summary"]
-    assert found["provider"]["status"] == "pass"
+    assert found["settings"]["status"] == "warn"
+    assert ".claude/settings.json is not a regular file" in found["settings"]["summary"]
+    assert found["provider"]["status"] == "fail"
+    assert "could not read .claude/settings.json (it is not a regular file)" in found["provider"]["summary"]
 
 
 def test_a_signal_while_a_version_command_starts_leaves_no_process(both, monkeypatch):
@@ -1291,4 +1363,4 @@ def test_a_settings_file_with_a_non_json_number_is_named_as_unusable(both, capsy
     path.parent.mkdir()
     path.write_text(f'{{"cleanupPeriodDays": {literal}}}')
     _, found = checks(capsys)
-    assert found["settings"]["status"] == "warn" and "cannot be read as JSON" in found["settings"]["summary"]
+    assert found["settings"]["status"] == "warn" and "is not valid JSON" in found["settings"]["summary"]

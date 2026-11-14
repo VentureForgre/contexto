@@ -67,6 +67,17 @@ has no stronger session signal; the CLI's own signals (Claude Code's ``X-Claude-
 ``affinity_key(session_id, salt)`` is an HMAC of the session id under a random per-install salt
 (``contexto.private.affinity_salt``), so the session id is not sent and cannot be recovered from the
 key by guessing names.
+
+Gateway hint headers (D70): with ``strip_hint_headers`` the six headers Claude Code sends only when
+``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` is on (``contexto.hints.GATED_HINT_HEADERS``) are left out of
+every request the proxy sends upstream: a transformed one, one forwarded unchanged, and the CLI's own
+request on each fail-open path. The transform still gets them, since it reads the request's class from
+them. ``contexto run claude`` turns the hints on for the engine and sets this, so the upstream gets
+the headers it got before; it leaves it off when the user turned the hints on themselves, or turned
+them off so that Contexto does not ask for them (``contexto.hints.hint_headers_state``). Off by
+default: ``contexto proxy`` and any other
+caller forward every header as received. ``X-Claude-Code-Session-Id``, ``x-claude-code-agent-id`` and
+``x-claude-code-parent-agent-id`` are never removed.
 """
 
 from __future__ import annotations
@@ -91,6 +102,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, loads_bounded
+from contexto.hints import without_hint_headers
 
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
     from compression import zstd as _zstd
@@ -911,7 +923,8 @@ class _LoopbackServer(ThreadingHTTPServer):
 class ContextoProxy:
     def __init__(self, upstream: str, log: SessionLog, transform: Transform = identity_transform, *,
                  observe_usage: ObserveUsage | None = None, observe_thinking: bool = False,
-                 upstream_source: str | None = None, affinity_key: str | None = None) -> None:
+                 upstream_source: str | None = None, affinity_key: str | None = None,
+                 strip_hint_headers: bool = False) -> None:
         parts = urlsplit(upstream)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("upstream must be an http(s) base URL")
@@ -927,6 +940,8 @@ class ContextoProxy:
         self.observe_usage = observe_usage
         self.observe_thinking = observe_thinking
         self.upstream_source = upstream_source
+        # D70: leave Claude Code's gated hint headers out of what is sent upstream (module docstring).
+        self.strip_hint_headers = strip_hint_headers
         self.transform_lock = threading.Lock()
         self.last_epoch: Any = None  # the engine's epoch from its last successful transform
         self._in_flight = 0  # requests being handled; idle keep-alive connections are not counted
@@ -1259,7 +1274,9 @@ class _Handler(BaseHTTPRequestHandler):
                 conn.putrequest(self.command, owner.base_path + self.path, skip_host=True,
                                 skip_accept_encoding=True)
                 conn.putheader("Host", owner.upstream_netloc)
-                for name, value in headers.items():
+                # D70: the one place a request's headers are written upstream, so this also covers
+                # the CLI's own request on every fail-open path.
+                for name, value in (without_hint_headers(headers) if owner.strip_hint_headers else headers).items():
                     conn.putheader(name, value)
                 if body or self.command in ("POST", "PUT", "PATCH"):
                     conn.putheader("Content-Length", str(len(body)))

@@ -6,9 +6,11 @@ done; a warning or a failure is followed by one line saying what to do. The chec
 - ``python``: this interpreter is 3.12 or later.
 - ``claude``, ``codex``: the CLI is on PATH, its ``--version`` (read as ``contexto run`` reads it,
   ``contexto.cliversions.installed_version``), and whether that version is in ``TESTED_VERSIONS``.
-- ``settings``: the Claude Code settings files ``contexto run`` reads from this directory. One that is
-  there and cannot be used (not JSON, unreadable, a directory) is named by its scope with what is
-  wrong: the launcher and the checks below read it as absent.
+- ``settings``: the Claude Code settings files ``contexto run`` reads from this directory, and Claude
+  Code's managed settings file, each read by ``contexto.upstream.read_settings_file`` as the launcher
+  reads it. One that is there and cannot be used (``SettingsFile.problem``: not a regular file, too
+  large, not valid JSON, an ``env`` that is not an object) is named by its scope with what is wrong:
+  nothing is taken from it, and it can make the ``provider`` check fail.
 - ``claude-upstream``, ``codex-upstream``: the upstream ``contexto run`` would use from this directory
   and what set it (``contexto.upstream.resolve_upstream``; for Codex
   ``contexto.codex.codex_upstream_with_source`` in API-key mode, its default). Only the URL's origin is
@@ -23,8 +25,9 @@ done; a warning or a failure is followed by one line saying what to do. The chec
 - ``store``: the store home is one ``contexto run`` can use: it can be written or created, sessions can
   be made in it, and ``contexto run claude`` does not refuse its path (``check_store``).
 - ``mcp``: the MCP server starts as the launcher starts it and lists Contexto's tools.
-- ``provider``: no variable sends Claude Code's model requests to another provider, past the proxy
-  (``contexto.providers``).
+- ``provider``: ``contexto run claude`` would not refuse to launch because Claude Code may send its
+  model requests to a cloud provider, past the proxy (D70): the launcher's own check, with the same
+  arguments (``contexto.launcher.check_cloud_provider``, ``contexto.upstream.cloud_provider``).
 
 What doctor never does:
 
@@ -43,12 +46,13 @@ Exit code 0 when no check failed, warnings or not; 1 when one did; 130 on Ctrl+C
 signal's number on SIGTERM or SIGHUP, after the same cleanup. These fail: Python below 3.12, neither
 CLI usable, an upstream that is not an http(s) URL (``contexto run`` refuses to start with it), a store
 home ``contexto run`` cannot use, an MCP server that does not start and list exactly Contexto's tools,
-and a check that cannot be made at all (no working directory, no home directory, no temporary
-directory: ``Fault``). Everything else is a warning: an untested or unreadable CLI version, one of the
-two CLIs missing, a settings file that cannot be used, no key found (a login the CLI holds also works),
-no upstream or key helper for Codex (a flag to ``contexto run`` can supply either), a setting skipped
-as untrusted, a store home that is read-only while its ``sessions`` directory can be used, and a
-provider variable. A check that does not apply because its CLI is missing is skipped.
+a cloud-provider switch that is on or a settings file that may turn one on (``contexto run claude``
+refuses to launch, exit 2), and a check that cannot be made at all (no working directory, no home
+directory, no temporary directory: ``Fault``). Everything else is a warning: an untested or unreadable
+CLI version, one of the two CLIs missing, a settings file that cannot be used, no key found (a login
+the CLI holds also works), no upstream or key helper for Codex (a flag to ``contexto run`` can supply
+either), a setting skipped as untrusted, and a store home that is read-only while its ``sessions``
+directory can be used. A check that does not apply because its CLI is missing is skipped.
 
 The text form escapes every character that does not print (``printable``): a host or a path can come
 from a project's files, and must not be able to rewrite the terminal's lines.
@@ -66,7 +70,6 @@ import os
 import shlex
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
@@ -78,23 +81,38 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from contexto import __version__, providers
+from contexto import __version__
 from contexto.cliversions import CLI_NAMES, REPORT_URL, TESTED_VERSIONS, installed_version, is_tested, tested_list
 from contexto.cliversions import _kill_group as kill_group
 from contexto.codex import API_KEY_MODE, KEY_HELPER_ENV, UPSTREAM_ENV, CodexLaunchError, codex_upstream_with_source
 from contexto.codex import _start_failure as cannot_start
-from contexto.launcher import LaunchError, Terminated, check_mcp_values, check_upstream, cli_not_found, mcp_payload
+from contexto.launcher import (
+    LaunchError,
+    Terminated,
+    check_cloud_provider,
+    check_mcp_values,
+    check_upstream,
+    cli_not_found,
+    mcp_payload,
+)
 from contexto.mcp import LEGACY_VERSIONS as MCP_PROTOCOL_VERSIONS
 from contexto.mcp import SERVER_NAME, TOOLS
 from contexto.paths import contexto_home
 from contexto.store import SessionStore
 from contexto.upstream import (
     BASE_URL_KEY,
+    CLOUD_PROVIDER_KEYS,
+    CONFIG_DIR_KEY,
     KEY_HELPER_KEY,
+    KIND_FILES,
+    MANAGED_KIND,
+    SettingsFiles,
+    claude_env_value,
     claude_key_helper,
     claude_settings_order,
-    json_constant,
-    json_int,
+    cloud_provider,
+    cloud_provider_note,
+    managed_settings_path,
     resolve_upstream,
     untrusted_note,
 )
@@ -136,10 +154,12 @@ class Context:
     """What the checks read: the environment, the working directory and the home directory of the
     ``contexto run`` being diagnosed. The two directories are looked up when a check first asks, inside
     that check's guard: a working directory that was deleted, or a user with no home directory, is then
-    a failed line that names the fault, not a traceback."""
+    a failed line that names the fault, not a traceback. ``files`` reads each settings file once for
+    every check, as one launch does (``contexto.upstream.SettingsFiles``)."""
 
     def __init__(self, env: Mapping[str, str], cwd: Path | None = None, home: Path | None = None) -> None:
         self.env, self._cwd, self._home = env, cwd, home
+        self.files = SettingsFiles()
 
     @property
     def cwd(self) -> Path:
@@ -308,8 +328,8 @@ def iter_checks(context: Context | None = None) -> Iterator[Check]:
         yield guarded(check_id, label, check) if usable[cli] else skipped(check_id, label, cli)
     yield guarded("store", "Store home", lambda: check_store(ctx.env, claude=usable["claude"]))
     yield guarded("mcp", "MCP server", lambda: check_mcp(ctx.env, ctx.cwd))
-    yield (guarded("provider", "Provider variables", lambda: check_provider(ctx)) if usable["claude"]
-           else skipped("provider", "Provider variables", "claude"))
+    yield (guarded("provider", "Cloud provider", lambda: check_provider(ctx)) if usable["claude"]
+           else skipped("provider", "Cloud provider", "claude"))
 
 
 def guarded(check_id: str, label: str, check: Callable[[], Check]) -> Check:
@@ -423,53 +443,48 @@ def require_one_cli(clis: list[Check]) -> None:
 # Settings files ---------------------------------------------------------------------------------------
 
 
-def settings_problem(path: Path) -> str | None:
-    """What is wrong with a settings file that is there and cannot be used, in a few words; None when it
-    is absent or usable. The readers (``contexto.upstream``, ``contexto.providers``) treat such a file as
-    absent, which is what ``contexto run`` does with it, and then nothing says that the file which sets
-    the upstream is the broken one. A file that is not a regular file is not opened: a FIFO would block,
-    and the readers skip it (``contexto.upstream.read_settings``)."""
-    try:
-        mode = path.stat().st_mode
-    except (FileNotFoundError, NotADirectoryError):
-        return None
-    except OSError as exc:
-        return f"cannot be read ({exc.strerror or type(exc).__name__})"
-    if stat.S_ISDIR(mode):
-        return "is a directory, not a file"
-    if stat.S_ISFIFO(mode):
-        return "is a FIFO (a named pipe), so it is skipped, as Claude Code skips it"
-    if not stat.S_ISREG(mode):
-        return "is not a regular file, so it is skipped"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"), parse_int=json_int,  # as read_settings reads it
-                          parse_constant=json_constant)
-    except OSError as exc:
-        return f"cannot be read ({exc.strerror or type(exc).__name__})"
-    except (ValueError, RecursionError):  # not UTF-8, not JSON, or nested too deep to read
-        return "cannot be read as JSON"
-    if not isinstance(data, dict):
-        return "is not a JSON object"
-    if "env" in data and not isinstance(data["env"], dict):
-        # Claude Code loads nothing from a file with a wrong-typed key, and the readers follow it.
-        return "has an env block that is not a JSON object, so Claude Code loads nothing from it"
-    return None
+def settings_file(kind: str, env: Mapping[str, str] | None = None) -> str:
+    """A settings file by its name, for a person, never a path: the user's file is
+    ``~/.claude/settings.json``, or ``$CLAUDE_CONFIG_DIR/settings.json`` when ``env`` sets that
+    variable (``contexto.upstream.user_settings_path``)."""
+    if kind == MANAGED_KIND:
+        return "Claude Code's managed settings file (managed-settings.json)"
+    if kind != "user":
+        return KIND_FILES.get(kind, kind)
+    moved = ((env or {}).get(CONFIG_DIR_KEY) or "").strip()
+    return f"${CONFIG_DIR_KEY}/settings.json" if moved else "~/.claude/settings.json"
+
+
+def source_text(source: str, env: Mapping[str, str] | None = None) -> str:
+    """Where a variable is set, for a person: the environment, or the ``env`` block of a settings file
+    (``settings_file``)."""
+    if source == "env":
+        return "the environment"
+    return f"the env block of {settings_file(source.removeprefix('settings:'), env)}"
 
 
 def check_settings(ctx: Context) -> Check:
-    """Each settings file ``contexto run`` reads from this directory (``claude_settings_order``): read,
-    absent, or there and unusable. An unusable one is a warning that names it by scope and says what is
-    wrong, because every check below reads it as absent, exactly as ``contexto run`` does."""
+    """Each settings file ``contexto run claude`` reads from this directory: those of
+    ``claude_settings_order``, then the managed settings file, which the cloud-provider check also reads
+    (D70). Each is read, absent, or there and unusable, as ``contexto.upstream.read_settings_file``
+    finds it, through the same ``SettingsFiles`` as the checks below. An unusable one is a warning that
+    names it by scope and says what is wrong (``SettingsFile.problem``): nothing is taken from it, and
+    one that may turn on a cloud provider makes the ``provider`` check fail. A file that does not exist,
+    a directory, and one this user cannot open are absent: Claude Code cannot read them either."""
     files: list[dict[str, str]] = []
     wrong: list[str] = []
     read: list[str] = []
-    for kind, path in claude_settings_order(ctx.cwd, ctx.home, ctx.env):
-        name = providers.settings_file(kind, ctx.env)
-        problem = settings_problem(path)
-        if problem:
-            files.append({"kind": kind, "state": "unusable", "problem": problem})
-            wrong.append(f"{name} {problem}")
-        elif os.path.exists(path):  # follows a symlink: one that leads nowhere is an absent file
+    paths = list(claude_settings_order(ctx.cwd, ctx.home, ctx.env))
+    managed = managed_settings_path()
+    if managed is not None:
+        paths.append((MANAGED_KIND, managed))
+    for kind, path in paths:
+        name = settings_file(kind, ctx.env)
+        found = ctx.files.read(path)
+        if found.problem:
+            files.append({"kind": kind, "state": "unusable", "problem": found.problem})
+            wrong.append(f"{name} {found.problem}")
+        elif found.data is not None:
             files.append({"kind": kind, "state": "read"})
             read.append(name)
         else:
@@ -477,8 +492,9 @@ def check_settings(ctx: Context) -> Check:
     details = {"files": files}
     if wrong:
         return Check("settings", WARN, f"Claude Code settings: {'; '.join(wrong)}",
-                     "Fix or remove it: what Contexto cannot read there (an upstream, a key helper or a provider "
-                     "variable) is missing from the checks below, as it is from `contexto run`", details)
+                     "Fix or remove it: Contexto takes nothing from it (an upstream, a key helper), and `contexto "
+                     "run claude` refuses to launch while it may turn on a cloud provider (see the provider check)",
+                     details)
     if read:
         return Check("settings", PASS, f"Claude Code settings: read {' and '.join(read)}", details=details)
     return Check("settings", PASS, "Claude Code settings: no settings file here or for this user", details=details)
@@ -516,12 +532,12 @@ def base_url_place(source: str, env: Mapping[str, str]) -> str:
     """Where Claude Code's upstream comes from, by ``contexto.upstream.Upstream.source``."""
     if source == "default":
         return f"the default: nothing sets {BASE_URL_KEY}"
-    return f"{BASE_URL_KEY} in {providers.source_text(source, env)}"
+    return f"{BASE_URL_KEY} in {source_text(source, env)}"
 
 
 def check_claude_upstream(ctx: Context) -> Check:
     """The upstream ``contexto run claude`` would use, resolved as ``launcher._run`` resolves it."""
-    upstream = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home)
+    upstream = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
     place = base_url_place(upstream.source, ctx.env)
     details: dict[str, Any] = {"origin": url_origin(upstream.url), "source": upstream.source}
     if upstream.ignored:
@@ -550,7 +566,7 @@ def codex_upstream_place(source: str, claude_source: str, env: Mapping[str, str]
 def check_codex_upstream(ctx: Context) -> Check:
     """The upstream ``contexto run codex`` would use in API-key mode with no ``--codex-upstream``, resolved
     as ``codex.run_codex`` resolves it: a project's base URL only from a folder Claude Code trusts."""
-    claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True)
+    claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files)
     untrusted = (untrusted_note(f"env.{BASE_URL_KEY}", claude.ignored, "Pass --codex-upstream", ctx.env)
                  if claude.ignored else None)
     details: dict[str, Any] = {"origin": None, "source": None}
@@ -583,16 +599,15 @@ def check_claude_key(ctx: Context) -> Check:
     is read; the value is never kept, and a helper is not run."""
     found: list[dict[str, str]] = []
     shown: list[str] = []
-    set_by = providers.claude_env(CLAUDE_KEY_VARIABLES, ctx.cwd, ctx.home, ctx.env)
     for name in CLAUDE_KEY_VARIABLES:
-        value, source = set_by.get(name, ("", ""))
-        if value.strip():
-            found.append({"name": name, "source": source})
-            shown.append(f"{name} in {providers.source_text(source, ctx.env)}")
+        value = claude_env_value(name, env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+        if value.value and value.value.strip() and value.source:
+            found.append({"name": name, "source": value.source})
+            shown.append(f"{name} in {source_text(value.source, ctx.env)}")
     helper = claude_key_helper(ctx.cwd, ctx.home, ctx.env, trusted_only=False)  # as Claude Code -p reads it
     if helper.value:
         found.append({"name": KEY_HELPER_KEY, "source": f"settings:{helper.source}"})
-        shown.append(f"{KEY_HELPER_KEY} in {providers.settings_file(helper.source or '', ctx.env)} (not run)")
+        shown.append(f"{KEY_HELPER_KEY} in {settings_file(helper.source or '', ctx.env)} (not run)")
     details = {"found": found}
     if found:
         return Check("claude-key", PASS, f"Claude Code key: {' and '.join(shown)}; no value is read or shown",
@@ -619,7 +634,7 @@ def check_codex_key(ctx: Context) -> Check:
                      "--codex-key-helper to contexto run", {**details, "error": "blank"})
     helper = claude_key_helper(ctx.cwd, ctx.home, ctx.env)  # a project's only from a trusted folder (D52)
     if helper.value:
-        place = providers.settings_file(helper.source or "", ctx.env)
+        place = settings_file(helper.source or "", ctx.env)
         return Check("codex-key", PASS, f"Codex key helper: Claude Code's {KEY_HELPER_KEY} in {place} (not run)",
                      details={"name": KEY_HELPER_KEY, "source": f"settings:{helper.source}"})
     details: dict[str, Any] = {"name": None, "source": None}
@@ -856,14 +871,28 @@ def stop_server(child: subprocess.Popen) -> None:
             pass
 
 
-# Provider variables -----------------------------------------------------------------------------------
+# Cloud providers --------------------------------------------------------------------------------------
 
 
 def check_provider(ctx: Context) -> Check:
-    found = providers.provider_overrides(ctx.cwd, ctx.home, ctx.env)
-    variables = [providers.override_record(o) for o in found]
-    if not found:
-        return Check("provider", PASS, "No provider variable (CLAUDE_CODE_USE_BEDROCK and the like) sends Claude "
-                     "Code's requests past the proxy", details={"variables": variables})
-    return Check("provider", WARN, providers.bypass_summary(found, ctx.env), providers.bypass_remedy(found),
-                 {"provider": found[0].provider, "variables": variables})
+    """Whether ``contexto run claude`` would refuse to launch from this directory because Claude Code may
+    send its requests to a cloud provider, past the proxy (D70). The launcher's own check, with the
+    arguments it uses (``contexto.upstream.cloud_provider``; ``contexto.launcher.check_cloud_provider``
+    for the message): a switch on in the environment or in any settings file, or a settings file that
+    is there, could not be read and may turn one on. A failure: the launch exits 2. The summary is
+    ``cloud_provider_note`` and the next step is the rest of the launcher's message, word for word."""
+    found = cloud_provider(env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+    if found is None:
+        return Check("provider", PASS, "Cloud provider: no switch (CLAUDE_CODE_USE_BEDROCK and the like) is on, so "
+                     "Claude Code sends its requests through the proxy", details={"variables": [], "unread": []})
+    note = cloud_provider_note(found)
+    try:
+        check_cloud_provider(ctx.cwd, ctx.env, home=ctx.home, files=ctx.files)  # the same files, already read
+        message = ""
+    except LaunchError as exc:
+        message = str(exc)
+    details = {"variables": [{"variable": name, "provider": CLOUD_PROVIDER_KEYS.get(name), "sources": list(places)}
+                             for name, places in found.on],
+               "unread": [{"source": place, "problem": problem} for place, problem in found.unread]}
+    return Check("provider", FAIL, f"{note}: `contexto run claude` refuses to launch (exit 2)",
+                 message.removeprefix(f"{note}. ") or None, details)
