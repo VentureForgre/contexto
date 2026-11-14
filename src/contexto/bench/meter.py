@@ -53,10 +53,22 @@ the count before the unit ends.
 Usage that cannot be read. When a 2xx response to a billed request ends without a usage the meter
 can read in full (an encoded body, a stream cut short before its final ``message_delta`` usage, a
 body that is not JSON), the vendor may still have billed up to the request's ``max_tokens``. The
-record then carries ``usage_unreadable: true`` and ``reserved_tokens``, the request's reservation,
-and the request counts as that reservation (or what was read, if more) everywhere: in the guard, in
-the unit's tokens and when a resumed run reads ``requests.jsonl`` (``record_tokens``). The guard
-never counts less than a request could have cost.
+record then carries ``usage_unreadable: true`` beside ``reserved_tokens``, the request's reservation
+(which every record carries, near the start of its line), and the request counts as that
+reservation (or what was read, if more) everywhere: in the guard, in the unit's tokens and when a
+resumed run reads ``requests.jsonl`` (``record_tokens``). The guard never counts less than a
+request could have cost.
+
+The reservation journal. Before a billed request is forwarded, the meter appends one line to
+``reservations.jsonl`` in the output directory (``Ledger.journal``): the unit, the attempt, the
+request's ``n`` and its ``reserved_tokens``, written and handed to the operating system (the file is
+closed) before the first byte goes upstream. A request that then gets a response is matched by its
+record in ``requests.jsonl``; one that gets none gets a second line, ``unanswered: true`` with the
+``kept_tokens`` counted for it. A request whose journal line cannot be written is not forwarded. So a
+run killed at any point, by any signal, leaves every request it forwarded either with a whole record,
+or with a journal line and no record (``read_journal``: in flight, or its record cut short), and a
+resumed run counts the second kind at its reservation (``contexto.bench.runner.recorded_spend``). The
+line is not synced to disk: it survives the process, not a power loss.
 
 ``Ledger`` is the spend guard of the whole run. Before a billed request is forwarded the meter
 reserves its worst case: the request's bytes at 1.5 bytes per token, a rate that overstates every
@@ -88,6 +100,7 @@ import socket
 import ssl
 import threading
 import time
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -95,6 +108,7 @@ from urllib.parse import urlsplit
 
 from contexto.hints import GATED_HINT_HEADERS
 
+JOURNAL_NAME = "reservations.jsonl"
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 RESERVE_BYTES_PER_TOKEN = 1.5
@@ -163,14 +177,25 @@ class Ledger:
     """The run's spend: the budget, what is spent, what requests in flight have reserved, and the
     ``requests.jsonl`` file every record is appended to as soon as its response has ended."""
 
-    def __init__(self, path: Path | None, budget: int | None, spent: int = 0) -> None:
+    def __init__(self, path: Path | None, budget: int | None, spent: int = 0, *, journal: Path | None = None) -> None:
         self.path = path
         self.budget = budget
         self.spent = spent
         self.reserved = 0
+        self.journal = journal  # the reservation journal (``reservations.jsonl``), or None for none
         self.stop: str | None = None  # "budget" or "auth": the run must end
         self.stopped = threading.Event()
         self._lock = threading.Lock()
+        self._journal_lock = threading.Lock()
+
+    def note(self, entry: dict[str, Any]) -> None:
+        """Append one line to the reservation journal and close the file, so the line is the operating
+        system's before this returns. Raises ``OSError`` when it cannot be written."""
+        if self.journal is None:
+            return
+        line = json.dumps(entry) + "\n"
+        with self._journal_lock, self.journal.open("a", encoding="utf-8") as f:
+            f.write(line)
 
     @property
     def remaining(self) -> int | None:
@@ -246,6 +271,100 @@ def read_recorded(path: Path) -> dict[tuple[str, int, int], dict[int, dict[str, 
         seen["requests"] += 1
         seen["tokens"] += record_tokens(record)
     return out
+
+
+Attempt = tuple[str, int, int, int]  # arm, seed, repeat, attempt
+RequestKey = tuple[str, int, int, int, int]  # the attempt and the request's n
+
+
+def _request_key(entry: Any) -> RequestKey | None:
+    try:
+        key = (entry["arm"], entry["seed"], entry["repeat"], entry.get("attempt") or 0, entry["n"])
+    except (KeyError, TypeError, AttributeError):
+        return None
+    if not isinstance(key[0], str) or not all(isinstance(x, int) and not isinstance(x, bool) for x in key[1:]):
+        return None
+    return key
+
+
+def _jsonl(data: bytes) -> list[Any]:
+    out = []
+    for line in data.splitlines():
+        try:
+            out.append(json.loads(line))
+        except ValueError:  # a torn line; UnicodeDecodeError included
+            continue
+    return out
+
+
+@dataclass
+class Journal:
+    """What ``reservations.jsonl`` says, matched against the request records. ``in_flight``: every
+    entry with neither a record nor an ``unanswered`` line (sorted), each counted at its
+    ``reserved_tokens``; ``unanswered``: per attempt, the ``kept_tokens`` of each request that got no
+    response; ``attempts``: every attempt the journal has a line of (the journal's figures replace the
+    manifest's for these)."""
+
+    in_flight: list[dict[str, Any]] = field(default_factory=list)
+    unanswered: dict[Attempt, list[int]] = field(default_factory=dict)
+    attempts: set[Attempt] = field(default_factory=set)
+
+    @property
+    def in_flight_tokens(self) -> int:
+        return sum(entry["reserved_tokens"] for entry in self.in_flight)
+
+    @property
+    def unanswered_tokens(self) -> int:
+        return sum(sum(kept) for kept in self.unanswered.values())
+
+
+def read_journal(journal: bytes, records: bytes) -> Journal:
+    """Match the journal's lines (``journal``, the bytes of ``reservations.jsonl``) against the whole
+    request records in ``records`` (the bytes of ``requests.jsonl``). A torn line in either is skipped:
+    a torn journal line's request was never forwarded, and a torn record leaves its entry in flight."""
+    recorded = {key for record in _jsonl(records) if (key := _request_key(record)) is not None}
+    opened: dict[RequestKey, int] = {}
+    closed: dict[RequestKey, int] = {}
+    for entry in _jsonl(journal):
+        if (key := _request_key(entry)) is None:
+            continue
+        if entry.get("unanswered") is True:
+            kept = entry.get("kept_tokens")
+            closed[key] = kept if isinstance(kept, int) and not isinstance(kept, bool) and kept > 0 else 0
+            continue
+        reserved = entry.get("reserved_tokens")
+        if isinstance(reserved, int) and not isinstance(reserved, bool) and reserved >= 0:
+            opened[key] = reserved
+    out = Journal(attempts={key[:4] for key in (*opened, *closed)})
+    for key, reserved in sorted(opened.items()):
+        if key in recorded:
+            continue
+        if key in closed:
+            out.unanswered.setdefault(key[:4], []).append(closed[key])
+            continue
+        out.in_flight.append({"arm": key[0], "seed": key[1], "repeat": key[2], "attempt": key[3], "n": key[4],
+                              "reserved_tokens": reserved})
+    return out
+
+
+def load_journal(out: Path) -> Journal:
+    """``read_journal`` over the files of an output directory (an empty journal when there is none)."""
+    try:
+        journal = (out / JOURNAL_NAME).read_bytes()
+    except FileNotFoundError:
+        return Journal()
+    try:
+        records = (out / "requests.jsonl").read_bytes()
+    except FileNotFoundError:
+        records = b""
+    return read_journal(journal, records)
+
+
+def record_head(entry: dict[str, Any]) -> bytes:
+    """The bytes a request record of this journal entry starts with (``json.dumps``, the meter's key order):
+    its unit, attempt and reservation."""
+    head = {name: entry[name] for name in ("arm", "seed", "repeat", "attempt", "reserved_tokens")}
+    return json.dumps(head).encode()[:-1] + b", "
 
 
 class _UsageReader:
@@ -632,7 +751,7 @@ class _Handler(BaseHTTPRequestHandler):
         headers = [(k, v) for k, v in headers if k.lower() not in drop]
         if model_path:
             headers.append(("Accept-Encoding", "identity"))
-        reserved, record = 0, None
+        reserved, record, unit = 0, None, {}
         turn = owner.turn
         if billed:
             shape = _shape(body, received.get("content-encoding"))
@@ -648,18 +767,32 @@ class _Handler(BaseHTTPRequestHandler):
                     owner.refused += 1
                 self._local_error(400, "contexto bench: the run was stopped (token budget or credential)")
                 return
+            n = owner.next_index()
+            unit = {"arm": owner.arm, "seed": owner.seed, "repeat": owner.repeat, "attempt": owner.attempt, "n": n}
+            try:  # before the request goes upstream: a kill from here on leaves it counted
+                owner.ledger.note({**unit, "reserved_tokens": reserved})
+            except OSError:
+                owner.settle(reserved, None, turn, answered=False)
+                owner.ledger.settle(reserved, None)
+                with owner._lock:
+                    owner.refused += 1
+                self._local_error(500, "contexto bench: the reservation journal could not be written")
+                return
             request_class = received.get(CLASS_HEADER)
             if request_class is not None:
                 owner.classes_seen = True
                 main = request_class == "main"
             else:  # no class header: a main request has a tool list and no subagent id
                 main = owner.arm == "full" or (shape["tools"] and AGENT_HEADER not in received)
-            record = {"arm": owner.arm, "seed": owner.seed, "repeat": owner.repeat, "model": owner.model,
-                      "n": owner.next_index(), "turn": turn, "main": bool(main),
+            # The unit, the attempt and the reservation come first, so that a record a kill cuts short
+            # still says what the request may have cost (``contexto.bench.runner.repair_torn``).
+            record = {"arm": owner.arm, "seed": owner.seed, "repeat": owner.repeat, "attempt": owner.attempt,
+                      "reserved_tokens": reserved, "model": owner.model,
+                      "n": n, "turn": turn, "main": bool(main),
                       "history_tokens": owner.history[turn] if turn is not None and turn < len(owner.history) else 0,
                       "uncached": 0, "cache_write": 0, "cache_read": 0, "output": 0, "status": 0,
                       "compaction": COMPACTION_HEADER in received or request_class == "compaction",
-                      "basis": "measured", "attempt": owner.attempt}
+                      "basis": "measured"}
         reached, tail, kept = False, b"", 0
         self.sent = False
         try:
@@ -668,7 +801,7 @@ class _Handler(BaseHTTPRequestHandler):
             if billed:
                 if reached and record is not None:
                     if record.pop("_unreadable", False):
-                        record["usage_unreadable"], record["reserved_tokens"] = True, reserved
+                        record["usage_unreadable"] = True
                     with owner._lock:
                         owner.records.append(record)
                         owner.usage_unreadable += int(bool(record.get("usage_unreadable")))
@@ -677,6 +810,10 @@ class _Handler(BaseHTTPRequestHandler):
                     with owner._lock:
                         owner.unanswered += 1
                         owner.unanswered_tokens += kept
+                    try:  # without this line a resumed run counts the request at its reservation
+                        owner.ledger.note({**unit, "unanswered": True, "kept_tokens": kept})
+                    except OSError:
+                        pass
                 answered = reached and record is not None and 200 <= int(record.get("status") or 0) < 300
                 owner.settle(reserved, record if reached else None, turn, answered, kept)
                 owner.ledger.settle(reserved, record if reached else None, kept)

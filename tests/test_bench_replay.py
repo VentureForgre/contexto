@@ -522,6 +522,10 @@ def _breakpoints(count):
     (lambda b: b["messages"].insert(4, _effort()), None),  # before a user's prompt: no placement rule
     (lambda b: b["messages"].insert(1, _effort("low")), None),
     (_carried_after_a_rotation, None),
+    # #269 Reviewer A low 1 at 8ef2742e: the first turn is checked on the turns, with system messages set aside.
+    (lambda b: b["messages"].insert(0, _effort()), None),
+    (lambda b: b["messages"].__setitem__(0, _effort()), "messages.1.role: the first message must use the user role"),
+    (lambda b: b.update(messages=[_effort()]), "messages: at least one user or assistant message is required"),
     (_two_system_messages_in_a_row, None),
     (_after_server_tool_use, None),
     # Several system messages in a row are checked as one: their neighbours are the messages around the run.
@@ -812,6 +816,25 @@ def test_a_request_moves_the_cache_breakpoint_without_changing_the_history():
     assert body["messages"][2]["content"] == [{"type": "text", "text": "turn two", "cache_control": client.CACHE}]
     assert [b["type"] for b in history[0]["content"]] == ["text", "text"]
     assert history[0]["content"][0]["text"].startswith("<system-reminder>")
+
+
+def test_a_failed_request_names_the_errno(small, monkeypatch, tmp_path):
+    """#269 Reviewer A nit 2 at 8ef2742e: under load the replay printed only "OSError", which read as a
+    proxy failure; the cause was no free local port. The errno and its text name no path or host."""
+    import errno
+
+    from contexto.store import SessionStore
+
+    replay = client.Client(1, "s", small, SessionStore(tmp_path / "home", "s"))
+
+    def no_port(self, *args, **kwargs):
+        raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "request", no_port)
+    with pytest.raises(client.ReplayError) as raised:
+        replay.send([client.user_message("x", True)])
+    assert str(raised.value) == (f"the request to the proxy failed: OSError [Errno {errno.EADDRNOTAVAIL}] "
+                                 "Can't assign requested address")
 
 
 def test_the_head_does_not_move_with_tool_wording(monkeypatch):
