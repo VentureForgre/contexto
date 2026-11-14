@@ -86,7 +86,12 @@ compaction never fires, and accuracy equals full context.
 
 `contexto bench` runs one generated session three ways and scores each the same, by exact match
 with no model judge: through Contexto, as full context sent straight to the model, and as plain
-Claude Code compacting on its own near the bound. Guide: `docs/bench.md`; decision: D66. Why: run
+Claude Code with its auto-compact window set so that compaction fires near the bound (bound +
+33,000). At its defaults Claude Code on these models (1,000,000-token windows) would compact near
+967,000 tokens and would not compact at all in this session (467,012 estimated tokens); the
+benchmark does not show plain Claude Code at its default compaction threshold. The session is
+generated log text with planted facts, not real coding work. Guide: `docs/bench.md`; decision:
+D66. Why: run
 #4's 52 of 54 against 47 is inside noise (exact McNemar p = 0.18), all runs used one seed, plain
 Claude Code was never run, and nobody outside could rerun the scoring. No model was called to build
 it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
@@ -94,7 +99,8 @@ it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
 - Merged into `main`: #255 (script generator, statistics, `--script-only`) as f826c464, #262 (scale
   harness) as c46de5b4, #264 (`--report`, `--chart`, cost at published prices) as 6e4e6b12, #273
   (the live runner, `--dry-run`) as 66336669 and #269 (`--replay`) as c476834f; docs in #282. The
-  benchmark is not in a release yet (D67: releases are batched).
+  benchmark is not in a release yet: releases are cut by hand and batched (D67, RELEASING.md). From
+  a checkout: `uv run contexto bench ...`, with a live run's `--out` outside the work tree.
 - Protocols: `d27`, the 54 probes of runs #3 and #4, byte-identical to the spike's script; `v2`
   (default), 72 probes, adding 18 whose questions name no key (`paraphrase`, `concluded`,
   `toolloop`). Seed 20261016 at bound 150,000: `v2` is 34 turns and 467,012 estimated tokens, 3.09
@@ -103,8 +109,9 @@ it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
   excludes 0 and exact McNemar p < 0.05) and the seed-level sign-flip p < 0.05, both the same way.
   Fewer than 6 seeds cannot reach 0.05 (2 / 2^5 = 0.0625).
 - Scoring: exact match, three deliberate differences from the spike's: an unanswered probe is never
-  correct; answer lines in markdown are read; a blockquote line is never read, and a fenced line
-  yields to an answer for the same id outside any fence.
+  correct; more answer lines in markdown are read (bold or backticked ids, numbered and `+` items);
+  a fenced line yields to an answer for the same id outside any fence. A blockquote line stays
+  unread, as in the spike.
 - Replay, keyless (`contexto bench --replay`), pinned session of 952,971 estimated tokens (6.35
   times the bound; head 21,306): 138 requests, the first 44,302 estimated tokens and the largest
   116,306, 0 over the bound, 14 rotations, 47 pages, no failure event, no compaction marker.
@@ -117,17 +124,26 @@ it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
   was read in the Claude Code 2.1.322 bundle, not documented, not confirmed live. Stub runs with
   the real 2.1.322 compacted at `pre_tokens` 147,140 to 168,178.
 - Scale harness: repaired, with a 200-turn run (634 requests, 913,084 tokens of history) in the
-  required `ci` check with latency and memory budgets.
-- The minimum run that makes the claim testable, for the owner to start (dry-run figures, tokens):
+  required `ci` check with latency and memory budgets; they catch a slowdown from about 7 to 10
+  times on a typical CI runner. Measured on the M5 Pro (median of 15 runs, smallest to largest):
+  added time 3.2 ms (2.5 to 4.7) for the first request, throughput 318 req/s (248 to 417) at 100
+  concurrent, startup 57.2 ms (49.6 to 73.1) (`spikes/m2/scale/proxy/README.md`).
+- The minimum run that makes the claim testable, for the owner to start (dry-run figures, tokens,
+  with estimated USD):
 
   ```sh
   contexto bench --model claude-haiku-5-5 --seeds 10 --repeats 3 --budget-tokens 598290000 --out <dir>
   contexto bench --model claude-opus-5-5 --seeds 5 --budget-tokens 250500000 --out <dir>
   ```
 
-  Haiku: 36 units, 180,251,043 expected, 598,285,396 worst case, 720 pooled paired probes per pair
-  of arms. Opus: 15 units, 97,122,711 expected, 250,490,244 worst case; with 5 seeds it alone can
-  name no direction. Not run: no live model spend under D66.
+  Haiku: 36 units, 180,251,043 expected (about $14), 598,285,396 worst case (about $456; $602 with
+  a 1-hour cache), 720 pooled paired probes per pair of arms. Opus: 15 units, 97,122,711 expected
+  (about $90), 250,490,244 worst case (about $2,025; $2,622); with 5 seeds it alone can name no
+  direction. Dollars: every request the plan simulates (`contexto.bench.plan`), split into its token
+  classes and priced on its own with `contexto.bench.prices.request_cost`, so Haiku's size step
+  applies per request; the token totals equal the dry run's. Estimates only: the run is paid by
+  whoever runs it, at their account's prices, and `--budget-tokens` is the ceiling. Not run: no
+  live model spend under D66.
 
 ## QA run and fix round (2026-11-05 to 2026-11-06, v0.5.9 to v0.5.24)
 
@@ -636,8 +652,9 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   the words each page matched; deterministic, no embeddings or model call. Its one-letter typo
   step is the one exception to the owner's ruling against fuzzy matching that D34 records.
 - D66: `contexto bench`, a benchmark anyone can run: Contexto, full context and plain Claude Code
-  on the same generated script, exact-match scoring, paired statistics with a seed-level test, cost
-  at published prices, a keyless replay, and the scale harness repaired into CI.
+  set to compact near the bound on the same generated script, exact-match scoring, paired
+  statistics with a seed-level test, cost at published prices, a keyless replay, and the scale
+  harness repaired into CI.
 - D68: the README is rewritten for a first-time reader (what it does, three numbers with their
   limits, install and start on the first screen; who it is not for; a comparison with compaction, a
   1M window and Claude Code's memory), with recall stated as no worse than full context and cost as
@@ -678,7 +695,7 @@ Still open:
   connection for every request (914 in one short run); on an HTTPS upstream each also pays a TCP
   connect, a TLS handshake and about 2.5 ms to build the SSL context (the handshake cost not
   measured).
-- D66 follow-ups: a code pull request in progress for the reviewers' remaining lows: notes on the
+- D66 follow-ups: a code pull request is planned for the reviewers' remaining lows: notes on the
   request-size chart (Contexto's drops are rotations, not compactions; the full-context line
   squeezes the y axis); a reach column on the `contexto_search` tool's own reply; report wording
   nits; the scale harness's lows (its 30 s port pool is shared across burst threads; the
