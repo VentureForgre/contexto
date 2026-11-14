@@ -580,8 +580,7 @@ client that changed its text would send; and `None` when it holds no injected co
 request cannot tell (another client, or an empty history).
 
 Only `ClientVersions.observe` calls it, on each request the dialect judges until one gives an
-answer. `False` logs one
-`session_start_unrecognised` event (`dialect`, `signature_version`, `cli_version`,
+answer. `False` logs one `session_start_unrecognised` event (`dialect`, `signature_version`, `cli_version`,
 `tested_versions`) to the session log; nothing is printed. `None` leaves the check open for at most
 `MAX_UNJUDGED` (8) such requests. An exception here is caught in `RewriteEngine._call` and logged as
 `cli_version_error`.
@@ -665,8 +664,8 @@ The client version the session-start recognition was measured on. `ClientVersion
   SECURITY.md describes as recording "sizes, counts, request paths, status codes, error names, hashes,
   event names, and the upstream source, never prompts, replies or the upstream URL". This page asks
   an implementation for the same and a little more: no client text of any kind in an event (no tool
-  input or output, no header value beyond a fixed vocabulary such as the client name and version the
-  `cli_version` event takes from `User-Agent`). The proxy reduces events to scalars and caps their
+  input or output, no header value except one checked against a fixed pattern, as the client name and
+  version the `cli_version` event takes from `User-Agent` are). The proxy reduces events to scalars and caps their
   size (`_scalar_summary`) but does not filter their content, so the rule is the implementation's to
   keep. Log an exception by its type name only, as the engine does.
 - **Credentials never reach a dialect.** The client's auth headers are forwarded upstream unchanged
@@ -745,13 +744,17 @@ D53).
   expand it (Claude Code expands `${`: `check_mcp_values`, D55). Where the client runs unattended it
   must be allowed to call the tools without a prompt, and no more than that: Contexto's own tools by
   their exact names where the client has per-tool rules, otherwise an approval scoped to Contexto's
-  own server entry, never a client-wide approval mode. The tools read and write only the session's
-  own store, which is why approving them is safe. Claude Code: one allow rule per tool
+  own server entry, never a client-wide approval mode. Approving them is safe because they touch
+  only the user's own local data (D44): they read the session's store, pin and close append to its
+  ledger, and `contexto_state` also reads and hashes the project files that ledger records cite,
+  inside the session's working directory; none runs a command, writes a project file or reaches the
+  network. Claude Code: one allow rule per tool
   (`contexto_tool_rules`, D44), and the user's own deny and ask rules still win (measured on 2.1.302);
   `mcp_payload`, `settings_payload` and `claude_argv` in `src/contexto/launcher.py`. Codex: yes, with
   an approval for the whole `[mcp_servers.contexto]` entry (`default_tools_approval_mode`,
-  `MCP_APPROVAL_MODE`) and the server started by `_mcp_server` in `src/contexto/codex.py`; whether a
-  user's own Codex rules override that approval was not measured. The child also gets
+  `MCP_APPROVAL_MODE`) and the server started by `_mcp_server` in `src/contexto/codex.py`, which in
+  v0.5.24 passes `--session` and the id as two arguments (changed to one in #277); whether a user's
+  own Codex rules override that approval was not measured. The child also gets
   `CONTEXTO_SESSION` (D57).
 - [ ] **The tool check.** `ToolCheck` in `src/contexto/toolcheck.py` reports a main conversation that
   runs without Contexto's tools. It returns nothing for a dialect name outside `DIALECTS`, and
