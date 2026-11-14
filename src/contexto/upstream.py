@@ -573,11 +573,16 @@ def claude_env_value(name: str, *, env: Mapping[str, str] | None = None, cwd: Pa
 # D70: with one of these on, Claude Code 2.1.322 sent every request to that provider's own endpoint
 # (ANTHROPIC_BEDROCK_BASE_URL, ANTHROPIC_VERTEX_BASE_URL, ANTHROPIC_FOUNDRY_BASE_URL,
 # ANTHROPIC_BEDROCK_MANTLE_BASE_URL, ANTHROPIC_AWS_BASE_URL) and none to ANTHROPIC_BASE_URL, not even
-# HEAD /api/hello: 0 of the requests of 5 runs with the value 1 and 4 more with true.
+# HEAD /api/hello: 0 of the requests of 5 runs with the value 1 and 4 more with true. The sixth,
+# CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD, is in the 2.1.318 and 2.1.322 programs with this provider name
+# and on no documentation page; on 2.1.318 (D64, spikes/m2/providers, zero spend), set to 1 in the
+# environment or in a project's env block, it sent every request to ANTHROPIC_GOOGLE_CLOUD_BASE_URL and
+# none through the proxy.
 CLOUD_PROVIDER_KEYS = {"CLAUDE_CODE_USE_BEDROCK": "Amazon Bedrock", "CLAUDE_CODE_USE_VERTEX": "Google Vertex AI",
                        "CLAUDE_CODE_USE_FOUNDRY": "Microsoft Foundry",
                        "CLAUDE_CODE_USE_MANTLE": "Amazon Bedrock (Mantle)",
-                       "CLAUDE_CODE_USE_ANTHROPIC_AWS": "Claude Platform on AWS"}
+                       "CLAUDE_CODE_USE_ANTHROPIC_AWS": "Claude Platform on AWS",
+                       "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "Claude Platform on Google Cloud"}
 PLACE_NAMES = {"env": "the process environment",
                "settings:user": "the env block of your Claude Code user settings "
                                 "(~/.claude/settings.json, or settings.json in $CLAUDE_CONFIG_DIR)",
@@ -603,18 +608,18 @@ def cloud_provider(*, env: Mapping[str, str] | None = None, cwd: Path | None = N
     ``claude_settings_order`` (the main checkout's and the folder's project files, and the user's) and
     the managed settings file (``managed``, by default ``managed_settings_path``; file-based managed
     settings only). Precedence between them is not applied and neither is the folder's trust state:
-    Claude Code does not apply every file Contexto can read (measured on 2.1.322: a file holding
-    ``NaN`` or a schema error, any project file under ``--setting-sources user``, a project file's
-    ``env`` in ``-p`` mode while ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is set), so a file that says
-    off cannot be trusted to win, and a project file can only add a refusal. The accepted cost is a
-    refusal Claude Code would not have needed: the environment says on and a file Claude Code does
-    apply says off, or a file it ignores says on.
+    Claude Code does not apply every file Contexto can read (measured on 2.1.322: a file with a
+    schema error such as a wrong-typed ``permissions``, any project file under ``--setting-sources
+    user``, a project file's ``env`` in ``-p`` mode while ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is
+    set), so a file that says off cannot be trusted to win, and a project file can only add a
+    refusal. The accepted cost is a refusal Claude Code would not have needed: the environment says
+    on and a file Claude Code does apply says off, or a file it ignores says on.
 
     A settings file that is there and that Contexto could not read (``read_settings_file``: not a
-    regular file, over the size limit, not valid JSON for Python) is reported in ``unread`` and also
-    refuses the launch. It is not evidence that a switch is off: Claude Code has no such limit and
-    may parse the file differently. A file that does not exist, and one this user cannot open, pass:
-    Claude Code cannot read them either.
+    regular file, over the size limit, not valid JSON) is reported in ``unread`` and also refuses the
+    launch, unless it cannot name a switch (``SettingsFile.may_name_provider``). It is not evidence
+    that a switch is off: Claude Code has no such limit and may parse the file differently. A file
+    that does not exist, and one this user cannot open, pass: Claude Code cannot read them either.
 
     Not covered: managed settings that are not in that file, and ``CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST``
     (the docs say Claude Code then ignores these switches in settings files; not measured, so a switch

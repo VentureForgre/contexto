@@ -138,7 +138,10 @@ Cloud providers (D70): with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
 even `HEAD /api/hello`, so the proxy would see nothing and the session would run with no bound.
 `contexto run claude` refuses such a launch (exit 2) before it opens a session, with a message that
 names the variable, each place it is on (the process environment, or which settings file's `env`
-block; never a path of the user's or the value) and what to do.
+block; never a path of the user's or the value) and what to do. `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`
+(Claude Platform on Google Cloud, on no documentation page) is refused too: it is in the 2.1.318 and
+2.1.322 programs, and on 2.1.318, at `1` in the environment or a project file's `env` block, it sent
+every request to its own endpoint and none through the proxy (D64, `spikes/m2/providers`).
 
 The check fails closed. It does not predict which value Claude Code ends up with: a switch counts
 when it is on in the process environment or in the `env` block of any settings file Contexto can
@@ -165,11 +168,14 @@ user settings file; a project file was measured with `"1"`, `"0"`, `1.0`, `1e0` 
 other four switches with `1`, `true` and `0` (D70).
 
 Settings files are read once per launch, through one reader with a bound: a regular file only, at
-most 4 MiB, with a UTF-8 byte order mark accepted as Claude Code accepts one. A file that does not
-exist, or that this user cannot open, counts as absent: Claude Code cannot read it either. A file
-that is there and that Contexto could not read (not a regular file, larger than the bound, not
-valid JSON for Python) is not evidence that a switch is off, so the launch is refused with a
-message naming that file.
+most 4 MiB, with a UTF-8 byte order mark accepted as Claude Code accepts one. It parses as Claude
+Code 2.1.322 does (measured for D64): an integer past Python's 4,300-digit limit is read (as
+JavaScript's Infinity), and a file holding `NaN` or `Infinity` is not valid JSON. A file that does
+not exist, or that this user cannot open, counts as absent: Claude Code cannot read it either. A
+file that is there and that Contexto could not read (not a regular file, larger than the bound, not
+valid JSON) is not evidence that a switch is off, so the launch is refused with a message naming
+that file, unless it was read whole and its text cannot name a switch. A file whose `env` is not an
+object sets nothing (Claude Code loads nothing from it, `apiKeyHelper` included) and refuses nothing.
 
 `claude --version` and `--help` alone are not checked. Not covered: managed settings that are not
 in that file, and `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` (not measured).
