@@ -103,6 +103,9 @@ class Upstream(BaseHTTPRequestHandler):
                                   "headers": {k.lower(): v for k, v in self.headers.items()},
                                   "header_list": [(k.lower(), v) for k, v in self.headers.items()]})
         answer = Upstream.answer
+        if answer.get("close"):  # read the request, then close the connection with no response
+            self.close_connection = True
+            return
         self.send_response(answer.get("status", 200))
         for name, value in answer.get("headers", {"content-type": "text/event-stream"}).items():
             self.send_header(name, value)
@@ -212,7 +215,7 @@ def test_the_meter_forwards_unchanged_and_records_counts_only(upstream, tmp_path
     assert ledger.spent == 1019 and ledger.reserved == 0
     assert meter.summary() == {"requests": 1, "max_input": 1007, "over_bound": 1, "tokens": 1019,
                                "compaction_requests": 0, "compaction_tokens": 0, "compaction_max_input": 0,
-                               "usage_unreadable": 0}
+                               "usage_unreadable": 0, "requests_unanswered": 0, "unanswered_tokens": 0}
 
 
 def test_the_meter_classifies_requests_from_claude_codes_headers_or_the_tool_list(upstream, tmp_path):
@@ -326,7 +329,40 @@ def test_an_unreachable_upstream_is_a_local_502_and_no_record(tmp_path):
     status, _, data = post(meter, "/v1/messages", b"{}")
     meter.stop()
     assert status == 502 and b"upstream unreachable" in data
-    assert meter.records == [] and meter.unreachable == 1 and ledger.spent == 0 and ledger.reserved == 0
+    # No connection was made, so nothing reached the provider: counted as unanswered, at 0 tokens.
+    assert meter.records == [] and meter.unanswered == 1 and meter.unanswered_tokens == 0
+    assert ledger.spent == 0 and ledger.reserved == 0
+    assert (meter.summary()["requests_unanswered"], meter.summary()["unanswered_tokens"]) == (1, 0)
+
+
+def test_a_request_the_upstream_never_answers_keeps_its_reservation_spent(upstream, tmp_path):
+    """The request was sent and the upstream closed without a response: the provider may have billed
+    it, so its reservation stays spent in the guard and in the unit, and the count is kept for the
+    manifest; there is no record, since there is no response to record."""
+    body = json.dumps({"max_tokens": 1_000, "messages": [{"role": "user", "content": "x" * 3_000}]}).encode()
+    reserve = -(-len(body) * 2 // 3) + 1_000
+    seen = []
+    meter, ledger = metered(upstream, tmp_path, on_unanswered=lambda: seen.append(meter.summary()))
+    Upstream.answer = {"close": True}
+    status, _, data = post(meter, "/v1/messages", body)
+    Upstream.answer = {"chunks": USAGE_EVENTS}
+    assert post(meter, "/v1/messages", body)[0] == 200
+    meter.stop()
+    assert status == 502 and b"upstream unreachable" in data and len(Upstream.received) == 2
+    assert [r["n"] for r in meter.records] == [1]  # the unanswered request took n 0 and wrote nothing
+    assert (meter.unanswered, meter.unanswered_tokens) == (1, reserve)
+    assert ledger.spent == reserve + 1_019 and ledger.reserved == 0
+    summary = meter.summary()
+    assert (summary["requests"], summary["tokens"]) == (1, 1_019)  # the records' own tokens
+    assert (summary["requests_unanswered"], summary["unanswered_tokens"]) == (1, reserve)
+    assert [(x["requests_unanswered"], x["unanswered_tokens"]) for x in seen] == [(1, reserve)]
+    assert bench_meter.read_spent(tmp_path / "requests.jsonl") == 1_019  # what resume adds the manifest's to
+    # The unit's token cap counts it too: a cap that only the unanswered request's reservation passes.
+    meter, ledger = metered(upstream, tmp_path, token_cap=reserve + 1)
+    Upstream.answer = {"close": True}
+    post(meter, "/v1/messages", body)
+    assert post(meter, "/v1/messages", body)[0] == 400 and meter.unit_stop == "runaway"
+    meter.stop()
 
 
 def raw_exchange(meter, request: bytes) -> bytes:

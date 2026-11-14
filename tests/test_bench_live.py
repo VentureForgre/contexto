@@ -88,7 +88,7 @@ def test_every_unit_completes_and_the_manifest_has_the_shared_fields(run, script
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",  # no background task, so one result per turn
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",  # the caller's own opt-out, kept for both arms and recorded
         "settings": {"permissions": {"allow": ["Read"]}}}
-    assert len(manifest["arm_differences"]) == 7 and len(manifest["metering"]) == 4
+    assert len(manifest["arm_differences"]) == 7 and len(manifest["metering"]) == 5
     background = next(line for line in manifest["arm_differences"] if "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" in line)
     assert background.startswith("Both Claude Code arms alike")
     for words in ("removes the run_in_background parameter", "Agent and Bash", "about 770 characters", "2.1.322",
@@ -101,6 +101,7 @@ def test_every_unit_completes_and_the_manifest_has_the_shared_fields(run, script
     assert [u["arm"] for u in manifest["units"]] == ["contexto", "full", "plain"]
     for unit in manifest["units"]:
         assert unit["status"] == "complete" and unit["reason"] is None and unit["stop"] is None, unit
+        assert (unit["requests_unanswered"], unit["unanswered_tokens"]) == (0, 0), unit
         assert unit["seed"] == SEED and unit["repeat"] == 0 and unit["attempt"] == 0
         assert unit["probe_turns_completed"] == 8 and isinstance(unit["compaction_pre_tokens"], list)
     full, contexto, plain = run.unit("full"), run.unit("contexto"), run.unit("plain")

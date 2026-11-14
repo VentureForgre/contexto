@@ -142,6 +142,50 @@ def test_the_guard_stops_before_the_budget_is_passed(env, tmp_path, script):
     assert all(child.poll() is not None for child in run.children)
 
 
+def test_a_request_that_got_no_response_is_counted_per_attempt_and_its_reservation_stays_spent(env, tmp_path,
+                                                                                               script):
+    """The upstream reads one billed request and closes with no response; the full arm retries it. The
+    unit and its attempt count it in the manifest as soon as it happens (a kill keeps the count), its
+    reservation stays in spent_tokens, and a resumed run counts it as spent."""
+    import json
+
+    from contexto.bench import runner
+
+    out = tmp_path / "out"
+    stub = stub_for(script)
+    stub.fault("close", arm="full", nth=2)
+    during = []
+
+    def look(arm, path):
+        if path == "/v1/messages" and len(stub.messages_requests()) == 5:  # two after the unanswered one
+            during.append(json.loads((out / "manifest.json").read_text())["units"][-1])
+
+    stub.on_request = look
+    run = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, stub=stub, out=out)
+    assert run.code == 0, run.printed
+    unit = run.unit("full")
+    records = run.lines("requests.jsonl")
+    assert unit["status"] == "complete" and unit["requests"] == len(records)
+    assert sorted(r["n"] for r in records) == [n for n in range(len(records) + 1) if n != 2]  # n 2 left a gap
+    assert unit["requests_unanswered"] == 1 and unit["unanswered_tokens"] > 0
+    (attempt,) = unit["attempts"]
+    assert (attempt["requests_unanswered"], attempt["unanswered_tokens"]) == (1, unit["unanswered_tokens"])
+    assert unit["tokens"] == sum(record_tokens(r) for r in records)  # the records' own tokens
+    assert run.manifest["spent_tokens"] == unit["tokens"] + unit["unanswered_tokens"]
+    assert any("requests_unanswered" in line and "unanswered_tokens" in line for line in run.manifest["metering"])
+    (seen,) = during
+    assert (seen["status"], seen["requests_unanswered"], seen["unanswered_tokens"]) == (
+        "running", 1, unit["unanswered_tokens"])
+    assert seen["attempts"][-1]["requests_unanswered"] == 1
+    assert runner.recorded_spend(out, run.manifest) == run.manifest["spent_tokens"]
+    # A unit a kill left running keeps the count its running entry had.
+    killed = {"units": [{**seen}]}
+    runner.settle_killed(killed, {})
+    assert (killed["units"][0]["requests_unanswered"], killed["units"][0]["attempts"][-1]["unanswered_tokens"]) == (
+        1, unit["unanswered_tokens"])
+    assert runner.recorded_spend(tmp_path / "nowhere", killed) == unit["unanswered_tokens"]
+
+
 def test_the_full_arm_retries_429_529_and_a_dropped_stream_and_nothing_else(env, tmp_path, script):
     stub = stub_for(script)
     stub.fault(429, arm="full", nth=1)

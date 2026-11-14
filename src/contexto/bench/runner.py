@@ -47,7 +47,9 @@ a local upstream), ``budget_tokens``, ``spent_tokens``, ``credential_source``, `
 ``request_classes``, ``full_arm``, ``runaway_caps``, and per unit ``stop``, ``attempt``, ``attempts``,
 ``turns_completed``, ``requests``, ``tokens``, ``max_input``, ``over_bound``, ``compaction_requests``,
 ``compaction_tokens``, ``compaction_max_input``, ``usage_unreadable``, ``token_cap``,
-``toolloop_requests``, ``toolloop_max_input``, ``toolloop_tool_calls``. A unit's ``status`` may also
+``toolloop_requests``, ``toolloop_max_input``, ``toolloop_tool_calls``, ``requests_unanswered`` and
+``unanswered_tokens`` (also in each entry of ``attempts``: billed requests that got no response, and
+the reservations of those that were sent, counted as spent; see ``metering``). A unit's ``status`` may also
 be ``running`` while it runs. ``requests.jsonl``: ``attempt``, and ``usage_unreadable`` with
 ``reserved_tokens`` on a response whose usage could not be read (``contexto.bench.meter``).
 ``probes.jsonl``: ``given_truncated`` (the answer was longer than 200 characters; it was scored whole).
@@ -57,6 +59,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import functools
 import json
 import os
 import shutil
@@ -161,6 +164,12 @@ METERING = (
     "Both Claude Code arms run with CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 so that each request names its class; the "
     "pass-through removes those headers again, except for the plain arm to a vendor's host, where Claude Code "
     "sends them unasked.",
+    "A billed request that got no response from the upstream (the connection failed or closed before a status "
+    "line) has no record in requests.jsonl, only a gap in n; each unit and each of its attempts counts them in "
+    "requests_unanswered. When the request had been sent, the upstream may have billed it, so its reservation "
+    "(request bytes / 1.5 + max_tokens) is not released but counted as spent, in unanswered_tokens and in "
+    "spent_tokens, and a resumed run counts it too; a request whose connection was never made counts 0 tokens. "
+    "A unit's tokens are its records' own.",
 )
 
 
@@ -388,7 +397,8 @@ def unit_entry(arm: str, seed: int, repeat: int, attempt: int, result: bench_arm
     loop = [r for r in meter.records if r["main"] and has_loop and r["turn"] == script.toolloop_turn]
     loop_inputs = [bench_meter.record_input(r) for r in loop]
     this = {"attempt": attempt, "status": result.status, "stop": result.stop, "requests": summary["requests"],
-            "tokens": summary["tokens"]}
+            "tokens": summary["tokens"], "requests_unanswered": summary["requests_unanswered"],
+            "unanswered_tokens": summary["unanswered_tokens"]}
     return {
         "arm": arm, "seed": seed, "repeat": repeat, "status": result.status, "reason": result.reason,
         "cli_exit": result.cli_exit, "compactions": result.compactions,
@@ -400,6 +410,7 @@ def unit_entry(arm: str, seed: int, repeat: int, attempt: int, result: bench_arm
         "over_bound": summary["over_bound"], "compaction_requests": summary["compaction_requests"],
         "compaction_tokens": summary["compaction_tokens"], "compaction_max_input": summary["compaction_max_input"],
         "usage_unreadable": summary["usage_unreadable"], "token_cap": token_cap,
+        "requests_unanswered": summary["requests_unanswered"], "unanswered_tokens": summary["unanswered_tokens"],
         "toolloop_requests": len(loop) if has_loop else None,
         "toolloop_max_input": max(loop_inputs, default=0) if has_loop else None,
         "toolloop_tool_calls": result.toolloop_tool_calls,
@@ -413,9 +424,41 @@ def running_entry(arm: str, seed: int, repeat: int, attempt: int, earlier: list[
             "compactions": None, "compaction_pre_tokens": [], "concluded_ok": {}, "toolloop_reads": None,
             "probe_turns_completed": 0, "stop": None, "attempt": attempt,
             "attempts": [*earlier, {"attempt": attempt, "status": "running", "stop": None, "requests": 0,
-                                    "tokens": 0}],
+                                    "tokens": 0, "requests_unanswered": 0, "unanswered_tokens": 0}],
             "turns_completed": 0, "requests": 0, "tokens": 0, "max_input": 0, "over_bound": 0,
-            "token_cap": token_cap}
+            "token_cap": token_cap, "requests_unanswered": 0, "unanswered_tokens": 0}
+
+
+UNANSWERED = ("requests_unanswered", "unanswered_tokens")
+
+
+def note_unanswered(manifest: dict[str, Any], key: tuple[str, int, int], attempt: int, meter: Any) -> None:
+    """Copy a running unit's count of requests that got no response into its manifest entry and its
+    attempt's (the caller writes the manifest): a run killed later still has them."""
+    summary = meter.summary()
+    for unit in manifest["units"]:
+        if unit_key(unit) == key and int(unit.get("attempt") or 0) == attempt:
+            unit.update({name: summary[name] for name in UNANSWERED})
+            for entry in unit.get("attempts") or []:
+                if entry.get("attempt") == attempt:
+                    entry.update({name: summary[name] for name in UNANSWERED})
+
+
+def unanswered_spend(manifest: dict[str, Any]) -> int:
+    """The tokens the manifest counts as spent with no record: the reservations of requests that were
+    sent and got no response, over every attempt of every unit."""
+    total = 0
+    for unit in manifest.get("units") or []:
+        attempts = [a for a in unit.get("attempts") or [] if isinstance(a, dict)]
+        values = [a.get("unanswered_tokens") for a in attempts] if attempts else [unit.get("unanswered_tokens")]
+        total += sum(v for v in values if isinstance(v, int) and not isinstance(v, bool) and v > 0)
+    return total
+
+
+def recorded_spend(out: Path, manifest: dict[str, Any]) -> int:
+    """What an output directory has spent: its request records, plus the reservations of requests that
+    got no response, which only the manifest counts."""
+    return bench_meter.read_spent(out / "requests.jsonl") + unanswered_spend(manifest)
 
 
 def settle_killed(manifest: dict[str, Any], recorded: dict[tuple[str, int, int], dict[int, dict[str, int]]]) -> int:
@@ -428,11 +471,14 @@ def settle_killed(manifest: dict[str, Any], recorded: dict[tuple[str, int, int],
         count += 1
         attempt = int(unit.get("attempt") or 0)
         seen = recorded.get(unit_key(unit), {}).get(attempt, {"requests": 0, "tokens": 0})
+        # The running entry's counts of requests with no response were written as they happened.
+        unanswered = {name: unit[name] for name in UNANSWERED if isinstance(unit.get(name), int)}
         reason = "the run ended while this unit was running (the process was killed)"
         unit.update({"status": "stopped", "stop": "interrupted", "reason": reason,
                      "requests": seen["requests"], "tokens": seen["tokens"]})
         history = [a for a in unit.get("attempts") or [] if a.get("attempt") != attempt]
-        unit["attempts"] = [*history, {"attempt": attempt, "status": "stopped", "stop": "interrupted", **seen}]
+        unit["attempts"] = [*history, {"attempt": attempt, "status": "stopped", "stop": "interrupted", **seen,
+                                       **unanswered}]
     return count
 
 
@@ -531,7 +577,7 @@ def prepare(config: Config, scripts: dict[int, Script] | None = None) -> dict[st
     killed = settle_killed(manifest, recorded)
     done = {unit_key(u) for u in manifest["units"] if u.get("status") == "complete"}
     todo = [u for u in bench_plan.units(config.seeds, config.repeats, config.arms) if u not in done]
-    spent = bench_meter.read_spent(config.out / "requests.jsonl")
+    spent = recorded_spend(config.out, manifest)
     return {"scripts": scripts, "manifest": manifest, "todo": todo, "spent": spent, "claude": claude,
             "plan": bench_plan.estimate(scripts, todo, config.bound, model=config.model or None),
             "resumed": old is not None,
@@ -587,7 +633,21 @@ def _run_units(config: Config, ready: dict[str, Any], out_stream: TextIO, err_st
     ledger = bench_meter.Ledger(config.out / "requests.jsonl", config.budget, ready["spent"])
     manifest["spent_tokens"] = ledger.spent
     drop_unrecorded_probes(config.out, manifest)
-    write_json_atomic(config.out / "manifest.json", manifest)
+    writing = threading.Lock()  # a meter's thread also writes the manifest (note_unanswered)
+
+    def write_manifest() -> None:
+        with writing:
+            write_json_atomic(config.out / "manifest.json", manifest)
+
+    write_manifest()
+
+    def unanswered(key: tuple[str, int, int], attempt: int, meter: Any) -> None:
+        """Called on a meter's thread after a request that got no response."""
+        with writing:
+            note_unanswered(manifest, key, attempt, meter)
+            manifest["spent_tokens"] = ledger.spent
+            write_json_atomic(config.out / "manifest.json", manifest)
+
     if ready["resumed"]:
         killed = f" ({ready['killed']} found running, from a run that was killed, now recorded as stopped)" \
             if ready["killed"] else ""
@@ -615,13 +675,14 @@ def _run_units(config: Config, ready: dict[str, Any], out_stream: TextIO, err_st
                 # leaves the unit's records attributed to it.
                 manifest["units"] = [u for u in manifest["units"] if unit_key(u) != key] + [
                     running_entry(arm, seed, repeat, attempt, earlier, token_cap)]
-                write_json_atomic(config.out / "manifest.json", manifest)
+                write_manifest()
                 recorded.setdefault(key, {}).setdefault(attempt, {"requests": 0, "tokens": 0})
                 directory = work / f"{arm}-{seed}-{repeat}-{attempt}"
                 meter = bench_meter.Meter(config.upstream, ledger, arm=arm, seed=seed, repeat=repeat,
                                           model=config.model, history=histories[seed], bound=config.bound,
                                           attempt=attempt, turn_request_cap=config.turn_request_cap,
                                           token_cap=token_cap, turn_failure_cap=config.turn_failure_cap)
+                meter.on_unanswered = functools.partial(unanswered, key, attempt, meter)
                 result = bench_arms.UnitResult()
                 try:
                     found = []
@@ -651,6 +712,7 @@ def _run_units(config: Config, ready: dict[str, Any], out_stream: TextIO, err_st
                 finally:
                     try:
                         meter.stop()
+                        meter.on_unanswered = None  # the entry below takes the meter's counts
                         if not config.keep_work:
                             shutil.rmtree(directory, ignore_errors=True)
                     except KeyboardInterrupt:  # a second Ctrl+C: the unit is still recorded below
@@ -663,11 +725,12 @@ def _run_units(config: Config, ready: dict[str, Any], out_stream: TextIO, err_st
                     lines = probe_lines(entry, config.model, script, result.answers)
                     with (config.out / "probes.jsonl").open("a", encoding="utf-8") as f:
                         f.write("".join(json.dumps(line) + "\n" for line in lines))
-                manifest["units"] = [u for u in manifest["units"] if unit_key(u) != key] + [entry]
-                manifest["spent_tokens"] = ledger.spent
-                if meter.records and manifest["request_classes"] != "header" and arm in bench_arms.CLI_ARMS:
-                    manifest["request_classes"] = "header" if meter.classes_seen else "inferred"
-                write_json_atomic(config.out / "manifest.json", manifest)
+                with writing:  # a call of unanswered() already under way finishes first
+                    manifest["units"] = [u for u in manifest["units"] if unit_key(u) != key] + [entry]
+                    manifest["spent_tokens"] = ledger.spent
+                    if meter.records and manifest["request_classes"] != "header" and arm in bench_arms.CLI_ARMS:
+                        manifest["request_classes"] = "header" if meter.classes_seen else "inferred"
+                    write_json_atomic(config.out / "manifest.json", manifest)
                 detail = f": {result.reason}" if result.reason else ""
                 budget = f" of {ledger.budget:,}" if ledger.budget is not None else ""
                 tries = f", attempt {attempt + 1}" if attempt else ""
@@ -687,7 +750,7 @@ def _run_units(config: Config, ready: dict[str, Any], out_stream: TextIO, err_st
     run_stop = ledger.stop or next((u["stop"] for u in stopped if u.get("stop") == "managed_settings"), None)
     if run_stop is None:
         manifest["finished"] = utc_now()
-        write_json_atomic(config.out / "manifest.json", manifest)
+        write_manifest()
     else:
         why = {"budget": "the token budget", "auth": "a refused credential",
                "managed_settings": "organization-managed Claude Code settings"}[run_stop]

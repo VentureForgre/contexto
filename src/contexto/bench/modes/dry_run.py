@@ -42,9 +42,7 @@ def run(args: argparse.Namespace) -> int:
                 runner.merge_manifest(old, config, None)  # refuses a different run, as the live run would
             done = {runner.unit_key(u) for u in old["units"] if u.get("status") == "complete"}
             todo = [u for u in todo if u not in done]
-            from contexto.bench.meter import read_spent
-
-            spent = read_spent(config.out / "requests.jsonl")
+            spent = runner.recorded_spend(config.out, old)  # what the live run would count as spent
             held = {"complete": len(done), "units": len(old["units"]),
                     "stopped": sum(1 for u in old["units"] if u.get("status") in ("stopped", "running"))}
     except (runner.Refused, ValueError) as exc:

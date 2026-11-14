@@ -112,6 +112,7 @@ class StubModel:
     tool_forever: set[str] = field(default_factory=set)  # arms whose every request is answered with a tool call
     long_answers: bool = False  # put 250 backticks before each right answer
     background: bool = False  # answer a Claude Code arm's decision and probe turns with a background subagent call
+    on_request: Any = None  # called with (arm, path) as each request arrives, before it is answered
     requests: list[dict[str, Any]] = field(default_factory=list)
     answered: dict[tuple[str, int, str], str] = field(default_factory=dict)  # (arm, seed, probe id) -> answer given
     searches: int = 0
@@ -132,7 +133,8 @@ class StubModel:
     def fault(self, kind: int | str, *, arm: str | None = None, nth: int = 0, path: str = "/v1/messages",
               times: int = 1) -> None:
         """Answer the ``nth`` request (0-based, counted per arm and path among those not yet faulted)
-        with HTTP status ``kind``, or cut its stream short when ``kind`` is ``"drop"``; ``times`` in a row."""
+        with HTTP status ``kind``, cut its stream short when ``kind`` is ``"drop"``, or close the connection
+        with no response at all when it is ``"close"``; ``times`` in a row."""
         self._faults.append({"kind": kind, "arm": arm, "nth": nth, "path": path, "left": times, "seen": 0})
 
     def start(self) -> str:
@@ -309,7 +311,13 @@ class StubModel:
                 }
                 with stub.lock:
                     stub.requests.append(record)
+                if stub.on_request is not None:
+                    stub.on_request(arm, path)
                 fault = stub._take_fault(arm, path)
+                if fault == "close":
+                    record["status"] = None
+                    self.close_connection = True
+                    return
                 if isinstance(fault, int):
                     record["status"] = fault
                     kind = {401: "authentication_error", 403: "permission_error", 429: "rate_limit_error",

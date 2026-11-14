@@ -41,6 +41,15 @@ tokens from the response's ``usage``, the HTTP status, and whether it carried ou
 reads the request body in memory for ``max_tokens`` and the presence of a tool list, and keeps
 nothing of it. ``count_tokens`` and every other path are forwarded and not recorded.
 
+A billed request that got no response from the upstream (the connection failed, or closed before a
+status line) has no record: there is no usage to record, and its ``n`` is left as a gap. The meter
+counts it (``Meter.unanswered``, written to the manifest as ``requests_unanswered``). When the
+request had been sent in full or in part, the upstream may have billed it, so its reservation is not
+released but counted as spent, in the guard and in the unit's token cap (``Meter.unanswered_tokens``,
+written as ``unanswered_tokens``); one whose connection was never made counts 0, since nothing
+reached the provider. ``on_unanswered``, when given, is called after each, so the runner can write
+the count before the unit ends.
+
 Usage that cannot be read. When a 2xx response to a billed request ends without a usage the meter
 can read in full (an encoded body, a stream cut short before its final ``message_delta`` usage, a
 body that is not JSON), the vendor may still have billed up to the request's ``max_tokens``. The
@@ -186,10 +195,12 @@ class Ledger:
         self.stopped.set()
         return False
 
-    def settle(self, reserved: int, record: dict[str, Any] | None) -> None:
-        """Release a reservation and, when the request got a response, count and write its record."""
+    def settle(self, reserved: int, record: dict[str, Any] | None, kept: int = 0) -> None:
+        """Release a reservation and, when the request got a response, count and write its record.
+        ``kept`` is counted as spent with no record (a request that got no response)."""
         with self._lock:
             self.reserved -= reserved
+            self.spent += kept
             if record is None:
                 return
             self.spent += record_tokens(record)
@@ -380,7 +391,8 @@ class Meter:
 
     def __init__(self, upstream: str, ledger: Ledger, *, arm: str, seed: int, repeat: int, model: str,
                  history: list[int], bound: int, attempt: int = 0, turn_request_cap: int | None = None,
-                 token_cap: int | None = None, turn_failure_cap: int | None = None) -> None:
+                 token_cap: int | None = None, turn_failure_cap: int | None = None,
+                 on_unanswered: Any = None) -> None:
         from contexto.proxy import HOP_BY_HOP, is_vendor_host  # here, so importing this module stays light
 
         parts = urlsplit(upstream)
@@ -400,7 +412,9 @@ class Meter:
         self.turn: int | None = None
         self.records: list[dict[str, Any]] = []  # this unit's, in the order their responses ended
         self.refused = 0  # billed requests not forwarded because of the budget
-        self.unreachable = 0  # requests that got no response from the upstream
+        self.unanswered = 0  # billed requests that got no response from the upstream
+        self.unanswered_tokens = 0  # their reservations, kept as spent (0 for one never sent)
+        self.on_unanswered = on_unanswered
         self.classes_seen = False  # a request carried Claude Code's request-class header
         self.auth_status: int | None = None
         self.turn_request_cap, self.token_cap, self.turn_failure_cap = turn_request_cap, token_cap, turn_failure_cap
@@ -501,11 +515,13 @@ class Meter:
         return False
 
     def settle(self, reserved: int, record: dict[str, Any] | None, turn: int | None = None,
-               answered: bool = True) -> None:
+               answered: bool = True, kept: int = 0) -> None:
         """Release an admitted request's reservation and count its record; one that was not
-        ``answered`` (no 2xx) leaves the per-turn count and counts as a failed response instead."""
+        ``answered`` (no 2xx) leaves the per-turn count and counts as a failed response instead.
+        ``kept`` is spent with no record: the reservation of a request that got no response."""
         with self._lock:
             self._unit_reserved -= reserved
+            self._unit_spent += kept
             if record is not None:
                 self._unit_spent += record_tokens(record)
             if not answered:
@@ -526,7 +542,8 @@ class Meter:
                 "compaction_requests": len(compactions),
                 "compaction_tokens": sum(record_tokens(r) for r in compactions),
                 "compaction_max_input": max((record_input(r) for r in compactions), default=0),
-                "usage_unreadable": sum(1 for r in records if r.get("usage_unreadable"))}
+                "usage_unreadable": sum(1 for r in records if r.get("usage_unreadable")),
+                "requests_unanswered": self.unanswered, "unanswered_tokens": self.unanswered_tokens}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -635,7 +652,8 @@ class _Handler(BaseHTTPRequestHandler):
                       "uncached": 0, "cache_write": 0, "cache_read": 0, "output": 0, "status": 0,
                       "compaction": COMPACTION_HEADER in received or request_class == "compaction",
                       "basis": "measured", "attempt": owner.attempt}
-        reached, tail = False, b""
+        reached, tail, kept = False, b"", 0
+        self.sent = False
         try:
             reached, tail = self._relay(body, headers, record)
         finally:
@@ -647,11 +665,18 @@ class _Handler(BaseHTTPRequestHandler):
                         owner.records.append(record)
                         owner.usage_unreadable += int(bool(record.get("usage_unreadable")))
                 else:
+                    kept = reserved if self.sent else 0  # sent: the upstream may have billed it
                     with owner._lock:
-                        owner.unreachable += 1
+                        owner.unanswered += 1
+                        owner.unanswered_tokens += kept
                 answered = reached and record is not None and 200 <= int(record.get("status") or 0) < 300
-                owner.settle(reserved, record if reached else None, turn, answered)
-                owner.ledger.settle(reserved, record if reached else None)
+                owner.settle(reserved, record if reached else None, turn, answered, kept)
+                owner.ledger.settle(reserved, record if reached else None, kept)
+                if not reached and owner.on_unanswered is not None:
+                    try:
+                        owner.on_unanswered()
+                    except Exception:  # noqa: BLE001 - the count is in the meter; the manifest gets it at the end
+                        pass
         # The client sees the response complete only now, after its record is counted and written:
         # Claude Code sends its next request at once, and the guard must already know this one's cost.
         if tail:
@@ -679,6 +704,7 @@ class _Handler(BaseHTTPRequestHandler):
                     conn.putheader(name, value)
                 if body or self.command in ("POST", "PUT", "PATCH"):
                     conn.putheader("Content-Length", str(len(body)))
+                self.sent = True  # from here bytes of the request may reach the upstream
                 conn.endheaders(body or None)
                 response = conn.getresponse()
             except (OSError, http.client.HTTPException) as exc:
