@@ -11,6 +11,20 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
+### Changed
+
+- The package is now named `contexto-proxy`. The command and the import name are still `contexto`.
+  If you installed 0.5.24 or earlier, uninstall `contexto` before you install the new one, or use
+  `install.sh`, which does it for you: both provide the same `contexto` command. The wheel and
+  sdist are named `contexto_proxy-<version>`.
+- Releases are no longer cut on every fix. They are batched, and each has a section in this file.
+
+### Added
+
+- `install.sh`: one line installs the latest release, after checking the wheel against the
+  release's `SHA256SUMS`, and upgrades it when run again. See the README's Install section.
+- `contexto --version` names the revision of an install from a git URL, for example
+  `contexto 0.0.0+checkout (git v0.6.0, commit 1a2b3c4d)`.
 - `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
   described in the command's `--help`; an error is still one line on stderr with the usual exit
   code.
@@ -32,13 +46,15 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## 0.5.24 (2026-11-06)
 
-- A Codex turn that starts with large tool output no longer goes out over the bound unnoticed.
-  Codex tool output is counted at a cautious 1.5 bytes per token until real usage arrives, as
-  Claude Code's already was.
+- A Codex turn that starts with large tool output rarely goes out over the bound unnoticed now
+  (1 of 32 test sessions, down from 26). Codex tool output is counted at a cautious 1.5 bytes per
+  token until real usage arrives, as Claude Code's already was. Codex sessions whose responses
+  carry no input count page out 9 to 20% more often as a result.
 - A session started on an earlier release has its fixed overhead (system prompt and tool
-  definitions) measured again when it resumes, so a low measurement is not carried on.
-- An image counts the higher of its pixel price and its 28-pixel patches, at most 4,787 tokens.
-  Sizing a crafted JPEG no longer slows a request.
+  definitions) measured again when it resumes, so a low measurement is not carried on. A session
+  used on 0.5.24 starts its window over if you go back to 0.5.23 or earlier; its pages stay.
+- An image counts the higher of two estimates, by pixel count and by 28-pixel tile, at most 4,787
+  tokens. Sizing a crafted JPEG no longer slows a request.
 - The start warning about a bound that may leave no room quotes each CLI's own measured overhead
   (`run codex` had quoted Claude Code's).
 
@@ -55,8 +71,9 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 - The proxy accepts `127.0.0.1` or `localhost` with any port in the `Host` header. 0.5.16 to 0.5.21
   answered 403 when the port was not the proxy's own, which broke SSH port forwards.
-- Claude Code's own compaction (`/compact` or automatic) is recognised in every form it takes, so
-  the compacted conversation becomes the main one at once. 0.5.15 to 0.5.21 missed most forms.
+- Claude Code's own compaction (`/compact` or automatic) is recognised in the three forms Claude
+  Code 2.1.314 and 2.1.318 send, so the compacted conversation becomes the main one at once.
+  0.5.15 to 0.5.21 recognised one of them.
 - A launch that waits for another launch to pick its session says so, and Ctrl+C during the wait
   exits 130. A damaged lock file in a session is named in the error.
 - `contexto run claude` knows all of Claude Code's options that take a value (36 were missing), so
@@ -130,9 +147,10 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## 0.5.15 (2026-11-06)
 
-- Recall works after `/clear`. The new conversation becomes the main one at once. Before, it
-  stayed a side conversation until it outgrew the old one, and recall returned nothing. `/resume`
-  and `/compact` are followed the same way, in interactive and headless runs.
+- Recall works after `/clear`. The new conversation becomes the main one at once. Before, it was
+  treated like a subagent's conversation until it outgrew the old one, and recall returned
+  nothing. `/resume` is followed the same way, in interactive and headless runs, and `/compact` in
+  one of its forms (the rest in 0.5.22).
 - Subagents, agent-team teammates and a `claude -p` started from a tool never become the main
   conversation. Each handover is logged as `main_changed`.
 
@@ -144,8 +162,10 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   recorded as trusted. 0.5.13 and earlier ran a cloned repository's helper command and could send
   your key to its host. To use project settings, run `claude` in the folder once and accept the
   trust dialog, or pass `--codex-key-helper` and `--codex-upstream`.
-- While `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is set, no project settings file is used by
-  `run claude`, `run codex` or `proxy`, as in `claude -p`.
+- While `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` is `1`, `true`, `yes` or `on`, no project settings
+  file is used by `run claude`, `run codex` or `proxy`, as in `claude -p`. With it set, 0.5.13 and
+  earlier still sent `run claude -p` and `proxy` requests, with your credential, to a base URL
+  set in the project.
 
 ### Fixed
 
@@ -157,7 +177,8 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 - The first release with a `SHA256SUMS` file and a build provenance attestation. Check a download
   with `gh attestation verify <file> --repo VentureForgre/contexto` or
   `shasum -a 256 -c SHA256SUMS --ignore-missing`. Releases up to 0.5.12 have neither.
-- Launches started at the same moment never share an automatically chosen session.
+- Launches started at the same moment no longer share an automatically chosen session. A launch
+  that has waited 5 s for another to choose goes on without waiting.
 - `contexto run claude` reads Claude Code's short-option clusters (`-pc`, `-r<id>`) when it picks
   the session to resume, and says that a `--fork-session` fork shares the original's session.
 
@@ -181,15 +202,16 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 - Claude Code 2.1.314 and 2.1.318 and Codex 0.166.0 are tested and no longer raise the
   untested-version warning.
-- Recall room held for a finished subagent is released early again on Claude Code 2.1.314 and
-  2.1.318, which report a subagent's stop in a new form.
+- The token budget held for a finished subagent's recalls is released early again on Claude Code
+  2.1.314 and 2.1.318, which report a subagent's stop in a new form.
 
 ## 0.5.9 (2026-11-06)
 
 - A change to the fixed overhead in mid-session (tool search loading a tool, an MCP server
   connecting, a model switch) no longer leaves the next turn over its budget with empty searches.
   At bound 60,000 such a turn went out at about 51,000 tokens and now goes out at about 21,000.
-- Every request, rotated or not, is checked against the bound before it is sent.
+- A request estimated over the bound is logged as `over_bound` (and still sent), whether or not
+  Contexto paged anything out of it. Before, a request it had just paged was never checked.
 
 ## 0.5.8 (2026-10-25)
 
@@ -210,15 +232,17 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## 0.5.6 (2026-10-25)
 
-- One damaged page file no longer stops paging for the session. Search and the index skip it,
-  recalling it returns an error, and `contexto recall` exits 1. The log names it as
-  `page_unreadable`. A read that fails for a passing reason (permissions, too many open files) is
-  tried again on the next call.
+- A page file that is valid JSON with damaged fields no longer stops paging for the session. It
+  is handled like any unreadable page (since 0.5.5): search and the index skip it, recalling it
+  returns an error, and the log names it as `page_unreadable`. A read that fails for a passing
+  reason (permissions, too many open files) is tried again on the next call.
 
 ## 0.5.5 (2026-10-25)
 
 - Very deeply nested JSON in a tool result or tool input no longer stops paging for the session.
   A request nested more than 512 levels is forwarded unchanged and logged as `request_too_deep`.
+- A page file that is not valid JSON, or is nested too deep, is a one-line error from
+  `contexto recall` (exit 1), not a traceback. Search skips it.
 
 ## 0.5.4 (2026-10-25)
 
@@ -238,8 +262,9 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 ## 0.5.2 (2026-10-25)
 
 - The first release under the MIT license with `LICENSE` in the wheel and the sdist.
-- With `--observe-thinking`, the log keeps every item of the `input_transformations` a response
-  reports (up to 32). A later empty list had been able to erase a dropped-thinking report.
+- With `--observe-thinking`, which logs when the API reports that it dropped thinking from a
+  request, the log keeps every such report of a response (up to 32). A later empty report had
+  been able to erase an earlier one.
 
 ## 0.5.1 (2026-10-24)
 
@@ -256,20 +281,22 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 - `contexto sessions prune` deletes old sessions (a dry run unless `--yes`, never a session in
   use), and `sessions list` shows each session's size.
 - A warning at launch when Claude Code or Codex is a version Contexto was not tested with.
-- Each subagent has its own recall room, so a subagent's recall cannot overfill its own window.
+- Each subagent has its own token budget for recall, so a subagent's recall cannot overfill its
+  own window.
 - The MCP server holds at most 64 MB of page text for search, set by `CONTEXTO_SEARCH_CACHE_MB`.
   Before, its memory grew with the session.
 
 ## 0.1.0 to 0.4.0
 
-0.1.0 was the first release, cut once the acceptance run passed. The 0.1.x releases made search
+0.1.0 was the first release. The 0.1.x releases made search
 work for Codex sessions and made the proxy and every MCP server use one store. 0.2.0 let a
 restarted proxy resume a session where it stopped, so the prompt cache survives a restart. 0.2.2
-added the headroom rule: one large read no longer leaves the session at its smallest window. The
+capped the space held back after a large read, so one large read no longer leaves the session at
+its smallest window. The
 other 0.2.x releases fixed how cut-short and unusual streams are read, made `contexto run codex`
 start its MCP server reliably, and cut the time spent on each request in long sessions. 0.3.0 added
-the warning for a session that runs without Contexto's tools. 0.4.0 stopped carried context from
-growing and made search match every word in any case, ranked by relevance.
+the warning for a session that runs without Contexto's tools. 0.4.0 stopped the context kept in
+every request from growing and made search match every word in any case, ranked by relevance.
 
 Their GitHub releases and tags were removed from GitHub on 2026-11-06, so 0.5.0 is the oldest
 release you can download. Their changes are part of every later release.
