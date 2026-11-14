@@ -323,7 +323,7 @@ def test_run_claude_refuses_a_cloud_provider_launch_before_any_session(launch_en
     proc = launch(launch_env, "--upstream", recording, "--session", "s1", "claude", "-p", "hello", cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == EXIT_USAGE == 2
-    assert err.startswith(f"contexto run: {name} is set in the process environment")
+    assert err.startswith(f"contexto: {name} is set in the process environment")
     assert "ANTHROPIC_BASE_URL" in err and "no bound" in err and f"unset {name}" in err
     assert "Traceback" not in err
     assert not Path(launch_env["CONTEXTO_HOME"]).exists()  # no session, no home
@@ -353,7 +353,7 @@ def test_run_claude_refuses_a_repository_file_claude_code_reads_as_on(launch_env
     proc = launch(launch_env, "--upstream", recording, "claude", "-p", "hello", cwd=project)
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == 2
-    assert err.startswith("contexto run: CLAUDE_CODE_USE_BEDROCK is set in the env block of .claude/settings.json")
+    assert err.startswith("contexto: CLAUDE_CODE_USE_BEDROCK is set in the env block of .claude/settings.json")
     assert not Path(launch_env["CONTEXTO_HOME"]).exists() and not Path(launch_env["FAKE_RECORD"]).exists()
     assert Recording.seen == []
 
