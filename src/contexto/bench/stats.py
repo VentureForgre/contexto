@@ -1,5 +1,5 @@
 """The statistics the benchmark report uses. Pure functions: no I/O, and the same input always gives
-the same output (the two resampling methods take a seed).
+the same output (the one resampling method, the sign-flip test above 20 seeds, takes a seed).
 
 Probes inside one session are not independent, so the report gives two views: probes pooled across
 seeds (``wilson``, ``paired``, ``mcnemar_exact``) and seeds as the unit (``seed_level``). Run-to-run
@@ -8,6 +8,7 @@ noise comes from repeats of one seed (``repeat_noise``).
 
 from __future__ import annotations
 
+import functools
 import math
 import random
 from collections.abc import Sequence
@@ -15,6 +16,8 @@ from typing import Any
 
 Z95 = 1.959963984540054  # the 0.975 quantile of the standard normal distribution
 SIGN_FLIP_EXACT_MAX = 20  # seeds up to which the sign-flip test enumerates every pattern
+SIGNIFICANCE = 0.05
+SEED_INTERVAL_METHOD = "Student t on the per-seed differences, n - 1 degrees of freedom"
 
 
 def wilson(k: int, n: int, z: float = Z95) -> tuple[float, float]:
@@ -73,6 +76,11 @@ def tango_interval(b: int, c: int, n: int, z: float = Z95) -> tuple[float, float
     and has a sensible width when a discordant count is small or zero. Tango, T. (1998),
     "Equivalence test and confidence interval for the difference in proportions for the
     paired-sample design", Statistics in Medicine 17: 891-908.
+
+    The interval is asymptotic: it excludes zero exactly when ``(b - c)^2 / (b + c)`` is above
+    ``z^2``, which is the asymptotic McNemar test, not the exact one. So it can exclude zero while
+    ``mcnemar_exact`` does not reject; ``paired`` reports both and calls a difference significant
+    only when both do.
     """
     if b < 0 or c < 0 or n <= 0 or b + c > n:
         raise ValueError(f"need b, c >= 0 and b + c <= n with n > 0, got b={b}, c={c}, n={n}")
@@ -98,7 +106,13 @@ def paired(a: Sequence[bool], b: Sequence[bool]) -> dict[str, Any]:
 
     Returns the 2x2 table (``both``, ``a_only``, ``b_only``, ``neither``), both accuracies, the
     difference ``accuracy_a - accuracy_b``, its 95% interval by Tango's score method
-    (``tango_interval``) and the exact two-sided McNemar p value (``mcnemar_exact``).
+    (``tango_interval``), the exact two-sided McNemar p value (``mcnemar_exact``) and
+    ``significant``: true only when the interval excludes zero and the p value is below 0.05.
+
+    The two can disagree, because the interval is asymptotic and the test is exact. For example, 4
+    probes right only in arm a and 0 only in arm b, out of 72, give the interval (0.0021, 0.1343),
+    which excludes zero, and p = 2 / 16 = 0.125. That difference is not significant: the exact test
+    decides.
     """
     if len(a) != len(b):
         raise ValueError(f"the two arms have {len(a)} and {len(b)} results: they must be aligned")
@@ -108,32 +122,123 @@ def paired(a: Sequence[bool], b: Sequence[bool]) -> dict[str, Any]:
     both = sum(1 for x, y in zip(a, b) if x and y)
     a_only = sum(1 for x, y in zip(a, b) if x and not y)
     b_only = sum(1 for x, y in zip(a, b) if y and not x)
+    interval = tango_interval(a_only, b_only, n)
+    p_value = mcnemar_exact(a_only, b_only)
     return {
         "n": n, "both": both, "a_only": a_only, "b_only": b_only, "neither": n - both - a_only - b_only,
         "accuracy_a": (both + a_only) / n, "accuracy_b": (both + b_only) / n, "difference": (a_only - b_only) / n,
-        "interval": tango_interval(a_only, b_only, n), "interval_method": "Tango score (1998)",
-        "mcnemar_p": mcnemar_exact(a_only, b_only),
+        "interval": interval, "interval_method": "Tango score (1998)", "mcnemar_p": p_value,
+        "significant": (interval[0] > 0 or interval[1] < 0) and p_value < SIGNIFICANCE,
     }
+
+
+def _beta_fraction(a: float, b: float, x: float) -> float:
+    """The continued fraction of the incomplete beta function, by the modified Lentz method (Press,
+    W. H. et al. (2007), Numerical Recipes, 3rd edition, section 6.4)."""
+    tiny = 1e-300
+    c, d = 1.0, 1.0 - (a + b) * x / (a + 1)
+    d = 1 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 10_000):
+        for numerator in (m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m)),
+                          -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1))):
+            d = 1 + numerator * d
+            d = 1 / (d if abs(d) > tiny else tiny)
+            c = 1 + numerator / c
+            c = c if abs(c) > tiny else tiny
+            h *= c * d
+        if abs(c * d - 1) < 1e-16:
+            break
+    return h
+
+
+def _incomplete_beta(a: float, b: float, x: float) -> float:
+    """The regularized incomplete beta function I_x(a, b)."""
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x))
+    if x < (a + 1) / (a + b + 2):
+        return front * _beta_fraction(a, b, x) / a
+    return 1 - front * _beta_fraction(b, a, 1 - x) / b
+
+
+def t_quantile(p: float, df: int) -> float:
+    """The ``p`` quantile of Student's t distribution with ``df`` degrees of freedom.
+
+    The upper tail at t > 0 is ``I_x(df / 2, 1 / 2) / 2`` with ``x = df / (df + t^2)`` (Abramowitz,
+    M. and Stegun, I. A. (1964), Handbook of Mathematical Functions, 26.7.1 and 26.5.27), computed
+    with ``_incomplete_beta`` and inverted by bisection to full double precision. Standard library
+    only; tests/test_bench_stats.py checks it against the published table.
+    """
+    if not 0 < p < 1 or df < 1:
+        raise ValueError(f"need 0 < p < 1 and df >= 1, got p={p}, df={df}")
+    if p == 0.5:
+        return 0.0
+    if p < 0.5:
+        return -t_quantile(1 - p, df)
+    tail = 1 - p
+
+    def upper(t: float) -> float:
+        return _incomplete_beta(df / 2, 0.5, df / (df + t * t)) / 2
+
+    low, high = 0.0, 1.0
+    while upper(high) > tail:
+        low, high = high, high * 2
+    for _ in range(200):
+        middle = (low + high) / 2
+        if middle in (low, high):
+            break
+        if upper(middle) > tail:
+            low = middle
+        else:
+            high = middle
+    return (low + high) / 2
+
+
+def t_interval(values: Sequence[float]) -> tuple[float, float] | None:
+    """The 95% Student t interval for the mean of ``values``: ``mean -/+ t(0.975, n - 1) * sd / sqrt(n)``
+    with the sample standard deviation (n - 1 in the denominator). None with fewer than two values;
+    zero width when every value is the same."""
+    n = len(values)
+    if n < 2:
+        return None
+    mean = sum(values) / n
+    sd = math.sqrt(sum((v - mean) ** 2 for v in values) / (n - 1))
+    half = _t975(n - 1) * sd / math.sqrt(n)
+    return (mean - half, mean + half)
+
+
+@functools.cache
+def _t975(df: int) -> float:
+    return t_quantile(0.975, df)
 
 
 def seed_level(differences: Sequence[float], resamples: int = 10_000, seed: int = 0) -> dict[str, Any]:
     """Treat each seed as one observation: ``differences`` holds one paired difference per seed.
 
-    Returns the mean difference, a two-sided sign-flip permutation p value and a percentile
-    bootstrap 95% interval over seeds.
+    Returns the mean difference, a two-sided sign-flip permutation p value, and a 95% interval for
+    the mean over seeds (``interval``, named in ``interval_method``).
 
     Sign-flip test (Fisher's randomization test for paired data; Good, P. (2005), Permutation,
     Parametric and Bootstrap Tests of Hypotheses, 3rd edition, section 3.1): under the null
     hypothesis each seed's difference is as likely to have either sign, so the p value is the share
     of sign patterns whose mean is at least as far from zero as the observed mean. Every one of the
     ``2 ** n`` patterns is counted for up to ``SIGN_FLIP_EXACT_MAX`` seeds; above that ``resamples``
-    random patterns are drawn and the p value is ``(hits + 1) / (resamples + 1)``. The smallest
-    exact p value with n seeds is ``2 / 2 ** n``, so fewer than six seeds cannot reach 0.05.
+    random patterns are drawn with ``random.Random(seed + 1)`` and the p value is
+    ``(hits + 1) / (resamples + 1)``. The smallest exact p value with n seeds is ``2 / 2 ** n``, so
+    fewer than six seeds cannot reach 0.05.
 
-    Bootstrap (Efron, B. and Tibshirani, R. (1993), An Introduction to the Bootstrap, section 13.3):
-    ``resamples`` samples of n seeds drawn with replacement; the interval is the 2.5th and 97.5th
-    percentiles of their means (the values at sorted positions ``floor(0.025 * resamples)`` and
-    ``ceil(0.975 * resamples) - 1``). With fewer than two seeds there is no interval (None).
+    Interval: ``t_interval``, Student's t on the per-seed differences. A percentile bootstrap was used before and
+    replaced: at 2, 3 and 5 seeds it held the true difference in 49%, 75% and 83% of simulated
+    benchmarks. The t interval's coverage, measured over 4,000 simulated benchmarks of 72 probes each
+    (``tests/test_bench_stats.py`` checks it is at least 93% at 3, 5, 10 and 20 seeds): with
+    discordance rates 0.10 and 0.04, 0.13 and 0.04, or 0.06 and 0.06, 94.7% to 95.7% at 3 to 20
+    seeds and 91% at 2; where one arm almost never wins alone (0.03 and 0), 92.1% at 3 seeds and 80%
+    at 2. Fewer than three seeds give an interval that covers less than it says.
+
+    Raises ``ValueError`` for no seeds, fewer than one resample, or a difference that is not finite.
     """
     values = [float(d) for d in differences]
     n = len(values)
@@ -141,6 +246,8 @@ def seed_level(differences: Sequence[float], resamples: int = 10_000, seed: int 
         raise ValueError("no seeds")
     if resamples < 1:
         raise ValueError("need at least one resample")
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError(f"every difference must be finite, got {values}")
     total = sum(values)
     tolerance = 1e-9 * max(1.0, sum(abs(v) for v in values))
     threshold = abs(total) - tolerance
@@ -156,13 +263,8 @@ def seed_level(differences: Sequence[float], resamples: int = 10_000, seed: int 
                    if abs(sum(v if flips.random() < 0.5 else -v for v in values)) >= threshold)
         p_value = (hits + 1) / (resamples + 1)
         method = "monte-carlo"
-    interval = None
-    if n >= 2:
-        draw = random.Random(seed)
-        means = sorted(sum(draw.choices(values, k=n)) / n for _ in range(resamples))
-        interval = (means[math.floor(0.025 * resamples)], means[math.ceil(0.975 * resamples) - 1])
     return {"seeds": n, "differences": values, "mean": total / n, "sign_flip_p": p_value, "sign_flip_method": method,
-            "bootstrap_interval": interval, "resamples": resamples}
+            "interval": t_interval(values), "interval_method": SEED_INTERVAL_METHOD, "resamples": resamples}
 
 
 def repeat_noise(runs: Sequence[Sequence[bool]]) -> dict[str, Any]:
