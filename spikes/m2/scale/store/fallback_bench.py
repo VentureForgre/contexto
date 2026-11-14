@@ -24,13 +24,16 @@ identifier pages of ``fallback_probes.EXTRA_FACTS``) under a temporary ``CONTEXT
 - A cross-check through the tool: each probe through ``contexto.mcp.Server`` in process, after a
   retained window and a turn room are published as the engine does per request. Only the detailed and
   the listed page lines of the reply are read.
-- Latency, through a real ``python -m contexto mcp --session S`` child over stdio: the first search of
-  the process, then the median of ``--reps`` calls per query, in ``--passes`` passes, for the nine
-  strict hits of ``scale_probes.LATENCY_QUERIES`` and three strict misses from each of five probe
-  classes. With ``--baseline-src`` (the ``src`` directory of another checkout) a second child runs that
-  code on the same store, and every query is timed against both in turn, so both see the same load.
-  Each pass starts with a throwaway child's search, which fills the OS file cache, and the side whose
-  first search goes first alternates by pass; the first search is reported by that position.
+- Latency, through a real ``python -m contexto mcp --session S`` child over stdio: the median of
+  ``--reps`` calls per query, in ``--passes`` passes, for the nine strict hits of
+  ``scale_probes.LATENCY_QUERIES``, three strict misses from each of six probe classes, and the strict
+  misses of ``TIMED_PROBES`` (the shapes that cost a fallback most). The list is recorded in
+  ``env.json``. With ``--baseline-src`` (the ``src`` directory of another checkout) a second child runs
+  that code on the same store, and every query is timed against both in turn, so both see the same
+  load. Each pass starts with a throwaway child's search, which fills the OS file cache, and the side
+  that goes first alternates by pass. The first search and the first strict miss of each process are
+  one-time costs: they are compared within a pass, and an odd pass is paired with the next even one
+  so that the position cancels.
 
 Outputs (numbers and queries only, no page text) go to ``--out``/``--label``: ``quality.csv`` (one row per
 probe), ``latency.csv`` (every call), ``env.json`` (one record per part) and ``summary.md``. A run
@@ -43,6 +46,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -77,11 +81,20 @@ from contexto.store import SessionStore  # noqa: E402
 
 SEED, FLOOR = 7, 0.0
 SIZES = (6000,)
-MISS_CLASSES = ("identifier", "question", "typo", "extra_word", "none")  # strict misses timed, three each
+MISS_CLASSES = ("identifier", "question", "typo", "extra_word", "none", "paraphrase")  # strict misses, three each
+# Strict misses timed by probe id, for the query shapes that cost a fallback most: a typo in the word
+# that carries the query (one word, or with a word many pages hold), and an off-page word that is on
+# many pages (owner 1,885 pages, flag 1,332, name 249, cache 267). Each is timed only when strict search
+# misses it in the store at hand; at 6,000 pages all seven are misses.
+TIMED_PROBES = (("miss_typo_carried", ("typo-16", "typo-21", "typo-24")),
+                ("miss_extra_word_common", ("extra_word-16", "extra_word-18")),
+                ("miss_paraphrase_common", ("paraphrase-33", "paraphrase-36")))
 FIRST_QUERY = LATENCY_QUERIES["rare"][0]  # the first search of each MCP child
 FIRST = ("first (searched first)", "first (searched second)")  # latency kinds of the first search, by position
+UNTIMED = ("startup", "peak_rss", "warm", *FIRST)  # latency kinds that are not a timed query of the list
+FIRST_CALLS = ("first search", "first strict miss")  # the one-time costs, compared within a pass
 QUALITY_FIELDS = ["n", "id", "class", "sub_kind", "flags", "split", "query", "expected", "source", "strict_pages",
-                  "returned", "ranks", "top3", "top10", "any3", "any10", "latest_first", "ceiling_query",
+                  "returned", "duplicates", "ranks", "top3", "top10", "any3", "any10", "latest_first", "ceiling_query",
                   "ceiling_ranks", "reach3", "reach10", "altered", "altered_pages", "tool_detailed", "tool_listed",
                   "tool_pages"]
 LATENCY_FIELDS = ["n", "pass", "load1", "side", "kind", "query", "rep", "seconds", "chars"]
@@ -136,26 +149,29 @@ def open_store(home: Path, n: int) -> list[str]:
 
 
 def refuse_live_home(store_home: Path) -> None:
-    """The bench writes its own sessions under ``--store-home``: never a home Contexto itself uses."""
+    """The bench writes its own sessions under ``--store-home``: never in a home Contexto itself uses,
+    nor in any folder under one."""
     target = store_home.resolve()
-    if target == (Path.home() / ".contexto").resolve():
-        raise SystemExit("--store-home must not be ~/.contexto: the bench writes its own sessions there")
-    live = os.environ.get("CONTEXTO_HOME")
-    if live and target == Path(live).resolve():
-        raise SystemExit("--store-home must not be $CONTEXTO_HOME: the bench writes its own sessions there")
+    for name, live in (("~/.contexto", str(Path.home() / ".contexto")), ("$CONTEXTO_HOME", os.environ.get("CONTEXTO_HOME"))):
+        if live and target.is_relative_to(Path(live).resolve()):
+            raise SystemExit(f"--store-home must not be {name} or a folder under it: the bench writes its own "
+                             "sessions there")
 
 
 # Quality
 
 
-def ranked(store: Any, query: str) -> tuple[list[str], str]:
-    """The ranked page ids for ``query`` and where they came from: ``strict``, ``fallback`` or ``none``."""
+def ranked(store: Any, query: str) -> tuple[list[str], str, int]:
+    """The ranked page ids for ``query``, where they came from (``strict``, ``fallback`` or ``none``), and
+    how many ids the fallback returned more than once. A repeated id keeps its first rank and is not
+    counted again, so it cannot push an expected page out of the top k."""
     strict = store.search(query)
     if strict:
-        return strict, "strict"
+        return strict, "strict", 0
     approximate = getattr(store, "search_approximate", None)
-    ids = [hit.id for hit in approximate(query)] if approximate is not None else []
-    return ids, "fallback" if ids else "none"
+    returned = [hit.id for hit in approximate(query)] if approximate is not None else []
+    ids = list(dict.fromkeys(returned))
+    return ids, "fallback" if ids else "none", len(returned) - len(ids)
 
 
 def score(expected: list[str], ranked_ids: list[str]) -> dict[str, Any]:
@@ -237,7 +253,7 @@ def quality(home: Path, n: int, ids: list[str], writer: csv.DictWriter) -> None:
 
     for probe in PROBES:
         expected = expected_pages(probe, ids)
-        found, source = ranked(store, probe.query)
+        found, source, duplicates = ranked(store, probe.query)
         strict = found if source == "strict" else []
         ceiling = ceiling_query(probe)
         reach = score(expected, strict if ceiling == probe.query else store.search(ceiling)) if ceiling else None
@@ -249,7 +265,8 @@ def quality(home: Path, n: int, ids: list[str], writer: csv.DictWriter) -> None:
             "n": n, "id": probe.id, "class": probe.cls, "sub_kind": probe.sub_kind, "flags": " ".join(probe.flags),
             "split": split_of(probe), "query": probe.query,
             "expected": ";".join(f"{fact}:{plant}" for fact, plant in probe.expected),
-            "source": source, "strict_pages": len(strict), "returned": len(found), **score(expected, found),
+            "source": source, "strict_pages": len(strict), "returned": len(found), "duplicates": duplicates,
+            **score(expected, found),
             "latest_first": latest_first(probe, ids, found), "ceiling_query": ceiling,
             "ceiling_ranks": reach["ranks"] if reach else "", "reach3": reach["top3"] if reach else "",
             "reach10": reach["top10"] if reach else "", "altered": altered, "altered_pages": altered_pages,
@@ -262,11 +279,15 @@ def quality(home: Path, n: int, ids: list[str], writer: csv.DictWriter) -> None:
 
 def latency_queries(store: Any) -> list[tuple[str, str]]:
     """(kind, query): the nine strict hits of ``LATENCY_QUERIES``, then for each class of ``MISS_CLASSES``
-    its first three probes that strict search finds nothing for in this store."""
+    its first three probes that strict search finds nothing for in this store, then the probes of
+    ``TIMED_PROBES`` that strict search finds nothing for."""
     out = [(kind, q) for kind, queries in LATENCY_QUERIES.items() for q in queries]
     for cls in MISS_CLASSES:
         misses = (p.query for p in PROBES if p.cls == cls and not store.search(p.query))
         out += [(f"miss_{cls}", q) for q, _ in zip(misses, range(3))]  # stops searching at the third
+    by_id = {p.id: p for p in PROBES}
+    for kind, probe_ids in TIMED_PROBES:
+        out += [(kind, by_id[i].query) for i in probe_ids if not store.search(by_id[i].query)]
     return out
 
 
@@ -390,25 +411,40 @@ def _recall(rows: list[dict[str, str]], percent: bool) -> str:
             f"{_yes(rows, 'reach10') if ceiling else '-'} | {latest} | {_sources(rows)}")
 
 
+_PROBE_FLAGS = {p.id: (p.query, set(p.flags)) for p in PROBES}
+
+
+def flags_of(row: dict[str, str]) -> set[str]:
+    """The flags of a quality row: those it was written with, and those its probe has now. Flags may be
+    added to a probe after a run (its query, class and expected pages may not change), and a row
+    written before is grouped by them too."""
+    query, flags = _PROBE_FLAGS.get(row["id"], (None, set()))
+    return set(row["flags"].split()) | (flags if query == row["query"] else set())
+
+
 def groups(rows: list[dict[str, str]]) -> list[tuple[str, list[dict[str, str]]]]:
     """(label, rows) of the groups a class is also reported by; empty groups are left out."""
     out = []
 
-    def add(label: str, cls: str, keep: Callable[[dict[str, str]], bool]) -> None:
-        found = [r for r in rows if r["class"] == cls and keep(r)]
+    def add(label: str, cls: str, keep: Callable[[set[str], dict[str, str]], bool]) -> None:
+        found = [r for r in rows if r["class"] == cls and keep(flags_of(r), r)]
         if found:
             out.append((label, found))
 
-    add("identifier, the identifier alone", "identifier", lambda r: "page_words" not in r["flags"].split())
-    add("identifier, with other page words", "identifier", lambda r: "page_words" in r["flags"].split())
+    add("identifier, the identifier alone", "identifier", lambda f, r: "page_words" not in f)
+    add("identifier, with other page words", "identifier", lambda f, r: "page_words" in f)
     for edit in ("substitution", "deletion", "insertion", "swap"):
-        add(f"typo, {edit}", "typo", lambda r, edit=edit: r["sub_kind"] == edit)
-    add("typo, the other words are the page's own", "typo", lambda r: "carries_query" not in r["flags"].split())
-    add("typo, the misspelled word carries the query", "typo", lambda r: "carries_query" in r["flags"].split())
-    add("typo, typed word under 6 characters", "typo", lambda r: "short_typo" in r["flags"].split())
-    for cls in ("typo", "extra_word", "paraphrase"):
-        add(f"{cls}, off-page word on no page", cls, lambda r: r["altered_pages"] == "0")
-        add(f"{cls}, off-page word on some page", cls, lambda r: r["altered_pages"] not in ("", "0"))
+        add(f"typo, {edit}", "typo", lambda f, r, edit=edit: r["sub_kind"] == edit)
+    add("typo, the other words are the page's own", "typo", lambda f, r: "carries_query" not in f)
+    add("typo, the misspelled word carries the query", "typo", lambda f, r: "carries_query" in f)
+    add("typo, the misspelled word carries the query, without identifier typos", "typo",
+        lambda f, r: "carries_query" in f and "identifier_typo" not in f)
+    add("typo, the misspelled word carries the query, identifier typos only", "typo",
+        lambda f, r: "carries_query" in f and "identifier_typo" in f)
+    add("typo, typed word under 6 characters", "typo", lambda f, r: "short_typo" in f)
+    for cls in ("extra_word", "paraphrase"):  # a typo is on no page by construction: no split for it
+        add(f"{cls}, off-page word on no page", cls, lambda f, r: r["altered_pages"] == "0")
+        add(f"{cls}, off-page word on some page", cls, lambda f, r: r["altered_pages"] not in ("", "0"))
     return out
 
 
@@ -478,8 +514,12 @@ def quality_tables(rows: list[dict[str, str]], n: str) -> list[str]:
     exact, altered = some("exact"), some("typo", "identifier", "extra_word", "two_page")
     reworded, questions, paraphrases = some("paraphrase", "question"), some("question"), some("paraphrase")
     answered = [r for r in reworded if r["source"] == "strict"]
-    lines += ["", f"## Probe checks at {int(n):,} pages", "",
-              f"- exact probes whose page strict search returns: {sum(map(_strict_hit, exact))} of {len(exact)}.",
+    fallback = [r for r in rows if r["source"] == "fallback"]
+    lines += ["", f"## Probe checks at {int(n):,} pages", ""]
+    if int(n) != 6000:
+        lines += ["The probes were written and checked against the 6,000-page store. At another size a word added "
+                  "to a probe can be on its page by chance, so a check below can fail without meaning anything.", ""]
+    lines += [f"- exact probes whose page strict search returns: {sum(map(_strict_hit, exact))} of {len(exact)}.",
               "- typo, identifier, extra_word and two_page probes for which strict search returns an expected page: "
               f"{sum(map(_strict_hit, altered))} of {len(altered)} (0 is right).",
               f"- none probes with an absent word on some page: {sum(int(r['altered_pages']) > 0 for r in none)} of "
@@ -491,8 +531,15 @@ def quality_tables(rows: list[dict[str, str]], n: str) -> list[str]:
               f"{sum(map(_strict_hit, answered))} of them.",
               f"- question probes strict search finds once the question mark is removed: "
               f"{sum(r['ceiling_ranks'] == '1' for r in questions)} at rank 1, {_yes(questions, 'reach3')} in the top "
-              f"3, {_yes(questions, 'reach10')} in the top 10, of {len(questions)}."]
+              f"3, {_yes(questions, 'reach10')} in the top 10, of {len(questions)}.",
+              f"- probes the fallback answered with a page id more than once: {_repeated(fallback)} of "
+              f"{len(fallback)} (0 is right)."]
     return lines
+
+
+def _repeated(rows: list[dict[str, str]]) -> int:
+    """Rows with a page id the fallback returned more than once (no column in a run from before it)."""
+    return sum(int(r.get("duplicates") or 0) > 0 for r in rows)
 
 
 def _cell(rows: list[dict[str, str]], side: str, kind: str) -> float | None:
@@ -505,13 +552,57 @@ def _cell(rows: list[dict[str, str]], side: str, kind: str) -> float | None:
 
 
 def _kinds(rows: list[dict[str, str]]) -> list[str]:
-    seen = dict.fromkeys(r["kind"] for r in rows if r["kind"] not in ("startup", "peak_rss", "warm"))
-    return sorted(seen, key=lambda k: (k not in FIRST, list(seen).index(k)))  # the first searches first
+    """The kinds of the timed queries, in the order they were timed (no first search, no warm-up)."""
+    return list(dict.fromkeys(r["kind"] for r in rows if r["kind"] not in UNTIMED))
 
 
 def _sides(rows: list[dict[str, str]]) -> list[str]:
     seen = dict.fromkeys(r["side"] for r in rows if r["kind"] != "warm")
     return sorted(seen, key=lambda s: (s != "tree", list(seen).index(s)))
+
+
+def first_calls(rows: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
+    """The one-time costs of each MCP child, from the rows in the order they were written: for
+    ``first search`` and ``first strict miss`` (each side's first ``miss_*`` call in a pass), the query,
+    and ``{pass: {side: seconds}}``."""
+    out: dict[str, dict[str, Any]] = {call: {"query": "", "passes": {}} for call in FIRST_CALLS}
+    missed: set[tuple[str, str]] = set()
+    for r in rows:
+        if not r["seconds"] or r["side"] == "warm-up":
+            continue
+        if r["kind"] in FIRST:
+            call = "first search"
+        elif r["kind"].startswith("miss_") and (r["pass"], r["side"]) not in missed:
+            missed.add((r["pass"], r["side"]))
+            call = "first strict miss"
+        else:
+            continue
+        out[call]["query"] = out[call]["query"] or r["query"]
+        out[call]["passes"].setdefault(int(r["pass"]), {})[r["side"]] = float(r["seconds"])
+    return out
+
+
+def paired(passes: dict[int, dict[str, float]]) -> tuple[dict[int, float], list[tuple[int, float]], float | None]:
+    """Tree over baseline within each pass; each odd pass with the next even pass by geometric mean (the
+    side that goes first alternates by pass, so its position cancels), as ``[(odd pass, ratio)]``; and
+    the geometric mean of those pairs (None when no pair is whole)."""
+    ratios = {p: v["tree"] / v["baseline"] for p, v in passes.items() if v.get("tree") and v.get("baseline")}
+    pairs = [(p, math.sqrt(ratios[p] * ratios[p + 1])) for p in sorted(ratios) if p % 2 and p + 1 in ratios]
+    overall = math.exp(statistics.mean(math.log(r) for _, r in pairs)) if pairs else None
+    return ratios, pairs, overall
+
+
+def _median_of(passes: dict[int, dict[str, float]], side: str) -> float | None:
+    values = [v[side] for v in passes.values() if side in v]
+    return statistics.median(values) if values else None
+
+
+def _s(seconds: float | None) -> str:
+    return "" if seconds is None else f"{seconds:.3f}"
+
+
+def _pairs_text(pairs: list[tuple[int, float]]) -> str:
+    return "; ".join(f"passes {p}-{p + 1}: {r:.2f}" for p, r in pairs)
 
 
 def latency_tables(rows: list[dict[str, str]], n: str) -> list[str]:
@@ -520,9 +611,9 @@ def latency_tables(rows: list[dict[str, str]], n: str) -> list[str]:
     head = "| kind | queries | " + " | ".join(f"{s}, s" for s in sides) + (" | tree / baseline |" if both else " |")
     lines = [f"## Latency at {int(n):,} pages", "",
              "Seconds through an MCP child over stdio: the median of the calls per query per pass, then the median "
-             "over queries and passes. `first` is the first search of a process, after a throwaway child's search "
-             "has filled the OS file cache, by whether that side searched first or second in its pass. `miss_*` are "
-             "queries strict search finds nothing for.", "", head, "|---|---:|" + "---:|" * (len(sides) + both)]
+             "over queries and passes. `miss_*` are queries strict search finds nothing for; `miss_typo_carried`, "
+             "`miss_extra_word_common` and `miss_paraphrase_common` are fixed probes whose shape costs a fallback "
+             "most.", "", head, "|---|---:|" + "---:|" * (len(sides) + both)]
     for kind in _kinds(rows):
         cells = [_cell(rows, side, kind) for side in sides]
         queries = len({r["query"] for r in rows if r["kind"] == kind})
@@ -531,19 +622,63 @@ def latency_tables(rows: list[dict[str, str]], n: str) -> list[str]:
             ratio = f" {cells[sides.index('tree')] / cells[sides.index('baseline')]:.2f} |"
         elif both:
             ratio = " |"
-        lines.append(f"| {kind} | {queries} | " + " | ".join("" if c is None else f"{c:.3f}" for c in cells)
-                     + " |" + ratio)
+        lines.append(f"| {kind} | {queries} | " + " | ".join(_s(c) for c in cells) + " |" + ratio)
     loads = {r["pass"]: r["load1"] for r in rows}
     rss = {side: [int(r["chars"]) for r in rows if r["side"] == side and r["kind"] == "peak_rss"] for side in sides}
     lines += ["", "1-minute load average at the start of each pass: "
-              + ", ".join(loads[p] for p in sorted(loads, key=int)) + ".",
-              "Peak RSS of the MCP child, MB: "
-              + ", ".join(f"{side} {statistics.median(v) / 1e6:.0f}" for side, v in rss.items() if v) + "."]
-    went_first = {side: sum(r["side"] == side and r["kind"] == FIRST[0] for r in rows) for side in sides}
-    if len(set(went_first.values())) > 1:
-        lines.append("The sides did not search first equally often ("
-                     + ", ".join(f"{side} {count}" for side, count in went_first.items())
-                     + "), so the first-search rows compare different numbers of passes; use an even number of passes.")
+              + ", ".join(loads[p] for p in sorted(loads, key=int)) + "."]
+    if any(rss.values()):
+        lines.append("Peak RSS of the MCP child, MB: "
+                     + ", ".join(f"{side} {statistics.median(v) / 1e6:.0f}" for side, v in rss.items() if v) + ".")
+    return lines + ["", *first_call_tables(rows, n, sides, both)]
+
+
+def first_call_tables(rows: list[dict[str, str]], n: str, sides: list[str], both: bool) -> list[str]:
+    """The first search and the first strict miss of each child, compared within a pass."""
+    calls = first_calls(rows)
+    if not any(c["passes"] for c in calls.values()):
+        return []
+    lines = [f"## First calls of a process at {int(n):,} pages", "",
+             "Each pass starts a new child per side, so its first search and its first strict miss are one-time "
+             "costs, which the medians above hide. The two sides are compared within a pass, under the same load. "
+             "The side that goes first alternates by pass, so each odd pass is paired with the next even pass by "
+             "geometric mean, which cancels the position. Paired: the geometric mean of those pairs. These rows "
+             "rest on one call per side and pass, and are noisier than the rows above.", ""]
+    if both:
+        lines += ["| call | query | tree, s | baseline, s | tree / baseline, paired | each pair |",
+                  "|---|---|---:|---:|---:|---|"]
+        for call, c in calls.items():
+            if c["passes"]:
+                _, pairs, overall = paired(c["passes"])
+                lines.append(f"| {call} | {c['query']} | {_s(_median_of(c['passes'], 'tree'))} | "
+                             f"{_s(_median_of(c['passes'], 'baseline'))} | "
+                             f"{'' if overall is None else f'{overall:.2f}'} | {_pairs_text(pairs)} |")
+        lines += ["", "Seconds are medians over passes. By pass:", "",
+                  "| pass | load | went first | first search: tree, s | baseline, s | tree / baseline | "
+                  "first strict miss: tree, s | baseline, s | tree / baseline |",
+                  "|---:|---:|---|---:|---:|---:|---:|---:|---:|"]
+        loads = {int(r["pass"]): r["load1"] for r in rows}
+        first = {int(r["pass"]): r["side"] for r in rows if r["kind"] == FIRST[0]}
+        ratios = {call: paired(c["passes"])[0] for call, c in calls.items()}
+        for p in sorted({p for c in calls.values() for p in c["passes"]}):
+            cells = []
+            for call in FIRST_CALLS:
+                v = calls[call]["passes"].get(p, {})
+                ratio = ratios[call].get(p)
+                cells += [_s(v.get("tree")), _s(v.get("baseline")), "" if ratio is None else f"{ratio:.2f}"]
+            lines.append(f"| {p} | {loads.get(p, '')} | {first.get(p, '')} | " + " | ".join(cells) + " |")
+        alone = sorted(p for p in ratios["first search"] if not any(p in (q, q + 1) for q, _ in
+                                                                    paired(calls["first search"]["passes"])[1]))
+        if alone:
+            lines += ["", f"Pass {', '.join(map(str, alone))} has no pair, so it is left out of the paired ratio; "
+                      "use an even number of passes."]
+    else:
+        lines += ["| call | query | " + " | ".join(f"{s}, s" for s in sides) + " |",
+                  "|---|---|" + "---:|" * len(sides)]
+        for call, c in calls.items():
+            if c["passes"]:
+                lines.append(f"| {call} | {c['query']} | "
+                             + " | ".join(_s(_median_of(c["passes"], side)) for side in sides) + " |")
     return lines
 
 
@@ -552,12 +687,35 @@ def _part_line(name: str, part: dict[str, Any]) -> str:
     extra = ""
     if name == "latency":
         extra = f", {part.get('passes')} passes of {part.get('reps')} calls per query"
+        if isinstance(part.get("queries"), dict):
+            extra += ", " + ", ".join(f"{len(q)} queries timed at {int(n):,} pages" for n, q in part["queries"].items())
         if part.get("baseline_commit"):
             extra += f", baseline commit {str(part['baseline_commit'])[:8]}"
     approx = "has" if part.get("search_approximate") else "has no"
     return (f"- {name.capitalize()}: commit {str(part.get('commit'))[:8]}{src}, {_pages(part)} pages, "
             f"{part.get('probes')} probes (set {part.get('probe_set')}){extra}; Python {part.get('python')}, "
             f"{part.get('os')}, {part.get('cpu')}; the store {approx} `search_approximate`.")
+
+
+def _part_differences(quality_part: dict[str, Any], latency_part: dict[str, Any]) -> list[str]:
+    """What the quality and the latency part of one folder do not share, in words."""
+    def src(part: dict[str, Any]) -> str:
+        return "src/ as committed" if part.get("src_matches_commit", True) else "uncommitted changes under src/"
+
+    def found(part: dict[str, Any]) -> str:
+        return "has" if part.get("search_approximate") else "has no"
+
+    out = []
+    if quality_part.get("commit") != latency_part.get("commit"):
+        out.append(f"commit (quality {str(quality_part.get('commit'))[:8]}, latency {str(latency_part.get('commit'))[:8]})")
+    if identity(quality_part) != identity(latency_part):
+        out.append("store size, corpus or probe set")
+    if bool(quality_part.get("search_approximate")) != bool(latency_part.get("search_approximate")):
+        out.append(f"`search_approximate` (the quality part's store {found(quality_part)} it, the latency part's "
+                   f"{found(latency_part)} it)")
+    if src(quality_part) != src(latency_part):
+        out.append(f"code (quality: {src(quality_part)}, latency: {src(latency_part)})")
+    return out
 
 
 def summarize(folder: Path) -> str:
@@ -567,10 +725,8 @@ def summarize(folder: Path) -> str:
     parts = {name: env[name] for name in PARTS if name in env}
     lines = [f"# D65 probes: {label_of(folder)}", ""]
     lines += [_part_line(name, part) for name, part in parts.items()]
-    if len(parts) == 2 and (identity(parts["quality"]) != identity(parts["latency"])
-                            or parts["quality"].get("commit") != parts["latency"].get("commit")):
-        lines.append("- The two parts were not measured on the same commit, store size, corpus or probe set; read "
-                     "them separately.")
+    if len(parts) == 2 and (differ := _part_differences(parts["quality"], parts["latency"])):
+        lines.append(f"- The two parts were not measured on the same {'; '.join(differ)}. Read them separately.")
     if parts:
         lines.append("")
     for n in dict.fromkeys(r["n"] for r in quality_rows):
@@ -622,21 +778,50 @@ def measures(folder: Path) -> dict[str, str]:
             out[f"{at}none: median pages returned"] = f"{statistics.median(int(r['returned']) for r in none):g}"
         if rows:
             out[f"{at}answered by strict / fallback / nothing ({len(rows)})"] = _sources(rows)
+        fallback = [r for r in rows if r["source"] == "fallback"]
+        if fallback:
+            out[f"{at}fallback answers with a page id more than once"] = f"{_repeated(fallback)} of {len(fallback)}"
         timed = [r for r in latency_rows if r["n"] == n]
         for kind in _kinds(timed):
             tree, baseline = _cell(timed, "tree", kind), _cell(timed, "baseline", kind)
             if tree is not None:
                 same_pass = f" (baseline in the same passes {baseline:.3f})" if baseline is not None else ""
                 out[f"{at}latency, {kind}, s"] = f"{tree:.3f}{same_pass}"
+        for call, c in first_calls(timed).items():
+            tree = _median_of(c["passes"], "tree")
+            if tree is None:
+                continue
+            value = f"{tree:.3f}"
+            baseline = _median_of(c["passes"], "baseline")
+            if baseline is not None:
+                _, pairs, overall = paired(c["passes"])
+                value += f" (baseline {baseline:.3f})"
+                if overall is not None:
+                    value += f"; tree / baseline paired {overall:.2f}, pairs {', '.join(f'{r:.2f}' for _, r in pairs)}"
+            out[f"{at}latency, {call} of the process, s"] = value
         if timed:
             loads = {r["pass"]: r["load1"] for r in timed}
             out[f"{at}load average at each pass"] = ", ".join(loads[p] for p in sorted(loads, key=int))
     return out
 
 
+def timed_queries(folder: Path, part: dict[str, Any]) -> dict[str, list[list[str]]]:
+    """``{pages: [[kind, query], ...]}``: the queries a latency part timed, in order. From its record in
+    ``env.json``; for a run from before that record, from its ``latency.csv``."""
+    recorded = part.get("queries")
+    if isinstance(recorded, dict):
+        return {str(n): [list(q) for q in queries] for n, queries in recorded.items()}
+    out: dict[str, list[list[str]]] = {}
+    for r in read_rows(folder / "latency.csv"):
+        if r["kind"] not in UNTIMED and [r["kind"], r["query"]] not in out.setdefault(r["n"], []):
+            out[r["n"]].append([r["kind"], r["query"]])
+    return out
+
+
 def compare(first: Path, second: Path) -> str:
     """Two result folders side by side, as one markdown table. ``CompareError`` when a folder holds no
-    results or the two were not measured on the same store sizes, corpus and probe set."""
+    results, the two were not measured on the same store sizes, corpus and probe set, or their latency
+    parts timed different queries."""
     envs = []
     for folder in (first, second):
         env = read_env(folder)
@@ -655,16 +840,29 @@ def compare(first: Path, second: Path) -> str:
         detail = "; ".join(f"{folder} ({name}): pages {sizes}, corpus {corpus}, probe set {probes}"
                            for folder, name, (sizes, corpus, probes) in seen)
         raise CompareError(f"not comparable: the runs differ in store size, corpus or probe set. {detail}")
+    if all("latency" in env for env in envs):
+        a, b = (timed_queries(folder, env["latency"]) for folder, env in zip((first, second), envs))
+        if a != b:
+            pairs = {(n, kind, query) for n, timed in a.items() for kind, query in timed}
+            others = {(n, kind, query) for n, timed in b.items() for kind, query in timed}
+            def listed(found: set) -> str:
+                return ", ".join(f"{kind} {query!r}" for _, kind, query in sorted(found)) or "none (the order differs)"
+            raise CompareError(f"not comparable: the latency parts timed different queries. Only in {first}: "
+                               f"{listed(pairs - others)}. Only in {second}: {listed(others - pairs)}.")
 
     def fact(env: dict[str, Any], get: Callable[[dict[str, Any]], str], part: str | None = None) -> str:
         found = [env[name] for name in ((part,) if part else PARTS) if name in env]
         return get(found[0]) if found else "-"
 
+    def found(p: dict[str, Any]) -> str:
+        return "yes" if p.get("search_approximate") else "no"
+
     facts = (("pages", lambda p: _pages(p), None),
              ("commit, quality part", lambda p: str(p.get("commit"))[:8], "quality"),
              ("commit, latency part", lambda p: str(p.get("commit"))[:8], "latency"),
              ("probes (probe set)", lambda p: f"{p.get('probes')} ({p.get('probe_set')})", None),
-             ("`search_approximate` found", lambda p: "yes" if p.get("search_approximate") else "no", None))
+             ("`search_approximate` found, quality part", found, "quality"),
+             ("`search_approximate` found, latency part", found, "latency"))
     a, b = measures(first), measures(second)
     lines = [f"| measure | {label_of(first)} | {label_of(second)} |", "|---|---|---|"]
     lines += [f"| {name} | {fact(envs[0], get, part)} | {fact(envs[1], get, part)} |" for name, get, part in facts]
@@ -764,6 +962,7 @@ def main(argv: list[str] | None = None) -> int:
         sides["baseline"] = lambda home, session: scale_bench.McpChild(home, session, src=src)
     parts = [name for name, skip in (("quality", args.latency_only), ("latency", args.quality_only)) if not skip]
     folder = args.out / args.label
+    made = [d for d in (folder, *folder.parents) if not d.exists()]  # what this run creates, deepest first
     folder.mkdir(parents=True, exist_ok=True)
     temporary = {name: folder / f"{name}.csv.tmp" for name in parts}
     try:
@@ -789,6 +988,7 @@ def main(argv: list[str] | None = None) -> int:
                 chooser = SessionStore(home, session_name(n))
                 chooser.set_search_cache(None)  # as in the quality pass: speed only
                 queries = latency_queries(chooser)
+                records["latency"].setdefault("queries", {})[str(n)] = [list(q) for q in queries]
                 for p in range(1, args.passes + 1):
                     print(f"[{time.strftime('%H:%M:%S')}] N={n}: latency pass {p}", flush=True)
                     latency_pass(home, n, p, args.reps, queries, writers["latency"], sides)
@@ -797,13 +997,21 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         for f in files.values():
             f.close()
-        if not done:  # the folder keeps what it held before this run
+        if not done:  # the folder keeps what it held before this run, and is gone if this run made it
             for path in temporary.values():
                 path.unlink(missing_ok=True)
+            for d in made:
+                try:
+                    d.rmdir()
+                except OSError:  # not empty: something else is in it
+                    break
         if args.store_home is None:
             shutil.rmtree(home, ignore_errors=True)
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
+    # Each file is replaced whole, but not the files as a group: a run killed between two renames
+    # leaves one part new and one old, and env.json says which (the summary warns when the parts differ).
+    # SIGKILL runs no clean-up, so it can leave *.csv.tmp files; the next run overwrites them.
     for name in parts:
         records[name] |= {"finished": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                           "load_end": [round(x, 2) for x in os.getloadavg()]}

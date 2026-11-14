@@ -39,7 +39,9 @@ Classes (``MINIMUM`` has the least each must hold):
   ``original`` the word and ``altered`` the typo. Probes 1 to 15 are exact probe ``i`` with a typo:
   the other words are the page's own and often find it without the misspelled one. In probes 16 to 30
   (flag ``carries_query``) the misspelled word is the only word, or stands with one word that many
-  pages hold. ``typo-14`` types ``woker``, 5 characters, for ``worker`` (flag ``short_typo``).
+  pages hold. ``typo-14`` types ``woker``, 5 characters, for ``worker`` (flag ``short_typo``). Six of
+  those, 16 to 20 and 23, are identifiers (flag ``identifier_typo``): splitting the identifier into
+  sub-words can find their page without any typo step.
 - ``extra_word``: exact probe ``i`` plus one word the expected page does not hold (``altered``).
   ``sub_kind`` ``no_page``: the word is on no page of the store; ``some_pages``: it is on other pages
   (5 to 1,885 of the 6,000).
@@ -170,11 +172,11 @@ def _typo(n: int, base: Probe, original: str, altered: str, edit: str, *flags: s
                  base=base.query, sub_kind=edit, flags=flags)
 
 
-def _carried(n: int, fact_id: str, base: str, original: str, altered: str, edit: str) -> Probe:
+def _carried(n: int, fact_id: str, base: str, original: str, altered: str, edit: str, *flags: str) -> Probe:
     """A typo probe added after review: ``base`` is words of the page (one word, or a rare word and a
     common one), and the misspelled word is the one that tells the page from the others."""
     return _typo(n, Probe("", "exact", base, (_last(fact_id),)), original, altered, edit, "carries_query",
-                 "after_review")
+                 "after_review", *flags)
 
 
 def _extra(n: int, base: Probe, query: str, word: str, kind: str = "no_page") -> Probe:
@@ -338,15 +340,19 @@ TYPO: tuple[Probe, ...] = (
     # Added 2026-11-12 after review: the misspelled word carries the query. 16 to 23 are one word that
     # only the planted page holds. 24 to 30 are that kind of word with a word of the page that many
     # other pages hold too (pages at 6,000: flag 1,332, retries 329, bucket 204, python all, limit 131,
-    # timeout 831, region 273).
-    _carried(16, "s08", "allkeys-lfu", "allkeys-lfu", "allkeys-lru", "substitution"),
-    _carried(17, "s06", "SUP-48213", "SUP-48213", "SUP-48231", "swap"),
-    _carried(18, "s11", "WEBHOOK_HMAC_KEY", "WEBHOOK_HMAC_KEY", "WEBHOOK_HAMC_KEY", "swap"),
-    _carried(19, "s07", "stream_chunked_v3", "stream_chunked_v3", "stream_chuncked_v3", "insertion"),
-    _carried(20, "s02", "test_resume_after_crash", "test_resume_after_crash", "test_resume_after_crsh", "deletion"),
+    # timeout 831, region 273). The flag ``identifier_typo`` (added 2026-11-13, no query changed) marks
+    # 16 to 20 and 23: the word is an identifier, its misspelled sub-word is mostly short, and a fallback
+    # that splits identifiers can find the page from the other sub-words without correcting the typo.
+    _carried(16, "s08", "allkeys-lfu", "allkeys-lfu", "allkeys-lru", "substitution", "identifier_typo"),
+    _carried(17, "s06", "SUP-48213", "SUP-48213", "SUP-48231", "swap", "identifier_typo"),
+    _carried(18, "s11", "WEBHOOK_HMAC_KEY", "WEBHOOK_HMAC_KEY", "WEBHOOK_HAMC_KEY", "swap", "identifier_typo"),
+    _carried(19, "s07", "stream_chunked_v3", "stream_chunked_v3", "stream_chuncked_v3", "insertion",
+             "identifier_typo"),
+    _carried(20, "s02", "test_resume_after_crash", "test_resume_after_crash", "test_resume_after_crsh", "deletion",
+             "identifier_typo"),
     _carried(21, "s04", "argon2id", "argon2id", "aragon2id", "insertion"),
     _carried(22, "s13", "Natarajan", "Natarajan", "Natarjan", "deletion"),
-    _carried(23, "s18", "cidr_block", "cidr_block", "cidr_blcok", "swap"),
+    _carried(23, "s18", "cidr_block", "cidr_block", "cidr_blcok", "swap", "identifier_typo"),
     _carried(24, "s07", "streaming flag", "streaming", "streamimg", "substitution"),
     _carried(25, "c08", "uploader retries", "uploader", "uploder", "deletion"),
     _carried(26, "s03", "artifacts bucket", "artifacts", "artefacts", "substitution"),
@@ -443,6 +449,7 @@ PROBES: tuple[Probe, ...] = tuple(
 FLAGS = {
     "after_review": "added on 2026-11-12 after the review of the first set",
     "carries_query": "typo: the misspelled word is the only word, or the only rare one",
+    "identifier_typo": "typo, carries_query: the word is an identifier, and its other sub-words can find the page",
     "short_typo": "typo: the misspelled word is under 6 characters as typed (the right spelling has 6)",
     "page_words": "identifier: the query also holds other words of the page",
 }

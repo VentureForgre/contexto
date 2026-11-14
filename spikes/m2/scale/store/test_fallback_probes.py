@@ -32,6 +32,9 @@ DEFAULT_CORPUS_60 = "2647552be3c73245eb87d787a97ff86490883a1599c3e1141389abbb8ec
 DEFAULT_SAMPLE_6000 = "b466d2f86770ad3f9843ad091cca08d19a5bb48d60f260eea32b241317eb5d1a"  # turns 0, 1499, 2220, 5999
 # sha256 over "id<TAB>query" of the 154 probes of the first set, sorted, as pushed at 2413af5.
 FIRST_SET = "587ecca4babed28011397d929bce077db05ce2682aa71690f20ada849884011e"
+# sha256 over "id<TAB>class<TAB>fact:plant;..." of the same 154, sorted, the same at 2413af5.
+FIRST_SET_EXPECTED = "638ede21d8b29f614bdef9c4e9d299ed2e4808af483111a2c77b7b272e56f33e"
+BEFORE = Path(__file__).resolve().parent / "results" / "d65" / "before"  # the checked-in run on main
 
 
 def of(cls: str) -> list[Probe]:
@@ -151,6 +154,9 @@ def test_no_query_of_the_first_set_was_changed_and_the_excluded_probe_is_kept():
     assert len(first) == 154
     text = "\n".join(f"{p.id}\t{p.query}" for p in sorted(first, key=lambda p: p.id))
     assert hashlib.sha256(text.encode()).hexdigest() == FIRST_SET
+    text = "\n".join(f"{p.id}\t{p.cls}\t" + ";".join(f"{fact}:{plant}" for fact, plant in p.expected)
+                     for p in sorted(first, key=lambda p: p.id))
+    assert hashlib.sha256(text.encode()).hexdigest() == FIRST_SET_EXPECTED  # and no class or expected page
     assert [(p.id, p.query, p.cls) for p, _ in EXCLUDED] == [("none-16", "OAuth session token", "none")]
     assert all(reason for _, reason in EXCLUDED)
     assert not {p.id for p, _ in EXCLUDED} & {p.id for p in PROBES}
@@ -248,6 +254,16 @@ def test_typo_probes_are_words_of_the_page_with_one_edit_in_a_word_of_six_or_mor
     assert [p.id for p in of("typo") if "short_typo" in p.flags] == ["typo-14"]
     carried = [p for p in of("typo") if "carries_query" in p.flags]
     assert sum(len(p.query.split()) == 1 for p in carried) >= 5 and sum(len(p.query.split()) == 2 for p in carried) >= 5
+
+
+def test_identifier_typos_are_the_carried_typos_written_as_an_identifier():
+    flagged = [p for p in of("typo") if "identifier_typo" in p.flags]
+    assert [p.id for p in flagged] == ["typo-16", "typo-17", "typo-18", "typo-19", "typo-20", "typo-23"]
+    for p in of("typo"):
+        identifier = "carries_query" in p.flags and bool(re.search(r"[_\-]", p.altered))
+        assert ("identifier_typo" in p.flags) == identifier, p.id
+    clean = [p.id for p in of("typo") if "carries_query" in p.flags and "identifier_typo" not in p.flags]
+    assert clean == ["typo-21", "typo-22", *(f"typo-{i}" for i in range(24, 31))]
 
 
 def test_style_of_names_the_four_identifier_styles():
@@ -476,10 +492,20 @@ class FakeChild:
 
 
 def test_ranked_ids_come_from_strict_search_and_from_the_fallback_only_when_strict_is_empty():
-    assert fallback_bench.ranked(FakeStore(["pg_a"], ["pg_b"]), "q") == (["pg_a"], "strict")
-    assert fallback_bench.ranked(FakeStore([], ["pg_b", "pg_c"]), "q") == (["pg_b", "pg_c"], "fallback")
-    assert fallback_bench.ranked(FakeStore([], []), "q") == ([], "none")
-    assert fallback_bench.ranked(FakeStore([], None), "q") == ([], "none")  # main: no search_approximate
+    assert fallback_bench.ranked(FakeStore(["pg_a"], ["pg_b"]), "q") == (["pg_a"], "strict", 0)
+    assert fallback_bench.ranked(FakeStore([], ["pg_b", "pg_c"]), "q") == (["pg_b", "pg_c"], "fallback", 0)
+    assert fallback_bench.ranked(FakeStore([], []), "q") == ([], "none", 0)
+    assert fallback_bench.ranked(FakeStore([], None), "q") == ([], "none", 0)  # main: no search_approximate
+
+
+def test_a_page_the_fallback_returns_twice_is_counted_and_keeps_its_first_rank(tmp_path: Path):
+    ranked = fallback_bench.ranked(FakeStore([], ["pg_b", "pg_c", "pg_b", "pg_d", "pg_c"]), "q")
+    assert ranked == (["pg_b", "pg_c", "pg_d"], "fallback", 2)
+    rows = [quality_row(0, "typo", "tune", source="fallback", returned=3, duplicates=2),
+            quality_row(1, "typo", "tune", source="fallback", returned=3, duplicates=0)]
+    write_quality(tmp_path, rows)
+    assert "- probes the fallback answered with a page id more than once: 1 of 2 (0 is right)." in \
+        fallback_bench.summarize(tmp_path)
 
 
 def test_score_counts_a_probe_at_k_only_when_every_expected_page_is_in_the_top_k():
@@ -561,6 +587,9 @@ def test_quality_run_writes_one_row_per_probe_and_the_tables(run):
         assert heading in summary, heading
     assert "| exact | all | 15 | " in summary and "| two_page, either page | all | 10 | " in summary
     assert "| typo, the misspelled word carries the query | 15 | " in summary
+    assert "| typo, the misspelled word carries the query, without identifier typos | 9 | " in summary
+    assert "| typo, the misspelled word carries the query, identifier typos only | 6 | " in summary
+    assert all(r["duplicates"] == "0" for r in rows)  # main has no fallback
     assert "| identifier, the identifier alone | 20 | " in summary
     assert "- exact probes whose page strict search returns: 15 of 15." in summary
     assert "absent word on some page: 0 of 16 (0 is right)." in summary
@@ -628,9 +657,9 @@ def test_summary_counts_recall_reach_and_latest_first_per_class_half_and_group(t
                  "| typo, deletion | 1 | 0 (0%) | 0 | 1 (100%) | 1 | 1 of 1 | 0 / 1 / 0 |",
                  "| typo, the misspelled word carries the query | 1 | 1 (100%) | 1 | 1 (100%) | 1 | - | 0 / 1 / 0 |",
                  "| typo, the other words are the page's own | 2 | 0 (0%) | 1 | 1 (50%) | 2 | 1 of 2 | 0 / 1 / 1 |",
+                 "| typo, the misspelled word carries the query, without identifier typos | 1 | 1 (100%) | 1 | 1 (100%) "
+                 "| 1 | - | 0 / 1 / 0 |",
                  "| typo, typed word under 6 characters | 1 | 0 (0%) | 0 | 1 (100%) | 1 | 1 of 1 | 0 / 1 / 0 |",
-                 "| typo, off-page word on no page | 2 | 1 (50%) | 1 | 2 (100%) | 2 | 1 of 1 | 0 / 2 / 0 |",
-                 "| typo, off-page word on some page | 1 | 0 (0%) | 1 | 0 (0%) | 1 | 0 of 1 | 0 / 0 / 1 |",
                  "| paraphrase, off-page word on some page | 1 | 0 (0%) | - | 0 (0%) | - | - | 1 / 0 / 0 |",
                  "| paraphrase-0 | staging database port | 25 |",
                  "| absent | 2 | 0/1 | 0/1 | 0/2 (0%) | 0 | 0 |",
@@ -638,6 +667,25 @@ def test_summary_counts_recall_reach_and_latest_first_per_class_half_and_group(t
                  "| all | 4 | 1/2 | 0/2 | 1/4 (25%) | 0 | 1 |"):
         assert line in summary, line
     assert "paraphrase, off-page word on no page" not in summary  # an empty group has no row
+    assert "identifier typos only" not in summary
+    assert "typo, off-page word" not in summary  # a typo is on no page by construction: no split
+
+
+def test_groups_take_a_flag_added_later_from_the_probe_set(tmp_path: Path):
+    """A row written before ``identifier_typo`` existed is grouped by the flags its probe has now."""
+    hit = {"top3": True, "top10": True, "any3": True, "any10": True}
+    rows = [quality_row(16, "typo", "tune", query="allkeys-lru", flags="carries_query after_review",
+                        source="fallback", returned=2, **hit),
+            quality_row(21, "typo", "tune", query="aragon2id", flags="carries_query after_review"),
+            quality_row(99, "typo", "tune", query="allkeys-lru", flags="carries_query")]  # not a probe of the set
+    write_quality(tmp_path, rows)
+    summary = fallback_bench.summarize(tmp_path)
+    for line in ("| typo, the misspelled word carries the query | 3 | 1 (33%) |",
+                 "| typo, the misspelled word carries the query, identifier typos only | 1 | 1 (100%) |",
+                 "| typo, the misspelled word carries the query, without identifier typos | 2 | 0 (0%) |"):
+        assert line in summary, line
+    measured = fallback_bench.measures(tmp_path)
+    assert measured["typo, the misspelled word carries the query, identifier typos only (1): top 3 / top 10"] == "1 / 1"
 
 
 def test_a_later_run_reuses_the_store(run, small, capsys):
@@ -667,7 +715,8 @@ def test_compare_prints_what_each_folder_is_and_two_runs_as_one_table(run, tmp_p
                  "| commit, latency part | - | - |",
                  f"| probes (probe set) | {len(PROBES)} ({env['quality']['probe_set']}) | "
                  f"{len(PROBES)} ({env['quality']['probe_set']}) |",
-                 "| `search_approximate` found | no | yes |"):
+                 "| `search_approximate` found, quality part | no | yes |",
+                 "| `search_approximate` found, latency part | - | - |"):
         assert line in lines, line
     assert any(line.startswith("| exact, all (15): top 3 / top 10 |") for line in lines)
     assert any(line.startswith("| none, all (16): probes with a page |") for line in lines)
@@ -717,6 +766,11 @@ def test_a_run_that_fails_leaves_the_folder_as_it_was(run, tmp_path: Path, safe_
     with pytest.raises(RuntimeError):
         fallback_bench.main(["--sizes", str(SMALL), "--quality-only", "--out", str(out), "--store-home", str(home)])
     assert files_of(out / "before") == before  # the earlier run, whole: no half-written csv, no temporary file
+    fresh = tmp_path / "new" / "results"
+    with pytest.raises(RuntimeError):
+        fallback_bench.main(["--sizes", str(SMALL), "--quality-only", "--out", str(fresh), "--label", "first",
+                             "--store-home", str(home)])
+    assert not (tmp_path / "new").exists()  # a run that fails on first use of a label leaves no empty folder
     assert not safe_home.exists()
 
 
@@ -738,10 +792,49 @@ def test_one_part_run_again_keeps_the_other_parts_record(run, tmp_path: Path, sa
     assert f"## Recall at {SMALL} pages" in summary and f"## Latency at {SMALL} pages" in summary
     assert "were not measured on the same" not in summary
     # a latency part from another store size is named as such
-    env["latency"]["sizes"] = [37]
-    (out / "before" / "env.json").write_text(json.dumps(env), encoding="utf-8")
-    assert "were not measured on the same" in fallback_bench.summarize(out / "before")
+    assert env["latency"]["queries"] == {str(SMALL): [list(q) for q in fallback_bench.latency_queries(
+        SessionStore(home, f"d65-{SMALL}"))]}
+    for change, named in (({"sizes": [37]}, "store size"), ({"search_approximate": True}, "`search_approximate`"),
+                          ({"src_matches_commit": False}, "uncommitted changes under src/")):
+        (out / "before" / "env.json").write_text(json.dumps({**env, "latency": {**env["latency"], **change}}),
+                                                 encoding="utf-8")
+        warning = [line for line in fallback_bench.summarize(out / "before").splitlines()
+                   if "were not measured on the same" in line]
+        assert len(warning) == 1 and named in warning[0], (change, warning)
     assert not safe_home.exists()
+
+
+def test_compare_refuses_latency_runs_that_timed_different_queries(run, tmp_path: Path, safe_home, monkeypatch, capsys):
+    folder, home = run
+    calls: list = []
+    monkeypatch.setattr(scale_bench, "McpChild", lambda home, session, **kw: FakeChild(0.01, calls))
+    out = tmp_path / "results"
+    for label in ("one", "two"):
+        shutil.copytree(folder, out / label)
+        assert fallback_bench.main(["--sizes", str(SMALL), "--latency-only", "--passes", "2", "--reps", "1",
+                                    "--out", str(out), "--label", label, "--store-home", str(home)]) == 0
+    capsys.readouterr()
+    assert fallback_bench.main(["--compare", str(out / "one"), str(out / "two")]) == 0
+    capsys.readouterr()
+    env = json.loads((out / "two" / "env.json").read_text(encoding="utf-8"))
+    timed = env["latency"]["queries"][str(SMALL)]
+    env["latency"]["queries"] = {str(SMALL): timed[:-1]}
+    (out / "two" / "env.json").write_text(json.dumps(env), encoding="utf-8")
+    assert fallback_bench.main(["--compare", str(out / "one"), str(out / "two")]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "timed different queries" in captured.err and timed[-1][1] in captured.err
+    # a run from before the list was recorded: the list is read from its latency.csv
+    del env["latency"]["queries"]
+    (out / "two" / "env.json").write_text(json.dumps(env), encoding="utf-8")
+    assert fallback_bench.main(["--compare", str(out / "one"), str(out / "two")]) == 0
+    capsys.readouterr()
+    rows = rows_of(out / "two", "latency")
+    with (out / "two" / "latency.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fallback_bench.LATENCY_FIELDS)
+        writer.writeheader()
+        writer.writerows(r for r in rows if r["query"] != timed[0][1])
+    assert fallback_bench.main(["--compare", str(out / "one"), str(out / "two")]) == 2
+    assert "timed different queries" in capsys.readouterr().err
 
 
 def test_a_store_that_is_not_whole_is_built_again(tmp_path: Path, capsys):
@@ -756,11 +849,16 @@ def test_a_store_that_is_not_whole_is_built_again(tmp_path: Path, capsys):
 
 def test_the_store_home_may_not_be_the_real_contexto_home(tmp_path: Path, safe_home, monkeypatch):
     out = tmp_path / "results"
-    with pytest.raises(SystemExit, match="~/.contexto"):
-        fallback_bench.main(["--sizes", "20", "--out", str(out), "--store-home", str(safe_home / ".contexto")])
+    for under in ("", "sessions", "sessions/d65"):
+        with pytest.raises(SystemExit, match="~/.contexto"):
+            fallback_bench.main(["--sizes", "20", "--out", str(out), "--store-home",
+                                 str(safe_home / ".contexto" / under)])
     monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "live"))
-    with pytest.raises(SystemExit, match="CONTEXTO_HOME"):
-        fallback_bench.main(["--sizes", "20", "--out", str(out), "--store-home", str(tmp_path / "live")])
+    for under in ("", "sessions"):
+        with pytest.raises(SystemExit, match="CONTEXTO_HOME"):
+            fallback_bench.main(["--sizes", "20", "--out", str(out), "--store-home", str(tmp_path / "live" / under)])
+    fallback_bench.refuse_live_home(safe_home / ".contexto-bench")  # a sibling is not the live home
+    fallback_bench.refuse_live_home(tmp_path / "live-bench")
     assert not out.exists() and not safe_home.exists() and not (tmp_path / "live").exists()  # nothing was written
 
 
@@ -785,17 +883,80 @@ def test_sigterm_removes_the_temporary_store(tmp_path: Path, safe_home, monkeypa
     assert signal.getsignal(signal.SIGTERM) is before  # the handler is put back
 
 
-def test_latency_queries_are_the_nine_strict_hits_and_three_strict_misses_of_five_classes(run):
+def test_latency_queries_are_the_strict_hits_three_misses_per_class_and_the_costly_shapes(run):
     _, home = run
     store = SessionStore(home, f"d65-{SMALL}")
     queries = fallback_bench.latency_queries(store)
     kinds = Counter(kind for kind, _ in queries)
-    assert kinds == {"rare": 3, "common": 3, "multi": 3, "miss_identifier": 3, "miss_question": 3, "miss_typo": 3,
-                     "miss_extra_word": 3, "miss_none": 3}
+    assert {k: v for k, v in kinds.items() if k not in dict(fallback_bench.TIMED_PROBES)} == {
+        "rare": 3, "common": 3, "multi": 3, "miss_identifier": 3, "miss_question": 3, "miss_typo": 3,
+        "miss_extra_word": 3, "miss_none": 3, "miss_paraphrase": 3}
+    assert kinds["miss_typo_carried"] == 3  # a typo is a strict miss at every size
+    assert [kind for kind, _ in queries].index("miss_identifier") == 9  # the first strict miss, as on main
     by_query = {p.query: p for p in PROBES}
+    fixed = {i for _, ids in fallback_bench.TIMED_PROBES for i in ids}
     for kind, query in queries:
         if kind.startswith("miss_"):
-            assert store.search(query) == [] and by_query[query].cls == kind.removeprefix("miss_"), query
+            assert store.search(query) == [], query
+            assert kind.removeprefix("miss_").startswith(by_query[query].cls), query
+        if kind in dict(fallback_bench.TIMED_PROBES):
+            assert by_query[query].id in dict(fallback_bench.TIMED_PROBES)[kind], query
+    assert {"typo-16", "typo-21", "typo-24", "extra_word-16", "extra_word-18", "paraphrase-33",
+            "paraphrase-36"} <= fixed
+
+
+def test_the_fixed_timed_probes_are_strict_misses_of_the_6000_page_store():
+    rows = {r["id"]: r for r in rows_of(BEFORE)}
+    fixed = [i for _, ids in fallback_bench.TIMED_PROBES for i in ids]
+    assert [i for i in fixed if rows[i]["source"] != "none"] == []
+
+
+def latency_rows(passes: dict[int, dict[str, float]], miss: dict[int, dict[str, float]]) -> list[dict]:
+    """latency.csv rows of a two-sided run: per pass, each side's first search and first strict miss."""
+    rows = []
+    for p in sorted(passes):
+        names = ["tree", "baseline"] if p % 2 else ["baseline", "tree"]
+        base = {"n": 6000, "pass": p, "load1": f"{10 * p:.2f}", "rep": 0, "chars": 9}
+        rows += [{**base, "side": side, "kind": kind, "query": "E4127", "seconds": passes[p][side]}
+                 for side, kind in zip(names, fallback_bench.FIRST)]
+        rows += [{**base, "side": side, "kind": "rare", "query": "E4127", "seconds": 0.5} for side in names]
+        for rep in range(3):
+            rows += [{**base, "rep": rep, "side": side, "kind": "miss_identifier", "query": "refresh_token",
+                      "seconds": miss[p][side] if rep == 0 else 0.5} for side in names]
+    return rows
+
+
+def write_latency(folder: Path, rows: list[dict]) -> None:
+    with (folder / "latency.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fallback_bench.LATENCY_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_first_calls_are_compared_within_a_pass_and_paired_so_position_cancels(tmp_path: Path):
+    # the side that goes first is 1.5 times slower, and pass 1 and 2 run under twice the load of 3 and 4
+    first = {1: {"tree": 12.0, "baseline": 8.0}, 2: {"tree": 8.0, "baseline": 12.0},
+             3: {"tree": 6.6, "baseline": 4.0}, 4: {"tree": 4.4, "baseline": 6.0}}
+    miss = {1: {"tree": 3.0, "baseline": 1.0}, 2: {"tree": 3.0, "baseline": 1.0},
+            3: {"tree": 3.0, "baseline": 1.0}, 4: {"tree": 3.0, "baseline": 1.0}}
+    write_latency(tmp_path, latency_rows(first, miss))
+    summary = fallback_bench.summarize(tmp_path)
+    # within each pass: 1.5, 0.667, 1.65, 0.733; pairs sqrt(1.5 * 0.667) = 1.00 and sqrt(1.65 * 0.733) = 1.10
+    for line in ("| first search | E4127 | 7.300 | 7.000 | 1.05 | passes 1-2: 1.00; passes 3-4: 1.10 |",
+                 "| first strict miss | refresh_token | 3.000 | 1.000 | 3.00 | passes 1-2: 3.00; passes 3-4: 3.00 |",
+                 "| 1 | 10.00 | tree | 12.000 | 8.000 | 1.50 | 3.000 | 1.000 | 3.00 |",
+                 "| 2 | 20.00 | baseline | 8.000 | 12.000 | 0.67 | 3.000 | 1.000 | 3.00 |"):
+        assert line in summary, line
+    assert "| miss_identifier | 1 | 0.500 | 0.500 | 1.00 |" in summary  # the one-time cost is lost in the median
+    assert "| first (searched" not in summary  # no ratio across passes
+    measured = fallback_bench.measures(tmp_path)
+    assert measured["latency, first search of the process, s"] == \
+        "7.300 (baseline 7.000); tree / baseline paired 1.05, pairs 1.00, 1.10"
+    assert measured["latency, first strict miss of the process, s"] == \
+        "3.000 (baseline 1.000); tree / baseline paired 3.00, pairs 3.00, 3.00"
+    first[5], miss[5] = {"tree": 1.0, "baseline": 1.0}, {"tree": 1.0, "baseline": 1.0}  # a fifth pass has no pair
+    write_latency(tmp_path, latency_rows(first, miss))
+    assert "Pass 5 has no pair" in fallback_bench.summarize(tmp_path)
 
 
 def test_latency_pass_warms_the_cache_and_times_the_first_search_in_both_orders(run, tmp_path: Path):
@@ -825,14 +986,47 @@ def test_latency_pass_warms_the_cache_and_times_the_first_search_in_both_orders(
     assert all(float(r["load1"]) >= 0 for r in rows)
     assert len(calls) == len(timed) + 2 * 3  # a warm-up search and two first searches in each pass
     summary = fallback_bench.summarize(tmp_path)
-    assert f"## Latency at {SMALL} pages" in summary
-    for line in ("| miss_typo | 1 | 0.020 | 0.010 | 2.00 |", "| first (searched first) | 1 | 0.020 | 0.010 | 2.00 |",
-                 "| first (searched second) | 1 | 0.020 | 0.010 | 2.00 |"):
+    assert f"## Latency at {SMALL} pages" in summary and f"## First calls of a process at {SMALL} pages" in summary
+    for line in ("| miss_typo | 1 | 0.020 | 0.010 | 2.00 |",
+                 "| first search | E4127 | 0.020 | 0.010 | 2.00 | passes 1-2: 2.00 |",
+                 "| first strict miss | stagng DB port | 0.020 | 0.010 | 2.00 | passes 1-2: 2.00 |"):
         assert line in summary, line
-    assert "| warm" not in summary and "did not search first equally often" not in summary
+    assert "| warm" not in summary and "has no pair" not in summary
     with (tmp_path / "latency.csv").open("a", newline="") as f:  # a third pass: the tree first twice
         fallback_bench.latency_pass(home, SMALL, 3, 2, queries, csv.DictWriter(f, fallback_bench.LATENCY_FIELDS), sides)
-    assert "did not search first equally often" in fallback_bench.summarize(tmp_path)
+    assert "Pass 3 has no pair" in fallback_bench.summarize(tmp_path)
+
+
+class SlowFirstMiss(FakeChild):
+    """A child with a one-time cost: its first strict miss takes ``extra`` seconds more."""
+
+    def __init__(self, seconds: float, calls: list, extra: float) -> None:
+        super().__init__(seconds, calls)
+        self.extra, self.paid = extra, False
+
+    def call(self, name: str, arguments: dict) -> tuple[float, str]:
+        seconds, text = super().call(name, arguments)
+        if arguments["query"] == "stagng DB port" and not self.paid:
+            self.paid = True
+            return seconds + self.extra, text
+        return seconds, text
+
+
+def test_a_one_time_cost_of_the_first_strict_miss_shows_in_the_summary(run, tmp_path: Path):
+    _, home = run
+    calls: list = []
+    sides = {"tree": lambda h, s: SlowFirstMiss(0.01, calls, 3.0), "baseline": lambda h, s: FakeChild(0.01, calls)}
+    queries = [("rare", "E4127"), ("miss_typo", "stagng DB port")]
+    with (tmp_path / "latency.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fallback_bench.LATENCY_FIELDS)
+        writer.writeheader()
+        for pass_no in (1, 2):
+            fallback_bench.latency_pass(home, SMALL, pass_no, 3, queries, writer, sides)
+    summary = fallback_bench.summarize(tmp_path)
+    assert "| miss_typo | 1 | 0.010 | 0.010 | 1.00 |" in summary  # the median of 3 calls hides it
+    assert "| first strict miss | stagng DB port | 3.010 | 0.010 | 301.00 | passes 1-2: 301.00 |" in summary
+    assert fallback_bench.measures(tmp_path)["latency, first strict miss of the process, s"].startswith(
+        "3.010 (baseline 0.010); tree / baseline paired 301.00")
 
 
 def test_an_mcp_child_that_does_not_answer_fails_the_bench_instead_of_hanging_it(tmp_path: Path, monkeypatch):
