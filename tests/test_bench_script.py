@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from contexto.bench import d27, script
-from contexto.bench.model import NEW_CLASSES, Probe, Script, lexical_overlap, words
+from contexto.bench.model import GENERATOR_WORDS, NEW_CLASSES, Probe, Script, lexical_overlap, words
 
 SEED = 20261016
 # SHA-256 of each turn of the d27 script for seed 20261016 at the default bound (150,000) and turn
@@ -53,9 +53,10 @@ D27_TURN_DIGESTS = (
 # SHA-256 of the whole v2 script's JSON for the same seed and defaults: it pins the new plants'
 # random stream (seeded with a string) and every word of the new turns and questions. A deliberate
 # change to the v2 protocol changes this value, and with it any recorded trace that pins the script.
-V2_SCRIPT_DIGEST = "eb77c4f824c07ff720b7420cb7593d5e42aed03a81ba80481ebb3fd6687e2248"
+V2_SCRIPT_DIGEST = "469a5465187a97997a4dd61e6d3486ff9108e925960084e62ee4d206973dea77"
 SPIKE_PROBE_FIELDS = ("id", "group", "type", "tier", "question", "answer", "kind", "older", "subjects", "statements")
 SEEDS = (20261016, 20261017, 1, 999)
+SOUND = {"restatements": [], "key_free": [], "service_alone": [], "placement": [], "unplanted": []}
 BOUNDS = (150_000, 100_000)
 
 
@@ -145,7 +146,7 @@ def test_d27_script_shape(base):
     assert base.added_turns == () and base.decisions == () and base.files == {} and base.reads == ()
     assert base.toolloop_turn is None
     assert all(p.cls == p.type for p in base.probes)
-    assert script.checks(base) == {"restatements": [], "key_free": [], "placement": [], "unplanted": []}
+    assert script.checks(base) == SOUND
     assert [base.scripted_reply(i) for i in (0, 17, 18)] == ["OK", "OK", None]
 
 
@@ -210,25 +211,89 @@ def test_from_json_refuses_a_malformed_probe(v2):
         Script.from_dict(data)
 
 
-@pytest.mark.parametrize("change, message", [
-    ({"kinds": ["log"]}, "34 turns but 1 kinds and 34 sizes"),
-    ({"turn_bytes": [1, 2]}, "34 turns but 34 kinds and 2 sizes"),
-    ({"protocol": "v9"}, "unknown protocol 'v9'"),
-    ({"reads": ["bench-files/absent.txt"]}, "read of 'bench-files/absent.txt', which is not among the files"),
-    ({"probe_turn_ids": [["q_zz_99"]]}, "probe turn asks unknown probe 'q_zz_99'"),
-    ({"decisions": [{"turn": 0, "probe": "q_c_01", "label": "DX-1", "value": "v", "reply": "r"}]},
-     "decision for turn 0, which is not a decision turn"),
-    ({"decisions": [{"turn": 99, "probe": "q_c_01", "label": "DX-1", "value": "v", "reply": "r"}]},
-     "decision for turn 99, which is not a decision turn"),
-])
-def test_from_json_refuses_a_script_whose_parts_do_not_fit(v2, change, message):
-    data = {**v2.to_dict(), **change}
+def _decision(v2: Script, **change) -> dict:
+    return {**dataclasses.asdict(v2.decisions[0]), **change}
+
+
+def _damaged(v2: Script, field: str, edit) -> dict:
+    data = v2.to_dict()
+    data[field] = edit(data[field]) if callable(edit) else edit
+    return data
+
+
+def _replace_at(items: list, index: int, value) -> list:
+    items = list(items)
+    items[index] = value
+    return items
+
+
+DAMAGE = [
+    # (field, edit, words the error must hold)
+    ("kinds", ["log"], "kinds: 34 turns but 1 kinds"),
+    ("turn_bytes", [1, 2], "turn_bytes: 34 turns but 2 sizes"),
+    ("turn_bytes", lambda b: [b[0] + 1, *b[1:]], "turn_bytes: turn 1 is"),
+    ("protocol", "v9", "protocol: unknown protocol 'v9'"),
+    ("reads", ["bench-files/absent.txt"], "reads: 'bench-files/absent.txt' is not among the files"),
+    ("probe_turn_ids", lambda ids: [*ids[:-1], ["q_zz_99"]], "probe_turn_ids: unknown probe 'q_zz_99'"),
+    ("decisions", lambda d: [{**d[0], "turn": 0}, *d[1:]], "decisions: turn 1 is not a decision turn"),
+    ("decisions", lambda d: [{**d[0], "turn": 99}, *d[1:]], "decisions: turn 100 is not a decision turn"),
+    ("decisions", lambda d: d[1:], "decisions: decision turn"),  # a decision turn with no Decision
+    ("decisions", lambda d: [d[0], *d], "decisions: two decisions for turn"),
+    ("decisions", lambda d: [{**d[0], "probe": "q_zz_99"}, *d[1:]], "decisions: unknown probe 'q_zz_99'"),
+    ("decisions", lambda d: [{**d[0], "value": "zz-0000"}, *d[1:]], "decisions: the value of"),
+    ("decisions", lambda d: [{**d[0], "reply": "DECISION DX-1: x"}, *d[1:]], "decisions: the reply of"),
+    ("files", lambda f: {"../outside.txt": "x", **f}, "files: '../outside.txt'"),
+    ("files", lambda f: {"/abs/path.txt": "x", **f}, "files: '/abs/path.txt'"),
+    ("files", lambda f: {"bench-files\\x.txt": "x", **f}, "files: 'bench-files\\\\x.txt'"),
+    ("files", lambda f: {"": "x", **f}, "files: ''"),
+    ("files", lambda f: {"bench-files//x.txt": "x", **f}, "files: 'bench-files//x.txt'"),
+    ("files", lambda f: {"bench-files/./x.txt": "x", **f}, "files: 'bench-files/./x.txt'"),
+    ("files", lambda f: {"elsewhere/x.txt": "x", **f}, "files: 'elsewhere/x.txt'"),
+    ("reads", lambda r: ["../outside.txt", *r], "reads: '../outside.txt'"),
+    ("reads", lambda r: [r[0], *r], "reads: 'bench-files/log-01.txt' is read twice"),
+    ("probe_turn_ids", lambda ids: [*ids[:-1], [*ids[-1], ids[0][0]]], "is asked 2 times"),
+    ("probe_turn_ids", lambda ids: [*ids[:-1], ids[-1][1:]], "is asked 0 times"),
+    ("turns", lambda t: [*t[:-1], t[-1].replace("q_", "x_")], "turns: probe turn 8 does not ask"),
+    ("kinds", lambda k: [*k[:-1], "log"], "kinds: turn 34 is a probe turn"),
+    ("kinds", lambda k: _replace_at(k, 10, "probe"), "kinds: turn 11 is a content turn"),
+    ("kinds", lambda k: _replace_at(k, 10, "toolloop"), "kinds: 2 toolloop turns"),
+    ("added_turns", [999], "added_turns: 999"),
+    ("added_turns", lambda a: [a[1], a[0], *a[2:]], "added_turns: not in order"),
+    ("paged_only", ["q_zz_99"], "paged_only: unknown probe 'q_zz_99'"),
+    ("probes", lambda p: [p[0], *p], "probes: 'q_p_01' twice"),
+    ("bound", -5, "bound: must be a whole number, 1 or more"),
+    ("bound", 1.9, "bound: must be a whole number"),
+    ("seed", 1.5, "seed: must be a whole number"),
+    ("seed", True, "seed: must be a whole number"),
+    ("seed", -1, "seed: must be a whole number, 0 or more"),
+    ("turn_size", 0, "turn_size: must be a whole number, 1 or more"),
+    ("probes", lambda p: [{**p[0], "overlap": 1.5}, *p[1:]], "overlap"),
+    ("probes", lambda p: [{**p[0], "kind": "list"}, *p[1:]], "probes: 'q_p_01' has kind 'list'"),
+    ("probes", lambda p: [{**p[0], "cls": "riddle"}, *p[1:]], "probes: 'q_p_01' has class 'riddle'"),
+]
+
+
+@pytest.mark.parametrize("field, edit, message", DAMAGE)
+def test_from_json_refuses_a_damaged_script_and_names_the_field(v2, field, edit, message):
     with pytest.raises(ValueError, match=re.escape(message)):
-        Script.from_dict(data)
+        Script.from_dict(_damaged(v2, field, edit))
     kinds = list(v2.kinds)
     kinds[0] = "chat"
-    with pytest.raises(ValueError, match="unknown turn kind 'chat'"):
+    with pytest.raises(ValueError, match="kinds: unknown turn kind 'chat'"):
         Script.from_dict({**v2.to_dict(), "kinds": kinds})
+
+
+def test_from_json_accepts_both_protocols_undamaged():
+    for protocol in ("d27", "v2"):
+        for seed in (1, 2, 3):
+            s = script.build(seed, protocol, bound=4_000, turn_bytes=2_000)
+            assert Script.from_json(s.to_json()) == s
+
+
+def test_a_script_is_hashable(v2):
+    again = Script.from_json(v2.to_json())
+    assert hash(again) == hash(v2) and len({v2, again}) == 1
+    assert len({v2, script.build(SEED, "d27")}) == 2
 
 
 # Protocol v2
@@ -284,7 +349,7 @@ def test_v2_script_digest_is_pinned(v2):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_v2_self_checks_pass(seed, bound):
     s = script.build(seed, "v2", bound=bound)
-    assert script.checks(s) == {"restatements": [], "key_free": [], "placement": [], "unplanted": []}
+    assert script.checks(s) == SOUND
     assert script.key_free(s) == [] and script.restatements(s) == []
     for p in s.probes[54:]:
         assert script.later_tokens(s, max(script.plant_turns(s, p))) >= bound
@@ -340,9 +405,10 @@ def test_paraphrase_plants_are_log_lines_asked_about_in_other_words(v2):
         assert service.replace("-", " ") in p.question  # the service, in plain words
         assert script.plant_turns(v2, p) == [log_turn]
         attributes.add(attribute)
-    assert len(attributes) >= 4
-    positions = [lines.index(p.statements[0]) for p in probes]
-    assert positions == sorted(positions)  # spread through the log in plant order
+        # The asked line and two decoys are in the log turn, the third decoy in a file.
+        assert sum(line.startswith(f"cfg {service}.") for line in lines) == 3
+        assert sum(line.startswith(f"cfg {service}.") for t in v2.files.values() for line in t.split("\n")) == 1
+    assert len(attributes) == 6
 
 
 def test_no_attribute_clause_shares_a_word_with_its_identifier():
@@ -353,7 +419,120 @@ def test_no_attribute_clause_shares_a_word_with_its_identifier():
         identifier_words = set(re.findall(r"[a-z0-9]+", name))
         clause_words = set(re.findall(r"[a-z0-9]+", clause.casefold()))
         assert not identifier_words & clause_words, name
+        assert not script.leaks(name, clause), name  # nor contains one or is contained in one
         assert name not in d27_identifiers()
+
+
+# Pairs of attributes whose clauses a reader could take for one another, judged by hand from the
+# clauses (the first three pairs are the reviewers'). Each pair must share a family.
+CONFUSABLE = (
+    ("failover_target", "standby_pool"), ("alert_route", "oncall_alias"), ("signing_secret", "cert_serial"),
+    ("standby_pool", "backup_bucket"), ("alert_route", "log_stream"), ("image_tag", "release_channel"),
+    ("image_tag", "schema_revision"), ("release_channel", "feature_set"),
+)
+
+
+def test_attribute_families_cover_the_whole_synonym_table():
+    assert set(script.FAMILIES) == {name for name, _ in script.ATTRIBUTES}
+    for a, b in CONFUSABLE:
+        assert script.FAMILIES[a] == script.FAMILIES[b], (a, b)
+    assert len(set(script.FAMILIES.values())) >= script.DECOYS + 1 + 2  # room to spare after leaks
+    # Across families, no identifier shares a word with another attribute's clause: a question can
+    # point at a planted decoy neither by meaning (families) nor by a word.
+    clauses = dict(script.ATTRIBUTES)
+    for a in clauses:
+        for b in clauses:
+            if script.FAMILIES[a] != script.FAMILIES[b]:
+                assert not script.leaks(b, clauses[a]), (a, b)
+
+
+def test_leaks():
+    assert script.leaks("cache_namespace", "the cache svc service")
+    assert script.leaks("alert_route", "the router hub service")  # contained in a word
+    assert script.leaks("log_stream", "the catalog api service")
+    assert not script.leaks("alert_route", "the relay mesh service")
+    assert not script.leaks("dns_zone", "an")  # tokens under 3 characters do not count
+
+
+def _cfg_lines(s: Script, service: str) -> list[tuple[str, str]]:
+    """Every cfg line of ``service`` with where it is: a turn index or a file path."""
+    out = []
+    for where, text in [*enumerate(s.content_turns), *s.files.items()]:
+        out += [(str(where), line) for line in text.split("\n") if line.startswith(f"cfg {service}.")]
+    return out
+
+
+SWEEP = range(200)  # seeds at the small test size: a 4,000-token bound and 2,000-byte turns
+
+
+@pytest.fixture(scope="module")
+def sweep() -> list[Script]:
+    return [script.build(seed, "v2", bound=4_000, turn_bytes=2_000) for seed in SWEEP]
+
+
+def test_a_search_by_service_alone_finds_four_candidates(sweep):
+    for s in sweep:
+        for p in s.probes:
+            if p.cls not in ("paraphrase", "toolloop"):
+                continue
+            service = p.subjects[1]
+            found = script.service_lines(s, service)
+            values = {line.rsplit("=", 1)[1] for line in found if line.startswith("cfg ")}
+            assert len(found) >= 4 and len(values) >= 4, (s.seed, p.id)
+            lines = [line for text in [*s.content_turns, *s.files.values()] for line in text.split("\n")]
+            for query in (service, service.split("-")):  # the hyphenated name, then its separate words
+                terms = [query] if isinstance(query, str) else query
+                hits = {line.rsplit("=", 1)[-1] for line in lines if all(t in line for t in terms)}
+                assert len(hits) >= 4, (s.seed, p.id, query)
+            own = {line.rsplit("=", 1)[1] for _, line in _cfg_lines(s, service)}
+            assert set(p.older) == own - {p.answer} and len(p.older) == script.DECOYS
+        assert script.service_alone(s) == [], s.seed
+
+
+def test_each_cfg_question_has_exactly_one_answer_line_and_lines_in_two_places(sweep):
+    for s in sweep:
+        for p in s.probes:
+            if p.cls not in ("paraphrase", "toolloop"):
+                continue
+            key, service, attribute = p.subjects
+            lines = _cfg_lines(s, service)
+            assert len(lines) == 1 + script.DECOYS, (s.seed, p.id)
+            assert [line for _, line in lines if line.startswith(f"cfg {key}=")] == [p.statements[0]]
+            assert len({where for where, _ in lines}) >= 2, (s.seed, p.id)
+            planted = [line.split(".", 1)[1].split("=", 1)[0] for _, line in lines]
+            assert len(set(planted)) == len(planted) and planted.count(attribute) == 1
+            # No two planted attributes of one service share a family, so no question fits two lines.
+            assert len({script.FAMILIES[a] for a in planted}) == len(planted), (s.seed, p.id, planted)
+            # No planted attribute's identifier shares a word with the service name or the question.
+            for name in planted:
+                assert not script.leaks(name, p.question), (s.seed, p.id, name)
+                assert not script.leaks(name, service), (s.seed, p.id, name)
+
+
+def test_a_service_never_carries_the_like_named_attribute():
+    # The reviewer's repro: seed 7 at the small size asked cache-svc for cache_namespace.
+    s = script.build(7, "v2", bound=4_000, turn_bytes=2_000)
+    for p in s.probes:
+        if p.cls in ("paraphrase", "toolloop"):
+            assert not script.leaks(p.subjects[2], p.subjects[1]), p.subjects
+
+
+def test_service_alone_catches_a_service_with_no_decoys(v2):
+    p = _new(v2, "paraphrase")[0]
+    service = p.subjects[1]
+
+    def strip(text: str) -> str:
+        return "\n".join(line for line in text.split("\n")
+                         if not line.startswith(f"cfg {service}.") or line == p.statements[0])
+
+    bare = dataclasses.replace(v2, turns=tuple(strip(t) for t in v2.turns),
+                               files={k: strip(t) for k, t in v2.files.items()})
+    assert [q.id for q in script.service_alone(bare)] == [p.id]
+    assert script.checks(bare)["service_alone"] == [f"{p.id}: a search for {service!r} alone finds only the plant line"]
+    # A plain-words mention of the service in a filler line is also a line a search finds.
+    turns = list(bare.turns)
+    turns[12] += f"\nnote: {' '.join(service.split('-'))} restarted"
+    assert script.service_alone(dataclasses.replace(bare, turns=tuple(turns))) == []
 
 
 def d27_identifiers() -> set[str]:
@@ -384,6 +563,8 @@ def test_concluded_answers_follow_from_their_turn_alone(v2):
         assert _decide(text) == d.value == p.answer
         assert d.reply == f"DECISION {d.label}: {d.value}" and text.endswith(f"DECISION {d.label}: <name>")
         assert p.statements == (text, d.reply) and p.subjects[0] == d.label and d.value in p.subjects[1:]
+        assert p.question.endswith("What did you pick? Answer with the name only.")
+        assert set(p.older) == set(p.subjects[1:]) - {d.value} and len(p.older) == 2  # the two that lost
         assert d.reply not in "\n".join(v2.turns)  # the fact is only ever the assistant's reply
         assert v2.scripted_reply(d.turn) == d.reply
         assert script.plant_turns(v2, p) == [d.turn, d.turn]
@@ -398,20 +579,45 @@ def test_scenarios_describe_the_decision_in_other_words():
         assert not words(question) & words(intro), question
 
 
-def test_decision_reply_ok(v2):
+RIGHT_REPLIES = (
+    "{reply}", "Thinking it over.\n**{reply}**\n", "- `DECISION {label}: {VALUE}`.",
+    "DECISION {label}: {other}\nDECISION {label}: {value}",  # the last line counts
+    # The forms Reviewer B found rejected at a975801:
+    "**DECISION** {label}: {value}", "DECISION **{label}**: {value}", "My reply: DECISION {label}: {value}",
+    "DECISION {label}: {value} (it has the lowest number, 110)", "DECISION {label}: {value} = 110",
+    "DECISION {label}: <{value}>", "decision {label}: {value}", "DECISION {label_lower}: {value}",
+    "1. DECISION {label}: {value}", "DECISION {label_nbh}: {value}",
+)
+WRONG_REPLIES = (
+    "DECISION {label}: {other}", "DECISION {label}: {value} or {other}", "DECISION {label}: {other2}",
+    "DECISION DX-0000: {value}", "DECISION {label}0: {value}", "OK", "", "{value}",
+    "DECISION {label}: {value}\nDECISION {label}: {other}", "DECISION {label}: none of them",
+    "DECISION {label}: {value_prefix}", "DECISION {label}: {value}9", "DECISION {label}:",
+)
+
+
+@pytest.mark.parametrize("form", RIGHT_REPLIES)
+def test_decision_reply_ok_accepts_a_right_decision_in_common_forms(v2, form):
     d = v2.decisions[0]
-    others = [name for name in next(p for p in v2.probes if p.id == d.probe).subjects[1:] if name != d.value]
-    assert script.decision_reply_ok(v2, d.turn, d.reply)
-    assert script.decision_reply_ok(v2, d.turn, f"Thinking it over.\n**{d.reply}**\n")
-    assert script.decision_reply_ok(v2, d.turn, f"- `DECISION {d.label}: {d.value.upper()}`.")
-    assert script.decision_reply_ok(v2, d.turn, f"DECISION {d.label}: {others[0]}\nDECISION {d.label}: {d.value}")
-    assert not script.decision_reply_ok(v2, d.turn, f"DECISION {d.label}: {others[0]}")
-    assert not script.decision_reply_ok(v2, d.turn, f"DECISION {d.label}: {d.value} or {others[0]}")
-    assert not script.decision_reply_ok(v2, d.turn, f"DECISION DX-0000: {d.value}")  # another label
-    assert not script.decision_reply_ok(v2, d.turn, "OK")
-    assert not script.decision_reply_ok(v2, d.turn, "")
+    assert script.decision_reply_ok(v2, d.turn, form.format(**_reply_fields(v2, d))), form
+
+
+@pytest.mark.parametrize("form", WRONG_REPLIES)
+def test_decision_reply_ok_rejects_every_wrong_decision(v2, form):
+    d = v2.decisions[0]
+    assert not script.decision_reply_ok(v2, d.turn, form.format(**_reply_fields(v2, d))), form
+
+
+def _reply_fields(s: Script, d) -> dict[str, str]:
+    others = [name for name in next(p for p in s.probes if p.id == d.probe).subjects[1:] if name != d.value]
+    return {"reply": d.reply, "label": d.label, "value": d.value, "VALUE": d.value.upper(), "other": others[0],
+            "other2": others[1], "label_lower": d.label.lower(), "label_nbh": d.label.replace("-", "\u2011"),
+            "value_prefix": d.value[:-1]}
+
+
+def test_decision_reply_ok_refuses_a_turn_that_is_not_a_decision(v2):
     with pytest.raises(ValueError, match="not a decision turn"):
-        script.decision_reply_ok(v2, 0, d.reply)
+        script.decision_reply_ok(v2, 0, v2.decisions[0].reply)
 
 
 # toolloop
@@ -437,7 +643,7 @@ def test_toolloop_turn_reads_ten_files_holding_six_facts(v2):
         holders.append(holding[0])
         assert p.statements[0] not in "\n".join(v2.turns)  # only in a file
         assert script.plant_turns(v2, p) == [turn]
-    assert len(set(holders)) == 6  # six files hold one fact each; the other four are filler only
+    assert len(set(holders)) == 6  # six files hold one asked fact each
     used = {p.subjects[2] for p in _new(v2, "toolloop")} | {p.subjects[2] for p in _new(v2, "paraphrase")}
     assert len(used) == 12  # no attribute is planted twice
 
@@ -462,17 +668,30 @@ def test_estimate_counts_the_files(v2, base):
 
 
 def test_words_tokenisation():
-    assert words("cfg billing-core.retention_days=amber-4417") == {"billing", "core", "retention", "days", "amber",
-                                                                   "4417"}
-    assert words("The API hub is OK; e2e ran.") == frozenset()  # every token is under four characters
-    assert words("WHAT value did Billing have, with THIS?") == {"value", "billing"}  # case folded, stop words out
+    assert words("cfg billing-core.retention_days=amber-4417") == {"cfg", "billing", "core", "retention", "days",
+                                                                   "amber", "4417"}
+    assert words("The API hub is OK; e2e ran.") == {"api", "hub", "e2e", "ran"}  # 3 characters count, "is" not
+    assert words("WHAT value did Billing have, with THIS?") == {"value", "did", "billing"}  # case folded
+    assert words("Next part of the working log: level=INFO latency_ms=3 shard=1 ok") == frozenset()  # filler, headers
+    assert words("the search-hub service") == {"search", "hub", "service"}  # a subject word stays
     assert words("") == frozenset()
+
+
+def test_generator_words_are_the_filler_and_fixed_turn_words():
+    texts = [d27.LOG_HEAD, d27.LOG_TAIL, d27.INSTRUCTIONS, *d27.PROBE_HEADER, script.TOOLLOOP_HEAD,
+             script.DECISION_HEAD, *(script.DECISION_RULE.format(rule=r) for r in ("lowest", "highest")),
+             *script.DECISION_ASK, d27.filler_text(random.Random(0), 200, "s00")]
+    found = {w for t in texts for w in re.findall(r"[a-z]+", t.casefold()) if len(w) >= 3}
+    names = {w for name in d27.Pools(random.Random(0)).services for w in name.split("-")} | set(d27.WORDS)
+    assert GENERATOR_WORDS == found - names
+    assert "search" in found & names  # the one collision: a service root and a word of the tool-loop head
 
 
 def test_lexical_overlap_counts_distinct_shared_words():
     statement = "cfg billing-core.retention_days=amber-4417"
     assert lexical_overlap("What value did billing-core.retention_days have? billing billing", [statement]) == 4
     assert lexical_overlap("How long does the billing core service keep its data?", [statement]) == 2
+    assert lexical_overlap("What does the relay hub service use?", ["cfg relay-hub.dns_zone=onyx-1234"]) == 2
     assert lexical_overlap("How long is data kept?", [statement]) == 0
     assert lexical_overlap("alpha beta", ["alpha one", "beta two"]) == 2  # across all the statements
 
@@ -522,6 +741,9 @@ def test_restatements_catch_a_subject_in_another_turn_or_file(v2):
     files = {**v2.files, path: v2.files[path] + f"cfg {q.subjects[0]}=zzz-0000\n"}
     problems = script.restatements(dataclasses.replace(v2, files=files))
     assert problems and all(r.startswith(f"{q.id}: ") and r.endswith(f"restated in file {path}") for r in problems)
+    # A decoy, a cfg line for the same service with another attribute, is not a restatement.
+    assert all(any(line.startswith(f"cfg {q.subjects[1]}.") and line != q.statements[0]
+                   for t in v2.content_turns for line in t.split("\n")) for q in _new(v2, "paraphrase"))
     # A d27 probe's own question may name its subject; anyone else's text may not.
     d = v2.probes[0]
     assert d.subjects[0] in d.question and script.restatements(v2) == []
@@ -593,3 +815,20 @@ def test_score_returns_one_row_per_probe(v2):
     assert result["cells"]["concluded"] == {"correct": 0, "total": 6, "stale": 0}
     assert result["cells"]["paraphrase/cfg-line"] == {"correct": 1, "total": 6, "stale": 0}
     assert script.score(v2.probes, _answers(v2.probes))["correct"] == 72
+
+
+def test_score_never_counts_a_missing_answer_correct(spike):
+    # The one deliberate difference from the spike's scoring: seed 11 at the small size has a set
+    # probe whose expected answer is "none", which the spike scores correct when nothing is answered.
+    s = script.build(11, "d27", bound=4_000, turn_bytes=2_000)
+    p = next(p for p in s.probes if p.id == "q_a_044")
+    assert p.kind == "set" and p.answer == "none"
+    theirs = spike["run"].build_script(11, 0, 2_000, spike["budget"].Params(bound=4_000)).probes
+    assert spike["l2f"].score(list(theirs), "")["correct"] == 1  # the spike: one point for silence
+    ours = script.score(s.probes, "")
+    row = next(r for r in ours["rows"] if r["id"] == p.id)
+    assert ours["correct"] == 0 and row["given"] is None and row["correct"] is False
+    assert script.score([p], f"{p.id}:")["correct"] == 0  # an empty answer line is no answer either
+    assert script.score([p], f"{p.id}: none")["correct"] == 1  # saying "none" is still right
+    value = next(q for q in s.probes if q.kind == "value")
+    assert script.score([value], "")["correct"] == 0

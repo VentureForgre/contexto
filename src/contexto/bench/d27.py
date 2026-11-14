@@ -24,7 +24,6 @@ import re
 
 from contexto.bench.model import Probe, Script, lexical_overlap
 
-DEFAULT_SEED = 20261016  # the seed of live runs #3 and #4
 PAGED_ONLY = 4  # probes whose only statement sits in turn 1
 PROBE_TURNS = 6
 PROBES_PER_TURN = 9

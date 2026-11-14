@@ -4,6 +4,7 @@ by hand in the comments; none comes from running the code under test."""
 from __future__ import annotations
 
 import math
+import random
 
 import pytest
 
@@ -137,6 +138,22 @@ def test_paired_on_the_run_4_fixture():
     assert high - low < 0.25
 
 
+def test_paired_is_significant_only_when_the_interval_and_the_exact_test_agree():
+    # 4 against 0 discordant of 72: Tango's interval excludes zero but the exact McNemar p is
+    # 2 / 16 = 0.125, so the result is not significant. The two can disagree because the interval
+    # is asymptotic; the exact test decides.
+    four = stats.paired(*_arms(60, 4, 0, 8))
+    low, high = four["interval"]
+    assert 0 < low < high and four["mcnemar_p"] == 0.125
+    assert four["significant"] is False
+    # 10 against 1 of 72: the interval excludes zero and p = 24 / 2048 < 0.05.
+    ten = stats.paired(*_arms(50, 10, 1, 11))
+    assert ten["interval"][0] > 0 and ten["mcnemar_p"] == 24 / 2048 and ten["significant"] is True
+    # The run #4 fixture: neither excludes zero.
+    assert stats.paired(*_arms(45, 7, 2, 0))["significant"] is False
+    assert list(four)[-1] == "significant"
+
+
 def test_paired_refuses_unaligned_or_empty_arms():
     with pytest.raises(ValueError, match="aligned"):
         stats.paired([True], [True, False])
@@ -145,6 +162,9 @@ def test_paired_refuses_unaligned_or_empty_arms():
 
 
 # Seeds as the unit
+
+# (hits + 1) / (resamples + 1) for the 21-seed case below at seeds 0 and 1: 335 and 312 hits of 2,000.
+PINNED_MONTE_CARLO = (336 / 2_001, 313 / 2_001)
 
 
 def test_seed_level_sign_flip_by_hand():
@@ -163,28 +183,69 @@ def test_seed_level_sign_flip_by_hand():
     assert stats.seed_level([0.0, 0.0, 0.0])["sign_flip_p"] == 1.0
 
 
-def test_seed_level_bootstrap_by_hand():
-    # Equal differences: every resample has the same mean.
-    result = stats.seed_level([0.05] * 6)
-    assert result["bootstrap_interval"] == pytest.approx((0.05, 0.05))
-    # 0 and 1: a resample's mean is 0, 0.5 or 1 with probability 1/4, 1/2, 1/4, so the 2.5th
-    # percentile is 0 and the 97.5th is 1.
-    assert stats.seed_level([0.0, 1.0])["bootstrap_interval"] == (0.0, 1.0)
+def test_t_quantile_reproduces_published_table_values():
+    # The 0.975 quantile of Student's t, from the table in Abramowitz, M. and Stegun, I. A. (1964),
+    # Handbook of Mathematical Functions, table 26.10, to the digits printed there.
+    for df, value in ((1, 12.7062047), (2, 4.30265273), (4, 2.77644511), (9, 2.26215716), (29, 2.04522964)):
+        assert stats.t_quantile(0.975, df) == pytest.approx(value, rel=1e-7), df
+    # One degree of freedom is the Cauchy distribution: the quantile is tan(pi (p - 1/2)).
+    assert stats.t_quantile(0.9, 1) == pytest.approx(math.tan(math.pi * 0.4), rel=1e-9)
+    assert stats.t_quantile(0.5, 7) == 0.0
+    assert stats.t_quantile(0.025, 9) == pytest.approx(-2.26215716, rel=1e-7)  # symmetric
+    assert stats.t_quantile(0.975, 10_000) == pytest.approx(stats.Z95, rel=1e-3)  # tends to the normal
+    for p, df in ((0.0, 3), (1.0, 3), (0.5, 0)):
+        with pytest.raises(ValueError):
+            stats.t_quantile(p, df)
+
+
+def test_seed_level_t_interval_by_hand():
+    # 0.1, 0.2, 0.3: mean 0.2, sample sd 0.1, standard error 0.1 / sqrt(3) = 0.0577350; with 2
+    # degrees of freedom the half width is 4.30265273 * 0.0577350 = 0.248414.
+    result = stats.seed_level([0.1, 0.2, 0.3])
+    assert result["interval"] == pytest.approx((0.2 - 0.248414, 0.2 + 0.248414), abs=1e-6)
+    assert result["interval_method"] == "Student t on the per-seed differences, n - 1 degrees of freedom"
+    assert "bootstrap_interval" not in result
+    assert list(result) == ["seeds", "differences", "mean", "sign_flip_p", "sign_flip_method", "interval",
+                            "interval_method", "resamples"]
+    # Equal differences: a zero-width interval.
+    assert stats.seed_level([0.05] * 6)["interval"] == pytest.approx((0.05, 0.05))
+    # 0 and 1: mean 0.5, sd sqrt(0.5), se 0.5; half width 12.7062047 * 0.5.
+    assert stats.seed_level([0.0, 1.0])["interval"] == pytest.approx((0.5 - 6.35310235, 0.5 + 6.35310235), rel=1e-7)
+    # seed_level's interval is t_interval's (the coverage test below calls t_interval directly, because
+    # the exact sign-flip test at 20 seeds enumerates 2 ** 20 patterns per call).
+    values = [0.02, -0.01, 0.05, 0.03, 0.00, 0.04, 0.01]
+    assert stats.seed_level(values)["interval"] == stats.t_interval(values)
+    assert stats.t_interval([0.3]) is None
     # One seed: no interval, and the sign-flip test cannot reject.
     single = stats.seed_level([0.3])
-    assert single["bootstrap_interval"] is None and single["sign_flip_p"] == 1.0 and single["mean"] == 0.3
-    values = [0.02, -0.01, 0.05, 0.03, 0.00, 0.04, 0.01]
-    low, high = stats.seed_level(values)["bootstrap_interval"]
-    assert min(values) <= low < sum(values) / len(values) < high <= max(values)
+    assert single["interval"] is None and single["sign_flip_p"] == 1.0 and single["mean"] == 0.3
 
 
-def test_seed_level_is_deterministic_and_seeded():
-    values = [0.02, -0.01, 0.05, 0.03, 0.00, 0.04, 0.01]
-    assert stats.seed_level(values) == stats.seed_level(values)
-    # The seed picks the resamples: with few of them, different seeds give different intervals.
-    assert len({stats.seed_level(values, resamples=20, seed=k)["bootstrap_interval"] for k in range(8)}) > 1
-    assert stats.seed_level(values, resamples=20, seed=3) == stats.seed_level(values, resamples=20, seed=3)
-    assert stats.seed_level(values, seed=1)["sign_flip_p"] == stats.seed_level(values, seed=2)["sign_flip_p"]
+def _benchmark_seed(rnd, only_a: float, only_b: float, probes: int = 72) -> float:
+    """One seed's paired difference: each of 72 probes is right only in arm a with probability
+    ``only_a``, only in arm b with ``only_b``, and otherwise the same in both."""
+    a = b = 0
+    for _ in range(probes):
+        u = rnd.random()
+        a += u < only_a
+        b += only_a <= u < only_a + only_b
+    return (a - b) / probes
+
+
+@pytest.mark.parametrize("only_a, only_b", [(0.10, 0.04), (0.13, 0.04), (0.06, 0.06)])
+@pytest.mark.parametrize("n", [3, 5, 10, 20])
+def test_seed_level_interval_covers_at_benchmark_shaped_differences(n, only_a, only_b):
+    # Reviewer A's scenario (0.10 against 0.04), live run #4's rates (7 and 2 of 54) and no
+    # difference, 2,000 simulated benchmarks each, seeded. Nominal 95%; the percentile bootstrap this
+    # replaced held the truth in 75% at 3 seeds and 83% at 5.
+    rnd = random.Random(f"coverage/{n}/{only_a}/{only_b}")
+    truth = only_a - only_b
+    trials = 2_000
+    hits = 0
+    for _ in range(trials):
+        low, high = stats.t_interval([_benchmark_seed(rnd, only_a, only_b) for _ in range(n)])
+        hits += low <= truth <= high
+    assert hits / trials >= 0.93
 
 
 def test_seed_level_monte_carlo_above_twenty_seeds():
@@ -199,11 +260,29 @@ def test_seed_level_monte_carlo_above_twenty_seeds():
     assert balanced["sign_flip_p"] == 1.0  # the observed sum is 0
 
 
-def test_seed_level_refuses_no_seeds():
+def test_seed_level_monte_carlo_value_is_pinned():
+    # 21 seeds with a moderate effect, so some random patterns reach the observed sum and the seed
+    # matters. The values are this implementation's (random.Random's stream is the same on Python
+    # 3.12 to 3.15): they pin the generator, its seeding and the hit rule.
+    values = [0.02, -0.01, 0.03, 0.0, 0.01, -0.02, 0.04, 0.01, -0.01, 0.02, 0.0,
+              0.03, -0.03, 0.01, 0.02, -0.01, 0.0, 0.01, 0.02, -0.02, 0.01]
+    first = stats.seed_level(values, resamples=2_000, seed=0)
+    assert first["sign_flip_method"] == "monte-carlo"
+    assert first["sign_flip_p"] == PINNED_MONTE_CARLO[0]
+    assert stats.seed_level(values, resamples=2_000, seed=1)["sign_flip_p"] == PINNED_MONTE_CARLO[1]
+    assert stats.seed_level(values, resamples=2_000, seed=0) == first  # deterministic
+
+
+def test_seed_level_refuses_no_seeds_and_non_finite_differences():
     with pytest.raises(ValueError):
         stats.seed_level([])
     with pytest.raises(ValueError):
         stats.seed_level([0.1], resamples=0)
+    for bad in (float("nan"), float("inf"), -float("inf")):
+        with pytest.raises(ValueError, match="finite"):
+            stats.seed_level([0.1, bad])
+        with pytest.raises(ValueError, match="finite"):
+            stats.seed_level([bad])
 
 
 # Repeats
