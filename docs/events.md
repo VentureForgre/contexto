@@ -290,8 +290,8 @@ The model reads a paged turn back:
   start with less makes the engine rotate if a rotation would restore it.
 - **Degraded mode**: after a store failure in one conversation, the engine stops paging that
   conversation and sends its last good transform, extended with the new messages, until the store
-  works again at one of its turn starts. It belongs to that conversation alone: the others keep
-  paging until a store call of their own fails.
+  works again at one of its turn starts or at a `paged_changed` resync of it, or the run ends. It
+  belongs to that conversation alone: the others keep paging until a store call of their own fails.
 
 The design contract, [milestones/M2-contexto-proxy.md](milestones/M2-contexto-proxy.md), defines
 these and the rules the entries cite.
@@ -317,10 +317,16 @@ conversation, and each run starts a new engine. So:
   one run, and counts those turns again in `turns_paged`.
 - A [`degraded_enter`](#degraded_enter) is the conversation of its line entering degraded mode, and a
   [`degraded_leave`](#degraded_leave) is one conversation leaving it, at that conversation's next turn
-  start that finds the store working. A conversation that sends no further turn start, such as a
-  subagent that has finished, never logs a leave. So a `degraded_enter` with no `degraded_leave` after
-  it does not mean the session stopped paging: other conversations, the main one included, can go on
-  paging and rotating on the lines that follow.
+  start that finds the store working, or at a `paged_changed` [`resync`](#resync) of it that finds the
+  store working, which can come inside a tool loop. A conversation that sends no further turn start
+  and no such resync, such as a subagent that has finished, never logs a leave. So a `degraded_enter`
+  with no `degraded_leave` after it does not mean the session stopped paging: other conversations, the
+  main one included, can go on paging and rotating on the lines that follow.
+- A new run starts every conversation out of degraded mode, and no `degraded_leave` is logged for
+  one that was degraded when the previous run ended. `epoch_resumed` does not carry degraded mode
+  over: the engine writes the epoch record only while the main conversation is not degraded, so a
+  resumed conversation continues the counters of a record written before it entered degraded mode,
+  and is paged as usual from its first request in the new run.
 - The store keeps one page per page id, and a turn paged again with the same turn number and the
   same messages gets the same id. So a run that pages a conversation from turn 0 again normally
   does not store those turns twice. A `paged_changed` resync gives its pages new turn numbers, so they are
@@ -357,7 +363,10 @@ It can rely on this:
   rises by one at each `rotation`. A line with `transform_error` set to a class name (the engine
   raised) breaks the rule: it has no nested events, so a `main_changed` or `epoch_resumed` it would
   have had is lost. After such a line the main conversation is unknown until the next of these
-  events.
+  events. A resume on that request is undone, not only unlogged: the engine used the record up on it
+  and kept nothing, so the conversation starts again at epoch 0, and its next line has neither
+  `epoch_resumed` nor `epoch_not_resumed`. Its first rotation then has `first_turn` 0, with an
+  `epoch` that can equal the one before the restart although the counters were not continued.
 
 ### Reading an entry
 
@@ -937,7 +946,8 @@ messages (a local compaction, a rewind). The engine continues from the longest m
 - `epoch`: the current epoch.
 - `kind`: `window_changed`: only retained messages changed, and the epoch continues.
   `paged_changed`: messages already paged changed, so a new epoch starts at the current turn with
-  everything before it paged (a `rotation` with reason `paged_changed` follows).
+  everything before it paged (a `rotation` with reason `paged_changed` follows). A conversation in
+  degraded mode leaves it here when the store works ([`degraded_leave`](#degraded_leave) follows).
 - `matched`: how many leading messages still match.
 - `previous_messages`: how many messages the previous request had.
 - `messages`: how many this request has.
@@ -1040,8 +1050,10 @@ Writer: engine. Where: `transform_events`, `usage_events`. Kind: problem.
 The conversation on this line entered degraded mode. Until it leaves, the engine pages nothing of it
 and never rotates it, so its requests can exceed the bound; each is marked `degraded` and, when
 over, `over_bound`. Nothing is lost, because no turn of it is paged while the store is broken. The
-store is tried again at each of its turn starts. Other conversations keep paging, and each enters
-degraded mode on a line of its own when a store call of its own fails.
+store is tried again at each of its turn starts and at a `paged_changed` [`resync`](#resync) of it.
+Other conversations keep paging, and each enters degraded mode on a line of its own when a store call
+of its own fails. Degraded mode ends with the run, with no `degraded_leave` (see
+[What the counters count](#what-the-counters-count)).
 
 - `epoch`: the current epoch.
 - `reason`: `store_error` or `page_conflict`: the event just before it.
@@ -1050,10 +1062,12 @@ degraded mode on a line of its own when a store call of its own fails.
 
 Writer: engine. Where: `transform_events`. Kind: notice.
 
-The store works again for the conversation on this line, which left degraded mode at this turn
-start. Its rotation resumes at this request. Each conversation leaves with its own `degraded_leave`,
-so pair this event with the `degraded_enter` of the same conversation. A conversation that sends no
-further turn start never logs one (see [What the counters count](#what-the-counters-count)).
+The store works again for the conversation on this line, which left degraded mode at this request:
+a turn start, or a `paged_changed` [`resync`](#resync), which can come inside a tool loop and is
+logged just before this event. Its rotation resumes at this request. Each conversation leaves with
+its own `degraded_leave`, so pair this event with the `degraded_enter` of the same conversation. A
+conversation that sends no further turn start or such resync never logs one, and a new run ends
+degraded mode without one (see [What the counters count](#what-the-counters-count)).
 
 - `epoch`: the current epoch.
 - `quarantined`: present when the engine left by quarantining a corrupted page: its id.
@@ -1100,7 +1114,8 @@ A new engine on an existing session (a proxy restart, `contexto run --session`) 
 conversation's recorded epoch, so the prompt stays as the previous process would have sent it and
 the cache still holds. The resumed conversation is the main one from this line on. When another
 conversation was main before it in the run (a side request that arrived first), no
-[`main_changed`](#main_changed) says so: this event is the only sign.
+[`main_changed`](#main_changed) says so: this event is the only sign. The resumed conversation is not
+in degraded mode, whatever it was when the previous run ended.
 
 - `epoch`: the epoch resumed.
 - `k`: its first message still sent.
