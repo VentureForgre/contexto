@@ -44,12 +44,17 @@ In scope:
   logs a request, drops a request header whose name or value holds the token, and refuses to start
   if the token file is a symlink, is not a regular file, or has a group or other permission bit
   set. `contexto serve --rotate-token` replaces the token. One service runs per `$CONTEXTO_HOME`: it
-  holds an exclusive lock on `serve.lock` while it runs, and the commands that talk to it send the
-  token only while that lock is held, to the port of a `serve.json` that is the user's own 0600
-  file. The service writes `serve.json` once its port is listening and removes it before it closes
-  the port. `serve.log` holds event names, reasons, counts,
-  request paths without the token, and status codes, never header values, bodies, tool-use ids,
-  the token, or the upstream URL. A client-supplied session id selects a store only through the ids
+  holds an exclusive lock on `serve.lock` while it runs. The commands that talk to it check, right
+  before each request they send (a retry included), that a service holds that lock, and take the
+  port from a `serve.json` that is the user's own 0600 file; a retry is sent only while
+  `serve.json` and `serve.token` still give the port, process id and token of the first try, so a
+  service that stops between tries gets no more requests and neither does whatever takes its port.
+  The service writes `serve.json` once its port is listening and removes it before it closes the
+  port. Claude Code's gateway hint headers, which the settings `--print-settings` prints turn on,
+  are read by the engine and removed before a request is forwarded, unless the service was started
+  with `--forward-hint-headers`. `serve.log` holds event names, reasons, counts,
+  request paths without the token, status codes and whether the hint headers are forwarded, never
+  header values, bodies, tool-use ids, the token, or the upstream URL. A client-supplied session id selects a store only through the ids
   recorded in the stores and never names a directory. Claude Code session ids are routing keys, not
   a boundary between holders of the token: a client with the token reaches any conversation's store
   by sending that conversation's session id or naming it as a parent. A tool-use id that two
@@ -85,9 +90,10 @@ In scope:
   0600 regular file, never through a symlink), and sends one request to the service on `127.0.0.1`
   that carries the call's tool-use id and no conversation text; the token goes in that request's
   path and is never written to stderr, a tool result or a log. With no service holding the lock it
-  sends nothing. A call whose session the service does not name, or names but that is not an
+  sends nothing, and it checks the lock and the service's files again before each retry of a call. A call whose session the service does not name, or names but that is not an
   existing real session directory, is refused: the server never falls back to another session and
-  never creates one. A token file that is not one token is not sent. Both modes serve
+  never creates one, nor fills in a session directory that `contexto sessions prune` has emptied. A
+  token file that is not one token is not sent. Both modes serve
   `contexto_search`, `contexto_recall`, and the ledger tools (`contexto_pin`, `contexto_close`,
   `contexto_state`). Reports of the server reading or writing outside the session of the call,
   connecting anywhere but the service on `127.0.0.1`, disclosing the token, or crashing on crafted

@@ -117,6 +117,8 @@ The index of everything under `docs/` is [docs/README.md](docs/README.md). The g
 - [`contexto run` reference](docs/run-reference.md): the options, what the launcher does,
   `contexto proxy`, environment variables, and upstreams.
 - [CLIProxyAPI](docs/cliproxyapi.md): running Contexto with a CLIProxyAPI instance as the upstream.
+- [`contexto serve`](docs/serve.md): the engine as a local service for Claude Code clients that
+  Contexto does not launch (the IDE extensions, the Agent SDK, `claude -p` in CI).
 - [Sessions](docs/sessions.md): how to tell it is working, what is stored and where, and the
   commands that inspect and remove sessions.
 - [Rules you give once](docs/standing-rules.md): how a standing rule stays in view after paging.

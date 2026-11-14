@@ -822,10 +822,15 @@ class ServeService:
         the time it spends as the newest connection is the time a connection would need to become the
         oldest of 64, and the line is in the socket from that moment. Whether it is the token is read
         here without taking it from the socket (``shows_token``, a peek), and the handler takes the
-        same look before it reads anything (``vouch``), so a request line that carries the token is
-        never mistaken for a silent connection however the handler and this thread interleave. A
-        process without the token then cannot close a token holder's connection by opening more of
-        its own, however fast it opens them; it can only close its own."""
+        same look before it reads anything (``vouch``), so a request line that has arrived up to the
+        slash after the token is recognised whichever of the two looks first. A process without the
+        token then cannot close such a connection by opening more of its own, however fast it opens
+        them; it can only close its own. Not covered: a request line that arrives in pieces. The
+        handler's look sees only the first piece, its buffered read then takes the rest off the
+        socket, and this thread's later peek finds nothing, so that connection can be closed here
+        while it is the oldest unchecked one (round-3 review, with the cap held full: a 2 ms gap
+        between the pieces was answered 25 of 25 times, 5 ms 15 of 25, 30 ms 1 of 23). A client that
+        connects and waits before it sends is in the same position (docs/serve.md, "Limits")."""
         for connection, _ in sorted(self._unchecked.items(), key=lambda item: item[1]):
             if connection in self._vouched:
                 continue

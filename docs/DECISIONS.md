@@ -2706,8 +2706,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
   hostname (D42).
 - **D70. `contexto serve`, gateway hint headers, and a cloud-provider guard.** Claude, 2026-11-12,
   under D0; contract change (Stack, Upstream resolution, main selection, the missing-tools and
-  session-start checks, the `contexto run claude` checks). This entry is written in slices; the
-  first covers the hint headers and the guard on the launcher path. Measured at zero spend on Claude
+  session-start checks, the `contexto run claude` checks; Architecture, "Standing service"). This
+  entry is written in two slices. The first covers the hint headers, the cloud-provider guard and
+  the settings reader on the launcher path. The second covers `contexto serve`: its token, routing
+  and shutdown, the MCP binding (`contexto mcp --serve`), and how the service uses the first slice's
+  hint headers, guard and settings reader. Measured at zero spend on Claude
   Code 2.1.322, macOS, against loopback stubs with temporary config directories and a fake key
   (`docs/research/D70-serve-probes.md`: 34 runs, 177 requests; 36 more runs for this slice and 23
   more after its review, `spikes/m2/serve/q10_truthy.sh`).
@@ -2927,8 +2930,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
       total for its head and a refused body (a deadline thread shuts its read side), and at most 64
       such connections are open. One more takes the place of the oldest whose request line has not
       shown the token, which is shut; whether it has is read with a peek, by the handler before it
-      reads anything and by the accept thread before it shuts one, so a token holder's connection is
-      never taken for a silent one. The first version closed the new connection at the cap, so a
+      reads anything and by the accept thread before it shuts one, so a connection whose request
+      line has arrived up to the slash after the token is recognised whichever looks first. One
+      whose request line arrives in pieces is not covered: the handler's buffered read can take the
+      rest off the socket before the accept thread peeks, which then finds nothing, and the
+      connection can be shut to make room (round-3 review, with the cap held full by 70 threads: a
+      gap of 2 ms between the pieces was answered 25 of 25 times, 5 ms 15 of 25, 30 ms 1 of 23). The first version closed the new connection at the cap, so a
       process without the token that held 64 silent connections and reopened each one as it was closed
       kept every client out (0 of 40 health requests answered in 16 s); with the oldest closed instead
       it got 40 of 40 answered. A connection that passed is outside both limits, so a long stream is
@@ -2990,7 +2997,10 @@ the owner's delegation. Open decisions are listed at the end with the options an
       `Content-Length` or chunked, until the ids are handed over. The test is a client that reads the
       response as a real one does and asks resolve once, the moment it has the whole call, against an
       upstream slow to end the response; with registration delayed by 0.2 s it fails in all eight
-      framings and without the delay passes. The first version registered ids in the usage callback,
+      framings and without the delay passes. Whitespace before the body's first value completes
+      nothing and is not held: the round-3 review found the hold had kept a gateway's whitespace
+      keep-alive from the client until the body arrived (three one-byte chunks 1 s apart reached it
+      after 3.03 s), on `contexto run` too, since the proxy is shared. The first version registered ids in the usage callback,
       which missed a response without `usage` and ran after the body when the hold was skipped; the
       second wrote a chunked JSON body whole before its ids were read. Where the order
       cannot be promised is a response upstream content-encoded although the proxy asked for
@@ -3025,9 +3035,33 @@ the owner's delegation. Open decisions are listed at the end with the options an
       `ANTHROPIC_BASE_URL`, which is also where the default upstream is read from. `contexto run
       claude` and `contexto proxy` refuse an upstream that is this home's service (a loopback URL
       whose first path segment is the token, compared in constant time) with a usage error pointing
-      to `--upstream`, since requests would otherwise pass two engines that open the same store. The
-      service warns when its own environment sets a cloud-provider switch, since such a client sends
-      nothing to `ANTHROPIC_BASE_URL` (0 requests in 5 runs, one per provider).
+      to `--upstream`, since requests would otherwise pass two engines that open the same store.
+    - **One cloud-provider check.** A client with a provider switch on sends nothing to
+      `ANTHROPIC_BASE_URL` (0 requests in 5 runs, one per provider), so it never reaches the
+      service. The service, at start and in `--print-settings`, and `contexto mcp --serve`, in its
+      "unknown tool call" error, use the first slice's check (`contexto.upstream.cloud_provider`):
+      the process environment and every settings file Claude Code would read from the directory,
+      values read as JavaScript's `String()` of them, and a settings file that cannot be read
+      counts. The first version of `serve` had its own list in `contexto.servecontract` and read
+      the environment only. Merging the two kept the stricter reading, so a switch in the user
+      settings file, a project file or the managed file is named too. The service warns and does
+      not refuse: its clients start elsewhere, with their own environment and directory. Its
+      settings files are read once, through the first slice's reader, for the check and the
+      upstream.
+    - **Hint headers under `serve`.** `--print-settings` sets `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`
+      for the engine, which prefers the headers and keeps the signatures as the fallback, as under
+      the launcher. Each session's proxy and the proxy for unrouted requests remove the six gated
+      headers before forwarding, so no prompt id, agent type or tool duration reaches the upstream
+      (with the real `claude -p` 2.1.322 through the printed settings: `request_class: main` in the
+      session log and no gated header at the stub). `--forward-hint-headers` passes them on, for a
+      gateway that reads them; `serve_start` logs `hint_headers` as `stripped` or `forwarded`. The
+      launcher's three states are not used: the service cannot see a client's settings, and a
+      client that leaves the variable out sends none. The round-3 review found the printed settings
+      turned the hints on while the service still forwarded them. Rejected: leaving the variable
+      out of the printed settings, which would leave `serve` on the signatures alone. Limit: merged
+      into the user settings file, the variable reaches every Claude Code the user starts, and a
+      `contexto run claude` then reads it as the user's own and forwards the hints to its upstream
+      (`forwarded`); `docs/serve.md` advises a separate `--settings` file.
     - **The MCP server for the service's clients: `contexto mcp --serve`.** A client `contexto serve`
       serves is not launched by Contexto, so its MCP server is registered once in the user's Claude
       Code configuration and shared by every conversation: it cannot be started with `--session S`.
@@ -3040,18 +3074,29 @@ the owner's delegation. Open decisions are listed at the end with the options an
       valid session id naming an existing session directory that is not a symlink, and the existing
       tool code then runs against that store, so replies, recall budgets and the session log are
       those of `--session` mode. The store is opened with `create=False`, so a session removed after
-      that check, or pruned while the open waits for its lock, is refused rather than made again. After
+      that check, or pruned while the open waits for its lock, is refused rather than made again.
+      So is an empty session directory, which is what prune leaves between unlinking `live.lock`,
+      its last file, and removing the directory: the round-3 version made `live.lock`, `page.key`
+      and `pages/` in it, so prune's `rmdir` failed and the session stayed. A directory with other
+      files and no `live.lock` (a session made before D37, or one whose damaged lock was deleted as
+      its repair) still gets the lock file. After
       a 404 the call is asked again: six tries in all, the last started within 2 s of the first (see
       "Tool calls"); nothing else is retried. Each try has 2 s in total to connect and read the whole
       answer (its socket is shut at that deadline), so a call ends within 4 s however slowly an
-      answer arrives.
+      answer arrives. Before each retry the server looks for the service again, as before the first
+      try: a service must hold the lock, and `serve.json` and `serve.token` must give the port, pid
+      and token of the first try, or the call ends as not running and nothing more is sent. The
+      round-3 version read the endpoint once, so a call retrying when the service stopped sent its
+      resolve request to whatever bound the freed port next (reproduced in review with SIGTERM at
+      0.7 s and 1.12 s into the retries; the test stops the service during a wait and binds the
+      port, and before the fix that socket received the request).
     - **It fails closed.** A call whose session cannot be established gets a tool error and no store
       is opened, read or written. There is no fallback to another session, to
       `CLAUDE_CODE_SESSION_ID`, or to the newest session: a pin written to another conversation's
       ledger stays in that conversation's pinned state, which is worse than a tool that says it did
       not run. The errors are distinct and say what to do: no tool-use id in the call; the service is
-      not running or its files cannot be used; the service does not know the id (the message names a
-      cloud-provider switch set in the server's environment); the token was refused; the answer is
+      not running or its files cannot be used; the service does not know the id (the message names what
+      the cloud-provider check below finds for the server's environment and directory); the token was refused; the answer is
       outside the contract; the session named cannot be opened. A session whose `live.lock` is
       damaged gets the D59 reply. The server keeps the 8 most recently used stores open and releases
       an evicted one, so `contexto sessions prune` sees it idle again; a kept store is checked at
@@ -3118,7 +3163,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
       call fails with the "no tool-use id" error. What Codex sends in `_meta` was not measured; the key
       is Claude Code's own, so `--serve` is for Claude Code only. Not run: `/resume` inside a running
       interactive session, `--continue`, background subagents, interactive subagents. A provider
-      switch set only in organization-managed settings may not be named in the "unknown id" error.
+      switch in managed settings delivered other than through the managed settings file is not
+      named in the "unknown id" error, as the first slice's check does not see it.
       Tool calls are answered one at a time, so a call waiting out its retries holds the others of its
       turn for up to 4 s. With 8 stores open the MCP server's search text can reach 8 times the
       per-store budget. A content-encoded upstream response was tested with gzip and sync flushes

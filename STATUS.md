@@ -580,6 +580,9 @@ Still open:
 - Not started: a byte budget per search on the pages `contexto_search` reads (D41 follow-up): it
   reads and renders up to 53 pages per search with no cap on their size (18.5 MB of page JSON for
   one multi-word query at 3,000 pages sized like real turns).
+- D70, `contexto serve` (PR #272): the step-by-step client recipes with tests (the Agent SDK,
+  VS Code, headless `claude -p`; the brief's requirement 6) come in a follow-up PR. Until then
+  `docs/serve.md` covers setup through `--print-settings` and `--print-mcp-config` only.
 - Open from D49: a head too large for `min_turn_room` (bound 60,000, a 28,000-token head) leaves the
   minimum-room rotation (A12) nothing to restore, so later turn starts keep their window (about 34,200 real, room 806,
   `turn_room_low` logged once); PR #232 review B's finding 1.
