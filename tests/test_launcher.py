@@ -76,6 +76,7 @@ if os.environ.get("FAKE_REQUEST"):
     headers = {"Content-Type": "application/json", "x-api-key": "fake-key"}
     if os.environ.get("FAKE_CLAUDE_SESSION"):  # Claude Code's own session id, the same as its transcript's name
         headers["X-Claude-Code-Session-Id"] = os.environ["FAKE_CLAUDE_SESSION"]
+    headers.update(json.loads(os.environ.get("FAKE_HEADERS", "{}")))  # more headers, such as the gateway hints
     request = urllib.request.Request(base + "/v1/messages", data=body, method="POST", headers=headers)
     with urllib.request.urlopen(request, timeout=10) as response:
         record["response_status"] = response.status
@@ -174,7 +175,9 @@ def test_run_wires_settings_mcp_and_args_and_cleans_up(env, upstream, tmp_path):
     assert argv[0] == "--settings=" + record["settings_path"] and argv[1] == "--mcp-config=" + record["mcp_path"]
     assert argv[2:] == ["-p", "hello", "--model", "m"]
     base = record["settings"]["env"]["ANTHROPIC_BASE_URL"]
-    assert record["settings"] == {"env": {"ANTHROPIC_BASE_URL": base}, "permissions": {"allow": contexto_tool_rules()}}
+    assert record["settings"] == {"env": {"ANTHROPIC_BASE_URL": base, "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
+                                          "CONTEXTO_HINT_HEADERS": "stripped"},
+                                  "permissions": {"allow": contexto_tool_rules()}}
     assert base.startswith("http://127.0.0.1:")
     server = record["mcp"]["mcpServers"]["contexto"]
     assert server["command"] == sys.executable and server["args"] == ["-P", "-m", "contexto", "mcp", "--session=s1"]
@@ -457,8 +460,11 @@ def test_engine_config_passes_only_set_values():
 
 
 def test_payloads_and_private_files(tmp_path):
-    assert settings_payload("http://127.0.0.1:1") == {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"},
-                                                      "permissions": {"allow": contexto_tool_rules()}}
+    # D70: the hint headers are asked for next to the base URL, with the launch's decision about them.
+    assert settings_payload("http://127.0.0.1:1") == {
+        "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
+                "CONTEXTO_HINT_HEADERS": "stripped"},
+        "permissions": {"allow": contexto_tool_rules()}}
     assert mcp_payload("s", tmp_path)["mcpServers"]["contexto"]["args"][-1] == "--session=s"
     # An id starting with "-" stays the option's value (security QA 2026-11-05, finding 7).
     assert mcp_payload("-x", tmp_path)["mcpServers"]["contexto"]["args"][-1] == "--session=-x"
@@ -480,7 +486,7 @@ def test_settings_allow_exactly_contexto_s_own_tools():
     assert all("*" not in rule and "(" not in rule for rule in rules)
     payload = settings_payload("http://127.0.0.1:1")
     assert set(payload) == {"env", "permissions"} and set(payload["permissions"]) == {"allow"}
-    assert set(payload["env"]) == {"ANTHROPIC_BASE_URL"}
+    assert set(payload["env"]) == {"ANTHROPIC_BASE_URL", "CLAUDE_CODE_GATEWAY_HINT_HEADERS", "CONTEXTO_HINT_HEADERS"}
 
 
 def test_exit_code_maps_signals():
@@ -504,7 +510,7 @@ def test_start_warning_depends_on_bound_and_assumed_overhead(env, upstream, tmp_
     assert "run from 13,322 to 18,403" in codex and "28,000" not in codex
     assert assumed_overhead({}) == ASSUMED_OVERHEAD_DEFAULT
     assert assumed_overhead({"OPENRIG_SESSION_NAME": "x"}) == ASSUMED_OVERHEAD_OPENRIG
-    quiet = launch(env, "--upstream", upstream, "--session", "w1", "claude", cwd=tmp_path)
+    quiet = launch(env, "--quiet", "--upstream", upstream, "--session", "w1", "claude", cwd=tmp_path)  # D64: no summary
     _, err = quiet.communicate(timeout=30)
     assert err.count("contexto:") == 1  # only the session line
     noisy = launch(env, "--upstream", upstream, "--bound", "70000", "--session", "w2", "claude", cwd=tmp_path)
@@ -664,6 +670,22 @@ def test_run_codex_without_the_codex_module_exits_2(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "contexto.codex", None)  # behaves as not installed
     assert cli.main(["run", "codex", "exec", "hi"]) == 2
     assert "codex support is not installed" in capsys.readouterr().err
+
+
+def test_every_command_loads_without_the_codex_module(tmp_path):
+    """The CLI imports every command module to build its parser. #258's doctor imported contexto.codex at
+    the top, so with the module missing every command, `contexto run codex` too, failed with
+    ModuleNotFoundError; the test above passed in the full suite only because an earlier test had already
+    imported the doctor module. A fresh interpreter with the module blocked does not depend on test order."""
+    code = ("import sys\n"
+            "sys.modules['contexto.codex'] = None\n"  # behaves as not installed
+            "from contexto import cli\n"
+            "raise SystemExit(cli.main(['run', 'codex', 'exec', 'hi']))\n")
+    env = {**os.environ, "HOME": str(tmp_path), "CONTEXTO_HOME": str(tmp_path / "store")}
+    done = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env, capture_output=True, text=True,
+                          timeout=60)
+    assert done.returncode == 2, done.stderr
+    assert "codex support is not installed" in done.stderr and "Traceback" not in done.stderr
 
 
 def test_run_codex_dispatches_to_contexto_codex(monkeypatch):

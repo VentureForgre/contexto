@@ -11,7 +11,15 @@ Directories are 0700 and files 0600 whatever the umask (``contexto.private``, co
   Opening a store repairs a crash-truncated tail and logs ``ledger_repaired``; other damage is
   left for a human and logged as ``ledger_damaged`` (pins and closes then fail).
 - ``meta.json``: session metadata. ``workdir`` (the directory file sources are checked against,
-  recorded by lane A's launcher with ``set_workdir``) and ``window_tokens`` and ``bytes_per_token``
+  recorded by lane A's launcher with ``set_workdir``), ``project`` (D69: the project root, recorded with
+  it the first time and never changed), ``project_memory`` (false when project memory is off for the
+  session), ``forgotten`` (record ids ``contexto project forget`` took out of what later sessions carry)
+  and ``main_records`` (the record ids the engine saw pinned or closed in the main conversation, the only
+  ones carried or removed beyond this session; see ``contexto.store.project`` and
+  ``contexto.mainrecords``), ``trusted_conversations`` (the keys of the conversations an engine trusted as
+  main, the newest ``TRUSTED_CONVERSATIONS_KEPT`` by last trust, recorded by lane A's engine with
+  ``add_trusted_conversation``; a later engine trusts them again),
+  and ``window_tokens`` and ``bytes_per_token``
   (recorded by lane A's engine with ``set_window``; recall sizes chunks from them), and the recall
   rooms: ``turn_room`` (the main conversation's) and ``side_rooms`` (D40, one per side request
   lineage in a tool loop, keyed by an engine-chosen id, each with its publish time; expired after
@@ -30,8 +38,9 @@ it, as ``sessions list`` and prune refuse it (D58). Files in it are never opened
 FIFO or directory in a file's place is refused without blocking, and temporary files left by a process
 that died mid-write are removed when a writable store opens (``contexto.private``).
 
-Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``) come from
-``contexto.store.records.LedgerOps``; see that module for the API the MCP server uses.
+Ledger methods (``pin``, ``close``, ``state``, ``state_text``, ``pinned_text``, ``carried``,
+``carried_text``) come from ``contexto.store.records.LedgerOps``; see that module for the API the MCP
+server uses.
 
 ``contexto.store.memory.MemoryStore`` has the same methods and keeps everything in memory.
 """
@@ -48,7 +57,7 @@ import secrets
 import sys
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -68,9 +77,10 @@ from contexto.private import (
 from contexto.store.catalog import PageCatalog, load_page
 from contexto.store.ledger import Ledger, LedgerCorruptError
 from contexto.store.pages import build_page, render_index, same_content
+from contexto.store.project import Project, merged_main_records, project_root, recorded_root, session_project
 from contexto.store.recall import lists_identifiers
 from contexto.store.records import LedgerOps
-from contexto.store.search import rank
+from contexto.store.search import Approximate, rank, rank_approximate
 
 __all__ = ["SessionStore", "PageConflictError", "PageNotFoundError", "PageUnreadableError", "KeyFileError",
            "LockFileDamagedError", "SessionNotFoundError", "redact"]
@@ -87,6 +97,7 @@ def check_page_id(page_id: Any) -> str:
 KEY_BYTES = 32
 
 LIVE_LOCK = "live.lock"
+TRUSTED_CONVERSATIONS_KEPT = 64  # add_trusted_conversation: main conversations an engine trusted (D69)
 CLI_SESSIONS_KEPT = 64  # record_cli_session: CLI conversation ids kept per CLI (a /clear or a fork adds one)
 LIVE_ATTEMPTS = 8  # hold_live: tries before giving up on a session that keeps being deleted
 
@@ -298,8 +309,11 @@ EPOCH_FIELDS: dict[str, Callable[[Any], bool]] = {
     "config": lambda v: isinstance(v, dict),
     "anchor": lambda v: isinstance(v, dict) and set(v) == {"n", "hash"} and _nat(v["n"]) and _hex64(v["hash"]),
 }
-# Fields a record may leave out, so a record written before one was added still reads (D61: head_rule).
-EPOCH_OPTIONAL_FIELDS: dict[str, Callable[[Any], bool]] = {"head_rule": _nat}
+# Fields a record may leave out, so a record written before one was added still reads (D61: head_rule;
+# D69: start_text, the carried records sent before the first rotation, written only when there are some).
+EPOCH_OPTIONAL_FIELDS: dict[str, Callable[[Any], bool]] = {"head_rule": _nat,
+                                                           "start_text": lambda v: isinstance(v, str),
+                                                           "untrusted": lambda v: v is True}
 
 
 def check_epoch(record: Any) -> dict[str, Any]:
@@ -545,8 +559,75 @@ class SessionStore(LedgerOps):
             self.log({"event": "ledger_repaired", "quarantine": quarantined.name})
 
     def set_workdir(self, path: Path) -> None:
-        """Record the session's working directory (absolute), which file sources are checked against."""
-        self._update_meta({"workdir": str(Path(path).resolve())})
+        """Record the session's working directory (absolute), which file sources are checked against,
+        and, once, the project it belongs to (D69): ``project``, the root of that directory's
+        repository, else the directory itself (``contexto.store.project.project_root``). A session that
+        records a project already (or, from an earlier release, a working directory to derive it from)
+        keeps it: a resume from another directory never moves the session or its records to another
+        project."""
+        workdir = Path(path).resolve()
+
+        def change(meta: dict[str, Any]) -> dict[str, Any]:
+            if recorded_root(meta) is not None:
+                return {"workdir": str(workdir), "project": str(recorded_root(meta))}
+            return {"workdir": str(workdir), "project": str(project_root(workdir))}
+
+        self._modify_meta(change)
+
+    def set_project_memory(self, on: bool) -> None:
+        """Record whether this session takes part in project memory (D69). Off (``project_memory``
+        false): it carries nothing from the project's earlier sessions and gives nothing to later ones."""
+        if not isinstance(on, bool):
+            raise ValueError(f"project memory is on or off (a bool), not {on!r}")
+        self._update_meta({"project_memory": on})
+
+    def add_main_records(self, record_ids: Iterable[str]) -> None:
+        """Record that the main conversation made these records (D69): the engine saw its own
+        ``contexto_pin`` or ``contexto_close`` call and the server's success reply. Kept in ``meta.json``
+        as ``main_records``, once each, the newest ``MAIN_RECORDS_KEPT``; only those are carried into
+        later sessions, and only those remove another session's records outside this one."""
+        new = list(record_ids)
+        if new:
+            self._modify_meta(lambda meta: (None if (merged := merged_main_records(meta.get("main_records"), new))
+                                            is None else {"main_records": merged}))
+
+    def main_records(self) -> list[str]:
+        """The record ids ``add_main_records`` kept, oldest first."""
+        kept = self._meta().get("main_records")
+        return [x for x in kept if isinstance(x, str)] if isinstance(kept, list) else []
+
+    def add_trusted_conversation(self, key: str) -> None:
+        """Record that an engine trusted the conversation ``key`` as the main one (D69): its own first
+        main, or one that took main by a trusted rule. A later engine on this store trusts that
+        conversation again when it is the first it sees (``RewriteEngine._first_trusted``), so a
+        ``--continue`` of the user's conversation carries pins though the epoch record names another
+        one. Kept in ``meta.json`` as ``trusted_conversations``, once each, the newest
+        ``TRUSTED_CONVERSATIONS_KEPT``."""
+        if not isinstance(key, str) or not key:
+            return
+
+        def change(meta: dict[str, Any]) -> dict[str, Any] | None:
+            kept = meta.get("trusted_conversations")
+            kept = [x for x in kept if isinstance(x, str)] if isinstance(kept, list) else []
+            if kept and kept[-1] == key:
+                return None
+            kept = [x for x in kept if x != key] + [key]
+            return {"trusted_conversations": kept[-TRUSTED_CONVERSATIONS_KEPT:]}
+
+        self._modify_meta(change)
+
+    def trusted_conversations(self) -> list[str]:
+        """The conversation keys ``add_trusted_conversation`` kept, oldest first."""
+        kept = self._meta().get("trusted_conversations")
+        return [x for x in kept if isinstance(x, str)] if isinstance(kept, list) else []
+
+    def project(self) -> Project | None:
+        """This session's view of its project (D69, ``contexto.store.project``): its earlier sessions
+        and the records it carries from them. None when no project is recorded or can be derived from
+        the working directory, or when project memory is off for this session. Other sessions are read
+        without changing them, and a store opened read-only logs nothing in its own either."""
+        log = None if getattr(self, "_read_only", False) else self.log
+        return session_project(self.home, self.session_id, self._meta(), self.ledger.records, log)
 
     def set_window(self, window_tokens: int, bytes_per_token: float, model: str | None = None) -> None:
         """Record the engine's window budget W (tokens) and the session's measured bytes per token.
@@ -872,7 +953,17 @@ class SessionStore(LedgerOps):
         path = self.dir / "page.key"
         if not path.exists():
             # A losing racer's write_new returns False and reads the winner's complete key below.
-            write_new(path, secrets.token_bytes(KEY_BYTES).hex().encode("ascii"))
+            if write_new(path, secrets.token_bytes(KEY_BYTES).hex().encode("ascii")):
+                # The key's modification time is the session's creation time (``sessions list``, and
+                # D69: a later session carries only records pinned before it was created). A file's
+                # time comes from the kernel's coarse clock, which on Linux can be milliseconds behind
+                # the clock a record's ``created_at`` is read from, so a pin made just before this
+                # session would look newer than it. Stamp the key from the same clock as the records.
+                now = time.time_ns()
+                try:
+                    os.utime(path, ns=(now, now))
+                except OSError:
+                    pass  # the coarse time stands
         try:
             key = bytes.fromhex(read_regular(path).decode("ascii").strip())
         except NotRegularFileError as e:
@@ -994,6 +1085,17 @@ class SessionStore(LedgerOps):
         for _ in range(3):
             entries, fetch, names = self._catalog.search_entries()
             found = rank(entries, query, fetch)
+            if self._catalog.all_present(names):
+                break
+        return found
+
+    def search_approximate(self, query: str) -> Approximate:
+        """Pages holding part of ``query``, best first, each with the words it matched and how: what
+        search falls back to when ``search`` finds no page (``contexto.store.search.rank_approximate``,
+        D65). Empty when no page passes the floor."""
+        for _ in range(3):  # as ``search``: run again on a new listing when a page went meanwhile
+            entries, fetch, names = self._catalog.search_entries()
+            found = rank_approximate(entries, query, fetch)
             if self._catalog.all_present(names):
                 break
         return found

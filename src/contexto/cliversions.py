@@ -28,6 +28,7 @@ measured-on constants next to each signature must name (``tests/test_cliversions
 
 from __future__ import annotations
 
+import builtins
 import os
 import re
 import selectors
@@ -35,7 +36,8 @@ import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 # Claude Code 2.1.302: session-start signature, context-block kinds, and the missing-tools notices
@@ -106,8 +108,18 @@ def check_disabled(env: Mapping[str, str] | None = None) -> bool:
     return value not in ("", "0", "false", "no")
 
 
+def start_failure(error: str | None) -> bool:
+    """Whether ``installed_version``'s error means the CLI could not be started at all: the name of an
+    ``OSError`` from starting it (FileNotFoundError for a missing #! interpreter, PermissionError,
+    OSError for an exec format error), not a timeout, an exit code, or unparsed output."""
+    cls = getattr(builtins, error or "", None)
+    return isinstance(cls, type) and issubclass(cls, OSError) and not issubclass(cls, TimeoutError)
+
+
 def installed_version(binary: str, *, timeout: float = VERSION_TIMEOUT_S,
-                      env: Mapping[str, str] | None = None) -> tuple[str | None, str | None]:
+                      env: Mapping[str, str] | None = None,
+                      spawn_guard: Callable[[], AbstractContextManager[Any]] | None = None
+                      ) -> tuple[str | None, str | None]:
     """``(version, None)`` from ``<binary> --version``, or ``(None, reason)`` when it cannot be read:
     ``not_found``, ``timeout``, ``exit_<code>``, ``unparsed``, or the exception's type name.
 
@@ -115,17 +127,28 @@ def installed_version(binary: str, *, timeout: float = VERSION_TIMEOUT_S,
     does not reach it), stdin closed, stdout and stderr on one pipe. At most ``MAX_VERSION_OUTPUT``
     bytes are read, until a complete line holding a version, end of file, or ``timeout``; a command
     that printed a version and exited is not waited on for a child that keeps the pipe open. The
-    process group is killed before returning. ``KeyboardInterrupt`` kills it too and propagates."""
+    process group is killed before returning. ``KeyboardInterrupt`` kills it too and propagates.
+
+    ``spawn_guard`` wraps the start of the command (``contexto doctor`` holds SIGINT, SIGTERM and SIGHUP
+    there): a signal that lands inside ``subprocess.Popen`` while it is still returning leaves a process
+    the caller never got and cannot kill. A held signal is raised as the guard exits, so the command is
+    killed on that path too."""
     path = shutil.which(binary) if os.sep not in binary else binary
     if path is None:
         return None, "not_found"
     started = time.monotonic()
+    child: subprocess.Popen | None = None
     try:
-        child = subprocess.Popen([path, "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, env=None if env is None else dict(env),
-                                 start_new_session=True)
+        with spawn_guard() if spawn_guard is not None else nullcontext():
+            child = subprocess.Popen([path, "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, env=None if env is None else dict(env),
+                                     start_new_session=True)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         return None, type(exc).__name__
+    except BaseException:  # a signal the guard held, raised as it exits: the command must not outlive it
+        if child is not None:
+            _kill_group(child)
+        raise
     try:
         output, timed_out = _read_version_output(child, started + timeout)
         code = child.poll()
@@ -227,7 +250,8 @@ class ClientVersions:
     engine, and ``session_start_unrecognised`` at most once per engine.
 
     The session start is judged once, on the first request that the dialect judges
-    (``Dialect.judges_session_start``; for Claude Code, one with a tool list) and that carries the CLI's
+    (``Dialect.judges_session_start``; for Claude Code, one with a tool list, or with the hint headers
+    on, one whose request class is ``main`` or ``compaction``, D70) and that carries the CLI's
     injected context (``Dialect.session_start_seen`` returns True or False, not None). That is the main
     conversation's first request: Claude Code's title, topic, and quota side requests have no tool
     list, and a subagent's requests start from a tool call of a main turn, so after it. The engine's
@@ -242,7 +266,10 @@ class ClientVersions:
         self.session_start_judged = False
         self.unjudged = 0  # judged requests that could not tell
 
-    def observe(self, request: dict, headers: Mapping[str, str], dialect: Any) -> list[dict]:
+    def observe(self, request: dict, headers: Mapping[str, str], dialect: Any, *,
+                judged: bool | None = None) -> list[dict]:
+        """``judged`` is the engine's answer to "is this a request the dialect judges?" when it has one
+        from Claude Code's request class (D70, ``RewriteEngine._classify``); None asks the dialect."""
         events: list[dict] = []
         found = client_version(headers)
         if found:
@@ -257,7 +284,9 @@ class ClientVersions:
                     self.untested_logged = True
                     events.append({"event": "cli_version_untested", "cli": cli, "version": version,
                                    "tested_versions": tested_list(cli)})
-        if not self.session_start_judged and dialect.judges_session_start(request):
+        if judged is None:
+            judged = dialect.judges_session_start(request)
+        if not self.session_start_judged and judged:
             seen = dialect.session_start_seen(request.get(dialect.field) or [])
             if seen is None:
                 self.unjudged += 1

@@ -7,7 +7,8 @@ Steps (M2 contract, Architecture):
 2. Open session S in ``contexto.paths.contexto_home()`` and start ``ContextoProxy`` on
    ``127.0.0.1:<free port>`` with the rewrite engine as its transform.
 3. Write two temporary files, mode 0600, in a private temporary directory (never in the user's
-   Claude configuration): a ``--settings`` file holding ``env.ANTHROPIC_BASE_URL = <proxy URL>`` and
+   Claude configuration): a ``--settings`` file holding ``env.ANTHROPIC_BASE_URL = <proxy URL>``,
+   ``env.CLAUDE_CODE_GATEWAY_HINT_HEADERS = 1`` and ``env.CONTEXTO_HINT_HEADERS`` (D70, below) and
    ``permissions.allow`` with one rule per Contexto MCP tool, by its exact name (D44:
    ``mcp__contexto__contexto_recall`` and the other four), and an ``--mcp-config`` file that makes
    Claude Code spawn ``contexto mcp --session S`` over stdio with the current interpreter.
@@ -25,6 +26,37 @@ every Contexto tool in ``-p`` mode ("you haven't granted it yet") and the sessio
 Limit: organization-managed settings outrank ``--settings``; if they set ``ANTHROPIC_BASE_URL``,
 Claude Code bypasses the proxy and Contexto cannot keep the prompt bounded. ``CLAUDE_CONFIG_DIR`` is
 never set and no user configuration file is edited.
+
+Hint headers (D70): the ``--settings`` file asks Claude Code for its gateway hint headers
+(``contexto.hints``), which say what kind of request each one is; the rewrite engine reads them in
+place of signatures that change between Claude Code versions. A launch is in one of three states
+(``contexto.hints.hint_headers_state``), logged in the launch event as ``hint_headers``:
+
+- ``stripped``: the proxy leaves the hints out of what it forwards, so the upstream gets the headers
+  it got before.
+- ``forwarded``: the user had turned them on themselves (the process environment, a settings file
+  ``env`` block, or the managed settings file), so they pass through as they did.
+- ``off``: the user set ``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` to ``0``, ``false``, ``no`` or ``off`` in
+  the process environment, their user settings file or the managed settings file. The launcher then
+  leaves the variable out of its ``env`` block, Claude Code sends no hint header, and the engine reads
+  its signatures.
+
+Claude Code applies the ``env`` block to its own environment, so every process the session starts (a
+tool command, a hook, an MCP server) inherits it. The block therefore also holds
+``CONTEXTO_HINT_HEADERS`` with the launch's state, and a nested ``contexto run claude`` that finds
+``stripped`` there does not take the inherited ``1`` for the user's. Limit: a nested plain ``claude``
+pointed at another base URL inherits the ``1`` too and sends the hints to that URL, where no Contexto
+proxy removes them. The explicit off above is the way out: Contexto then sets nothing to inherit.
+
+Cloud providers (D70): with ``CLAUDE_CODE_USE_BEDROCK``, ``CLAUDE_CODE_USE_VERTEX``,
+``CLAUDE_CODE_USE_FOUNDRY``, ``CLAUDE_CODE_USE_MANTLE`` or ``CLAUDE_CODE_USE_ANTHROPIC_AWS`` on, Claude
+Code sends every request to that provider and none to ``ANTHROPIC_BASE_URL`` (measured on 2.1.322;
+``CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`` too, measured on 2.1.318: ``upstream.CLOUD_PROVIDER_KEYS``),
+so the session would run with no bound and nothing would say so. The launch is refused before a
+session is opened when a switch is on in the process environment or in any settings file Contexto
+can find, whichever of them Claude Code would apply (``check_cloud_provider``).
+
+Claude Code's settings files are read once per launch, with a bound (``claude_launch_settings``).
 
 Resume (D55): the proxy records each Claude Code session id it serves (the ``X-Claude-Code-Session-Id``
 header, else ``metadata.user_id``) in the session's metadata. Claude Code keeps that id across
@@ -62,13 +94,25 @@ claude exits. So is a CLI version Contexto was not tested with (``contexto.clive
 ``<cli> --version`` at start; ``contexto run --no-version-check <cli>`` or
 ``CONTEXTO_NO_VERSION_CHECK=1`` skips it), before claude starts. stderr stays quiet otherwise.
 
+Project memory (D69): a session belongs to the project of the directory it was started in
+(``contexto.store.project``) and carries what the main conversation pinned in that project's earlier
+sessions. ``contexto run --no-project-memory <cli>``, or ``CONTEXTO_PROJECT_MEMORY`` set to ``0``,
+``false``, ``off`` or ``no``, keeps the launch out of it: the session records ``project_memory: false``
+before the proxy starts and before the CLI can start the MCP server (both read it from the store), and a
+later resume of that session stays off without the option. A launch with memory on records nothing, so
+it never turns a session back on. With the other start notices, after the session line and before the
+CLI starts (the terminal is still the launcher's then), one line says how many records the session
+carries, from how many of the project's earlier sessions, and how to list them or turn this off; there
+is no line when the project has no earlier session or memory is off. The line names the project's
+directory; the session log gets one ``project_memory`` event of counts, never the path.
+
 ``claude --version`` and ``--help`` (alone) run claude directly, with no session or proxy.
 
 Exit codes: claude's own code; 128 + N if claude died from signal N, or if the launcher got signal N
-before claude started; 2 for a usage error such as a bound above the guard, an invalid session id, or
-a ``CONTEXTO_HOME`` that is not a directory; 1 if the proxy or the session store cannot start (for
-example ``CONTEXTO_HOME`` is not writable); 127 if ``claude`` is not on PATH or cannot be run; 130 for
-a Ctrl+C during the version check, before claude starts.
+before claude started; 2 for a usage error such as a bound above the guard, an invalid session id, a
+cloud-provider switch that is on (D70), or a ``CONTEXTO_HOME`` that is not a directory; 1 if the proxy
+or the session store cannot start (for example ``CONTEXTO_HOME`` is not writable); 127 if ``claude`` is
+not on PATH or cannot be run; 130 for a Ctrl+C during the version check, before claude starts.
 """
 
 from __future__ import annotations
@@ -85,7 +129,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,21 +137,33 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from contexto.cliversions import launch_check
+from contexto.hints import HINT_HEADERS_KEY, HINT_MARKER_KEY, HINT_STATES, OFF, STRIPPED, hint_headers_state
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
 from contexto.mcp import TOOLS as MCP_TOOLS
-from contexto.paths import contexto_home, mcp_env, session_dir
+from contexto.paths import PROJECT_MEMORY_ENV, contexto_home, mcp_env, project_memory_env, session_dir
 from contexto.private import affinity_salt, open_private, private_dir
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
+from contexto.stats import fault_notices, log_unwritable_message, print_exit_summary, quiet_from_env
 from contexto.store import LIVE_LOCK, SessionStore
+from contexto.store.pinned import render_carried
+from contexto.store.project import project_root, read_meta, recorded_root
 from contexto.store.prune import discard_new_session
 from contexto.store.sessions import named, starting_with
 from contexto.toolcheck import denied_tools_message, missing_tools_message
-from contexto.upstream import Upstream, resolve_upstream, untrusted_note
+from contexto.upstream import (
+    SettingsFiles,
+    Upstream,
+    cloud_provider,
+    cloud_provider_note,
+    resolve_upstream,
+    untrusted_note,
+)
 
 DEFAULT_BOUND = 150_000
 REPORT_LOCK_TIMEOUT_S = 2.0  # report_missing_tools: how long the exit waits for a request still in the engine
 MIN_WINDOW_BUDGET = 25_000
 DEFAULT_HEADROOM_FLOOR = 25_000
+DEFAULT_PIN_BUDGET = 6_000  # rewrite.Config.pin_budget, for a launch without the engine
 ASSUMED_OVERHEAD_OPENRIG = 92_000
 ASSUMED_OVERHEAD_DEFAULT = 28_000  # D55: 18,641 to 27,925 measured on Claude Code 2.1.314, tool search on
 BOUND_GUARD = 170_000  # below Claude Code's idle compaction (200,000) with room for an over-bound turn
@@ -124,7 +180,9 @@ WATCHDOG_EXITED = b"exited\n"  # the child was reaped: its pid may be reused
 # Contexto's own ``contexto run`` options, and whether each takes a value (D55: a hint when one is put
 # after the CLI's name). The codex options are not listed: they only apply before 'codex'.
 RUN_OPTIONS = {"--bound": True, "--allow-large-bound": False, "--window-fraction": True, "--headroom-floor": True,
-               "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False}
+               "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False,
+               "--quiet": False, "--no-project-memory": False}
+ENV_VALUE_SHOWN = 40  # characters of an unrecognised variable's value quoted on stderr
 # Claude Code's long options whose value is the next argument even when it starts with "-": every main-command
 # option declared with a required ``<value>`` in the 2.1.314 and 2.1.318 binaries, shown in ``--help`` or
 # hidden (variadic ones take at least that one). ``claude_options`` skips that value.
@@ -193,6 +251,8 @@ class LaunchOptions:
     headroom_floor: int | None = None
     claude_bin: str = "claude"
     version_check: bool = True
+    quiet: bool = False  # D64: no summary at exit; warnings are still printed
+    project_memory: bool = True  # False: --no-project-memory (D69)
 
 
 def check_user_args(claude_args: list[str]) -> None:
@@ -248,6 +308,57 @@ def check_upstream(upstream: Upstream) -> None:
         raise LaunchError(f"invalid upstream {upstream.url!r} (from {upstream.source}): {problem}", EXIT_USAGE)
 
 
+def check_cloud_provider(cwd: Path, env: Mapping[str, str] | None = None, *, home: Path | None = None,
+                         files: SettingsFiles | None = None, managed: Path | None = None) -> None:
+    """D70: refuse a launch that Claude Code may send to a cloud provider. With one of the provider
+    switches on Claude Code 2.1.322 sent nothing to ``ANTHROPIC_BASE_URL``, so the proxy would see no
+    request, the session would run with no bound, and nothing would say so. The check fails closed
+    (``contexto.upstream.cloud_provider``): a switch that is on in the process environment or in any
+    settings file Contexto can find refuses, whichever of them Claude Code would apply, and so does
+    a settings file that is there and cannot be read. A usage error, before a session is opened,
+    naming the variable, each place it is on, and what to do. ``env``, ``home`` and ``managed``
+    default to the process environment, the home directory and the platform's managed settings file."""
+    found = cloud_provider(env=env, cwd=cwd, home=home, files=files, managed=managed)
+    if found is None:
+        return
+    steps = []
+    for name, places in found.on:
+        if "env" in places:
+            steps.append(f"unset {name} for this command (env -u {name} contexto run ...)")
+        blocks = len([place for place in places if place != "env"])
+        if blocks:
+            where = "that env block" if blocks == 1 else "those env blocks"
+            steps.append(f"remove {name} from {where}, or set it to 0 there")
+    if found.unread:
+        steps.append("fix or remove the " + ("file" if len(found.unread) == 1 else "files")
+                     + " that could not be read")
+    remedy = "; ".join(steps)
+    if found.on:
+        why = ("Contexto's proxy would see no request and the session would run with no bound, so the launch "
+               "is refused. Contexto refuses when a switch is on in any of these places, whichever of them "
+               "Claude Code would apply")
+        how = (f"To run through Contexto: {remedy}; and give Contexto an upstream that speaks the Anthropic "
+               f"Messages API (--upstream or ANTHROPIC_BASE_URL). To keep using the provider, run claude "
+               f"without contexto.")
+    else:
+        why = ("With a provider on, Contexto's proxy would see no request and the session would run with no "
+               "bound, so the launch is refused")
+        how = f"{remedy[0].upper()}{remedy[1:]}, then run again."
+    raise LaunchError(f"{cloud_provider_note(found)}. {why}. {how}", EXIT_USAGE)
+
+
+def claude_launch_settings(explicit_upstream: str | None, cwd: Path, env: Mapping[str, str] | None = None, *,
+                           home: Path | None = None, managed: Path | None = None) -> tuple[Upstream, str]:
+    """Everything ``contexto run claude`` takes from Claude Code's settings files, each file read once
+    and with a bound (``contexto.upstream.SettingsFiles``): the cloud-provider check, which raises
+    before anything else is decided; the upstream (``resolve_upstream``); and the hint header state
+    (``contexto.hints.hint_headers_state``). Nothing is created on disk."""
+    files = SettingsFiles()
+    check_cloud_provider(cwd, env, home=home, files=files, managed=managed)
+    upstream = resolve_upstream(explicit_upstream, env=env, cwd=cwd, home=home, files=files)
+    return upstream, hint_headers_state(env=env, cwd=cwd, home=home, files=files, managed=managed)
+
+
 def check_home(home: Path) -> None:
     """``$CONTEXTO_HOME`` must be a directory or not exist yet; it is never chmodded here (a home the user
     made is kept as it is; one Contexto creates is 0700)."""
@@ -267,9 +378,22 @@ def check_mcp_values(session_id: str, home: Path, executable: str) -> None:
                               EXIT_USAGE)
 
 
+# How to install each CLI (D64): its name, the first command its own documentation gives for macOS and
+# Linux, and that page (read 2026-11-12: Claude Code's "Advanced setup", Codex's "Codex CLI", at the
+# address developers.openai.com/codex/cli permanently redirects to).
+CLI_INSTALL = {
+    "claude": ("Claude Code", "curl -fsSL https://claude.ai/install.sh | bash",
+               "https://code.claude.com/docs/en/setup"),
+    "codex": ("Codex", "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+              "https://learn.chatgpt.com/docs/codex/cli"),
+}
+
+
 def cli_not_found(name: str, path: str | None = None) -> str:
     """Why ``shutil.which`` found no usable ``name``: a non-executable file, a broken symlink or a
-    directory on PATH is named with what is wrong; otherwise "not found on PATH"."""
+    directory on PATH is named with what is wrong; otherwise "not found on PATH", and for ``claude`` and
+    ``codex`` how to install it (D64). The CLI may be installed outside PATH, which is not searched for
+    here, so the message names that case too."""
     candidates = [Path(name)] if os.sep in name else [
         Path(d or os.curdir) / name for d in (os.environ.get("PATH", "") if path is None else path).split(os.pathsep)]
     for candidate in candidates:
@@ -279,7 +403,11 @@ def cli_not_found(name: str, path: str | None = None) -> str:
             return f"'{name}' at {candidate} is a directory, not a program"
         if candidate.is_file() and not os.access(candidate, os.X_OK):
             return f"'{name}' at {candidate} is not executable (chmod +x it, or fix PATH)"
-    return f"'{name}' not found on PATH"
+    if name not in CLI_INSTALL:
+        return f"'{name}' not found on PATH"
+    product, command, page = CLI_INSTALL[name]
+    return (f"'{name}' not found on PATH. Install {product}: {command} (other ways: {page}). If it is installed, "
+            "add its directory to PATH.")
 
 
 def check_bound(bound: int, allow_large_bound: bool) -> None:
@@ -339,7 +467,8 @@ class NoticeLog:
     first window budget under MIN_WINDOW_BUDGET, first ``mcp_tools_denied`` (D44), and first
     ``mcp_tools_missing`` (from a request, or logged at exit by ``report_missing_tools``) are also shown
     on stderr, once each; an exit-time ``mcp_tools_missing`` that repeats a mid-run one is shown once
-    more, after the CLI exited.
+    more, after the CLI exited. A store failure (``store_error``, ``page_conflict``) is shown once per cause
+    with what to do about it, and so is a session log that cannot be written (D64).
 
     Between ``hold`` and ``release`` (while the CLI owns the terminal) the lines are kept and printed at
     ``release``, in order: a line written mid-run landed in Claude Code's input box and garbled the next
@@ -351,6 +480,7 @@ class NoticeLog:
         self.shown: set[str] = set()
         self.held: list[str] | None = None
         self.held_keys: set[str] = set()
+        self.start_text_tokens: int | None = None  # D69: the carried records the engine sent at the start
 
     def hold(self) -> None:
         if self.held is None:
@@ -362,8 +492,19 @@ class NoticeLog:
             print(f"contexto: {message}", file=self.stderr, flush=True)
 
     def log(self, event: dict[str, Any]) -> None:
-        self.store.log(event)
-        for inner in [event, *(event.get("transform_events") or [])]:
+        # D64: store failures first, because on a full disk the write below fails as well.
+        for key, message in fault_notices(event, getattr(self.store, "session_id", None)):
+            self._once(key, "warning: " + message)
+        try:
+            self.store.log(event)
+        except OSError as exc:
+            self._once("log_unwritable", "warning: " + log_unwritable_message(exc))
+            raise
+        inners = [event, *(event.get("transform_events") or [])]
+        for inner in inners:
+            if isinstance(inner, dict) and inner.get("event") == "start_text" and isinstance(inner.get("tokens"), int):
+                self.start_text_tokens = inner["tokens"]
+        for inner in inners:
             if not isinstance(inner, dict):
                 continue
             if inner.get("event") == "mcp_tools_missing":
@@ -399,12 +540,16 @@ class NoticeLog:
                 # Rule 4 window_minimal (contract PR #50): the engine still rotates, to a window of
                 # only the new turn, which can still put the request over the bound.
                 bound = inner.get("bound")
-                self._once("bound_too_small", f"bound {bound:,} is too small: fixed overhead {overhead:,} leaves a "
+                # D69: carried records sent at the session's start take part of the bound from the first
+                # request; the notice says so, and how to turn them off.
+                carried = ("" if not self.start_text_tokens else f" Records carried by project memory take about "
+                           f"{self.start_text_tokens:,} tokens of the bound; --no-project-memory turns them off.")
+                self._once("bound_too_small", (f"bound {bound:,} is too small: fixed overhead {overhead:,} leaves a "
                            f"window budget of {budget:,}; the engine keeps only the new turn, and requests may "
                            f"exceed the bound. Restart with a larger --bound."
                            if all(isinstance(v, int) for v in (bound, overhead, budget))
                            else "bound is too small for the measured fixed overhead; the engine keeps only the new "
-                           "turn, and requests may exceed the bound.")
+                           "turn, and requests may exceed the bound.") + carried)
             elif isinstance(budget, int) and budget < MIN_WINDOW_BUDGET:
                 self._once("small_window", f"measured window budget {budget:,} is below {MIN_WINDOW_BUDGET:,} "
                            f"(fixed overhead {overhead:,}); consider a larger --bound."
@@ -726,6 +871,8 @@ def resume_command(options: LaunchOptions, session_id: str, cli_session: str) ->
         args.append("--observe-thinking")
     if not options.version_check:
         args.append("--no-version-check")
+    if not options.project_memory:
+        args.append("--no-project-memory")
     return shlex.join([*args, "claude", "--resume", cli_session])
 
 
@@ -742,6 +889,152 @@ def open_session(home: Path, session_id: str, workdir: Path) -> Any:
     store = SessionStore(home, session_id)
     store.set_workdir(workdir)
     return store
+
+
+def project_memory_wanted(options: LaunchOptions, stderr=None, env: dict[str, str] | None = None) -> bool:
+    """Whether this launch asks for project memory (D69): not with ``--no-project-memory``, and not with
+    ``CONTEXTO_PROJECT_MEMORY`` (``contexto.paths.project_memory_env``) set to an off value. A value of
+    the variable Contexto does not know gets one line on stderr naming the ones it does, and changes
+    nothing. Shared by claude and codex."""
+    on, unknown = project_memory_env(env)
+    if unknown is not None:
+        shown = unknown if len(unknown) <= ENV_VALUE_SHOWN else unknown[:ENV_VALUE_SHOWN] + "..."
+        print(f"contexto: {PROJECT_MEMORY_ENV}={shown!r} is not a value Contexto knows and is ignored: 0, false, "
+              f"off or no turns project memory off; 1, true, on, yes or unset leaves it on",
+              file=stderr or sys.stderr, flush=True)
+    return options.project_memory and on
+
+
+def record_project_memory(store: Any, wanted: bool) -> None:
+    """Record a launch that turned project memory off in the session (``project_memory: false``), before
+    the proxy starts and before the CLI can start the MCP server: both read it from the store. A launch
+    that wants memory records nothing, so a session that never recorded it stays as it is and a resumed
+    session that recorded ``false`` stays off (``true`` is never written over it).
+
+    A session that cannot record ``false`` would run with memory on against what the user asked, so that
+    is a ``LaunchError`` and the CLI is not started. A store that has no project memory to turn off (a
+    test's stand-in) is left alone. Shared by claude and codex."""
+    turn = getattr(store, "set_project_memory", None)
+    if wanted or not callable(turn):
+        return
+    try:
+        turn(False)
+    except Exception as exc:
+        raise LaunchError(f"cannot record that project memory is off for this session: {exc}", EXIT_PROXY) from exc
+
+
+def project_memory_line(root: Path, earlier: int, carried: int, sources: int, skipped: int,
+                        sent: int | None = None) -> str | None:
+    """The start line about project memory, None when the project has no earlier session: how many records
+    this session carries and from how many of the ``earlier`` sessions (``sources``), or that it carries
+    none; when only ``sent`` of the ``carried`` records fit the pin budget, that the rest did not; how many
+    of the project's sessions were ``skipped`` as damaged or unreadable; the project's directory; and how
+    to list the records or turn this off. A path that is not printable as it is (a line break, an escape
+    sequence) is quoted, so it cannot forge a line or drive the terminal."""
+    if earlier <= 0:
+        return None
+    path = str(root)
+    where = path if path.isprintable() else repr(path)
+    sessions = f"{earlier} earlier session{'' if earlier == 1 else 's'}"
+    records = f"{carried} record{'' if carried == 1 else 's'} carried"
+    if sent is not None and sent < carried:
+        records = (f"{sent} of {carried} records carried ({carried - sent} did not fit the pin budget; contexto state "
+                   "lists them all)")
+    text = f"{records} from {sources} of {sessions} in {where}" if carried else f"{records} from {sessions} in {where}"
+    if skipped:
+        text += f"; {skipped} session{'' if skipped == 1 else 's'} skipped as damaged or unreadable"
+    return f"project memory: {text} (list: contexto project show; off: --no-project-memory)"
+
+
+def engine_pin_budget(config: dict[str, int | float] | None = None) -> int:
+    """The pin budget of the engine ``config`` builds (``contexto.rewrite.Config``); 6,000 without the engine."""
+    try:
+        from contexto.rewrite import Config
+    except ImportError:
+        return DEFAULT_PIN_BUDGET
+    return Config(**(config or {})).pin_budget
+
+
+def project_memory_notice(store: Any, stderr=None, pin_budget: int | None = None) -> None:
+    """At launch (D69): log one content-free ``project_memory`` event (whether memory is on for the
+    session, how many earlier sessions its project has, how many records it carries and from how many
+    sessions, how many of the project's sessions were skipped as damaged and how many session directories
+    of any project were left out as unreadable) and, when the project has an earlier session, print
+    ``project_memory_line``. Its record count is what the first request sends: the carried section the
+    engine renders within ``pin_budget`` (default the engine's, ``engine_pin_budget``), counted from that
+    render, with the total beside it when the budget cuts it.
+
+    It runs with the other start notices, before the CLI starts: the terminal is still the launcher's
+    then, and a line written while the CLI runs lands inside its TUI (D55). It never fails a launch:
+    any error is that event with the error's class in place of the counts, and no line. The line names
+    the project's directory, which is the user's own, on their terminal; the log never does. Reading
+    the project here also fills this process's cache of the earlier sessions, which the engine in the
+    same process reads again at the first request. A store with no ``project`` (a test's stand-in) gets
+    neither. Shared by claude and codex."""
+    view = getattr(store, "project", None)
+    if not callable(view):
+        return
+    line = moved = None
+    try:
+        directory = getattr(store, "dir", None)
+        recorded = read_meta(directory) if directory is not None else None
+        on = (recorded or {}).get("project_memory") is not False  # as the store reads it
+        moved = moved_line(store, recorded) if on else None
+        event: dict[str, Any] = {"event": "project_memory", "on": on, "earlier": 0, "carried": 0,
+                                 "carried_sessions": 0, "skipped": 0, "unreadable": 0}
+        project = view() if on else None
+        if not on and was_carrying(store):
+            line = ("project memory: off for this session; the records it carried are not sent again from its next "
+                    "request")
+        if project is not None:
+            carried = project.carried()
+            event.update(earlier=len(project.earlier), carried=len(carried),
+                         carried_sessions=len({item.session for item in carried}),
+                         skipped=len(project.skipped), unreadable=project.unreadable)
+            sent = None
+            if carried and event["earlier"]:
+                budget = engine_pin_budget() if pin_budget is None else pin_budget
+                text = render_carried(carried, budget)  # what the store's carried_text gives the engine
+                sent = sum(1 for part in text.split("\n") if part.startswith("- "))
+            line = project_memory_line(project.root, event["earlier"], event["carried"], event["carried_sessions"],
+                                       event["skipped"], sent)
+    except Exception as exc:
+        event, line = {"event": "project_memory", "error": type(exc).__name__}, None
+    try:
+        store.log(event)
+    except Exception:  # a diagnostic record; never stop a launch for it
+        pass
+    for text in (moved, line):
+        if text:
+            print(f"contexto: {text}", file=stderr or sys.stderr, flush=True)
+
+
+def was_carrying(store: Any) -> bool:
+    """Whether the session's epoch record holds a start text (D69): a resumed session that was sending
+    carried records, which the engine stops sending from the resume on (rule 19)."""
+    reader = getattr(store, "epoch_record", None)
+    try:
+        record = reader() if callable(reader) else None
+    except Exception:  # an unreadable record resumes nothing, so nothing carried is sent from it
+        return False
+    return isinstance(record, dict) and isinstance(record.get("start_text"), str) and bool(record["start_text"])
+
+
+def moved_line(store: Any, meta: dict[str, Any] | None) -> str | None:
+    """D69: the line for a session resumed from a directory of another project: it stays in the project
+    it was started in (``SessionStore.set_workdir`` never moves it), which the line names. None otherwise."""
+    workdir = store.workdir() if callable(getattr(store, "workdir", None)) else None
+    root = recorded_root(meta or {})
+    if workdir is None or root is None:
+        return None
+    here = project_root(workdir)
+    if str(here) == str(root):
+        return None
+    shown = [str(path) if str(path).isprintable() else repr(str(path)) for path in (root, here)]
+    session = getattr(store, "session_id", "")
+    name = session if isinstance(session, str) and session.isprintable() else repr(session)
+    return (f"project memory: session {name} stays in the project it was started in, {shown[0]}; it neither carries "
+            f"from nor gives to {shown[1]}")
 
 
 def build_engine(store: Any,
@@ -770,11 +1063,25 @@ def contexto_tool_rules() -> list[str]:
     return [f"mcp__{MCP_SERVER_NAME}__{tool['name']}" for tool in MCP_TOOLS]
 
 
-def settings_payload(proxy_url: str) -> dict[str, Any]:
-    """The flag-level ``--settings`` content: the proxy's base URL, and an allow rule for each of Contexto's
+def settings_payload(proxy_url: str, hint_headers: str = STRIPPED) -> dict[str, Any]:
+    """The flag-level ``--settings`` content: the proxy's base URL, the request for Claude Code's gateway
+    hint headers (D70: with a custom base URL they are off unless ``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` is
+    on; the engine reads them and the proxy removes them before forwarding, ``contexto.hints``), and an
+    allow rule for each of Contexto's
     own MCP tools (D44). Claude Code 2.1.302 refuses an MCP tool in ``-p`` mode unless a rule allows it
-    ("you haven't granted it yet"), so without these rules ``contexto run claude -p`` loses recall."""
-    return {"env": {"ANTHROPIC_BASE_URL": proxy_url}, "permissions": {"allow": contexto_tool_rules()}}
+    ("you haven't granted it yet"), so without these rules ``contexto run claude -p`` loses recall.
+
+    ``hint_headers`` is the launch's ``contexto.hints.hint_headers_state``. With ``off`` the hints are
+    not asked for. The state is written beside the request as ``CONTEXTO_HINT_HEADERS``: Claude Code
+    applies this ``env`` block to its own environment, every process the session starts inherits it,
+    and a nested ``contexto run claude`` reads the marker to tell Contexto's ``1`` from the user's."""
+    if hint_headers not in HINT_STATES:
+        raise ValueError(f"unknown hint header state {hint_headers!r}")
+    env = {"ANTHROPIC_BASE_URL": proxy_url}
+    if hint_headers != OFF:
+        env[HINT_HEADERS_KEY] = "1"
+    env[HINT_MARKER_KEY] = hint_headers
+    return {"env": env, "permissions": {"allow": contexto_tool_rules()}}
 
 
 def mcp_payload(session_id: str, home: Path) -> dict[str, Any]:
@@ -913,7 +1220,7 @@ def run_claude(options: LaunchOptions, *, stderr=None) -> int:
         try:
             return _run(options, stderr, signals)
         except LaunchError as exc:
-            print(f"contexto run: {exc}", file=stderr)
+            print(f"contexto: {exc}", file=stderr)  # one prefix for claude and codex (D64)
             return exc.code
         except Terminated as exc:
             return 128 + exc.signum
@@ -925,7 +1232,9 @@ def options_from_args(args: Any) -> LaunchOptions:
         claude_args=list(getattr(args, "cli_args", None) or []), bound=args.bound, session_id=args.session,
         upstream=args.upstream, observe_thinking=args.observe_thinking, allow_large_bound=args.allow_large_bound,
         window_fraction=args.window_fraction, headroom_floor=args.headroom_floor,
-        version_check=not getattr(args, "no_version_check", False))
+        version_check=not getattr(args, "no_version_check", False),
+        quiet=bool(getattr(args, "quiet", False)) or quiet_from_env(),
+        project_memory=not getattr(args, "no_project_memory", False))
 
 
 def check_options(options: LaunchOptions) -> None:
@@ -965,11 +1274,13 @@ def session_affinity_key(store: Any, upstream_url: str) -> str | None:
 
 
 def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dict[str, int | float],
-                observe_thinking: bool, *, stderr=None, cli: str | None = None) -> tuple[ContextoProxy, str]:
+                observe_thinking: bool, *, stderr=None, cli: str | None = None,
+                strip_hint_headers: bool = False) -> tuple[ContextoProxy, str]:
     """Build the rewrite engine for ``store`` and start the proxy on 127.0.0.1 with a free port.
     Returns ``(proxy, engine_name)``; the caller stops the proxy. Shared by claude and codex. With
     ``cli="claude"`` the engine is wrapped in a ``SessionRecorder`` (``proxy.transform``), so the
-    session records which Claude Code sessions it served (D55)."""
+    session records which Claude Code sessions it served (D55). ``strip_hint_headers`` is the proxy's
+    (D70); Codex sends no such headers and leaves it off."""
     # The previous launch's MCP server record must not count for this one (contexto.toolcheck): a
     # back-to-back launch can start within the check's clock slack of that server's tools/list.
     clear = getattr(store, "clear_mcp_listed", None)
@@ -985,7 +1296,8 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
     try:
         proxy = ContextoProxy(upstream_url, NoticeLog(store, stderr or sys.stderr), transform,
                               observe_usage=observe_usage, observe_thinking=observe_thinking,
-                              upstream_source=upstream_source, affinity_key=key)
+                              upstream_source=upstream_source, affinity_key=key,
+                              strip_hint_headers=strip_hint_headers)
     except ValueError as exc:
         raise LaunchError(f"invalid upstream: {exc}", EXIT_USAGE) from exc
     try:
@@ -1096,19 +1408,24 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         raise LaunchError(cli_not_found(options.claude_bin), EXIT_NOT_FOUND)
     if options.claude_args in INFO_ARGS:  # nothing to bound, so no session or proxy (D57)
         return run_child([claude, *options.claude_args], stderr=stderr)
-    upstream = resolve_upstream(options.upstream, cwd=Path.cwd())
+    # D70: the provider check, the upstream and the hint header state, from one read of each settings file.
+    upstream, hint_headers = claude_launch_settings(options.upstream, Path.cwd())
     check_upstream(upstream)
     if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: as Claude Code -p, no project base URL (D52)
         print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', upstream.ignored, 'Pass --upstream', os.environ)}",
               file=stderr)
     home = contexto_home()
     check_home(home)
+    memory = project_memory_wanted(options, stderr)
     choice, store = pick_session(options, home, Path.cwd(), stderr)
     session_id = choice.session_id
     config = engine_config(options)
+    # D70: the --settings file below turns the hint headers on for the engine, and the proxy removes
+    # them, unless the user had them on already (forwarded) or turned them off (not asked for).
     try:
+        record_project_memory(store, memory)  # before anything reads the store: the proxy, the MCP server
         proxy, engine_name = start_proxy(store, upstream.url, upstream.source, config, options.observe_thinking,
-                                         stderr=stderr, cli="claude")
+                                         stderr=stderr, cli="claude", strip_hint_headers=hint_headers == STRIPPED)
     except LaunchError:
         if choice.created:  # a launch that never started leaves no empty session (D57)
             discard_new_session(store)
@@ -1117,17 +1434,20 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     tmp: Path | None = None
     watchdog: Watchdog | None = None
     code = EXIT_PROXY
+    started: float | None = None  # when claude was started (D64: a launch that never ran it has no summary)
     try:
         tmp = Path(tempfile.mkdtemp(prefix="contexto-run-"))  # mode 0700, removed on exit
         watchdog = Watchdog.start(tmp, store)
-        settings = write_private_json(tmp, "settings.json", settings_payload(proxy.url))
+        settings = write_private_json(tmp, "settings.json", settings_payload(proxy.url, hint_headers))
         mcp = write_private_json(tmp, "mcp.json", mcp_payload(session_id, home))
         store.log({"event": "launch", "cli": "claude", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": upstream.source,
                    "observe_thinking": options.observe_thinking, "user_arg_count": len(options.claude_args),
-                   "affinity_header": proxy.affinity_header is not None})
+                   "affinity_header": proxy.affinity_header is not None,
+                   "hint_headers": hint_headers})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
+        project_memory_notice(store, stderr, engine_pin_budget(config))  # D69: what it carries, or nothing
         if not check_cli_version("claude", claude, store, enabled=options.version_check, stderr=stderr):
             code = EXIT_INTERRUPTED
             return code
@@ -1137,6 +1457,7 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
             store.log({"event": "window_budget_warning", "bound": options.bound,
                        "assumed_overhead": assumed_overhead()})
         notices.hold()  # claude owns the terminal until it exits (D55)
+        started = time.monotonic()
         # The CLI's shell commands (`contexto state`, `contexto search`) then name this session (D57).
         code = run_child(claude_argv(claude, settings, mcp, options.claude_args), session_env(session_id),
                          stderr=stderr, watchdog=watchdog)
@@ -1154,7 +1475,12 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
             shutil.rmtree(tmp, ignore_errors=True)
         if watchdog is not None:
             watchdog.done()
-        store.log({"event": "exit", "code": code})
+        try:
+            notices.log({"event": "exit", "code": code})
+        except OSError:  # D64: a full disk, already said by the NoticeLog; claude's exit code stands
+            pass
+        print_exit_summary(store, "claude", started, cli_args=options.claude_args, quiet=options.quiet,
+                           log_incomplete="log_unwritable" in notices.shown, stderr=stderr, code=code)
         after_exit(options, home, session_id, recorder, choice, stderr)
 
 

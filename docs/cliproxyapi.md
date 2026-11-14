@@ -1,5 +1,7 @@
 # Running Contexto with CLIProxyAPI
 
+[Contexto](../README.md) / [Documentation](README.md)
+
 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) is a local or hosted proxy that serves
 Claude Code, Codex, and other CLIs through subscription logins and API keys. Contexto can use it as
 its upstream for both Claude Code and Codex. This guide covers the setup, what to check when it
@@ -61,8 +63,8 @@ port) or `https://cpa.example.com`. CLIProxyAPI serves `/v1/messages`, `/v1/mess
    contexto run claude
    ```
 
-   Contexto finds the upstream the way Claude Code would (README, Troubleshooting), so the
-   settings above are enough. To name it explicitly, put `--upstream` before `claude`:
+   Contexto finds the upstream the way Claude Code would ([Troubleshooting](troubleshooting.md)),
+   so the settings above are enough. To name it explicitly, put `--upstream` before `claude`:
 
    ```sh
    contexto run --upstream http://127.0.0.1:8317 claude --model claude-haiku-5-5

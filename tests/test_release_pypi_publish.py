@@ -1,0 +1,913 @@
+"""The PyPI job's checks (.github/scripts/pypi-publish.py).
+
+The script never uploads. It verifies the files downloaded from a GitHub Release, asks PyPI what it
+already holds for the version, and says which files, if any, may be uploaded. Nothing here talks to
+pypi.org: the index is an injected function or a server on 127.0.0.1.
+"""
+
+import hashlib
+import http.client
+import importlib.util
+import io
+import json
+import sys
+import tarfile
+import threading
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parent.parent / ".github" / "scripts" / "pypi-publish.py"
+PROJECT = "contexto-proxy"
+VERSION = "9.9.9"
+TAG = "v9.9.9"
+WHEEL = "contexto_proxy-9.9.9-py3-none-any.whl"
+SDIST = "contexto_proxy-9.9.9.tar.gz"
+INDEX = "https://index.invalid"
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location("release_pypi_publish", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    # Leave no __pycache__ next to the workflow's scripts.
+    writes_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = writes_bytecode
+    return module
+
+
+pypi = _load()
+
+
+def _sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def make_dist(
+    directory, *, name=PROJECT, version=VERSION, sdist_name=None, sdist_version=None, stem=None, sdist_root=None,
+    name_line=None,
+):
+    """A wheel, an sdist and SHA256SUMS shaped like release-build.sh's output."""
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = stem or f"{name.replace('-', '_')}-{version}"
+    name_line = f"Name: {name}\n" if name_line is None else name_line
+    wheel = directory / f"{stem}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            f"{stem}.dist-info/METADATA",
+            f"Metadata-Version: 2.4\n{name_line}Version: {version}\nSummary: test\n\nName: not-a-header\n",
+        )
+        archive.writestr("contexto/__init__.py", "")
+    sdist = directory / f"{stem}.tar.gz"
+    pkg_info = (
+        f"Metadata-Version: 2.4\nName: {sdist_name or name}\nVersion: {sdist_version or version}\n\nbody\n"
+    ).encode()
+    with tarfile.open(sdist, "w:gz") as archive:
+        member = tarfile.TarInfo(f"{sdist_root or stem}/PKG-INFO")
+        member.size = len(pkg_info)
+        archive.addfile(member, io.BytesIO(pkg_info))
+        # A nested file of the same name must not be taken for the sdist's metadata.
+        decoy = b"Metadata-Version: 2.4\nName: decoy\nVersion: 0\n"
+        member = tarfile.TarInfo(f"{stem}/tests/PKG-INFO")
+        member.size = len(decoy)
+        archive.addfile(member, io.BytesIO(decoy))
+    write_sums(directory, [sdist, wheel])
+    return wheel, sdist
+
+
+def write_sums(directory, paths):
+    lines = [f"{_sha256(path)}  {path.name}\n" for path in sorted(paths, key=lambda p: p.name)]
+    (directory / "SHA256SUMS").write_text("".join(lines), encoding="ascii")
+
+
+@pytest.fixture
+def dist(tmp_path):
+    directory = tmp_path / "dist"
+    make_dist(directory)
+    return directory
+
+
+@pytest.fixture
+def release(dist):
+    return pypi.load_release(dist, PROJECT, TAG)
+
+
+def listing(release, *names, changed=()):
+    """A PyPI JSON answer that lists `names`, with a wrong digest for those in `changed`."""
+    urls = [
+        {
+            "filename": name,
+            "digests": {"sha256": "0" * 64 if name in changed else release.digests[name], "md5": "x"},
+            "yanked": False,
+        }
+        for name in names
+    ]
+    return 200, json.dumps({"info": {"name": PROJECT, "version": release.version}, "urls": urls}).encode()
+
+
+class Index:
+    """An injected fetch function that returns the queued answers, then repeats the last one."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.urls = []
+
+    def __call__(self, url):
+        self.urls.append(url)
+        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def no_sleep(_seconds):
+    return None
+
+
+# --- the downloaded files -------------------------------------------------------------------------
+
+
+def test_a_release_build_is_accepted(dist):
+    release = pypi.load_release(dist, PROJECT, TAG)
+    assert release.version == VERSION
+    assert sorted(release.files) == [WHEEL, SDIST]
+    assert release.digests == {WHEEL: _sha256(dist / WHEEL), SDIST: _sha256(dist / SDIST)}
+
+
+def test_the_name_is_compared_normalized(tmp_path):
+    make_dist(tmp_path / "d", name="Contexto_Proxy", stem="contexto_proxy-9.9.9")
+    assert pypi.load_release(tmp_path / "d", PROJECT, TAG).version == VERSION
+
+
+@pytest.mark.parametrize("tag", ["9.9.9", "v9.9", "v9.9.9rc1", "main", "", "v9.9.9 ", "v09.9.9x"])
+def test_only_a_release_tag_is_accepted(dist, tag):
+    with pytest.raises(pypi.Refused, match="not a release tag"):
+        pypi.load_release(dist, PROJECT, tag)
+
+
+def test_an_old_contexto_artifact_is_refused(tmp_path):
+    make_dist(tmp_path / "d", name="contexto", version="0.5.24")
+    with pytest.raises(pypi.Refused) as refusal:
+        pypi.load_release(tmp_path / "d", PROJECT, "v0.5.24")
+    message = str(refusal.value)
+    assert "'contexto'" in message and "contexto-proxy" in message
+    assert "cannot be published" in message
+
+
+@pytest.mark.parametrize("name", ["contextoproxy", "contexto-cli", "something-else"])
+def test_another_name_is_refused_without_blaming_the_rename(tmp_path, name):
+    make_dist(tmp_path / "d", name=name, stem="contexto_proxy-9.9.9")
+    with pytest.raises(pypi.Refused) as refusal:
+        pypi.load_release(tmp_path / "d", PROJECT, TAG)
+    message = str(refusal.value)
+    assert repr(name) in message and "not contexto-proxy" in message
+    assert "renamed" not in message
+
+
+def test_metadata_without_a_name_is_refused(tmp_path):
+    make_dist(tmp_path / "d", name_line="")
+    with pytest.raises(pypi.Refused) as refusal:
+        pypi.load_release(tmp_path / "d", PROJECT, TAG)
+    assert "no Name" in str(refusal.value)
+    assert "renamed" not in str(refusal.value)
+
+
+@pytest.mark.parametrize("root", ["evil-1.0", "contexto_proxy-9.9.8", "..", "contexto_proxy-9.9.9/sub"])
+def test_the_sdist_metadata_is_read_only_from_its_own_top_directory(tmp_path, root):
+    make_dist(tmp_path / "d", sdist_root=root)
+    with pytest.raises(pypi.Refused, match="contexto_proxy-9.9.9/PKG-INFO"):
+        pypi.load_release(tmp_path / "d", PROJECT, TAG)
+
+
+@pytest.mark.parametrize("artifact", [WHEEL, SDIST])
+def test_a_directory_named_like_an_artifact_is_refused(dist, artifact):
+    (dist / artifact).unlink()
+    (dist / artifact).mkdir()
+    with pytest.raises(pypi.Refused, match="not a regular file"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+def test_a_wheel_with_a_damaged_metadata_stream_is_refused(dist):
+    wheel = dist / WHEEL
+    metadata = "Metadata-Version: 2.4\nName: contexto-proxy\nVersion: 9.9.9\n" + "Classifier: x\n" * 400
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("contexto_proxy-9.9.9.dist-info/METADATA", metadata)
+    data = bytearray(wheel.read_bytes())
+    start = data.index(b"METADATA") + len(b"METADATA")
+    data[start : start + 12] = b"\xff" * 12  # the first bytes of the deflate stream
+    wheel.write_bytes(bytes(data))
+    write_sums(dist, [dist / WHEEL, dist / SDIST])
+    with pytest.raises(pypi.Refused, match="Cannot read the metadata"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+def test_oversized_metadata_is_refused(dist):
+    wheel = dist / WHEEL
+    metadata = "Metadata-Version: 2.4\nName: contexto-proxy\nVersion: 9.9.9\n\n" + "x" * (pypi.MAX_METADATA + 1)
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("contexto_proxy-9.9.9.dist-info/METADATA", metadata)
+    write_sums(dist, [dist / WHEEL, dist / SDIST])
+    with pytest.raises(pypi.Refused, match="Cannot read the metadata"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+@pytest.mark.parametrize("tag", ["v٩.9.9", "v9.9.９"])
+def test_digits_that_are_not_ascii_are_not_a_release_tag(dist, tag):
+    with pytest.raises(pypi.Refused, match="not a release tag"):
+        pypi.load_release(dist, PROJECT, tag)
+
+
+def test_a_checkout_build_is_refused(tmp_path):
+    make_dist(tmp_path / "d", version="0.0.0+checkout")
+    with pytest.raises(pypi.Refused) as refusal:
+        pypi.load_release(tmp_path / "d", PROJECT, TAG)
+    assert "0.0.0+checkout" in str(refusal.value)
+    assert VERSION in str(refusal.value)
+
+
+def test_a_version_other_than_the_tag_is_refused(dist):
+    with pytest.raises(pypi.Refused, match="9.9.9"):
+        pypi.load_release(dist, PROJECT, "v9.9.8")
+
+
+def test_an_sdist_with_other_metadata_than_the_wheel_is_refused(tmp_path):
+    make_dist(tmp_path / "a", sdist_name="contexto")
+    with pytest.raises(pypi.Refused, match="sdist"):
+        pypi.load_release(tmp_path / "a", PROJECT, TAG)
+    make_dist(tmp_path / "b", sdist_version="9.9.8")
+    with pytest.raises(pypi.Refused, match="sdist"):
+        pypi.load_release(tmp_path / "b", PROJECT, TAG)
+
+
+def test_a_file_name_that_does_not_carry_the_name_and_version_is_refused(tmp_path):
+    make_dist(tmp_path / "d", stem="contexto-9.9.9")
+    with pytest.raises(pypi.Refused, match="contexto_proxy-9.9.9"):
+        pypi.load_release(tmp_path / "d", PROJECT, TAG)
+
+
+def test_two_wheels_are_refused(dist):
+    (dist / "contexto_proxy-9.9.9-py2-none-any.whl").write_bytes((dist / WHEEL).read_bytes())
+    with pytest.raises(pypi.Refused, match="exactly one wheel and one sdist"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+@pytest.mark.parametrize("missing", [WHEEL, SDIST])
+def test_a_missing_wheel_or_sdist_is_refused(dist, missing):
+    (dist / missing).unlink()
+    with pytest.raises(pypi.Refused, match="exactly one wheel and one sdist"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+def test_a_release_without_checksums_is_refused(dist):
+    (dist / "SHA256SUMS").unlink()
+    with pytest.raises(pypi.Refused, match="SHA256SUMS"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+@pytest.mark.parametrize("unlisted", [WHEEL, SDIST])
+def test_a_file_missing_from_the_checksums_is_refused(dist, unlisted):
+    write_sums(dist, [dist / name for name in (WHEEL, SDIST) if name != unlisted])
+    with pytest.raises(pypi.Refused) as refusal:
+        pypi.load_release(dist, PROJECT, TAG)
+    assert "does not list" in str(refusal.value) and unlisted in str(refusal.value)
+
+
+def test_checksums_for_a_file_that_was_not_downloaded_are_refused(dist):
+    with (dist / "SHA256SUMS").open("a", encoding="ascii") as sums:
+        sums.write(f"{'a' * 64}  contexto_proxy-9.9.9-py3-none-win_amd64.whl\n")
+    with pytest.raises(pypi.Refused, match="win_amd64"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+@pytest.mark.parametrize("changed", [WHEEL, SDIST])
+def test_a_checksum_mismatch_is_refused(dist, changed):
+    with (dist / changed).open("ab") as artifact:
+        artifact.write(b"\0")
+    with pytest.raises(pypi.Refused) as refusal:
+        pypi.load_release(dist, PROJECT, TAG)
+    assert "does not match" in str(refusal.value) and changed in str(refusal.value)
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["not a checksum line\n", f"{'a' * 63}  {WHEEL}\n", f"{'A' * 64}  {WHEEL}\n", f"{'a' * 64} {WHEEL}\n"],
+)
+def test_a_malformed_checksum_line_is_refused(dist, line):
+    with (dist / "SHA256SUMS").open("a", encoding="ascii") as sums:
+        sums.write(line)
+    with pytest.raises(pypi.Refused, match="SHA256SUMS"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+def test_a_file_listed_twice_is_refused(dist):
+    text = (dist / "SHA256SUMS").read_text(encoding="ascii")
+    (dist / "SHA256SUMS").write_text(text + text.splitlines(keepends=True)[0], encoding="ascii")
+    with pytest.raises(pypi.Refused, match="twice"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+def test_a_wheel_that_is_not_a_zip_is_refused(dist):
+    (dist / WHEEL).write_bytes(b"not a zip")
+    write_sums(dist, [dist / WHEEL, dist / SDIST])
+    with pytest.raises(pypi.Refused, match="Cannot read the metadata"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+# --- what may be uploaded --------------------------------------------------------------------------
+
+
+def test_a_version_pypi_does_not_have_uploads_both_files(release):
+    index = Index((404, b'{"message": "Not Found"}'))
+    assert pypi.plan(release, PROJECT, INDEX, index) == [WHEEL, SDIST]
+    assert index.urls == [f"{INDEX}/pypi/contexto-proxy/9.9.9/json"]
+
+
+def test_identical_files_on_pypi_upload_nothing(release):
+    assert pypi.plan(release, PROJECT, INDEX, Index(listing(release, WHEEL, SDIST))) == []
+
+
+@pytest.mark.parametrize(("present", "missing"), [(WHEEL, SDIST), (SDIST, WHEEL)])
+def test_a_partial_upload_uploads_only_the_missing_file(release, present, missing):
+    assert pypi.plan(release, PROJECT, INDEX, Index(listing(release, present))) == [missing]
+
+
+def test_a_version_that_exists_without_files_is_refused(release):
+    # A version whose files were deleted: PyPI never takes those file names again.
+    index = Index(listing(release))
+    with pytest.raises(pypi.Refused) as refusal:
+        pypi.plan(release, PROJECT, INDEX, index, attempts=3, sleep=no_sleep)
+    message = str(refusal.value)
+    assert "no files" in message and "new release" in message and "Nothing was uploaded" in message
+    assert "not on PyPI" not in message
+    assert len(index.urls) == 1
+
+
+def test_the_project_name_is_normalized_in_the_request(release):
+    index = Index((404, b""))
+    pypi.plan(release, "Contexto_Proxy", "https://index.invalid/", index)
+    assert index.urls == ["https://index.invalid/pypi/contexto-proxy/9.9.9/json"]
+
+
+@pytest.mark.parametrize("digest", ["abc", "A" * 64, "a" * 63, "a" * 65, "sha256:" + "a" * 57, "", None, 7])
+def test_a_digest_from_the_index_that_is_not_a_sha256_is_refused(release, digest):
+    body = json.dumps({"urls": [{"filename": WHEEL, "digests": {"sha256": digest}}]}).encode()
+    with pytest.raises(pypi.Refused, match="Nothing was uploaded") as refusal:
+        pypi.plan(release, PROJECT, INDEX, Index((200, body)), attempts=1, sleep=no_sleep)
+    # An answer that cannot be read, not a file that differs: the index said nothing usable.
+    assert "not a release's file list" in str(refusal.value)
+    assert "cannot be replaced" not in str(refusal.value)
+
+
+def test_a_broken_connection_is_retried_like_any_other_failure(release):
+    index = Index(http.client.IncompleteRead(b"{", 100), http.client.BadStatusLine("garbage"), (404, b""))
+    assert pypi.plan(release, PROJECT, INDEX, index, attempts=3, sleep=no_sleep) == [WHEEL, SDIST]
+    assert len(index.urls) == 3
+    index = Index(http.client.IncompleteRead(b"{", 100))
+    with pytest.raises(pypi.Refused, match="Nothing was uploaded"):
+        pypi.plan(release, PROJECT, INDEX, index, attempts=2, sleep=no_sleep)
+
+
+@pytest.mark.parametrize("changed", [WHEEL, SDIST])
+def test_a_different_file_on_pypi_fails_and_says_a_new_release_is_needed(release, changed):
+    with pytest.raises(pypi.Refused) as refusal:
+        pypi.plan(release, PROJECT, INDEX, Index(listing(release, WHEEL, SDIST, changed=(changed,))))
+    message = str(refusal.value)
+    assert changed in message
+    assert "cannot be replaced" in message
+    assert "new release" in message
+
+
+def test_a_different_file_fails_even_when_the_other_is_missing(release):
+    with pytest.raises(pypi.Refused, match="cannot be replaced"):
+        pypi.plan(release, PROJECT, INDEX, Index(listing(release, WHEEL, changed=(WHEEL,))))
+
+
+def test_a_file_on_pypi_that_the_release_does_not_have_fails(release):
+    answer = listing(release, WHEEL, SDIST)
+    body = json.loads(answer[1])
+    body["urls"].append({"filename": "contexto_proxy-9.9.9-py3-none-win_amd64.whl", "digests": {"sha256": "1" * 64}})
+    with pytest.raises(pypi.Refused, match="win_amd64"):
+        pypi.plan(release, PROJECT, INDEX, Index((200, json.dumps(body).encode())))
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 429, 403, 301])
+def test_any_other_answer_fails_without_a_plan(release, status):
+    index = Index((status, b"upstream error"))
+    with pytest.raises(pypi.Refused) as refusal:
+        pypi.plan(release, PROJECT, INDEX, index, attempts=3, sleep=no_sleep)
+    assert str(status) in str(refusal.value)
+    assert "Nothing was uploaded" in str(refusal.value)
+    assert len(index.urls) == 3
+
+
+def test_a_network_error_fails_without_a_plan(release):
+    index = Index(OSError("connection refused"))
+    with pytest.raises(pypi.Refused, match="connection refused"):
+        pypi.plan(release, PROJECT, INDEX, index, attempts=2, sleep=no_sleep)
+    assert len(index.urls) == 2
+
+
+def test_a_passing_error_is_retried(release):
+    index = Index((503, b""), OSError("timed out"), (404, b""))
+    assert pypi.plan(release, PROJECT, INDEX, index, attempts=3, sleep=no_sleep) == [WHEEL, SDIST]
+    assert len(index.urls) == 3
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"<html>maintenance</html>", b"[]", b'{"info": {}}', b'{"urls": {}}', b'{"urls": [{"filename": "x"}]}', b"\xff"],
+)
+def test_an_answer_that_cannot_be_read_fails(release, body):
+    with pytest.raises(pypi.Refused, match="Nothing was uploaded"):
+        pypi.plan(release, PROJECT, INDEX, Index((200, body)), attempts=1, sleep=no_sleep)
+
+
+def test_a_404_is_not_retried(release):
+    index = Index((404, b""))
+    pypi.plan(release, PROJECT, INDEX, index, attempts=5, sleep=no_sleep)
+    assert len(index.urls) == 1
+
+
+# --- after the upload ------------------------------------------------------------------------------
+
+
+def test_confirm_waits_until_pypi_lists_both_files(release):
+    index = Index((404, b""), listing(release, WHEEL), (502, b""), listing(release, WHEEL, SDIST))
+    waits = []
+    pypi.confirm(release, PROJECT, INDEX, index, attempts=10, delay=7, sleep=waits.append)
+    assert len(index.urls) == 4
+    assert waits == [7, 7, 7]
+
+
+def test_confirm_gives_up_and_says_how_to_check(release):
+    index = Index(listing(release, WHEEL))
+    with pytest.raises(pypi.Refused) as refusal:
+        pypi.confirm(release, PROJECT, INDEX, index, attempts=4, delay=1, sleep=no_sleep)
+    assert len(index.urls) == 4
+    assert SDIST in str(refusal.value)
+    assert "action=publish" in str(refusal.value)
+
+
+def test_confirm_fails_at_once_on_a_different_file(release):
+    index = Index(listing(release, WHEEL, SDIST, changed=(SDIST,)))
+    with pytest.raises(pypi.Refused, match="cannot be replaced") as refusal:
+        pypi.confirm(release, PROJECT, INDEX, index, attempts=10, delay=1, sleep=no_sleep)
+    assert len(index.urls) == 1
+    # By now the upload step has run: the message must not say that nothing was uploaded.
+    message = str(refusal.value)
+    assert "After the upload" in message and SDIST in message
+    assert "Nothing was uploaded" not in message
+
+
+def test_confirm_keeps_waiting_through_a_broken_connection_and_an_empty_list(release):
+    index = Index(
+        http.client.IncompleteRead(b"{", 100), listing(release), http.client.RemoteDisconnected("closed"),
+        listing(release, WHEEL, SDIST),
+    )
+    waits = []
+    pypi.confirm(release, PROJECT, INDEX, index, attempts=10, delay=3, sleep=waits.append)
+    assert len(index.urls) == 4
+    assert waits == [3, 3, 3]
+
+
+# --- the command, against a server on 127.0.0.1 ------------------------------------------------------
+
+
+class _Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.paths.append(self.path)
+        self.server.agents.append(self.headers.get("User-Agent", ""))
+        self.server.accepts.append(self.headers.get("Accept", ""))
+        answer = self.server.answer
+        if self.path.startswith("/elsewhere"):
+            answer = (200, b'{"urls": []}')
+        if callable(answer):
+            answer(self)
+            return
+        status, body = answer
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        return None
+
+
+def _cut_mid_body(handler):
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", "100000")
+    handler.end_headers()
+    handler.wfile.write(b'{"urls": [')
+    handler.wfile.flush()
+    handler.close_connection = True
+
+
+def _garbage_status_line(handler):
+    handler.wfile.write(b"this is not HTTP\r\n\r\n")
+    handler.wfile.flush()
+    handler.close_connection = True
+
+
+def _redirect(handler):
+    handler.send_response(302)
+    handler.send_header("Location", f"http://127.0.0.1:{handler.server.server_address[1]}/elsewhere")
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+
+
+PROXY_VARIABLES = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy",
+                   "NO_PROXY")
+
+
+@pytest.fixture
+def serve(monkeypatch):
+    """Start servers on 127.0.0.1; each answers `answer` (a (status, body) or a function)."""
+    # A proxy set in the environment must not get the requests meant for 127.0.0.1.
+    for variable in PROXY_VARIABLES:
+        monkeypatch.delenv(variable, raising=False)
+    started = []
+    # A handler that stalls waits for this, so that no thread outlives the test.
+    release = threading.Event()
+
+    def start():
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        httpd.answer = (404, b"{}")
+        httpd.paths = []
+        httpd.agents = []
+        httpd.accepts = []
+        httpd.release = release
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        httpd.url = f"http://127.0.0.1:{httpd.server_address[1]}"
+        started.append((httpd, thread))
+        return httpd
+
+    yield start
+    release.set()
+    for httpd, thread in started:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def server(serve):
+    return serve()
+
+
+def _command(*args):
+    return pypi.main([*args, "--project", PROJECT, "--tag", TAG])
+
+
+def test_verify_command_prints_what_it_checked(dist, capsys):
+    assert _command("verify", "--dist", str(dist)) == 0
+    out = capsys.readouterr().out
+    assert WHEEL in out and SDIST in out
+    assert _sha256(dist / WHEEL) in out
+    assert "Name: contexto-proxy" in out and "Version: 9.9.9" in out
+
+
+def test_verify_command_fails_with_an_error_annotation(tmp_path, capsys):
+    make_dist(tmp_path / "d", name="contexto", version="0.5.24")
+    assert pypi.main(["verify", "--dist", str(tmp_path / "d"), "--project", PROJECT, "--tag", "v0.5.24"]) == 1
+    assert "::error" in capsys.readouterr().out
+
+
+def test_plan_command_writes_the_files_to_upload(dist, server, tmp_path, monkeypatch, capsys):
+    output = tmp_path / "upload.txt"
+    github_output = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
+    assert _command("plan", "--dist", str(dist), "--index", server.url, "--output", str(output)) == 0
+    assert output.read_text(encoding="utf-8").splitlines() == [str(dist / WHEEL), str(dist / SDIST)]
+    assert github_output.read_text(encoding="utf-8") == "upload_count=2\n"
+    assert server.paths == ["/pypi/contexto-proxy/9.9.9/json"]
+    # A generic client name: nothing about the repository or its owner goes to the index.
+    assert server.agents and all("contexto" not in agent.lower() for agent in server.agents)
+    assert "not on PyPI" in capsys.readouterr().out
+
+
+def test_plan_command_uploads_only_what_is_missing(dist, release, server, tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    output = tmp_path / "upload.txt"
+    server.answer = listing(release, WHEEL)
+    assert _command("plan", "--dist", str(dist), "--index", server.url, "--output", str(output)) == 0
+    assert output.read_text(encoding="utf-8").splitlines() == [str(dist / SDIST)]
+    assert "::notice" in capsys.readouterr().out
+
+
+def test_plan_command_uploads_nothing_when_pypi_has_the_files(dist, release, server, tmp_path, monkeypatch, capsys):
+    github_output = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
+    output = tmp_path / "upload.txt"
+    server.answer = listing(release, WHEEL, SDIST)
+    assert _command("plan", "--dist", str(dist), "--index", server.url, "--output", str(output)) == 0
+    assert output.read_text(encoding="utf-8") == ""
+    assert github_output.read_text(encoding="utf-8") == "upload_count=0\n"
+    out = capsys.readouterr().out
+    assert "::notice" in out and "nothing to upload" in out.lower()
+
+
+def test_plan_command_fails_on_a_different_file(dist, release, server, tmp_path, monkeypatch, capsys):
+    github_output = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
+    output = tmp_path / "upload.txt"
+    server.answer = listing(release, WHEEL, SDIST, changed=(WHEEL,))
+    assert _command("plan", "--dist", str(dist), "--index", server.url, "--output", str(output)) == 1
+    assert not output.exists()
+    assert not github_output.exists()
+    out = capsys.readouterr().out
+    assert "::error" in out and "cannot be replaced" in out
+
+
+def test_plan_command_fails_on_a_server_error(dist, server, tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    output = tmp_path / "upload.txt"
+    server.answer = (503, b"try later")
+    args = ("plan", "--dist", str(dist), "--index", server.url, "--output", str(output))
+    assert _command(*args, "--attempts", "2", "--delay", "0") == 1
+    assert not output.exists()
+    assert len(server.paths) == 2
+    assert "503" in capsys.readouterr().out
+
+
+def test_plan_command_fails_when_the_index_cannot_be_reached(dist, server, tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    output = tmp_path / "upload.txt"
+    url = server.url
+    server.shutdown()
+    server.server_close()
+    args = ("plan", "--dist", str(dist), "--index", url, "--output", str(output))
+    assert _command(*args, "--attempts", "1", "--delay", "0") == 1
+    assert not output.exists()
+    assert "Nothing was uploaded" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("broken", [_cut_mid_body, _garbage_status_line])
+def test_plan_command_fails_cleanly_when_the_answer_breaks_off(dist, server, tmp_path, monkeypatch, capsys, broken):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    output = tmp_path / "upload.txt"
+    server.answer = broken
+    args = ("plan", "--dist", str(dist), "--index", server.url, "--output", str(output))
+    assert _command(*args, "--attempts", "2", "--delay", "0") == 1
+    assert not output.exists()
+    assert len(server.paths) == 2
+    out = capsys.readouterr().out
+    assert "::error::" in out and "Nothing was uploaded" in out
+
+
+def test_confirm_command_waits_through_an_answer_that_breaks_off(dist, release, server, capsys):
+    answers = [_cut_mid_body, _garbage_status_line, listing(release, WHEEL, SDIST)]
+
+    def in_turn(handler):
+        answer = answers.pop(0) if len(answers) > 1 else answers[0]
+        if callable(answer):
+            return answer(handler)
+        status, body = answer
+        handler.send_response(status)
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    server.answer = in_turn
+    assert _command("confirm", "--dist", str(dist), "--index", server.url, "--attempts", "5", "--delay", "0") == 0
+    assert len(server.paths) == 3
+    assert "lists both files" in capsys.readouterr().out
+
+
+def test_a_redirect_is_not_followed(dist, server, tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    output = tmp_path / "upload.txt"
+    server.answer = _redirect
+    args = ("plan", "--dist", str(dist), "--index", server.url, "--output", str(output))
+    assert _command(*args, "--attempts", "2", "--delay", "0") == 1
+    assert server.paths == ["/pypi/contexto-proxy/9.9.9/json"] * 2
+    assert not output.exists()
+    assert "302" in capsys.readouterr().out
+
+
+def test_an_answer_larger_than_the_limit_is_not_read(dist, server, tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    output = tmp_path / "upload.txt"
+    server.answer = (200, b'{"urls": [], "padding": "' + b"x" * (pypi.MAX_ANSWER + 1) + b'"}')
+    args = ("plan", "--dist", str(dist), "--index", server.url, "--output", str(output))
+    assert _command(*args, "--attempts", "1", "--delay", "0") == 1
+    assert not output.exists()
+    out = capsys.readouterr().out
+    assert "larger than" in out and "Nothing was uploaded" in out
+
+
+def test_a_proxy_in_the_environment_does_not_get_the_loopback_requests(dist, server, tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    for variable in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(variable, "http://127.0.0.1:9")  # the discard port: nothing listens
+    output = tmp_path / "upload.txt"
+    assert _command("plan", "--dist", str(dist), "--index", server.url, "--output", str(output)) == 0
+    assert server.paths == ["/pypi/contexto-proxy/9.9.9/json"]
+
+
+@pytest.mark.parametrize(
+    "index",
+    ["http://example.invalid", "http://127.0.0.1.example.invalid:8080", "http://127.0.0.1@example.invalid/",
+     "ftp://127.0.0.1/", "file:///etc/passwd", "127.0.0.1:8080", "http://localhost.example.invalid", ""],
+)
+def test_the_index_must_be_https_or_a_loopback_address(dist, tmp_path, index, capsys):
+    output = tmp_path / "upload.txt"
+    with pytest.raises(SystemExit) as stopped:
+        _command("plan", "--dist", str(dist), "--index", index, "--output", str(output))
+    assert stopped.value.code == 2
+    assert not output.exists()
+    assert "https://" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("index", ["https://pypi.org", "http://127.0.0.1:8080", "http://localhost:8080/", "http://[::1]:8080"])
+def test_an_https_or_loopback_index_is_accepted(index):
+    assert pypi.index_url(index) == index
+
+
+def test_plan_command_does_not_ask_the_index_about_files_it_refuses(tmp_path, server, capsys):
+    make_dist(tmp_path / "d", name="contexto")
+    output = tmp_path / "upload.txt"
+    assert _command("plan", "--dist", str(tmp_path / "d"), "--index", server.url, "--output", str(output)) == 1
+    assert server.paths == []
+    assert not output.exists()
+
+
+def test_confirm_command_passes_when_pypi_lists_both_files(dist, release, server, capsys):
+    server.answer = listing(release, WHEEL, SDIST)
+    assert _command("confirm", "--dist", str(dist), "--index", server.url, "--attempts", "2", "--delay", "0") == 0
+    assert "lists both files" in capsys.readouterr().out
+
+
+def test_confirm_command_fails_when_pypi_never_lists_them(dist, server, capsys):
+    assert _command("confirm", "--dist", str(dist), "--index", server.url, "--attempts", "2", "--delay", "0") == 1
+    assert len(server.paths) == 2
+    assert "::error" in capsys.readouterr().out
+
+
+def test_the_script_uses_only_the_standard_library():
+    allowed = set(sys.stdlib_module_names)
+    for line in SCRIPT.read_text(encoding="utf-8").splitlines():
+        words = line.split()
+        if len(words) >= 2 and words[0] in ("import", "from") and not line.startswith((" ", "\t")):
+            assert words[1].split(".")[0].rstrip(",") in allowed, line
+
+
+def test_the_script_has_no_upload_code():
+    text = SCRIPT.read_text(encoding="utf-8")
+    for word in ("upload.pypi.org", "method=", "POST", "subprocess", "os.system"):
+        assert word not in text, word
+
+
+# --- limits and rough edges ------------------------------------------------------------------------
+
+
+def _stall_after(prefix, length):
+    """An answer that announces `length` bytes, sends `prefix`, and then sends nothing more."""
+
+    def answer(handler):
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(length))
+        handler.end_headers()
+        handler.wfile.write(prefix)
+        handler.wfile.flush()
+        handler.server.release.wait(30)
+        handler.close_connection = True
+
+    return answer
+
+
+def _in_thread(function, limit):
+    """Run `function` in a thread; return what it returned or raised, or fail after `limit` seconds."""
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = function()
+        except BaseException as error:  # noqa: BLE001 - the test looks at what was raised
+            outcome["error"] = error
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(limit)
+    assert not thread.is_alive(), f"still waiting after {limit} s"
+    return outcome
+
+
+def test_an_answer_is_never_read_past_the_limit(server, monkeypatch):
+    # The server sends one byte more than the limit and then stalls: a read without a limit would
+    # wait for the rest, and end in a timeout instead of the size error.
+    monkeypatch.setattr(pypi, "MAX_ANSWER", 1000)
+    server.answer = _stall_after(b"x" * 1001, 10_000_000)
+    outcome = _in_thread(lambda: pypi.fetch(f"{server.url}/pypi/x/9.9.9/json", timeout=20), limit=10)
+    assert isinstance(outcome.get("error"), OSError)
+    assert "larger than 1000 bytes" in str(outcome["error"])
+
+
+def test_a_read_has_a_timeout(server):
+    server.answer = _stall_after(b"", 100)
+    outcome = _in_thread(lambda: pypi.fetch(f"{server.url}/pypi/x/9.9.9/json", timeout=1), limit=10)
+    assert isinstance(outcome.get("error"), (TimeoutError, OSError)), outcome
+
+
+def test_the_request_asks_for_json(dist, server, tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    assert _command("plan", "--dist", str(dist), "--index", server.url, "--output", str(tmp_path / "u.txt")) == 0
+    assert server.accepts == ["application/json"]
+
+
+def test_a_proxy_in_the_environment_is_used_for_any_other_host(serve, monkeypatch):
+    # A runner behind a proxy can reach PyPI only through it. Only loopback requests skip it.
+    proxy = serve()
+    proxy.answer = (404, b"{}")
+    monkeypatch.setenv("http_proxy", proxy.url)
+    status, _ = pypi.fetch("http://pypi.example.invalid/pypi/contexto-proxy/9.9.9/json", timeout=10)
+    assert status == 404
+    assert proxy.paths == ["http://pypi.example.invalid/pypi/contexto-proxy/9.9.9/json"]
+
+
+def test_a_deeply_nested_answer_is_an_unreadable_answer(release):
+    deep = (200, b"[" * 200_000)
+    with pytest.raises(pypi.Refused, match="not a release's file list"):
+        pypi.plan(release, PROJECT, INDEX, Index(deep), attempts=2, sleep=no_sleep)
+    index = Index(deep, listing(release, WHEEL, SDIST))
+    pypi.confirm(release, PROJECT, INDEX, index, attempts=3, delay=0, sleep=no_sleep)
+    assert len(index.urls) == 2
+
+
+def test_a_file_listed_twice_by_the_index_is_an_unreadable_answer(release):
+    # With another digest first and ours second, keeping the last one would pass a different file.
+    body = json.loads(listing(release, WHEEL, SDIST)[1])
+    body["urls"].insert(0, {"filename": WHEEL, "digests": {"sha256": "0" * 64}})
+    twice = (200, json.dumps(body).encode())
+    with pytest.raises(pypi.Refused, match="not a release's file list"):
+        pypi.plan(release, PROJECT, INDEX, Index(twice), attempts=1, sleep=no_sleep)
+    with pytest.raises(pypi.Refused, match="After 2 checks"):
+        pypi.confirm(release, PROJECT, INDEX, Index(twice), attempts=2, delay=0, sleep=no_sleep)
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [("--attempts", "0"), ("--attempts", "-1"), ("--delay", "-1"), ("--delay", "nan"), ("--delay", "inf")],
+)
+def test_attempts_and_delay_must_be_usable(dist, tmp_path, option, value, capsys):
+    with pytest.raises(SystemExit) as stopped:
+        _command("plan", "--dist", str(dist), "--index", INDEX, "--output", str(tmp_path / "u.txt"), option, value)
+    assert stopped.value.code == 2
+    assert option in capsys.readouterr().err
+
+
+def test_an_output_file_that_cannot_be_written_fails_with_an_error(dist, server, tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    output = tmp_path / "missing" / "upload.txt"
+    assert _command("plan", "--dist", str(dist), "--index", server.url, "--output", str(output)) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "Nothing was uploaded" in out
+
+
+def test_oversized_checksums_are_refused(dist):
+    sums = dist / "SHA256SUMS"
+    sums.write_text(sums.read_text(encoding="ascii") + "#" * pypi.MAX_SUMS, encoding="ascii")
+    with pytest.raises(pypi.Refused, match="larger than"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+@pytest.mark.parametrize("name", ["evil-1.0-py3-none-any.whl", "contexto_proxy-9.9.90-py3-none-any.whl"])
+def test_a_wheel_with_another_file_name_and_our_metadata_is_refused(dist, name):
+    (dist / WHEEL).rename(dist / name)
+    write_sums(dist, [dist / name, dist / SDIST])
+    with pytest.raises(pypi.Refused, match="do not start with contexto_proxy-9.9.9"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+def test_a_wheel_with_two_metadata_files_is_refused(dist):
+    with zipfile.ZipFile(dist / WHEEL, "a") as archive:
+        archive.writestr("other-1.0.dist-info/METADATA", "Metadata-Version: 2.4\nName: other\nVersion: 1.0\n")
+    write_sums(dist, [dist / WHEEL, dist / SDIST])
+    with pytest.raises(pypi.Refused, match="expected one .dist-info/METADATA, found 2"):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+def test_a_checksum_line_with_one_space_is_refused(dist):
+    sums = dist / "SHA256SUMS"
+    sums.write_text(sums.read_text(encoding="ascii").replace("  ", " ", 1), encoding="ascii")
+    with pytest.raises(pypi.Refused, match='line 1 is not "<sha256>  <file name>"'):
+        pypi.load_release(dist, PROJECT, TAG)
+
+
+def test_an_unwritable_github_output_says_what_was_not_written(dist, server, tmp_path, monkeypatch, capsys):
+    # The plan file is written; the job's output is a directory, so upload_count cannot be.
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path))
+    output = tmp_path / "upload.txt"
+    assert _command("plan", "--dist", str(dist), "--index", server.url, "--output", str(output)) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "upload_count" in out and "Nothing was uploaded" in out
+    assert "Cannot write the plan" not in out

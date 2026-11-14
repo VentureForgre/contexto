@@ -19,8 +19,14 @@ cd contexto
 uv run contexto --help                # creates .venv and runs the checkout's code
 ```
 
+The distribution is named `contexto-proxy`, its name on PyPI, where `contexto` is an unrelated
+project. The command and the import name are `contexto`.
+
 An install from a checkout reports its version as `0.0.0+checkout`. Only release builds carry a real
-version (see [RELEASING.md](RELEASING.md)).
+version (see [RELEASING.md](RELEASING.md)). An install from a git URL also prints the revision, which
+the installer records in the distribution's `direct_url.json`:
+`contexto 0.0.0+checkout (git v1.2.3, commit 0123abcd)` for a tag or branch, and
+`contexto 0.0.0+checkout (git commit 0123abcd)` when the URL names a commit or no revision.
 
 ## Tests and lint
 
@@ -28,7 +34,13 @@ version (see [RELEASING.md](RELEASING.md)).
 uv run --with pytest pytest -q        # the whole suite, about 4 minutes
 uvx ruff@0.17.2 check .               # lint, with the rules in pyproject.toml
 uv build                              # the sdist and wheel, into dist/
+bash .github/scripts/install-check.sh 3.12   # install the built wheel and sdist, run the command
+bash .github/scripts/package-check.sh        # twine check, metadata, the rendered PyPI description
 ```
+
+The two scripts need only uv. They build into a new temporary directory, create their virtual
+environments there, and remove it when they finish. `install-check.sh` takes the Python version to
+use.
 
 The suite collects `tests/` (the package) and `spikes/` (measurement code that the research notes in
 `docs/research/` cite). It makes no model calls and needs no API key. Tests that drive a real
@@ -43,6 +55,12 @@ Some tests skip when something is missing, and pytest prints the reason:
 - A shallow clone: one research test that reads git history.
 - Running as root: two file-permission tests.
 
+The tests assume the machine has no Claude Code managed settings file
+(`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
+`/etc/claude-code/managed-settings.json` on Linux). The tests against the real `claude` skip when
+one exists; the launcher tests that start `contexto run claude` read it and fail if it turns on a
+cloud-provider switch or the gateway hint headers.
+
 CI has neither `claude` nor `codex`, so a green CI run does not cover the tests against the real
 CLIs. If you change how Contexto talks to a CLI, install it and run the suite locally.
 
@@ -56,7 +74,16 @@ pip install -e . pytest
 pytest -q
 ```
 
-The suite runs on macOS and Linux. Windows is not supported (see the README's Platforms note).
+`pip install -e .` installs the checkout as before. `pip list` shows it as `contexto-proxy`, and
+`pip uninstall contexto-proxy` removes it.
+
+A virtual environment made before the rename still holds the old `contexto` distribution. With uv,
+run `uv sync --reinstall-package contexto-proxy` once: it removes the old distribution and puts back
+the `contexto` command, which the old one owned. In a plain virtual environment run
+`pip uninstall contexto` and then `pip install -e .` again; until then `contexto --version` prints
+`0.0.0+unknown` and two packaging tests fail.
+
+The suite runs on macOS and Linux. Windows is not supported (see [Platforms](docs/install.md#platforms)).
 
 ## What CI runs
 
@@ -65,10 +92,22 @@ The suite runs on macOS and Linux. Windows is not supported (see the README's Pl
 - `lint`: `uvx ruff@0.17.2 check .`. `ruff format` is not enforced.
 - `test`: `uv run --with pytest==9.1.1 pytest` and `uv build`, on Python 3.12, 3.13, 3.14 and 3.15
   on Ubuntu, and on 3.12 and 3.15 on macOS.
-- `ci`: passes only when lint and every test job pass. It is the one required check.
+- `install`: `.github/scripts/install-check.sh`, on the same Pythons and systems as `test`. It builds
+  the sdist and wheel, installs the wheel into an empty virtual environment, and from a directory
+  outside the checkout runs `contexto --version`, `contexto --help`, `python -m contexto --version`
+  and `contexto sessions list` against an empty `CONTEXTO_HOME`. Then it installs the sdist into a
+  second empty environment and checks that it holds the same package.
+- `package`: `.github/scripts/package-check.sh`, once. It runs `twine check --strict` on the sdist
+  and wheel, checks their name, metadata (every classifier is one PyPI knows) and contents, builds
+  a wheel again from the unpacked sdist, and renders the PyPI description
+  ([docs/pypi-description.md](docs/pypi-description.md)) with `readme_renderer`, the renderer PyPI
+  uses. It uploads nothing.
+- `ci`: passes only when lint, package and every test and install job pass. It is the one required
+  check.
 
-uv, Ruff, pytest and the actions are pinned, so a new release of any of them cannot fail CI on code
-that did not change. Workflow runs on pull requests from forks wait for a maintainer to approve them.
+uv, Ruff, pytest, twine, readme-renderer, trove-classifiers and the actions are pinned, so a new
+release of any of them cannot fail CI on code that did not change. Workflow runs on pull requests
+from forks wait for a maintainer to approve them.
 
 ## Pull requests
 
@@ -76,9 +115,10 @@ that did not change. Workflow runs on pull requests from forks wait for a mainta
   ruleset: changes reach it only through a pull request with a passing `ci` check.
 - The pull request title must be a [Conventional Commit](https://www.conventionalcommits.org/),
   for example `fix: recall reads a page written by an older release`. Pull requests are squash
-  merged, so the title becomes the commit on `main`, and it decides the release: `feat:` is a minor
-  release, `fix:` and `perf:` a patch, and `docs:`, `test:`, `build:`, `ci:`, `chore:` and
-  `refactor:` none. The table is in [RELEASING.md](RELEASING.md#conventional-commits).
+  merged, so the title becomes the commit on `main`. Merging does not release anything. The title
+  decides how far the next release moves the version: `feat:` makes it at least a minor release,
+  `fix:` and `perf:` at least a patch, and `docs:`, `test:`, `build:`, `ci:`, `chore:` and
+  `refactor:` have no effect. The table is in [RELEASING.md](RELEASING.md#conventional-commits).
 - For a bug fix, add a test that fails without the fix.
 - Run the suite and the lint before you push.
 - A change to what the proxy does to requests is a change to the design contract,
@@ -107,8 +147,12 @@ contribution is licensed under the same terms.
   part of the package.
 - `docs/milestones/`: design contracts. `docs/DECISIONS.md`: decisions and their reasons.
 - [docs/cli-updates.md](docs/cli-updates.md): how a new Claude Code or Codex version is tested.
+- [docs/README.md](docs/README.md): the index of the guides, design records and research notes.
 
 ## Releases
 
-Releases are automated from the Conventional Commits on `main`. [RELEASING.md](RELEASING.md)
-describes the workflow, the version rules, and recovery.
+Releases are cut by hand and batched, normally no more than one a week; a security fix or a fix
+for a broken release ships the same day. Merging a pull request never releases by itself. The
+maintainer starts the release workflow, which computes the version from the Conventional Commits
+on `main` since the last release and requires a section for it in `CHANGELOG.md`.
+[RELEASING.md](RELEASING.md) describes the rule, the steps, the version rules, and recovery.

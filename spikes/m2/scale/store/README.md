@@ -630,6 +630,428 @@ words in 3 or more texts are no longer pushed down. The other 8 latency queries 
 renders every page it shows (`get_page` for the 3 detailed and the 50 listed), with no cap on their size; D39's budget
 bounds the text held between searches, not these reads. `index_text` does not rank and is unchanged.
 
+## D65: fallback probes (2026-11-12)
+
+D65 adds a fallback to `contexto_search` that runs only when strict search (every word of the query
+on the page) finds nothing. This section is the measurement for it, built without sight of that
+code: a probe set, a script anyone can run, and the numbers on `main` before the change. Nothing in
+`src/` changes here. The after numbers are added by the D65 pull request.
+
+### Commands
+
+```
+# before: on main. The store is kept under --store-home and later runs find it again.
+uv run python spikes/m2/scale/store/fallback_bench.py --store-home /tmp/d65-store
+# after: on the branch with the fallback. --baseline-src is the src directory of a checkout of main.
+uv run python spikes/m2/scale/store/fallback_bench.py --store-home /tmp/d65-store --label after \
+    --baseline-src ../contexto-main/src
+# both side by side, as one table
+uv run python spikes/m2/scale/store/fallback_bench.py --compare \
+    spikes/m2/scale/store/results/d65/before spikes/m2/scale/store/results/d65/after
+# a quick check at 60 pages
+uv run python spikes/m2/scale/store/fallback_bench.py --sizes 60 --out /tmp/d65-quick
+```
+
+The quick check runs the code paths, not the probes. The probes were written against the 6,000-page
+store, and their checks mean something only there. At 60 or 300 pages a word added to a probe can
+be on its page by chance (`extra_word-20` at 300 pages), so a probe check can fail, and the summary
+says so at any other size.
+
+`--quality-only` and `--latency-only` run one part and keep the other part's files and its record
+in `env.json`. Without `--store-home` the store is written under a temporary `CONTEXTO_HOME` and
+deleted at the end, also on Ctrl-C and on SIGTERM. `--store-home` may not be `~/.contexto` or
+`$CONTEXTO_HOME`, or a folder under either. A `~` in `CONTEXTO_HOME` is expanded first, as
+Contexto expands it. There is no model call. A 6,000-page build takes about 20 seconds on an idle
+machine.
+
+Results go to `results/d65/<label>/`: `quality.csv` (one row per probe), `latency.csv` (every call),
+`env.json` (one record per part: commit, pages, probe set, corpus) and `summary.md`. A run writes to
+temporary names and renames them at the end, so a run that fails leaves the folder as it was, and a
+run that fails on first use of a label leaves no folder. The renames are not atomic as a group, and
+SIGKILL can leave `*.csv.tmp` files; the next run overwrites them. `summary.md` names the commit and
+page count of each part. It warns when the two parts differ in commit, store size, corpus, probe
+set, whether the store had `search_approximate`, or uncommitted changes under `src/`.
+
+`--compare` first prints, for each folder, the pages, the commit of each part, the probe count with
+a digest of the probe set, and for each part whether the store had `search_approximate`. An after
+run that never reached the fallback shows "no" there. It exits with status 2 and prints no table
+when a folder is missing, the two runs differ in store size, corpus (seed, floor, the added plants)
+or probe set, or their latency parts timed different queries. It also refuses two runs that timed
+the same queries in a different order, and says so: the order decides which query is the first
+call of its kind and what ran before each call. Page ids are keyed per store, so they cannot be
+compared across stores; these can. The timed queries are recorded in `env.json`; for a run from
+before that record they are read from its `latency.csv`.
+
+### The corpus
+
+The store is the 6,000-page store of this spike (seed 7, floor 0) with six more plants,
+`fallback_probes.EXTRA_FACTS`. The plants of `scale_probes` write identifiers in snake_case and
+UPPER_SNAKE, plus two PascalCase names and two kebab-case keys. No page holds a camelCase or a
+dotted identifier, so the identifier class could not cover those styles. The six plants add them:
+`refreshToken`, `maxConnections`, `fetch.max.wait.ms`, `tls.min.version`, `x-request-id` and
+`drain-grace-period`, each on one page and nowhere else.
+
+They are planted only when a build passes `extra=EXTRA_FACTS` (`scale_synth.session_turn`,
+`scale_bench.build_store`). Without it the corpus is the one D34, D39 and D41 were measured on,
+byte for byte: `test_fallback_probes.py` compares a digest of the default turns with the value
+recorded on `main` before `extra` existed. The D65 run uses the extended corpus. 6 of its 6,000
+pages differ from the default corpus, and none of them holds a `scale_probes` plant.
+
+### The probes (`fallback_probes.py`)
+
+192 queries in eight classes.
+
+| class | probes | the query | example |
+|---|---:|---|---|
+| `exact` | 15 | words of the page itself; strict search finds it. The control. | `Redis eviction policy` |
+| `identifier` | 23 | the page's identifier in another style (snake_case, camelCase, kebab-case, dotted); case alone does not count | `refresh_token` for `refreshToken` |
+| `paraphrase` | 42 | the fact in other words; at least one word is not on the page | `ingestion batch size` for "Ingest batch size set to 1200." |
+| `question` | 30 | a question, one per fact; 10 are the fact's own `question`, 20 are new | `Which eviction policy is Redis using now?` |
+| `typo` | 30 | words of the page with one single-character typo in a word of 6 or more characters | `Redis eviction polciy`, `allkeys-lru` |
+| `extra_word` | 26 | exact probe i plus one word the page does not hold | `Redis eviction policy production` |
+| `two_page` | 10 | two facts that sit on different pages; both pages are expected | `staging DB port Redis eviction policy` |
+| `none` | 16 | nothing to find: 8 of words that are on no page, 8 of an absent topic with a common word | `Kafka consumer rebalance`, `kubernetes liveness probe timeout` |
+
+For a fact whose value changes, the expected page is the last plant.
+
+**What three classes measure.** The first set had 154 probes. Its typo, extra-word and paraphrase
+probes mostly ask one thing: ignore a word that is on no page. In a first-set typo probe the other
+words are the page's own, and they often find the page without the misspelled word. 12 of its 15
+added words and most of its reworded words are on no page of the store. A fallback that drops
+words no page holds would score well on all three classes without a typo step. So 39 probes were
+added after review, on 2026-11-12, and none was edited:
+
+- 15 typo probes whose misspelled word carries the query. 8 are one word that only the planted page
+  holds (`allkeys-lru` for `allkeys-lfu`, `SUP-48231` for `SUP-48213`). 7 are that kind of word with
+  one word that many pages hold (`streamimg flag`; `flag` is on 1,332 pages).
+- 11 extra-word probes whose added word is on other pages and not on the expected one: `owner`
+  (1,885 pages, 31 percent), `flag` (1,332), `timeout` (831, 14 percent), `retries` (329), `limit`
+  (131), `policy` (77, about 1 percent), `failover` (66), `client` (48).
+- 12 paraphrase probes that replace one word of the page by a word many pages hold and keep the
+  page's other words: `cache timeout seconds` for "The cache TTL is 120 seconds."
+- 1 `none` probe, `webpack bundle import`, in place of `none-16`.
+
+`summary.md` reports these classes by group: for extra-word and paraphrase probes, off-page word on
+no page against on some page; typo by kind of edit and by whether the misspelled word carries the
+query; and identifier with and without other page words. A typo is on no page by construction, so
+typo has no off-page split. For a paraphrase the off-page words are the words its expected page does
+not hold, and the group goes by the most common one.
+
+**Marked, not edited.**
+
+- `typo-14` types `woker` for `worker`. The right spelling has 6 characters and the typed word 5. A
+  fallback that applies a 6-character rule to the word as typed skips it. It has its own row.
+- A swap of two adjacent characters counts as one edit here. Under plain Levenshtein distance it is
+  two. 9 of the 30 typos are swaps, and the summary has a row per kind of edit.
+- `typo-16` to `typo-20` and `typo-23` are identifiers. In five the misspelled sub-word is short
+  (`lru`, `48231`, `hamc`, `crsh`, `blcok`); in `typo-19` it is `chuncked`. A fallback that splits
+  identifiers into sub-words can find their page from the other sub-words with no typo step. At 6,000 pages the kept sub-words of
+  `typo-16`, `-18` and `-20` are on that page only. Two are arguably real values rather than typos:
+  `allkeys-lru` is a valid Redis policy and `SUP-48231` another ticket number. They carry the flag
+  `identifier_typo` (added 2026-11-13; no query changed). The summary reports the "misspelled word
+  carries the query" row for all 15, for the 9 without them (`typo-21`, `-22`, `-24` to `-30`), and
+  for the 6 alone. Read typo correction on the 9.
+- `identifier-04`, `-13` and `-23` also hold other words of the page (`replaced fetchRows`), which
+  can find the page with no style folding. The summary reports the 20 bare identifiers and these 3
+  apart.
+- `none-16` (`OAuth session token`) is out of the set and kept in `fallback_probes.EXCLUDED`. The
+  added `refreshToken` page is about refresh and access tokens for a login, so a page near the
+  query exists.
+
+**How they were written.** I wrote the first 154 queries on 2026-11-12 from the fact's `question`
+and the text of its plant, as a model would type it, before I ran any query through search. The 39
+later ones were written the same day, after the first run on `main` and after review, from the
+facts and from single-word lookups: how many pages hold a word, and whether a fact's page holds it.
+No query was changed after its result was seen. Two tests pin the 154 first probes by digest
+against 2413af5: one over id and query, one over id, class and expected pages. Flags were added
+later; queries, classes and expected pages were not changed. I did not see the fallback's code, and
+nothing is tuned to it.
+
+**The two halves.** Every fact is in one half, and every probe is in the half of its fact. The two
+facts of a two-page probe share a half. So do facts whose expected plants sit on one page (s05 with
+c04, s14 with c03). No fact and no page is asked about in both halves, and a test checks it. `none`
+probes have no fact and alternate. The halves hold 96 probes each, and no class differs by more
+than one probe between them. Both pages with a dotted identifier came out in `tune`. Parameters of
+the fallback are chosen on `tune` and reported on `held_out`.
+
+Both halves come from one synthetic corpus and one author. The held-out half shows whether a
+setting carries over to other facts and other queries of the same kind. It shows nothing more: not
+real sessions, and not queries a model would write.
+
+### Method (`fallback_bench.py`)
+
+- Quality, in process. The ranked pages of a probe are `store.search(query)`. If that is empty and
+  the store has `search_approximate` (`main` has none), they are the ids of
+  `store.search_approximate(query)`, best first. A probe counts at 3 (at 10) when every expected page
+  is in the top 3 (top 10). For `two_page` the table also counts probes with either page. For `none`,
+  a false hit is a probe for which any page comes back. The quality pass holds all page text in
+  memory, which changes its speed and no result (D39).
+- The ceiling ("reachable at 3 / at 10"). Each probe that alters a word is also run through strict
+  search spelled the page's way: the page's identifier, the query before its typo, the query without
+  its added word, the question without its question mark. A probe is reachable at 3 when strict
+  search then ranks its page in the top 3. For identifier, typo and extra-word probes this is a
+  ceiling: a fallback that ranks as strict search does cannot do better on the others, so recall is
+  read against this count and not against the probe count. For `question` it is not a ceiling. It
+  only counts what removing the "?" gives (3 of 30); a fallback that also drops stop words or
+  question words can beat it.
+- Latest first. All three plants of a changing fact hold the query's words, so a top 3 can hold a
+  stale value first and still count. For probes on such a fact the table counts those whose
+  expected page ranks above every older value's page, as `scale_bench.py` does with `latest_first`.
+- A cross-check through the tool. Each probe also goes through `contexto.mcp.Server` in process,
+  after a retained window and a turn room are published. It assumes this reply format: a page shown
+  in detail has a line that is exactly `pg_<16 hex> (turn N)`, and a listed page has a line that
+  starts `pg_<16 hex> (turn N) @`. Every other line is ignored. That is today's format, and the
+  assumption is that the fallback pull request (#267) keeps both shapes and puts any approximate
+  label on lines of its own; #267 has to confirm it. If it prefixed the page lines, this check would
+  read 0 for every fallback answer, and the "differs from top 3" column would show it.
+- Probe checks. The summary counts exact probes strict search misses, altered probes strict search
+  answers with the expected page, `none` probes with an absent word on some page, and paraphrase
+  probes whose page holds every word. All four must be 0 for the classes to mean what they say. It
+  also counts the probes for which `search_approximate` returned a page id more than once: the
+  `duplicates` column of `quality.csv` holds how many repeats, and a repeated id keeps its first
+  rank and is not counted again. And it counts the probes for which `search_approximate` returned
+  a page id the store does not hold: the `unknown` column holds how many. Such an id still counts
+  as a page returned, and as a false hit for `none`, so this count must be 0 too. A
+  test also checks that every typo, every added word said to be on no page, and every absent word
+  of a `none` probe occurs in no text a page is built from (the line pools, the plants, and the
+  distractor lines that can be drawn at floor 0), so the claim holds at every store size.
+- Latency, through a real `python -m contexto mcp --session S` child over stdio with the default
+  64 MB search budget: the median of 5 calls per query, in 4 passes. The queries are the nine of
+  `scale_probes.LATENCY_QUERIES` (strict hits); the first three probes strict search finds nothing
+  for in each of `identifier`, `question`, `typo`, `extra_word`, `none` and `paraphrase`; and seven
+  fixed strict misses whose shape costs a fallback most (`fallback_bench.TIMED_PROBES`):
+  `miss_typo_carried` is `typo-16`, `-21` and `-24` (`allkeys-lru`, `aragon2id`, `streamimg flag`),
+  `miss_extra_word_common` is `extra_word-16` and `-18` (added word `owner`, on 1,885 pages, and
+  `flag`, on 1,332), and `miss_paraphrase_common` is `paraphrase-33` and `-36` (`name`, 249 pages,
+  and `cache`, 267). At 6,000 pages that is 34 queries. The list is recorded in `env.json`. With
+  `--baseline-src` a second child runs the other checkout's code on the same store. Every call is
+  made against both children in turn, and the child that goes first alternates, so both see the
+  same load. The 1-minute load average is recorded at each pass. A child that does not answer
+  within 600 seconds is killed and the run fails. Next to each kind's ratio the summary gives the
+  lowest and the highest ratio of one pass alone, so a difference in some passes only shows. The
+  overall ratio is that of two medians over all queries and passes, and can fall outside that
+  range. The summary also says which side went first in which pass. Use an even number of passes:
+  with an odd number one order has one pass more, and the medians lean to it, which the summary
+  says.
+- First calls of a process. Each pass starts with a throwaway child's search, which fills the OS
+  file cache, then a new child per side. Each child's first search, its first strict miss (its first
+  `miss_*` call, `streamChunkedV3`) and its first call of each `miss_*` kind (`first miss_typo` is
+  rep 0 of `stagng DB port`) are one-time costs, which the medians of 5 calls hide. A fallback that
+  pays 3 seconds once per process shows in the row of the first kind whose first query runs the
+  costly stage: a cost on the typo step lands in `first miss_typo`, and the first strict miss and
+  the steady `miss_typo` row stay near 1. A test checks this case. The rows are compared within a
+  pass, where both sides ran under the same load. The side that goes first alternates by pass, so an
+  odd pass and the next even pass are combined by geometric mean, which cancels the position. The
+  summary gives the paired ratio (the geometric mean of the pairs), each pair, and every pass;
+  `--compare` gives the paired ratio and the pairs. An unpaired pass is left out and named. A cost
+  paid on the second call of a kind, or later, shows in none of these rows: only `latency.csv` has
+  it.
+
+### Before: `main` (`results/d65/before`)
+
+`main` has no fallback, so every answer below is strict search's. The two parts come from two runs,
+and `summary.md` says so:
+
+- Quality: commit 698acaa of this branch, whose `src/` is `main`'s (b0e2dbc, v0.5.24); Python
+  3.13.14, macOS 26.6.1, Apple M5 Pro. It replaced the first run (154 probes, at 835dadc).
+- Latency: one run with `--latency-only` on 2026-11-14, at commit 01d6dfc of this branch against
+  `--baseline-src`, a checkout of `main` at ef15af0. The two `src/` trees are identical, so both
+  children ran `main`'s code. 4 passes of 5 calls per query, the 34-query list; Python 3.13.14,
+  macOS 27.2.1, Apple M5 Pro. The 1-minute load average was 8.95, 11.61, 10.9 and 10.92 at the
+  start of the four passes. It replaces the earlier latency run (24 queries, load 28 to 67), so
+  every latency number below comes from this one run.
+
+`latency.csv` and `env.json` are that run's files, unchanged except the label. `quality.csv` is
+byte for byte the quality run's, and `summary.md` was regenerated from these files by the bench as
+of the third review (first call of each `miss_*` kind, ratio by pass).
+
+Recall: probes with every expected page in the top 3 and in the top 10. Reachable: probes whose
+page strict search ranks there when the query is spelled the page's way.
+
+| class | half | probes | top 3 | reachable at 3 | top 10 | reachable at 10 | latest first | strict / fallback / nothing |
+|---|---|---:|---:|---:|---:|---:|---|---|
+| exact | tune | 8 | 8 | 8 | 8 | 8 | 1 of 1 | 8 / 0 / 0 |
+| exact | held-out | 7 | 7 | 7 | 7 | 7 | 2 of 2 | 7 / 0 / 0 |
+| exact | all | 15 | 15 (100%) | 15 | 15 (100%) | 15 | 3 of 3 | 15 / 0 / 0 |
+| identifier | tune | 11 | 0 | 8 | 0 | 9 | 0 of 2 | 0 / 0 / 11 |
+| identifier | held-out | 12 | 0 | 12 | 0 | 12 | 0 of 3 | 0 / 0 / 12 |
+| identifier | all | 23 | 0 (0%) | 20 | 0 (0%) | 21 | 0 of 5 | 0 / 0 / 23 |
+| paraphrase | tune | 21 | 0 | - | 0 | - | 0 of 4 | 2 / 0 / 19 |
+| paraphrase | held-out | 21 | 0 | - | 0 | - | 0 of 7 | 4 / 0 / 17 |
+| paraphrase | all | 42 | 0 (0%) | - | 0 (0%) | - | 0 of 11 | 6 / 0 / 36 |
+| question | tune | 15 | 0 | 2 | 0 | 2 | 0 of 3 | 0 / 0 / 15 |
+| question | held-out | 15 | 0 | 1 | 0 | 1 | 0 of 5 | 0 / 0 / 15 |
+| question | all | 30 | 0 (0%) | 3 | 0 (0%) | 3 | 0 of 8 | 0 / 0 / 30 |
+| typo | tune | 15 | 0 | 15 | 0 | 15 | 0 of 1 | 0 / 0 / 15 |
+| typo | held-out | 15 | 0 | 15 | 0 | 15 | 0 of 5 | 0 / 0 / 15 |
+| typo | all | 30 | 0 (0%) | 30 | 0 (0%) | 30 | 0 of 6 | 0 / 0 / 30 |
+| extra_word | tune | 13 | 0 | 13 | 0 | 13 | 0 of 1 | 1 / 0 / 12 |
+| extra_word | held-out | 13 | 0 | 13 | 0 | 13 | 0 of 5 | 1 / 0 / 12 |
+| extra_word | all | 26 | 0 (0%) | 26 | 0 (0%) | 26 | 0 of 6 | 2 / 0 / 24 |
+| two_page | tune | 5 | 0 | - | 0 | - | 0 of 1 | 0 / 0 / 5 |
+| two_page | held-out | 5 | 0 | - | 0 | - | 0 of 2 | 0 / 0 / 5 |
+| two_page | all | 10 | 0 (0%) | - | 0 (0%) | - | 0 of 3 | 0 / 0 / 10 |
+
+`two_page` counted by either page is also 0 in every cell.
+
+The same counts by group, both halves together:
+
+| group | probes | top 3 | reachable at 3 | top 10 | reachable at 10 | strict / fallback / nothing |
+|---|---:|---:|---:|---:|---:|---|
+| identifier, the identifier alone | 20 | 0 | 17 | 0 | 18 | 0 / 0 / 20 |
+| identifier, with other page words | 3 | 0 | 3 | 0 | 3 | 0 / 0 / 3 |
+| typo, substitution | 9 | 0 | 9 | 0 | 9 | 0 / 0 / 9 |
+| typo, deletion | 7 | 0 | 7 | 0 | 7 | 0 / 0 / 7 |
+| typo, insertion | 5 | 0 | 5 | 0 | 5 | 0 / 0 / 5 |
+| typo, swap | 9 | 0 | 9 | 0 | 9 | 0 / 0 / 9 |
+| typo, the other words are the page's own | 15 | 0 | 15 | 0 | 15 | 0 / 0 / 15 |
+| typo, the misspelled word carries the query | 15 | 0 | 15 | 0 | 15 | 0 / 0 / 15 |
+| ... without identifier typos | 9 | 0 | 9 | 0 | 9 | 0 / 0 / 9 |
+| ... identifier typos only | 6 | 0 | 6 | 0 | 6 | 0 / 0 / 6 |
+| typo, typed word under 6 characters (`woker`) | 1 | 0 | 1 | 0 | 1 | 0 / 0 / 1 |
+| extra_word, off-page word on no page | 12 | 0 | 12 | 0 | 12 | 0 / 0 / 12 |
+| extra_word, off-page word on some page | 14 | 0 | 14 | 0 | 14 | 2 / 0 / 12 |
+| paraphrase, off-page word on no page | 22 | 0 | - | 0 | - | 0 / 0 / 22 |
+| paraphrase, off-page word on some page | 20 | 0 | - | 0 | - | 6 / 0 / 14 |
+
+False hits on `none`: probes for which any page comes back.
+
+| sub-kind | probes | false hits: tune | held-out | all | median pages returned |
+|---|---:|---:|---:|---:|---:|
+| absent | 8 | 0/4 | 0/4 | 0/8 (0%) | 0 |
+| mixed | 8 | 0/4 | 0/4 | 0/8 (0%) | 0 |
+| all | 16 | 0/8 | 0/8 | 0/16 (0%) | 0 |
+
+- Strict search is all or nothing. It finds every exact probe: 14 at rank 1 and one at rank 2
+  (`staging DB port`, 18 matching pages). Of the 161 probes that are not exact and have a page to
+  find, 153 get an empty reply.
+- The other 8 get pages, and never the expected one. Some page holds every word of the query, so a
+  fallback that runs only on an empty result never runs for them. 6 are paraphrases:
+  `staging database port` (25 pages), `cache timeout seconds` (10), `flaky test name` (11),
+  `fetch_rows rename` (11), `UserCache rename` (7), `pool size workers` (24). 2 are extra-word
+  probes with one page each: `public API rate limit timeout`, `HTTP client timeout retries`.
+  5 of the 12 added paraphrases and 2 of the 11 added extra-word probes are of this kind. That is
+  what a common off-page word does in this store, and `summary.md` lists the probes.
+- The ceiling. Spelled the page's way, every typo and extra-word probe is in the top 3. 3 of the 23
+  identifier probes are not: `decode_frame_header` ranks 42 (163 pages hold the new name, and the
+  other 162 are newer than the page that states the rename), `requires-python` ranks 39 and `LOG_LEVEL` ranks 4. All
+  three are in `tune`, so the most a fallback that ranks as strict search does can score at 3 is 8
+  of 11 in `tune` and 12 of 12 held-out. Read identifier recall against the reachable column.
+- Questions. Part of the 0 of 30 is the trailing "?", which strict search treats as part of the last
+  word. Without it strict search finds 3 of the 30 at rank 1 at 6,000 pages (questions 7, 12 and
+  28). At 300 pages a reviewer counted 9. The other 27 hold a word the page lacks.
+- Latest first. 42 probes are on a fact whose value changes. The 3 exact ones rank the latest value's
+  page above the older ones. The other 39 count 0: 36 return no page, and 3 return pages without
+  the expected one (`paraphrase-31` 10 pages, `paraphrase-41` 24, `extra_word-26` 1).
+- The tool agrees with the store on every probe: the reply details the expected page for the 15
+  exact probes and shows no expected page for any other (`summary.md`, "Through the tool").
+- The probe checks pass at 6,000 pages: strict search finds all 15 exact pages, returns an expected
+  page for 0 of the 89 typo, identifier, extra-word and two-page probes, no absent word of a `none`
+  probe is on any page, and no paraphrase has all its words on its page.
+
+Latency (stdio, seconds). Both children ran `main`'s code (this branch at 01d6dfc and `main` at
+ef15af0, with identical `src/`), so the ratio columns are the noise of the paired method, not a
+change. By pass: the lowest and the highest ratio of one pass alone.
+
+| kind | queries | this branch (`main`'s src), s | `main` ef15af0, s | ratio | by pass, min to max |
+|---|---:|---:|---:|---:|---:|
+| rare (strict hit) | 3 | 0.284 | 0.289 | 0.98 | 0.98 to 1.00 |
+| common (strict hit) | 3 | 0.272 | 0.268 | 1.01 | 0.97 to 1.02 |
+| multi-word (strict hit) | 3 | 0.426 | 0.426 | 1.00 | 1.00 to 1.01 |
+| strict miss: identifier | 3 | 0.271 | 0.270 | 1.00 | 0.99 to 1.02 |
+| strict miss: question | 3 | 0.373 | 0.373 | 1.00 | 0.98 to 1.00 |
+| strict miss: typo | 3 | 0.460 | 0.460 | 1.00 | 0.98 to 1.01 |
+| strict miss: extra word | 3 | 0.549 | 0.553 | 0.99 | 0.99 to 1.00 |
+| strict miss: none | 3 | 0.463 | 0.455 | 1.02 | 0.91 to 1.00 |
+| strict miss: paraphrase | 3 | 0.444 | 0.411 | 1.08 | 0.94 to 1.02 |
+| strict miss: typo in the word that carries the query (`miss_typo_carried`) | 3 | 0.340 | 0.333 | 1.02 | 0.96 to 1.04 |
+| strict miss: added word on many pages (`miss_extra_word_common`) | 2 | 0.610 | 0.609 | 1.00 | 1.00 to 1.01 |
+| strict miss: paraphrase word on many pages (`miss_paraphrase_common`) | 2 | 0.534 | 0.532 | 1.00 | 1.00 to 1.01 |
+
+First calls of a process, from the same run (`summary.md`, "First calls of a process"). Each row is
+each side's first call of that kind in a pass, paired over passes:
+
+| call | query | this branch, s | `main`, s | ratio, paired | each pair |
+|---|---|---:|---:|---:|---|
+| first search | `E4127` | 2.060 | 2.081 | 1.01 | passes 1-2: 0.98; passes 3-4: 1.04 |
+| first strict miss | `streamChunkedV3` | 0.261 | 0.260 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first `miss_identifier` | `streamChunkedV3` | 0.261 | 0.260 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first `miss_question` | `What port is the staging database on?` | 0.368 | 0.367 | 1.00 | passes 1-2: 1.01; passes 3-4: 0.98 |
+| first `miss_typo` | `stagng DB port` | 0.417 | 0.423 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first `miss_extra_word` | `staging DB port number` | 0.511 | 0.516 | 0.99 | passes 1-2: 0.99; passes 3-4: 0.99 |
+| first `miss_none` | `kubernetes ingress annotations` | 0.448 | 0.449 | 1.00 | passes 1-2: 1.01; passes 3-4: 1.00 |
+| first `miss_paraphrase` | `intermittently failing test` | 0.354 | 0.352 | 1.04 | passes 1-2: 1.00; passes 3-4: 1.09 |
+| first `miss_typo_carried` | `allkeys-lru` | 0.295 | 0.304 | 0.97 | passes 1-2: 0.96; passes 3-4: 0.99 |
+| first `miss_extra_word_common` | `webhook signing secret owner` | 0.575 | 0.575 | 1.00 | passes 1-2: 0.99; passes 3-4: 1.01 |
+| first `miss_paraphrase_common` | `artifacts bucket name` | 0.535 | 0.537 | 1.00 | passes 1-2: 1.01; passes 3-4: 0.99 |
+
+Seconds are medians over the 4 passes. The first strict miss and the first `miss_identifier` are
+the same call, because `miss_identifier` is timed first. Within one pass the first-search ratio
+ranged from 0.98 to 1.09, the first-strict-miss ratio from 0.98 to 1.01, and the first call of a
+`miss_*` kind from 0.93 to 1.15.
+
+- Load. The 1-minute load average was 9 to 12 at the start of each pass (18 cores), against 28 to
+  67 in the earlier latency run. The times are still not an idle machine's. Trust the ratio
+  columns: both children ran in the same passes under the same load. An after run should be read
+  the same way, by its ratio against the baseline child and not against this table's seconds.
+- Steady-state calls are 1.15 to 1.23 times an idle run (D41 at 6,000 pages: rare 0.240, common
+  0.222, multi 0.372). The first search (2.06 and 2.08 s) is 1.4 times the idle 1.49 s.
+- Order. The tree went first in passes 1 and 3, the baseline in passes 2 and 4. At this load the
+  first search shows no position effect: the side that searched first took a median 2.06 s, the
+  side that searched second 2.09 s. In the earlier run, at load 28 to 67, the second was 15 to 16
+  percent faster. The paired ratio cancels it either way.
+- No first call shows a one-time cost on `main`. The paired ratios are 0.97 to 1.04, and each first
+  call is at most 1 percent slower than the steady median of its kind. A fallback that builds
+  something on its first use shows in the first-call row of the first kind whose first query reaches
+  that code: a typo step built on first use lands in `first miss_typo`. A cost paid on a later call
+  of a kind shows in no row of the summary, only in `latency.csv`.
+- Two ratios fall outside their own range by pass: strict miss `none` (1.02, by pass 0.91 to 1.00)
+  and `paraphrase` (1.08, by pass 0.94 to 1.02). Each median is over 12 values, 3 queries in 4
+  passes. For `paraphrase` its middle two come from different queries; for `none` on the baseline
+  side both are `GraphQL resolver dataloader`, in passes 2 and 3. In pass 4 the paraphrase queries
+  were also slower on both sides (medians up to 1.05 s, against 0.34 to 0.58 s in the other passes).
+  The by-pass range is the better guide here.
+- Noise. In the steady-state rows the same code against itself gives 0.98 to 1.08, and 0.91 to 1.04
+  for one kind in one pass. At a load like this one, read a change in those rows only when its
+  ratio is well outside 0.9 to 1.1. The earlier run at load 28 to 67 needed 0.8 to 1.2. The
+  first-call rows rest on one call per side and pass and ranged from 0.93 to 1.15 for the same
+  code, so read them with a wider band and by their pairs.
+- What to watch after D65. The fallback adds its work to the strict misses only, so the strict-miss
+  rows, the three fixed costly shapes among them, and the first call of each `miss_*` kind are
+  where its cost shows. The three strict-hit rows and the first search should not move.
+- Peak RSS of the MCP child: 139 MB (this branch) and 141 MB (`main`).
+
+### After: D65 (`results/d65/after`)
+
+Run on 2026-11-13 at `045cd599`, a local merge of PR #267 at `5280096` with this bench (PR #266).
+Its `src/` is that of `5280096`; the baseline child ran `main` at `ef15af03`. #267 merged as
+`fa598816` and #266 as `a5ffbaaa`. On the search path, the later commits on #267 changed only
+`contexto search --json` and how `hit_view` builds its line, which gives the same bytes. Merges of
+`main` brought in other `src/` changes off that path, such as D64's `serverInfo` version and
+session commands. The quality part, run again at `06da10f1`, gave the same 192 rows. Full tables
+are in `results/d65/after/summary.md`.
+
+Recall at 3, all probes of each class, before → after: exact 15 → 15 of 15; identifier 0 → 20 of
+23; paraphrase 0 → 34 of 42; question 0 → 26 of 30; typo 0 → 22 of 30; extra word 0 → 24 of 26;
+two-page 0 → 8 of 10 (either page: 10 of 10). Recall at 10 differs only for identifier (21) and
+two-page (9). False hits on the 16 `none` probes: 0 before, 0 after.
+
+Latency, through the MCP child, medians over 4 passes at load averages of 4.7 to 13:
+
+- **Strict hits:** rare 0.280 s against 0.280, common 0.258 against 0.254, multi 0.416 against
+  0.413. The tree / baseline ratio is 1.00 to 1.01, inside the noise band above.
+- **First search of a process:** 1.865 s against 1.851 (paired 0.99).
+- **Strict misses** (the fallback's work): 0.625 to 1.426 s against 0.259 to 0.585 s for the empty
+  answer before. Pooled, that is 2.13 to 3.47 times, but 7 of the 9 pooled ratios fall outside
+  their own range by pass, so read the by-pass range: 2.24 to 3.72 times. By pass, the costliest
+  kinds are paraphrase (3.38 to 3.72), typo (2.91 to 3.16), none (2.86 to 2.96) and question (2.77
+  to 2.89).
+- **First call of each `miss_*` kind:** 2.21 to 3.83 times the baseline's first call, steady across
+  the four passes (pairs within 0.12 of each other). In `latency.csv`, the first call of each
+  kind's first query is 0.88 to 1.07 times the later calls of the same query on the tree side
+  (0.90 to 1.09 on the baseline), so the fallback pays no one-time cost on first use. Its cost is
+  in every call.
+
 ## Files
 
 - `scale_bench.py`: the harness (store build, stdio and in-process timing, quality, profile, summary).
@@ -645,10 +1067,16 @@ bounds the text held between searches, not these reads. `index_text` does not ra
   a key, built from this repository's own text (D41).
 - `scale_grid.py`: the D41 grid table from `scale_length.py --grid` and `scale_dumps.py` outputs.
 - `test_scale_store.py`: fast checks of the helpers (about 0.5 s, part of the default suite).
+- `fallback_probes.py`: the 192 probes of D65, the six added identifier plants, and the split by fact.
+- `fallback_bench.py`: D65's store build, quality pass with its ceiling, tool cross-check, latency,
+  summary and `--compare`.
+- `test_fallback_probes.py`: fast checks of the probe set, the default corpus, and the bench at 40
+  pages (part of the default suite).
 - `results/`: `stores.csv`, `latency.csv` (every call), `quality.csv` (every probe query), `df.csv`,
   `profile_3000.txt`, `env.json`, `summary.md`, `fts_*`, and `floor_0.002/`; `d34_before/` and
   `d34_after/` (with `d34_after/floor_0.002/` and `long_query.txt`) are the same outputs from the D34 runs;
   `d39/` holds the D39 runs at 6,000 pages (`before`, `after_64`, `after_64_uncompressed`, `unlimited`,
   `zero`, `long_query.txt`); `d41/` holds `length/` (with `floor_0.002/`) from `scale_length.py`,
   `grid/` from `scale_dumps.py`, `scale_length.py --grid` and `--grid-full`, and `scale_grid.py`, and the D41
-  before and after runs of `scale_bench.py` for each page-size model.
+  before and after runs of `scale_bench.py` for each page-size model; `d65/before/` holds the D65 run on `main`
+  (`quality.csv`, `latency.csv`, `env.json`, `summary.md`).
