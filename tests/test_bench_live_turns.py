@@ -253,7 +253,7 @@ def test_a_second_run_into_the_same_output_directory_is_refused_at_once(env, tmp
 def test_the_lock_is_released_when_a_run_is_refused_or_fails(env, tmp_path, script, monkeypatch):
     out = tmp_path / "out"
     first = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, out=out, budget=10)
-    assert first.code == 2  # the budget is below the plan: refused before the directory was made
+    assert first.code == 2 and not out.exists()  # the budget is below the plan: refused, and the directory it made is gone
     bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, out=out)
     monkeypatch.setattr(runner, "_run_units", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
     with pytest.raises(RuntimeError):
@@ -263,6 +263,107 @@ def test_the_lock_is_released_when_a_run_is_refused_or_fails(env, tmp_path, scri
         fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
     finally:
         os.close(probe)
+
+
+def test_two_runs_into_a_new_output_directory_never_both_run(env, tmp_path, script, monkeypatch):
+    """Both runs reach the point where --out is made before either has made it (a barrier there): the
+    one that takes the lock second is refused, and nothing in the directory is written twice."""
+    import threading
+
+    from contexto.bench import credentials as bench_credentials
+
+    stub = stub_for(script)
+    url = stub.start()
+    out = tmp_path / "new" / "out"
+    barrier = threading.Barrier(2, timeout=5)
+    real_mkdir, codes, printed = runner.Path.mkdir, {}, {}
+
+    def config(name):
+        return runner.Config(model="claude-haiku-5-5", bound=BOUND, protocol="v2", turn_kbytes=2, seed=3, seeds=[3],
+                             repeats=1, arms=("full",), budget=2_000_000_000, out=out, upstream=url,
+                             credentials=bench_credentials.resolve(f"printf %s {bench_stubs.FAKE_KEY}", None),
+                             work=tmp_path / f"work-{name}")
+
+    def mkdir(path, *args, **kwargs):
+        if path == out:
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:  # the other run never got here
+                pass
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(runner.Path, "mkdir", mkdir)
+
+    def one(name):
+        import io
+
+        stream = io.StringIO()
+        codes[name] = runner.run(config(name), {3: script}, stdout=stream, stderr=stream)
+        printed[name] = stream.getvalue()
+
+    try:
+        threads = [threading.Thread(target=one, args=(name,)) for name in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+    finally:
+        stub.stop()
+    assert sorted(codes.values()) == [0, 2], printed
+    loser = next(name for name, code in codes.items() if code == 2)
+    assert "another contexto bench run is writing to this output directory" in printed[loser]
+    lines = [json.loads(x) for x in (out / "probes.jsonl").read_text().splitlines()]
+    assert len(lines) == len(script.probes) == len({p["id"] for p in lines})
+    assert len(json.loads((out / "manifest.json").read_text())["units"]) == 1
+
+
+def test_two_processes_started_together_into_a_new_output_directory_never_both_run(tmp_path, script):
+    """``contexto bench --arms full`` twice, 20 times. Each process imports Contexto, says it is ready and
+    waits; both are released together, so they reach --out at the same moment."""
+    import subprocess
+    import sys
+
+    stub = stub_for(script)
+    url = stub.start()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_", "CONTEXTO_"))}
+    env.update({"HOME": str(home), "ANTHROPIC_API_KEY": bench_stubs.FAKE_KEY})
+    launcher = ("import sys\nfrom contexto.cli import main\nimport contexto.bench.runner\n"
+                "print('ready', flush=True)\nsys.stdin.readline()\nsys.exit(main(sys.argv[1:]))")
+    collided = 0
+    try:
+        for trial in range(20):
+            out = tmp_path / f"out-{trial}"
+            procs = [subprocess.Popen(
+                [sys.executable, "-c", launcher, "bench", "--model", "claude-haiku-5-5", "--arms", "full",
+                 "--seed", "3", "--bound", "4000", "--turn-kbytes", "2", "--budget-tokens", "2000000000",
+                 "--upstream", url, "--out", str(out), "--work", str(tmp_path / f"work-{trial}-{n}")],
+                env=env, cwd=tmp_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True) for n in range(2)]
+            for p in procs:
+                assert p.stdout.readline() == "ready\n"
+            for p in procs:
+                p.stdin.write("go\n")
+                p.stdin.flush()
+            results = [(p.wait(timeout=120), p.stdout.read()) for p in procs]
+            for p in procs:
+                p.stdin.close()
+                p.stdout.close()
+            codes = sorted(code for code, _ in results)
+            said = "\n".join(text for _, text in results)
+            if codes == [0, 2]:
+                collided += 1
+                assert "another contexto bench run is writing to this output directory" in said
+            else:  # one ended before the other looked: the second found the unit complete
+                assert codes == [0, 0] and "resuming: 1 units are complete, 0 to run" in said, said
+            lines = [json.loads(x) for x in (out / "probes.jsonl").read_text().splitlines()]
+            assert len(lines) == len(script.probes) == len({p["id"] for p in lines}), trial
+            recorded = [json.loads(x) for x in (out / "requests.jsonl").read_text().splitlines()]
+            assert {r["attempt"] for r in recorded} == {0} and len({r["n"] for r in recorded}) == len(recorded)
+    finally:
+        stub.stop()
+    assert collided >= 10  # the runs did overlap
 
 
 # -- what the manifest says ------------------------------------------------------------------------------

@@ -13,9 +13,12 @@ What is written, and when:
 - ``probes.jsonl``: the lines of a unit, together, only when the unit is ``complete``;
 - ``manifest.json``: rewritten atomically before every unit (the unit as ``running``) and after it.
 
-One run at a time per output directory: the run holds an exclusive lock (``fcntl.flock``) on
-``<out>/.lock`` from before it reads the manifest until it returns, and a second run into the same
-directory is refused at once. The lock file stays, empty; the lock goes with the process.
+One run at a time per output directory: before it reads or writes anything in it, the run creates the
+directory (if needed) and takes an exclusive lock (``fcntl.flock``) on ``<out>/.lock``, which it holds
+until it returns; only then does it read the manifest. A second run into the same directory is refused
+at once, also when both were started together into a directory neither found. The lock file stays,
+empty; the lock goes with the process. A run that created the directory and is then refused before it
+wrote anything removes the directory again.
 
 Units are independent and a run can be resumed: the same command with the same ``--out`` keeps the
 units the manifest records ``complete`` and runs the rest again. Attempts are numbered before a unit
@@ -418,19 +421,43 @@ def next_attempt(key: tuple[str, int, int], manifest: dict[str, Any],
     return max(seen, default=-1) + 1
 
 
+LOCKED = ("another contexto bench run is writing to this output directory (it holds " + LOCK_NAME + "); wait "
+          "for it to end, or use another --out")
+
+
 @contextlib.contextmanager
 def out_lock(out: Path):
-    """Hold the output directory's lock, or raise ``Refused`` at once when another run holds it."""
-    fd = os.open(out / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o644)
+    """Hold the output directory's lock, or raise ``Refused`` at once when another run holds it. The
+    lock file is checked to be the one at its path once locked: a refused run that had created the
+    directory removes it with its lock file (``remove_if_unused``)."""
+    path = out / LOCK_NAME
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise Refused("another contexto bench run is writing to this output directory (it holds "
-                          f"{LOCK_NAME}); wait for it to end, or use another --out") from None
+            raise Refused(LOCKED) from None
+        try:
+            held, there = os.fstat(fd), os.stat(path)
+            current = (held.st_dev, held.st_ino) == (there.st_dev, there.st_ino)
+        except OSError:
+            current = False
+        if not current:
+            raise Refused(LOCKED)
         yield
     finally:
         os.close(fd)
+
+
+def remove_if_unused(out: Path) -> None:
+    """Remove an output directory this run created when it holds nothing but the lock file. Called
+    with the lock held, so no other run is writing to it."""
+    try:
+        if [p.name for p in out.iterdir()] == [LOCK_NAME]:
+            (out / LOCK_NAME).unlink()
+            out.rmdir()
+    except OSError:
+        pass
 
 
 @contextlib.contextmanager
@@ -491,9 +518,16 @@ def run(config: Config, scripts: dict[int, Script] | None = None, *, stdout: Tex
     """Run the benchmark. ``scripts`` (tests) replaces the scripts generated from ``config``."""
     err_stream = stderr or sys.stderr
     with contextlib.ExitStack() as stack:
+        created = locked = False
         try:
-            if config.out.is_dir():  # an existing directory: refuse at once if another run holds it
-                stack.enter_context(out_lock(config.out))
+            # The directory and its lock come first: nothing in it is read before the lock is held.
+            created = not config.out.exists()
+            try:
+                config.out.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise Refused(f"--out cannot be made a directory ({type(exc).__name__})") from None
+            stack.enter_context(out_lock(config.out))
+            locked = True
             ready = prepare(config, scripts)
             if config.budget is None:
                 raise Refused("a live run needs --budget-tokens; 'contexto bench --dry-run' with the same --model, "
@@ -508,13 +542,10 @@ def run(config: Config, scripts: dict[int, Script] | None = None, *, stdout: Tex
             if config.work is not None and inside_git(config.work):
                 raise Refused("the --work directory is inside a git work tree, where Claude Code would load the "
                               "repository's settings; use a directory outside any repository")
-            if not config.out.is_dir():
-                config.out.mkdir(parents=True, exist_ok=True)
-                stack.enter_context(out_lock(config.out))
-                if read_manifest(config.out) is not None:  # another run started it between the checks and the lock
-                    ready = prepare(config, scripts)
             write_scripts(config.out, ready["scripts"])
         except Refused as exc:
+            if created and locked:
+                remove_if_unused(config.out)
             print(f"contexto bench: refusing: {exc}", file=err_stream)
             return exc.code
         return _run_units(config, ready, stdout or sys.stdout, err_stream)
