@@ -26,8 +26,7 @@ import math
 import sys
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
-from pathlib import Path
-from typing import IO, Any, Protocol
+from typing import IO, TYPE_CHECKING, Any, Protocol
 
 from contexto import __version__, serveclient
 from contexto.canonical import loads_bounded, utf8
@@ -49,6 +48,9 @@ from contexto.store.render import (
 )
 from contexto.store.search import SHOWN_IN_DETAIL, Query, text_matches
 from contexto.upstream import CLOUD_PROVIDER_KEYS, cloud_provider, cloud_provider_note
+
+if TYPE_CHECKING:  # annotations only: the module imports nothing beyond the standard library it lists
+    from pathlib import Path
 
 SERVER_NAME = "contexto"
 SERVER_VERSION = __version__  # the package's, as `contexto version` prints it (D64); it was a fixed 0.1.0
