@@ -4,6 +4,8 @@
 
 The warnings and errors you are most likely to see from `contexto`, each with its cause and what to
 do. An entry about a printed message quotes its text, so search this page for the words you saw.
+Before a first run, or when a launch fails, `contexto doctor` checks what `contexto run` needs from
+the directory you run it in and says what to fix ([Doctor](doctor.md)).
 
 **Which upstream does `contexto run` use?** The first of: `--upstream`; `env.ANTHROPIC_BASE_URL` from
 the first Claude Code settings file that sets it: the main checkout's `.claude/settings.local.json`

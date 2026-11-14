@@ -51,10 +51,11 @@ contexto: resume this conversation through Contexto with: contexto run --session
   for Ctrl+C while it is being built: the summary is dropped, and the exit code and the resume
   line are kept.
 - No summary is printed when the CLI was only asked for its version or help (`--version`, `-v`,
-  `-V`, `--help`, `-h`), or when the launch ended before the CLI started (a usage error, Ctrl+C
-  during the version check).
+  `-V`, `--help`, `-h`), or when the launch ended before the CLI started (a usage error, a
+  cloud-provider switch refused, Ctrl+C during the version check).
 - The summary reads only the latest run's part of the log, so it does not slow down as a resumed
-  session's log grows (see Speed).
+  session's log grows (see Speed). It does open every page file for the `paged out` line, which
+  grows with the session's pages: about 0.5 s at 20,000 pages, measured in PR #263's review.
 
 ### No model request
 
@@ -246,7 +247,7 @@ not tool calls and are not counted.
 | `tools.recall.failed` | Calls that returned an error to the model. The text shows them: `2 failed (1 recall, 1 pin)`. |
 | `tools.recall.charged_tokens` | What the tool's replies were charged against the turn's recall room. It is a budget charge, not a count of tokens read: the reply's characters divided by the session's measured characters per token, capped at 1.5, so that a reply can never cost more than it was charged. A page stored with an estimate of 2,285 tokens was charged 5,322 when recalled whole. Do not compare it with `pages.tokens_estimate`, which counts text at 3.5 bytes a token. Always 0 for `pin` and `close`. |
 | `tools.out_of_room` | Successful calls that found the turn's recall room used up, so they returned little or nothing. The text says how many of the calls these were. |
-| `pins.readable` | `false` when the ledger is damaged; the two counts are then `null`. |
+| `pins.readable` | `false` when the ledger is damaged, and when the caller asked for the log only (`session_stats(..., store=False)`, as `contexto state`'s fault report does); the two counts are then `null`. |
 | `pins.active_records` | Records in the ledger that nothing supersedes, now. |
 | `pins.open_obligations` | Obligations not closed, now. |
 
@@ -305,10 +306,15 @@ User-Agent's entrypoint. So the log can show a compaction only when:
   once per run from the `claude-cli/<version>` User-Agent); otherwise `cli_version_unknown`. Any
   other client that posts to `/v1/messages` gets this.
 - every such version is one the summary's wording was measured on, 2.1.314 and 2.1.318; otherwise
-  `cli_version_not_measured`.
-- the engine read every Messages request: a request it did not read (no engine was running, as with a
-  request that reached Contexto's proxy before any engine started, or its body was forwarded unread
-  after a skipped or failed transform) was never checked; otherwise `not_read`.
+  `cli_version_not_measured`. This and the condition above do not apply to a run in which every
+  Messages request carried Claude Code's request-class hint header (`request_class` on the engine's
+  event; hints on, D70): the engine then recognises a compaction from
+  `x-claude-code-context-compacted` whatever the summary's wording.
+- the log shows Contexto's check of every Messages request: a request with no engine event (no
+  engine was running, as under a bare `contexto proxy`; its body was forwarded unread after a
+  skipped or failed transform; or the proxy failed after the transform and forwarded the original,
+  `proxy_error` with `fallback: forward_original`) was never checked as far as the log can show;
+  otherwise `not_read`.
 
 The text makes the claim only then:
 
@@ -377,7 +383,10 @@ It is now said in three places:
    stderr is written when the failure happens, so it is in the present; the summary's `faults` line
    says whether paging resumed, and under `--quiet` one line says so (above).
 3. **In `contexto state`**, for the latest run only: `Warning:` when paging is stopped now, `Note:`
-   when it stopped and resumed. `contexto state --raw` is the model's text and is unchanged.
+   when it stopped and resumed. `contexto state --json` carries the same report under `faults`
+   (the object `contexto stats --last-run --json` gives under that key) and `log.missing`, so a
+   script can tell a run with no faults from a session with no log to read them from.
+   `contexto state --raw` is the model's text and is unchanged.
 
 `contexto stats` also says what each fault event means, under the `faults` line:
 
@@ -485,8 +494,9 @@ Events that are **not** counted, because they happen in normal use:
   from the real one.
 - `pdf_allowance`, `pdf_pages_uncertain`: sizing notes about a PDF, which the launcher prints.
 - `hint_mismatch`: a signal for whoever updates Contexto for a new Claude Code (D70,
-  docs/cli-updates.md): a hint header and the signature beside it disagree. Logged once per engine,
-  and the request is handled as before, so it is not a fault of the session.
+  docs/cli-updates.md): a hint header and the signature beside it disagree. Logged once per pair
+  and engine; the header decides how the request is handled (except that an agent id outranks it),
+  so it is not a fault of the session.
 - `cli_version_untested`: a condition, not a failure. The launcher warns about an untested CLI
   version when the session starts.
 - `window_budget_warning`: the same kind: the bound leaves little room, and the launcher says so
@@ -531,7 +541,10 @@ so `contexto stats` never reads them: `serve_start`, `serve_stop`, `serve_error`
 
 - Lines the log lost (a full disk) are not counted.
 - Two launches that share one session (`--session ID` given to both) write one log; their runs
-  interleave and `--last-run` then mixes them.
+  interleave and `--last-run` then mixes them. The session's `paging.pages_added` and
+  `run_seconds` can then be low too: one launch's stop or exit can end the run the other is in.
+- `run_seconds` is rounded to whole seconds, and the launcher writes its `launch` and `exit` lines
+  with whole-second times, so a run shorter than a second can count 0 s.
 - A launcher killed with SIGKILL prints no summary. `contexto stats` still works.
 - Turn counts: the log counts requests, and the store counts pages. Neither counts the turns you
   typed, and no number here is a count of turns.

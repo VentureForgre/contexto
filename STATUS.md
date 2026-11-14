@@ -1,7 +1,9 @@
 # Contexto status
 
-Updated 2026-11-14 by claude (D66: the benchmark `contexto bench`, PRs #255, #262, #264, #269, #273,
-#289 and #286, recorded in the docs PR #282). Before that, 2026-11-13 (D69, project memory: PR #279,
+Updated 2026-11-14 by claude (D70: `contexto serve` for clients Contexto does not launch, PRs #271,
+#272, #275 and #277, with the recipes in this follow-up), and the same day (D66: the benchmark
+`contexto bench`, PRs #255, #262, #264, #269, #273, #289 and #286, recorded in the docs PR #282).
+Before that, 2026-11-13 (D69, project memory: PR #279,
 the first of its two pull requests, unreleased), and 2026-11-12 (v0.5.24: the 2026-11-05 QA run and
 the fix round, PRs #232 to #250, D48 to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0
 releases, D62, and the README rewrite, D68). Decisions taken and still open, with reasons:
@@ -81,6 +83,15 @@ compaction never fires, and accuracy equals full context.
   (typos) and 92 percent (one extra word), and exact queries stayed at 15 of 15. False hits stayed
   at 0 of 16. A miss now takes 0.6 to 1.4 s instead of an empty answer at 0.3 to 0.6 s; strict
   hits are unchanged (D65 gives the latency in full). Guide: `docs/search.md`.
+- `contexto serve` (D70, PRs #271, #272, #275, #277, unreleased): the engine as a standing service on
+  `127.0.0.1:7837` for Claude Code clients Contexto does not launch (the IDE extensions, the desktop
+  app, the Agent SDK, `claude -p` in CI). It requires a token in the base URL path, routes each
+  Claude Code session to its own store, gives those clients Contexto's tools through
+  `contexto mcp --serve`, and keeps its sessions out of project memory. Claude Code's gateway hint
+  headers are read in preference to text signatures, under `contexto run` too, and stripped before
+  forwarding. `contexto run claude` refuses a launch Claude Code would send to a cloud provider. The
+  recipes for the Python Agent SDK and headless `claude -p` ran with the real binary against a fake
+  upstream; the VS Code recipe was not run in an IDE. Guides: `docs/serve.md`, `docs/dialect.md`.
 
 ## Benchmark (D66)
 
@@ -680,6 +691,11 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   start line, `contexto project show|forget` and an off switch shipped in the same pull request.
   Main-conversation records are confirmed from the main conversation's own history; removals are
   project-wide; forgetting never reopens a record, pruning does.
+- D70: `contexto serve`, a token-gated loopback service for clients Contexto does not launch, with
+  per-session stores and locks and an MCP server that resolves each tool call's session from the
+  service; the documented gateway hint headers preferred over text signatures and stripped
+  upstream; a refusal for cloud-provider launches; the `Dialect` contract documented for another
+  client.
 
 ## Open follow-ups
 
@@ -727,9 +743,12 @@ Still open:
 - Not started: a byte budget per search on the pages `contexto_search` reads (D41 follow-up): it
   reads and renders up to 53 pages per search with no cap on their size (18.5 MB of page JSON for
   one multi-word query at 3,000 pages sized like real turns).
-- D70, `contexto serve` (PR #272): the step-by-step client recipes with tests (the Agent SDK,
-  VS Code, headless `claude -p`; the brief's requirement 6) come in a follow-up PR. Until then
-  `docs/serve.md` covers setup through `--print-settings` and `--print-mcp-config` only.
+- D70, `contexto serve`: not confirmed in an IDE, the desktop app, the TypeScript SDK, the GitHub
+  Action, a claude.ai (OAuth) login or on Linux with a real client (steps in `docs/serve.md`).
+  `contexto stats` on a session the service made shows its requests and faults but no bound, CLI
+  or run count. `contexto run codex` does not apply the serve-upstream refusal that
+  `contexto run claude` and `contexto doctor` do. Out of scope: listening beyond loopback,
+  several users, Chat Completions, Bedrock and Vertex request paths, other agents.
 - Open from D49: a head too large for `min_turn_room` (bound 60,000, a 28,000-token head) leaves the
   minimum-room rotation (A12) nothing to restore, so later turn starts keep their window (about 34,200 real, room 806,
   `turn_room_low` logged once); PR #232 review B's finding 1.

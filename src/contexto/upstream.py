@@ -328,7 +328,8 @@ def read_settings_file(path: Path) -> SettingsFile:
     2.1.322 decodes it (measured, D70): UTF-16LE when it starts with that byte order mark, a final odd
     byte dropped and a lone surrogate kept; otherwise UTF-8, a byte order mark dropped and a byte that
     is not UTF-8 read as U+FFFD. Parsed with ``contexto.canonical.loads_bounded``, as Claude Code
-    parses it (measured on 2.1.322, PR #258): an integer past Python's 4,300-digit limit is read, as
+    parses it (measured on 2.1.322,
+    spikes/m2/providers/README.md): an integer past Python's 4,300-digit limit is read, as
     JavaScript's Infinity (``_json_int``), and ``NaN``, ``Infinity`` and ``-Infinity``, which are not
     JSON, make the file not valid JSON (``_json_constant``), so no setting is taken from it.
 
@@ -339,12 +340,12 @@ def read_settings_file(path: Path) -> SettingsFile:
     ``problem``: it is not a regular file, it is larger than the limit, it cannot be read, or it is
     not valid JSON (a syntax error, ``NaN``, a wide encoding Claude Code does not load, nested too
     deep), or its ``env`` is there and is not an object (Claude Code 2.1.322 then loads nothing from
-    the file, PR #258: not its ``apiKeyHelper`` either; only ``env``'s type is checked here). Such a
+    the file, spikes/m2/providers/README.md: not its ``apiKeyHelper`` either; only ``env``'s type is checked here). Such a
     file is not evidence that a setting is off, since Claude Code may read it differently; the
     cloud-provider guard refuses on it (``cloud_provider``) unless it was read whole, is not valid JSON, and its text
     could not name a switch (``may_name_provider``): Claude Code does not load a file with a comment,
     a trailing comma or another syntax error (measured on 2.1.322, D70), or with ``NaN`` or an ``env``
-    that is not an object (PR #258), so such a file turns no switch on. The NUL byte in that rule is
+    that is not an object (spikes/m2/providers/README.md), so such a file turns no switch on. The NUL byte in that rule is
     the backstop for wide files that still do not parse: UTF-16BE, UTF-16LE without the mark, UTF-32,
     and UTF-16LE with the mark and a syntax error."""
     try:
@@ -408,7 +409,8 @@ def _json_int(text: str) -> int | float:
 
 def _json_constant(name: str) -> float:
     """``NaN``, ``Infinity`` and ``-Infinity`` are not JSON. Python accepts them; Claude Code 2.1.322
-    loads nothing from a file that holds one (PR #258), so the file is not valid JSON here either."""
+    loads nothing from a file that holds one (D70-serve-probes.md, "D70 review round" §3;
+    spikes/m2/providers/README.md), so the file is not valid JSON here either."""
     raise ValueError(f"{name} is not JSON")
 
 
@@ -464,7 +466,7 @@ def claude_setting(read: Callable[[dict], str | None], cwd: Path, home: Path, en
     for kind, path in claude_settings_order(cwd, home, env, layout=layout):
         data = files.read(path).data
         value = read(data) if data is not None else None
-        if value is None:  # the file does not set it; an empty value (``_settings_env``) is still a value
+        if value is None:  # the file does not set it; an empty value (``settings_env``) is still a value
             continue
         if kind in PROJECT_KINDS and (trusted_only or no_trust):
             if trusted is None:
@@ -528,7 +530,7 @@ def _js_scalar(value: object) -> str:
     return "null" if value is None else "[object Object]"
 
 
-def _settings_env(data: dict, name: str) -> str | None:
+def settings_env(data: dict, name: str) -> str | None:
     """``env.<name>`` in a settings file's JSON object as Claude Code applies it to its environment
     (``js_string``), or None when the file does not set it (no ``env`` object, no such entry, or
     ``null``). An empty string is a value."""
@@ -538,10 +540,10 @@ def _settings_env(data: dict, name: str) -> str | None:
 
 
 def settings_file_env(files: SettingsFiles, path: Path | None, name: str) -> str | None:
-    """``env.<name>`` of the settings file at ``path`` (``_settings_env``), or None when there is no
+    """``env.<name>`` of the settings file at ``path`` (``settings_env``), or None when there is no
     such file, it could not be read, or it does not set the variable."""
     data = files.read(path).data if path is not None else None
-    return _settings_env(data, name) if data is not None else None
+    return settings_env(data, name) if data is not None else None
 
 
 @dataclass(frozen=True)
@@ -554,7 +556,7 @@ class EnvValue:
 
 def claude_env_value(name: str, *, env: Mapping[str, str] | None = None, cwd: Path | None = None,
                      home: Path | None = None, files: SettingsFiles | None = None, managed: Path | None = None,
-                     process_env: bool = True) -> EnvValue:
+                     process_env: bool = True, skip: Callable[[dict], bool] | None = None) -> EnvValue:
     """The value Claude Code would run with for the environment variable ``name``, launched from
     ``cwd`` with the process environment ``env``, as far as Contexto can tell: the managed settings
     file's ``env`` block (``managed``, by default ``managed_settings_path``), else the first settings
@@ -566,15 +568,22 @@ def claude_env_value(name: str, *, env: Mapping[str, str] | None = None, cwd: Pa
     value wins over the environment's in both directions, in the user file and in a project file, and
     a project file's wins over the user file's. That managed settings come first is from Claude Code's
     documentation, not measured. A ``--settings`` file is not read. This is a prediction, good enough
-    to decide what to forward; the cloud-provider guard does not rely on it (``cloud_provider``)."""
+    to decide what to forward; the cloud-provider guard does not rely on it (``cloud_provider``).
+
+    A settings file whose parsed JSON object ``skip`` accepts is read as not setting ``name``, so the
+    next file or the environment decides, as for a file that is not there."""
     env = os.environ if env is None else env
     files = files or SettingsFiles()
     managed = managed or managed_settings_path()
-    value = settings_file_env(files, managed, name)
+
+    def read(data: dict) -> str | None:
+        return None if skip is not None and skip(data) else settings_env(data, name)
+
+    managed_data = files.read(managed).data if managed is not None else None
+    value = read(managed_data) if managed_data is not None else None
     if value is not None:
         return EnvValue(name, value, f"settings:{MANAGED_KIND}")
-    found = claude_setting(lambda data: _settings_env(data, name), cwd or Path.cwd(), home or Path.home(), env,
-                           files=files)
+    found = claude_setting(read, cwd or Path.cwd(), home or Path.home(), env, files=files)
     if found.value is not None:
         return EnvValue(name, found.value, f"settings:{found.source}")
     value = env.get(name) if process_env else None
@@ -647,7 +656,7 @@ def cloud_provider(*, env: Mapping[str, str] | None = None, cwd: Path | None = N
     for name in CLOUD_PROVIDER_KEYS:
         places = ["env"] if env_truthy(env.get(name)) else []
         places += [place for place, found in read
-                   if found.data is not None and env_truthy(_settings_env(found.data, name))]
+                   if found.data is not None and env_truthy(settings_env(found.data, name))]
         if places:
             on.append((name, tuple(places)))
     unread = tuple((place, found.problem) for place, found in read if found.problem and found.may_name_provider)

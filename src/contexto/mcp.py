@@ -55,7 +55,7 @@ if TYPE_CHECKING:  # annotations only: the module imports nothing beyond the sta
     from pathlib import Path
 
 SERVER_NAME = "contexto"
-SERVER_VERSION = __version__  # the package's, as `contexto version` prints it (D64); it was a fixed 0.1.0
+SERVER_VERSION = __version__  # the package version, which `contexto version` prints first (D64); it was 0.1.0
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"

@@ -26,6 +26,9 @@ The exit codes of the `contexto` commands. The Command column names the subcomma
 | `doctor` | 130, 143, 129 | Stopped by Ctrl+C, SIGTERM or SIGHUP |
 | `sessions`, `recall`, `search`, `state` | 0 | Success (an empty session list, or a search with no match, is a success) |
 | `sessions`, `recall`, `search`, `state` | 1 | Unknown, ambiguous or invalid session id, pages that cannot be read, an unknown or malformed page id, an offset past the end of the page, an unreadable ledger, or a `CONTEXTO_HOME` that is not a directory |
+| `stats` | 0 | Success, also for a session whose log is missing or damaged (the output says so) |
+| `stats` | 1 | No session matches: unknown, ambiguous or invalid session id, no session yet, or a `CONTEXTO_HOME` that is not a directory |
+| `stats` | 2 | Usage error, for example the session named both as SESSION and with `--session` |
 | `sessions prune` | 1 | A session could not be deleted, or the session named by `--session` was skipped (in use, active in the last 10 minutes, or unsafe to delete) |
 | `sessions prune` | 2 | `--session` is not a session but the start of existing ids (prune needs the full id) |
 | `project` | 0 | Success: `show`, or `forget` that did everything asked (a record or session already forgotten counts as done) |

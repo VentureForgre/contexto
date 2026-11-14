@@ -306,7 +306,8 @@ user settings file; a project file was measured with `"1"`, `"0"`, `1.0`, `1e0` 
 other four switches with `1`, `true` and `0` (D70).
 
 Settings files are read once per launch, through one reader with a bound: a regular file only, at
-most 4 MiB. A file is read exactly when Claude Code 2.1.322 reads it (measured, D64 and D70), for
+most 4 MiB. A file is read exactly when Claude Code 2.1.322 reads it (measured, D64 and D70,
+`spikes/m2/providers/README.md`), for
 every setting taken from it (the provider switches, the base URL, the hint setting, `apiKeyHelper`):
 
 - UTF-8, with or without a byte order mark; a byte that is not UTF-8 reads as U+FFFD, as in

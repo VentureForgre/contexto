@@ -138,7 +138,7 @@ from urllib.parse import urlsplit
 
 from contexto import __version__, servecontract
 from contexto.canonical import loads_bounded
-from contexto.hints import FORWARDED, STRIPPED
+from contexto.hints import FORWARDED, HINT_HEADERS_KEY, HINT_MARKER_KEY, STRIPPED
 from contexto.launcher import (
     CLAUDE_SESSION_HEADER,
     CLI_SESSION_ID,
@@ -304,8 +304,15 @@ def rotate_token(home: Path) -> str:
 def settings_payload(port: int, token: str) -> dict[str, Any]:
     """A Claude Code settings file for a ``serve`` client: the base URL with the token, the gateway
     hint headers on (off by default for a custom base URL; Claude Code 2.1.273 and later), and an
-    allow rule for each of Contexto's own MCP tools (D44)."""
-    return {"env": {"ANTHROPIC_BASE_URL": base_url(port, token), "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"},
+    allow rule for each of Contexto's own MCP tools (D44).
+
+    The marker ``CONTEXTO_HINT_HEADERS=stripped`` goes beside the hint setting, as in the launcher's
+    ``--settings`` file: the ``1`` is the service's, not the user's. Claude Code applies the block to
+    its own environment, and a user may merge it into their settings file, so a ``contexto run
+    claude`` that inherits it or reads it there strips the hints rather than forwarding them
+    (``contexto.hints.hint_headers_state``). ``stripped`` whatever ``--forward-hint-headers`` says:
+    that flag is the service's own choice, and the user's settings still do not turn the hints on."""
+    return {"env": {"ANTHROPIC_BASE_URL": base_url(port, token), HINT_HEADERS_KEY: "1", HINT_MARKER_KEY: STRIPPED},
             "permissions": {"allow": contexto_tool_rules()}}
 
 

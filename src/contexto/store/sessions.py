@@ -133,8 +133,10 @@ def check_home(home: Path) -> None:
     directory: one message for every reader (D57), rather than "no sessions under <file>/sessions", a raw
     ``[Errno 20]``, or the first-run hint where ``contexto run`` could not create a session either (D64)."""
     for path in (Path(home), Path(home) / "sessions"):
-        if path.exists() and not path.is_dir():
-            raise SessionNotFoundError(f"{path} is not a directory (check $CONTEXTO_HOME)")
+        # lexists, not exists: a dangling symlink is not a fresh install either (PR #257 review A and B).
+        if os.path.lexists(path) and not path.is_dir():
+            what = "a broken symlink" if path.is_symlink() and not path.exists() else "not a directory"
+            raise SessionNotFoundError(f"{path} is {what} (check $CONTEXTO_HOME)")
 
 
 FIRST_RUN_HINT = "run `contexto run claude` (or `contexto run codex`) first"
@@ -204,18 +206,20 @@ def in_use(home: Path, session_id: str) -> bool:
     return False
 
 
-def select_session(home: Path, explicit: str | None) -> tuple[str, str]:
+def select_session(home: Path, explicit: str | None, named_by: str = "--session") -> tuple[str, str]:
     """(session id, how it was chosen). Raises SessionNotFoundError with a clear message.
 
-    ``--session`` (even an empty one, which is refused as invalid), else a non-empty ``CONTEXTO_SESSION``,
-    each an exact id or a unique prefix; else the most recently active session that has pages or ledger
-    records or is in use by another process, so a failed launch's empty session does not hide the last
-    one with content while a live session that has not paged yet is still found; else, when every
-    session is empty and idle, the most recent one. ``contexto run`` sets ``CONTEXTO_SESSION`` for the
-    CLI it runs, so commands the CLI runs name its session in any case."""
+    ``explicit``, given as ``named_by`` (``--session``, or ``SESSION`` for ``contexto stats``' positional
+    argument, so an error names what the user typed), even an empty one, which is refused as invalid;
+    else a non-empty ``CONTEXTO_SESSION``; each an exact id or a unique prefix. Else the most recently
+    active session that has pages or ledger records or is in use by another process, so a failed
+    launch's empty session does not hide the last one with content while a live session that has not
+    paged yet is still found; else, when every session is empty and idle, the most recent one.
+    ``contexto run`` sets ``CONTEXTO_SESSION`` for the CLI it runs, so commands the CLI runs name its
+    session in any case."""
     check_home(home)
     if explicit is not None:
-        how, sid = "--session", explicit
+        how, sid = named_by, explicit
     elif os.environ.get("CONTEXTO_SESSION"):
         how, sid = "CONTEXTO_SESSION", os.environ["CONTEXTO_SESSION"]
     else:
