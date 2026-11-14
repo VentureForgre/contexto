@@ -11,6 +11,24 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
+- `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
+  described in the command's `--help`; an error is still one line on stderr with the usual exit
+  code.
+- `contexto version` and `contexto -V` print the same line as `--version`. `contexto sessions`
+  with no command lists the sessions.
+- On a fresh install, `state`, `search`, `recall` and `sessions` say to run `contexto run claude`
+  first.
+- When `claude` or `codex` is not on `PATH`, the error gives the vendor's install command. Every
+  `contexto run claude` launch error now starts with `contexto:`, as `run codex` errors did.
+- The Codex "no key helper" error gives a whole command that works with an OpenAI key in
+  `OPENAI_API_KEY`:
+
+  ```sh
+  contexto run --codex-upstream https://api.openai.com/v1 \
+    --codex-key-helper 'printenv OPENAI_API_KEY' codex
+  ```
+
+- The MCP server reports the package version in `serverInfo` (it said `0.1.0`).
 - New command: `contexto doctor` checks what `contexto run` needs from the directory you run it
   in, and prints one line per check with the next step under a warning or a failure. It checks
   Python, the `claude` and `codex` CLIs and their versions, the Claude Code settings files, the
@@ -24,9 +42,11 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 - A Claude Code settings file that starts with a UTF-8 byte order mark is read. Claude Code reads
   such a file, and Contexto treated it as absent, so `contexto run` missed an
   `ANTHROPIC_BASE_URL` or `apiKeyHelper` set there and used another upstream than Claude Code's own.
-- A Claude Code settings file is now read as Claude Code reads it in three more cases: a named
+- A Claude Code settings file is now read as Claude Code reads it in four more cases: a named
   pipe in its place is skipped (`contexto run` waited on it for ever), a file holding `NaN` or
-  `Infinity` is ignored, and a file holding a number longer than 4,300 digits is read.
+  `Infinity` is ignored, a file holding a number longer than 4,300 digits is read, and a file whose
+  `env` block is not a JSON object is ignored whole, so an `apiKeyHelper` or base URL in it is no
+  longer used (Claude Code loads nothing from it either).
 
 ## 0.5.24 (2026-11-06)
 
