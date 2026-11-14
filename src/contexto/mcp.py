@@ -398,7 +398,8 @@ def _has_project(store: Any) -> bool:
 
 
 class Server:
-    def __init__(self, store: Store, stdout: IO[str], stderr: IO[str] | None = None) -> None:
+    def __init__(self, store: Store, stdout: IO[str], stderr: IO[str] | None = None, *,
+                 project_tools: bool | None = None) -> None:
         self.store = store
         self.stdout = stdout
         self.stderr = stderr or sys.stderr
@@ -406,7 +407,9 @@ class Server:
         self.listed = False  # tools/list answered and recorded (see _tools_list)
         # D69: decided once, here, so the tool list never changes during a session (it is part of the
         # prompt's cached head). Without a project view the list and the arguments are those before D69.
-        self.project_tools = _has_project(store)
+        # ``project_tools=False`` forces that: ``ServeServer`` lists the plain tools for every session, so
+        # each session it serves must refuse the arguments it did not list (review B on #287, N6).
+        self.project_tools = _has_project(store) if project_tools is None else project_tools
         self.tools = PROJECT_TOOLS if self.project_tools else TOOLS
         self.instructions = PROJECT_INSTRUCTIONS if self.project_tools else INSTRUCTIONS
         self.handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
@@ -1506,7 +1509,7 @@ class ServeServer(Server):
                           session=_clip(repr(session), ECHO_CHARS)) from None
         except LockFileDamagedError as exc:  # every tool says so, naming the file, as --session mode does
             return Server(UnopenedStore(session, exc), self.stdout, self.stderr)
-        server = self.servers[session] = Server(store, self.stdout, self.stderr)
+        server = self.servers[session] = Server(store, self.stdout, self.stderr, project_tools=False)
         server._record_listed()
         while len(self.servers) > STORE_CACHE:
             self._drop(next(iter(self.servers)))

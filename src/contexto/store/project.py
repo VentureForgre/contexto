@@ -896,13 +896,13 @@ class InViewLine:
     start: int  # the part of the entry's text the line shows: text[start:end]
     end: int
     line: str
-    role: str  # the entry's role: user, assistant or tool_result (``contexto.store.RETAINED_ROLES``)
+    role: str  # the entry's role (user, assistant or tool_result, ``contexto.store.RETAINED_ROLES``), or fold_note
 
     @property
     def shown_role(self) -> str:
         """The role as a reply names it (``tool result``): an earlier session's tool output must never
-        read like its user's words (review B on D69, finding 1)."""
-        return self.role.replace("_", " ")
+        read like its user's words (review B on D69, finding 1), nor Contexto's own fold note."""
+        return "Contexto fold note" if self.role == FOLD_NOTE_ROLE else self.role.replace("_", " ")
 
 
 @dataclass(frozen=True)
@@ -973,13 +973,27 @@ def _parse_retained(data: bytes) -> tuple[dict[str, Any], ...]:
     return tuple(snapshot[3])
 
 
+# D63's fold note ("[Contexto folded N earlier tool rounds ...]", ``contexto.inturn.fold_note``) rides in the
+# turn-start user message and holds the model's tool inputs, so the snapshot gives it the role user. In an
+# earlier window it is shown as Contexto's note, never as the user's words (review B on #287, N5).
+FOLD_NOTE_ROLE = "fold_note"
+_FOLD_NOTE_START = "[Contexto folded "
+
+
+def _window_role(entry: dict[str, Any]) -> str:
+    text = entry.get("text")
+    return FOLD_NOTE_ROLE if isinstance(text, str) and text.startswith(_FOLD_NOTE_START) else entry["role"]
+
+
 def _window_matches(entries: Sequence[dict[str, Any]], query: str) -> list[tuple[int, int, int, int, str, str]]:
     """``render.retained_matches`` of an earlier session's snapshot (no question is being asked in it:
-    ``asked=False``), each match with its entry's role after it, in the same order."""
+    ``asked=False``), each match with its entry's role after it (a D63 fold note's as ``fold_note``), in
+    the same order."""
     q = Query.parse(query)
     if q is None:
         return []
-    found = [(*match, entry["role"]) for entry in entries for match in retained_matches([entry], q, asked=False)]
+    found = [(*match, _window_role(entry)) for entry in entries
+             for match in retained_matches([entry], q, asked=False)]
     found.sort(key=lambda m: (m[0], m[1], m[2]), reverse=True)  # stable, as retained_matches sorts
     return found
 

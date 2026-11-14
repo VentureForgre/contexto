@@ -3262,6 +3262,13 @@ the owner's delegation. Open decisions are listed at the end with the options an
     (B2 round 2, N4). The page text is a block of its own, so offsets are unchanged, and a recall of
     the current session's page is as before, byte for byte. `contexto search --project`
     and `contexto recall --from SESSION` reach the same sessions under the same labels.
+    `contexto mcp --serve` (D70) lists the plain tools for every session, so each session it serves
+    refuses `scope` and `session`, a session the launcher made with project memory on included: an
+    argument the model was never offered is never accepted (B2 round 3, N6; reviewer A too). Since
+    D63, an earlier session's pages include tool results and folded rounds paged inside a turn,
+    subagents' included; they are searched like any page. A D63 fold note in an earlier last window
+    rides in the turn-start user message with the tool inputs it folded, so it is shown as `Contexto
+    fold note`, never as a user line (B2 round 3, N5).
   - **What is read, and how far.** An earlier session is a session of the same project created before
     this one, with project memory on and not forgotten. Its `pages/` and its last `retained.json` are
     read with no lock, nothing created and nothing logged there (`EarlierPages`, `read_page`); a page

@@ -487,6 +487,14 @@ With `--json`, `contexto search --project` adds an `earlier` object (`null` with
   without keeping modification times, touching `page.key`, or damaging it changes which sessions are
   earlier than it: a session restored that way, or one whose `page.key` is gone, can search and
   recall sessions that started after it.
+- **Pages paged inside a turn are searched too.** Since in-turn paging (D63), an earlier session's
+  pages include tool results and folded tool rounds paged inside a running turn, subagents' and
+  side conversations' included, under the main conversation's turn numbers. They are the same kind
+  of text, under the same untrusted sentence. A fold note in an earlier session's last window, which
+  holds the tool inputs it folded, is shown as `Contexto fold note`, not as a user line.
+- **`contexto serve` does not search earlier sessions.** Its MCP server (`contexto mcp --serve`)
+  lists the tools without `scope` and `session` for every session, and refuses those arguments even
+  for a session the launcher made.
 
 To keep a session's transcripts out of every later session's reach, start it with
 `--no-project-memory`, or forget it afterwards with `contexto project forget --session ID`. To
