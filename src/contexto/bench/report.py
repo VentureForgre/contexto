@@ -67,6 +67,8 @@ SEED_INTERVAL_CAVEAT = (
     "The interval over seeds assumes roughly symmetric per-seed differences, holds the true difference less often "
     "than 95% when one arm rarely wins alone (76% to 92% of the time in simulated benchmarks), and does not decide "
     "the direction of a difference: the pooled test and the sign-flip test do.")
+# The v2 classes whose search by the service name also shows decoy lines (contexto.bench.script DECOYS).
+DECOY_CLASSES = ("paraphrase", "toolloop")
 
 
 class ReportError(ValueError):
@@ -776,7 +778,19 @@ def _accuracy(block: Mapping[str, Any], h: str) -> list[str]:
                   "Each cell is correct of asked, with the accuracy and its Wilson 95% interval.", ""]
         lines += _table(["Class", *(label(arm) for arm in arms)],
                         [[cls, *(_share(a["by_class"].get(cls)) for a in arms.values())] for cls in classes])
+        decoyed = [cls for cls in DECOY_CLASSES if cls in classes]
+        if decoyed:
+            lines += [_decoy_note(decoyed), ""]
     return lines
+
+
+def _decoy_note(classes: Sequence[str]) -> str:
+    """What the accuracy of a class whose search shows decoy lines measures."""
+    these = "these classes measure" if len(classes) > 1 else "this class measures"
+    return (f"In {_and([f'`{cls}`' for cls in classes])}, a search by the service name shows the page with the "
+            f"answer together with decoy lines for other attributes of the same service, so {these} whether the "
+            "model picks the right attribute's line among the three or four it is shown; `paged_only` is the keyed "
+            "control of the same age.")
 
 
 def _differences(block: Mapping[str, Any], h: str) -> list[str]:

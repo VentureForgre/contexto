@@ -38,6 +38,8 @@ Each cell is correct of asked, with the accuracy and its Wilson 95% interval.
 | concluded | 32 of 36 (88.9%, 74.7% to 95.6%) | 34 of 36 (94.4%, 81.9% to 98.5%) | 26 of 36 (72.2%, 56.0% to 84.2%) |
 | toolloop | 34 of 36 (94.4%, 81.9% to 98.5%) | 35 of 36 (97.2%, 85.8% to 99.5%) | 29 of 36 (80.6%, 65.0% to 90.2%) |
 
+In `paraphrase` and `toolloop`, a search by the service name shows the page with the answer together with decoy lines for other attributes of the same service, so these classes measure whether the model picks the right attribute's line among the three or four it is shown; `paged_only` is the keyed control of the same age.
+
 ## Differences between arms
 
 Each pair is compared on the same probes, pooled across seeds. The difference is the first arm's accuracy minus the second's, in percentage points, with a 95% interval by Tango's score method and the exact two-sided McNemar p value.

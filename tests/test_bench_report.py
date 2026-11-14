@@ -198,6 +198,20 @@ def test_every_recorded_request_is_totalled_separately_from_the_per_arm_blocks(t
     assert total["tokens"]["requests"] > sum(results["arms"][a]["tokens"]["requests"] for a in ARMS)  # the repeats
 
 
+def test_the_classes_whose_search_shows_decoys_say_what_they_measure(tmp_path):
+    text = report.render(report.build([crafted(tmp_path / "v2", {"plain": 30})]))
+    section = text.split("### Accuracy by probe class")[1].split("\n## ")[0]
+    note = ("In `paraphrase` and `toolloop`, a search by the service name shows the page with the answer together "
+            "with decoy lines for other attributes of the same service, so these classes measure whether the model "
+            "picks the right attribute's line among the three or four it is shown; `paged_only` is the keyed control "
+            "of the same age.")
+    assert section.index(note) > section.index("| toolloop |")  # after the table
+    assert report._decoy_note(["toolloop"]).startswith("In `toolloop`, a search by the service name shows ")
+    assert ", so this class measures whether the model picks " in report._decoy_note(["toolloop"])
+    d27 = report.render(report.build([crafted(tmp_path / "d27", {"plain": 30}, protocol="d27")]))
+    assert "### Accuracy by probe class" in d27 and "decoy lines" not in d27  # neither class is in d27
+
+
 # Pairs
 
 
