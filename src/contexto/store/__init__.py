@@ -322,8 +322,9 @@ def _in_turn(v: Any) -> bool:
         return False
     lists = v.get("lists", [])
     if not (isinstance(lists, list) and all(
-            isinstance(x, list) and len(x) == 3 and _nat(x[0]) and _nat(x[1]) and x[1] > 0
-            and isinstance(x[2], str) and bool(_PAGE_ID.fullmatch(x[2])) for x in lists)):
+            isinstance(x, list) and len(x) in (3, 4) and _nat(x[0]) and _nat(x[1]) and x[1] > 0
+            and isinstance(x[2], str) and bool(_PAGE_ID.fullmatch(x[2])) and (len(x) == 3 or _nat(x[3]))
+            for x in lists)):
         return False
     stubs, folds = v["stubs"], v["folds"]
     return (isinstance(stubs, list) and all(

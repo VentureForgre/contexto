@@ -111,12 +111,19 @@ FOLDED: dict[str, Any] = {"role": "assistant", "content": []}
 _NOTE_CACHE_SIZE = 256
 # A turn's one fold note is at most this many UTF-8 bytes (about 2,000 tokens, a byte rule), call ids
 # included, however long the loop: the newest fold in detail, the earlier ones as page ids and round
-# numbers, and past the cap one folds page that lists them. A page a note names covers every call reachable
+# numbers, and past the cap folds pages that list them. A page a note names covers every call reachable
 # from it (the rounds page holds the results, a folds page names the rounds pages), so the note needs no id
 # to account for a call; it lists the ids of the newest folds only, within NOTE_IDS_BYTES, newest first.
 NOTE_BYTES = 6_000
 NOTE_IDS_BYTES = 1_200
-FOLDS_PAGE = "folds"  # a page holding the detailed notes of a turn's earlier folds, every call id included
+# A page of a turn's earlier folds. One of level 0 holds the detailed notes of the folds since the previous
+# folds page, every call id included, so each fold's note is stored once (Reviewer A at 7575c76f, finding
+# 5); one of level L > 0 is an index that names FOLDS_FANOUT pages of level L - 1. The levels count like
+# digits in base FOLDS_FANOUT, so the note names at most FOLDS_FANOUT - 1 pages a level and the chain from
+# the note to a result stays short at any number of folds: three index levels name up to 512 folds pages
+# (tens of thousands of folds), and the note to a result is then six pages.
+FOLDS_PAGE = "folds"
+FOLDS_FANOUT = 8
 
 
 class InTurn(NamedTuple):
@@ -134,9 +141,11 @@ class InTurn(NamedTuple):
     # The message count of the last request whose batch changed a message the request before it had (a
     # rewrite of the cached prefix); the request right after it starts no other unless over the bound.
     rewrote: int = 0
-    # (turn-start index, folds covered, page id): the folds page that lists the first ``covered`` folds of
-    # that turn in detail, once the turn's note would pass NOTE_BYTES. At most one per turn.
-    lists: tuple[tuple[int, int, str], ...] = ()
+    # (turn-start index, folds covered, page id, level): a folds page that lists the turn's folds from the
+    # previous entry's ``covered`` (0 for the first) up to its own, written once the turn's note would pass
+    # NOTE_BYTES; level 0 lists them in detail, a higher level through pages of the level below. Sorted;
+    # a turn's levels never increase from one entry to the next.
+    lists: tuple[tuple[int, int, str, int], ...] = ()
     # One past the turn-start index of the turn whose small-bound room was logged (``turn_room_low``).
     room_low: int = 0
 
@@ -459,7 +468,9 @@ def is_own_stub(content: Any) -> bool:
 
 _NOTE_IDS = re.compile(r"\ncall ids: ([^\n]*)\n")
 _EARLIER = re.compile(r"\nearlier folds of this turn: ([^\n]*)\n")
-_ITEM = re.compile(r"(?:in|listed in page) (pg_[0-9a-f]{16})(?: \(ids: ([^)]*)\))?")
+_ITEM = re.compile(r"(?:in|listed (?:in|under) page) (pg_[0-9a-f]{16})(?: \(ids: ([^)]*)\))?")
+_INDEX_LINE = re.compile(r"\[Contexto folded [0-9,]+ earlier tool rounds? of this turn \([^)\n]*\) into [0-9,]+ "
+                         r"pages? listed (?:in|under) page (pg_[0-9a-f]{16})\.\]")
 
 
 def note_calls(text: Any) -> tuple[str, ...]:
@@ -474,10 +485,11 @@ def note_calls(text: Any) -> tuple[str, ...]:
 
 
 def note_page(text: Any) -> str | None:
-    """The page id a fold note names, or None when ``text`` is not one (``fold_note``'s form)."""
+    """The page id a fold note names, or None when ``text`` is not one (``fold_note``'s form, or an index
+    page's line for one folds page, ``index_line``)."""
     if not isinstance(text, str) or not text.startswith("[Contexto folded "):
         return None
-    found = _NOTE_PAGE.search(text)
+    found = _NOTE_PAGE.search(text) or _INDEX_LINE.fullmatch(text)
     return found.group(1) if found else None
 
 
@@ -607,12 +619,14 @@ def _round_numbers(messages: list[dict], start: int, upto: int, dialect: Any) ->
     return numbers
 
 
+Listed = tuple[tuple[int, str, int], ...]  # a turn's ``InTurn.lists`` entries: (covered, page id, level)
+
+
 def turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
-              group: list[tuple[tuple[tuple[int, int], ...], str]], listed: tuple[int, str] | None,
-              dialect: Any) -> str:
+              group: list[tuple[tuple[tuple[int, int], ...], str]], listed: Listed, dialect: Any) -> str:
     """The one fold note of the turn starting at ``start``: the newest fold in detail (``fold_note``),
-    then the earlier ones as round numbers and page ids, the first ``listed[0]`` of them as one item
-    naming the folds page ``listed[1]`` that lists them in detail. The ids left of NOTE_IDS_BYTES after
+    then the earlier ones as round numbers and page ids, those ``listed`` covers as one item for each
+    folds page there (``InTurn.lists``). The ids left of NOTE_IDS_BYTES after
     the newest fold's go to the folds just before it, newest first, each whole or not at all; older ones
     are named by their page alone. A pure function of the CLI's blocks and the page ids, kept per turn,
     folds and folds page, so a request with no new fold builds none. ``sent`` is the view before the
@@ -621,9 +635,24 @@ def turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
     return _cached(_TURN_NOTES, key, lambda: _turn_note(hooks, messages, sent, start, group, listed, dialect))
 
 
+def _span(numbers: list[int], start: int, rs: tuple[tuple[int, int], ...]) -> str:
+    """``round N`` or ``rounds N to M`` for the removed spans ``rs``, by the turn's round ``numbers``."""
+    first, end = numbers[rs[0][0] - start], numbers[rs[-1][1] - 1 - start]
+    return f"round {first}" if first == end else f"rounds {first} to {end}"
+
+
+def _listed_item(numbers: list[int], start: int, group: list, before: int, covered: int, page_id: str,
+                 level: int) -> str:
+    """A folds page as a note or an index page names it: the rounds of folds ``before`` to ``covered``,
+    how many rounds pages, and how the page leads to them."""
+    whole = ((group[before][0][0][0], group[covered - 1][0][-1][1]),)
+    count = covered - before
+    return (f"{_span(numbers, start, whole)} in {count:,} page{'s' if count != 1 else ''} "
+            f"listed {'in' if level == 0 else 'under'} page {page_id}")
+
+
 def _turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
-               group: list[tuple[tuple[tuple[int, int], ...], str]], listed: tuple[int, str] | None,
-               dialect: Any) -> str:
+               group: list[tuple[tuple[tuple[int, int], ...], str]], listed: Listed, dialect: Any) -> str:
     ranges, page_id = group[-1]
     note = fold_note(hooks, [sent[i] for a, b in ranges for i in range(a, b)], page_id)
     earlier = group[:-1]
@@ -632,42 +661,62 @@ def _turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
     last = max(b for rs, _ in earlier for _, b in rs)
     numbers = _round_numbers(messages, start, last, dialect)
 
-    def span(rs: tuple[tuple[int, int], ...]) -> str:
-        first, end = numbers[rs[0][0] - start], numbers[rs[-1][1] - 1 - start]
-        return f"round {first}" if first == end else f"rounds {first} to {end}"
-
     def ids(rs: tuple[tuple[int, int], ...]) -> str:
         return " ".join(_safe_id(b["id"]) for a, b_ in rs for i in range(a, b_) if dialect.is_assistant(messages[i])
                         for b in _blocks(messages[i]) if isinstance(b, dict) and b.get("type") == "tool_use"
                         and isinstance(b.get("id"), str) and b["id"])
 
-    covered = listed[0] if listed is not None else 0
+    covered = listed[-1][0] if listed else 0
     budget = NOTE_IDS_BYTES - sum(len(i) + 1 for i in note_calls(note))
     items = []
     for rs, pid in reversed(earlier[covered:]):
         named = ids(rs) if budget > 0 else ""
         if named and len(named) + 8 <= budget:
             budget -= len(named) + 8
-            items.append(f"{span(rs)} in {pid} (ids: {named})")
+            items.append(f"{_span(numbers, start, rs)} in {pid} (ids: {named})")
         else:
             budget = 0  # an older fold gets no ids once a newer one went without
-            items.append(f"{span(rs)} in {pid}")
-    parts = []
-    if covered:
-        whole = ((earlier[0][0][0][0], earlier[covered - 1][0][-1][1]),)
-        parts.append(f"{span(whole)} in {covered} pages listed in page {listed[1]}")
+            items.append(f"{_span(numbers, start, rs)} in {pid}")
+    parts, before = [], 0
+    for upto, pid, level in listed:
+        parts.append(_listed_item(numbers, start, earlier, before, upto, pid, level))
+        before = upto
     parts += reversed(items)
     head, tail = note[:-len(_NOTE_TAIL)], _NOTE_TAIL
     return f"{head}earlier folds of this turn: {'; '.join(parts)}\n{tail}"
 
 
 def folds_page(hooks: Any, sent: list[dict], group: list[tuple[tuple[tuple[int, int], ...], str]]) -> list[dict]:
-    """The messages of a folds page: the detailed note of each fold in ``group``, in order, with every
-    call id, so search finds them and a reader follows each to its rounds page. ``sent`` is the view with
-    no fold applied."""
+    """The messages of a folds page of level 0: the detailed note of each fold in ``group``, in order,
+    with every call id, so a reader follows each to its rounds page. ``sent`` is the view with no fold
+    applied."""
     return [{"role": "user", "content": [
         {"type": "text", "text": _fold_note_uncached(hooks, [sent[i] for a, b in rs for i in range(a, b)], pid, None)}
         for rs, pid in group]}]
+
+
+def index_line(messages: list[dict], numbers: list[int], start: int, group: list, before: int, covered: int,
+               page_id: str, level: int, dialect: Any) -> str:
+    """An index page's line for one folds page of the level below: how many rounds it leads to, which,
+    and the page (``note_page`` reads the id back)."""
+    rounds = sum(1 for rs, _ in group[before:covered] for a, b in rs for i in range(a, b)
+                 if dialect.is_assistant(messages[i]))
+    item = _listed_item(numbers, start, group, before, covered, page_id, level)
+    span, rest = item.split(" in ", 1)
+    plural = "s" if rounds != 1 else ""
+    return f"[Contexto folded {rounds:,} earlier tool round{plural} of this turn ({span}) into {rest}.]"
+
+
+def index_page(messages: list[dict], start: int, group: list, before: int, children: Listed,
+               dialect: Any) -> list[dict]:
+    """The messages of a folds page of level L > 0: one ``index_line`` for each of ``children``, the
+    FOLDS_FANOUT pages of level L - 1 it names, which list the turn's folds from ``before`` on."""
+    numbers = _round_numbers(messages, start, group[children[-1][0] - 1][0][-1][1], dialect)
+    lines, first = [], before
+    for covered, page_id, level in children:
+        lines.append(index_line(messages, numbers, start, group, first, covered, page_id, level, dialect))
+        first = covered
+    return [{"role": "user", "content": [{"type": "text", "text": line} for line in lines]}]
 
 
 # The view: the CLI's messages as the epoch sends them ---------------------------------------------
@@ -712,11 +761,13 @@ def view(messages: list[dict], state: Any, dialect: Any) -> list[dict]:
                 texts[j] = stub_text(hooks, hooks.call(messages, i, result["tool_use_id"]), result, page_id)
         if texts:
             out[i] = hooks.with_stubs(item, texts)
-    listed = {start: (covered, page_id) for start, covered, page_id in edits.lists}
+    listed: dict[int, Listed] = {}
+    for start, covered, page_id, level in edits.lists:
+        listed[start] = (*listed.get(start, ()), (covered, page_id, level))
     for start, group in by_turn.items():
         # One note per turn, however many folds (Reviewer B, finding 1): rebuilt at each fold, bounded.
-        out[start] = hooks.with_note(out[start], turn_note(hooks, messages, out, start, group, listed.get(start),
-                                                           dialect))
+        out[start] = hooks.with_note(out[start], turn_note(hooks, messages, out, start, group,
+                                                           listed.get(start, ()), dialect))
         for ranges, _ in group:
             for a, b in ranges:
                 for i in range(a, b):
@@ -818,12 +869,14 @@ def clipped(edits: InTurn, matched: int, messages: list[dict], dialect: Any) -> 
             removed = [i for i in removed if i < cut]
         if removed:
             folds.append((start, _spans(removed), page_id))
-    # A folds page stands for the turn's first folds only while those are unchanged.
+    # A folds page stands for the turn's first folds only while those are unchanged, and never for its
+    # newest fold, which the note gives in detail.
     def first(group: Any, start: int, covered: int) -> list:
         return [f for f in group if f[0] == start][:covered]
 
-    lists = tuple((start, covered, pid) for start, covered, pid in edits.lists
-                  if first(folds, start, covered) == first(edits.folds, start, covered))
+    lists = tuple((start, covered, pid, level) for start, covered, pid, level in edits.lists
+                  if first(folds, start, covered) == first(edits.folds, start, covered)
+                  and covered < sum(1 for f in folds if f[0] == start))
     return edits._replace(stubs=tuple(s for s in edits.stubs if s[0] < matched), folds=tuple(folds), lists=lists,
                           strips=_merged([(a, min(b, n)) for a, b in edits.strips if a < n]))
 
@@ -849,7 +902,9 @@ def from_record(record: Any, n: int) -> InTurn:
                         for start, ranges, page_id in record["folds"]),
             strips=tuple((int(a), int(b)) for a, b in record["strips"]), batches=int(record["batches"]),
             rewrote=int(record["rewrote"]),
-            lists=tuple((int(s), int(c), str(p)) for s, c, p in record.get("lists", [])),
+            # A record before Reviewer A's finding 5 holds one folds page a turn, of level 0.
+            lists=tuple((int(x[0]), int(x[1]), str(x[2]), int(x[3]) if len(x) > 3 else 0)
+                        for x in record.get("lists", [])),
             room_low=int(record.get("room_low", 0)))
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("epoch record field in_turn") from error
@@ -1252,10 +1307,10 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
 
 def _listed(messages: list[dict], state: Any, store: Any, start: int, hooks: Any, dialect: Any) -> Any:
     """Keep the turn's note under NOTE_BYTES, call ids included: when it would pass the cap, write a folds
-    page that lists every fold but the newest in detail, each with every call id, and let the note name
-    that page instead of each of them. The note is then the newest fold and one item, whatever the
-    number of folds; each page holds or leads to every call it stands for, within three pages (the note,
-    the folds page, the rounds page, a result page)."""
+    page that lists in detail, each with every call id, the folds since the previous folds page but the
+    newest, and let the note name that page instead of each of them. When FOLDS_FANOUT pages of one level
+    are named, an index page of the next level names them instead. Each fold's note is stored once, the
+    note names a few pages a level, and each page holds or leads to every call it stands for."""
     edits = state.inturn
     group = [(ranges, pid) for s, ranges, pid in edits.folds if s == start]
     if len(group) < 2:
@@ -1263,10 +1318,21 @@ def _listed(messages: list[dict], state: Any, store: Any, start: int, hooks: Any
     sent = view(messages, state, dialect)
     if note_size(_note_text(sent[start])) <= NOTE_BYTES:
         return state
+    entries = [(covered, pid, level) for s, covered, pid, level in edits.lists if s == start]
+    done, upto = (entries[-1][0] if entries else 0), len(group) - 1
+    if upto <= done:
+        return state
+    turn = _turn_of(messages, state, dialect, start)
     unfolded = view(messages, replace(state, inturn=edits._replace(folds=(), lists=())), dialect)
-    page_id = store.page_parts([folds_page(hooks, unfolded, group[:-1])], _turn_of(messages, state, dialect, start),
-                               FOLDS_PAGE, [start])[0]
-    lists = tuple(x for x in edits.lists if x[0] != start) + ((start, len(group) - 1, page_id),)
+    page_id = store.page_parts([folds_page(hooks, unfolded, group[done:upto])], turn, FOLDS_PAGE, [start])[0]
+    entries.append((upto, page_id, 0))
+    while len(entries) >= FOLDS_FANOUT and len({level for *_, level in entries[-FOLDS_FANOUT:]}) == 1:
+        children = tuple(entries[-FOLDS_FANOUT:])
+        before = entries[-FOLDS_FANOUT - 1][0] if len(entries) > FOLDS_FANOUT else 0
+        index = store.page_parts([index_page(messages, start, group, before, children, dialect)], turn,
+                                 FOLDS_PAGE, [start])[0]
+        entries[-FOLDS_FANOUT:] = [(children[-1][0], index, children[0][2] + 1)]
+    lists = tuple(x for x in edits.lists if x[0] != start) + tuple((start, *entry) for entry in entries)
     return replace(state, inturn=edits._replace(lists=tuple(sorted(lists))))
 
 

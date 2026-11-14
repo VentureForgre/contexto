@@ -12,6 +12,7 @@ import argparse
 import base64
 import copy
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -643,11 +644,16 @@ def test_the_record_field_is_checked_by_the_store_and_the_engine():
             check_epoch({**base, "in_turn": bad})
     edits = inturn.from_record(good, 11)
     assert inturn.to_record(edits) == {**good, "lists": [], "room_low": 0}  # a record without them reads
-    full = {**good, "lists": [[0, 1, "pg_0123456789abcdef"]], "room_low": 1}
+    full = {**good, "lists": [[0, 1, "pg_0123456789abcdef", 0], [0, 9, "pg_fedcba9876543210", 1]], "room_low": 1}
     assert check_epoch({**base, "in_turn": full})["in_turn"] == full and inturn.to_record(
         inturn.from_record(full, 11)) == full
-    with pytest.raises(ValueError):
-        check_epoch({**base, "in_turn": {**full, "lists": [[0, 0, "pg_0123456789abcdef"]]}})
+    # A record from before folds pages had levels: one page a turn, of level 0.
+    before = {**full, "lists": [[0, 1, "pg_0123456789abcdef"]]}
+    assert check_epoch({**base, "in_turn": before})["in_turn"] == before
+    assert inturn.from_record(before, 11).lists == ((0, 1, "pg_0123456789abcdef", 0),)
+    for lists in ([[0, 0, "pg_0123456789abcdef", 0]], [[0, 1, "pg_0123456789abcdef", -1]]):
+        with pytest.raises(ValueError):
+            check_epoch({**base, "in_turn": {**full, "lists": lists}})
     with pytest.raises(ValueError):
         inturn.from_record(good, 10)  # the record names a message the request does not have
     assert inturn.from_record(None, 0) == inturn.EMPTY
@@ -1114,7 +1120,8 @@ def test_one_fold_note_per_turn_stays_bounded_and_is_not_rebuilt_per_fold(monkey
     assert_bound_held(cli, SMALL.bound)
     edits = cli.state.inturn
     assert len(edits.folds) > 40 and edits.lists  # past the cap, a folds page lists the earlier folds
-    (start, covered, listing), = edits.lists
+    (start, covered, listing, level), = edits.lists
+    assert level == 0
     notes = [b["text"] for b in cli.sent[-1].messages[0]["content"][1:]]
     assert len(notes) == 1 and inturn.note_size(notes[0]) <= inturn.NOTE_BYTES  # the cap holds the ids too
     # Every fold's page is named in the request: the newest and the latest ones by their rounds pages, the
@@ -1411,3 +1418,42 @@ def test_a_page_written_inside_a_turn_names_that_turn_in_every_later_turn():
     reply = tool(cli.store, "contexto_search", {"query": "cache_ttl_seconds"})
     assert f"{paged} (turn 0)\n  [paged inside turn 0, tool result]" in reply
     assert "this turn" not in reply and "a hit paged inside a turn can be newer" in reply
+
+
+def test_folds_pages_store_each_fold_once_and_every_fold_stays_reachable_at_2000_folds():
+    # Reviewer A at 7575c76f, finding 5: each folds page stored every earlier fold's note again (546 KB at
+    # 199 folds, 1.82 MB at 335). Now each holds only the folds since the previous one, and index pages
+    # list folds pages once FOLDS_FANOUT of one level pile up, so the note reaches every fold within the
+    # harness's eight pages. A turn of one-round folds, through the engine's own _listed, as a batch calls it.
+    from contexto.rewrite import _dialect
+    dialect = _dialect()
+    store = memory()
+    messages = [{"role": "user", "content": [{"type": "text", "text": "Read every module."}]}]
+    state = EpochState()
+    folds_bytes: dict[int, int] = {}
+    for r in range(2_001):
+        call = {"type": "tool_use", "id": f"toolu_{r:05d}", "name": "Read",
+                "input": {"file_path": f"src/deep/module_{r:05d}.py"}}
+        messages += [{"role": "assistant", "content": [call]},
+                     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"],
+                                                   "content": output(f"m-{r}", 300)}]}]
+        page_id = store.page_parts([messages[-2:]], 0, ROUNDS_PAGE, [len(messages) - 2])[0]
+        edits = state.inturn
+        state = replace(state, inturn=edits._replace(folds=(*edits.folds, (0, ((len(messages) - 2, len(messages)),),
+                                                                            page_id))))
+        state = inturn._listed(messages, state, store, 0, dialect.in_turn, dialect)
+        note = inturn._note_text(inturn.view(messages, state, dialect)[0])
+        assert inturn.note_size(note) <= inturn.NOTE_BYTES
+        if r + 1 in (1_000, 2_000):
+            folds_bytes[r + 1] = sum(len(canonical_bytes(p["messages"])) for p in store.pages.values()
+                                     if p.get("kind") == inturn.FOLDS_PAGE)
+    # Linear: the second thousand folds add about what the first did, not three times as much.
+    assert folds_bytes[2_000] < 2.3 * folds_bytes[1_000]
+    own = sum(len(canonical_bytes(inturn._fold_note_uncached(dialect.in_turn, messages[a:b], pid, None)))
+              for _, ((a, b),), pid in state.inturn.folds[:-1])
+    assert folds_bytes[2_000] < 1.3 * own  # each fold's note once, and the index pages are small
+    levels = {level for *_, level in state.inturn.lists}
+    assert max(levels) >= 1  # index pages were needed
+    seen: dict = {}
+    reached = set().union(*(_reach(store, ref, 8, seen) for ref, _ in inturn.note_refs(note)))
+    assert {f"toolu_{r:05d}" for r in range(2_001)} <= reached
