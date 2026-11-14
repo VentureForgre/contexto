@@ -646,6 +646,164 @@ def test_the_second_page_is_the_newest_value_when_two_pages_hold_the_lacked_word
     assert found(hits)[:3] == [12, 11, 15] and set(found(hits)[3:]) == {10, 13}
 
 
+def sized_pages(n, extra):
+    """``n`` filler pages, oldest first, with ``extra[i]`` added to page ``i``."""
+    texts = [f"page {i} ran the build" for i in range(n)]
+    for i, text in extra.items():
+        texts[i] += text
+    return entries(*texts)
+
+
+STAGING = {20: "; the staging database port is 6543", 21: "; the staging database port moved",
+           22: "; staging database port checked"}
+
+
+@pytest.mark.parametrize("n", [100, 1000])
+def test_a_second_fact_matched_through_a_typo_takes_the_place(n):
+    # Reviewer B on PR #267, round 3: a typo word weighs half, and half the weight of a word on one page
+    # is under SECOND_BAR at every store size, so page 40 dropped out. The bar reads the unhalved weight.
+    pages = sized_pages(n, {**STAGING, 40: "; backups run at 02:00"})
+    for query in ("staging database port bakcups", "staging database port backups"):
+        hits = rank_approximate(pages, query)
+        assert found(hits) == [22, 21, 40, 20] and hits.total == 4, query
+    assert how(rank_approximate(pages, "staging database port bakcups")[2]) == {"bakcups": ("typo", "backups")}
+
+
+def test_a_typo_word_on_a_common_page_is_still_refused_the_place():
+    # Unhalved, "backups" on 8 of 100 pages is over the 6 that one word may be on
+    extra = {**STAGING, **{i: "; backups run" for i in range(99, 91, -1)}}
+    for query in ("staging database port bakcups", "staging database port backups"):
+        assert found(rank_approximate(sized_pages(100, extra), query)) == [22, 21, 20], query
+
+
+def test_a_single_word_second_fact_matched_through_a_typo_is_shown():
+    # Reviewer A on PR #267, round 3: typed correctly, page 70 is third; with the typo it was not returned
+    extra = {5: "; the redis eviction policy is allkeys-lru", 6: "; eviction policy noted",
+             70: "; kubernetes runs the workers"}
+    for query in ("redis eviction policy kuberntes", "redis eviction policy kubernetes"):
+        assert found(rank_approximate(sized_pages(100, extra), query)) == [5, 6, 70], query
+
+
+def rate_limit_pages(df):
+    """100 pages. The first fact, ``webhook signing secret``, is on pages 10 to 12; ``rate`` and
+    ``limit`` are each on ``df`` pages and stand together only on page 60."""
+    extra = {10: "; the webhook signing secret for the API is in vault", 11: "; webhook signing secret rotated",
+             12: "; webhook signing secret checked", 60: "; the API rate limit is 600 a minute"}
+    for i in range(df - 1):
+        extra[30 + i] = extra.get(30 + i, "") + "; the error rate was low"
+        extra[99 - i] = extra.get(99 - i, "") + "; the disk limit was raised"
+    return sized_pages(100, extra)
+
+
+@pytest.mark.parametrize("df", [15, 18, 30])
+def test_a_second_fact_whose_words_stand_together_as_typed_takes_the_place(df):
+    # The orchestrator on PR #267, round 3: at 6,000 pages SECOND_BAR refused real second facts of fairly
+    # common words. A page that holds a lacked word beside its neighbour as the query has them passes.
+    pages = rate_limit_pages(df)
+    hits = rank_approximate(pages, "webhook signing secret and API rate limit")
+    # page 10 also holds "API", so what it lacks is "rate limit": 2.4 of a word on no page's 5.3 at df 30
+    assert found(hits)[:3] == [10, 12, 60] and list(how(hits[2])) == ["api", "rate", "limit"]
+
+
+def test_a_single_lacked_word_beside_a_held_neighbour_takes_the_place():
+    extra = {10: "; the worker pool size is 8", 11: "; worker pool drained", 12: "; worker pool size checked",
+             70: "; the batch size is 500"}
+    for i in range(14):
+        extra[30 + i] = "; the batch finished"
+    query = "worker pool size and batch size"
+    assert found(rank_approximate(sized_pages(100, extra), query))[:3] == [12, 10, 70]
+    extra[70] = "; size the batch to 500"  # the same words, not side by side: "batch" alone is too common
+    assert 70 not in found(rank_approximate(sized_pages(100, extra), query))[:3]
+
+
+@pytest.mark.parametrize("query, extra, noise, beside", [
+    ("staging database port server", {**STAGING, **{i: "; server it" for i in range(99, 39, -5)}}, 99,
+     "; the port server it"),
+    ("staging database port using", {**STAGING, **{i: "; using it" for i in range(99, 0, -5)}}, 99,
+     "; the port using it"),
+])
+def test_a_leftover_word_is_refused_because_it_stands_beside_no_query_neighbour(query, extra, noise, beside):
+    # The noise cases of rounds 2 and 3 are single words standing alone. Put the same word next to its
+    # neighbour in the query and the page takes the place. (``restart the laptop`` is not refused by the
+    # bar: "restart" is on 2 of 100 pages and passes it. It loses the place to the page that also holds
+    # "nginx", test_the_second_page_is_the_one_that_also_holds_the_query_s_other_words.)
+    assert noise not in found(rank_approximate(sized_pages(100, extra), query))[:3]
+    assert found(rank_approximate(sized_pages(100, {**extra, noise: beside}), query))[2] == noise
+
+
+def test_output_on_two_of_seven_pages_is_refused_and_beside_rollout_is_shown(store):
+    by_turn = ids(store)
+    assert [h.id for h in store.search_approximate("canary rollout output")] == [by_turn[6]]
+    store.page_out([page("the rollout output was clean")], 30)
+    assert store.search_approximate("canary rollout output")[1].id == store.page_ids()[0]
+
+
+def test_a_specific_word_takes_the_place_only_with_30_percent_of_the_lacked_weight():
+    # Reviewer B on PR #267, round 3: "2024" on 40 of 100 pages took the place from page 95, which holds
+    # the rarer "retention" with "deploy". A specific word passes the bar, not the 30 percent.
+    extra = {i: "; released in 2024" for i in range(40, 80)}
+    extra.update({i: "; retention set" for i in range(85, 94)})
+    extra.update({30: "; the deploy pipeline is green", 31: "; deploy pipeline rebuilt",
+                  95: "; deploy retention is 30 days"})
+    hits = rank_approximate(sized_pages(100, extra), "deploy pipeline 2024 retention")
+    assert found(hits)[:3] == [31, 30, 95] and 59 not in found(hits)[:3]
+    # with "2024" on 30 percent of the lacked weight or more, it takes the place as before
+    extra = {**{i: "; released in 2024" for i in range(40, 48)}, 30: "; the deploy pipeline is green",
+             31: "; deploy pipeline rebuilt"}
+    assert found(rank_approximate(sized_pages(100, extra), "deploy pipeline 2024 retention"))[:3] == [31, 30, 47]
+
+
+def test_a_turn_page_takes_the_place_before_a_context_block():
+    texts = [f"page {i} ran the build" for i in range(100)]
+    for i, line in STAGING.items():
+        texts[i] += line
+    texts[40] += "; deploys go out on tuesday"
+    texts[41] += "; deploys were paused"
+    pages = entries(*texts)
+    pages[40] = pages[40]._replace(context=True)  # holds both lacked words, but is a context block
+    hits = rank_approximate(pages, "staging database port deploys tuesday")
+    assert found(hits)[:3] == [22, 21, 41] and 40 in found(hits)[3:]
+    pages[41] = pages[41]._replace(context=True)
+    assert found(rank_approximate(pages, "staging database port deploys tuesday"))[:3] == [22, 21, 40]
+
+
+def test_the_page_under_the_floor_is_counted_in_total_and_in_the_reply_s_more_line(monkeypatch):
+    # The place can go to a page under the floor. It is one of the pages returned, so ``total`` counts it,
+    # and the reply's "N more not shown" line, total less the pages shown and listed, does too.
+    texts = [f"page {i} ran the build" for i in range(100)]
+    for i in range(40):
+        texts[i] += "; the gateway restarted"
+        texts[40 + i] += "; the port opened"
+    for i in range(80, 96):
+        texts[i] += "; the redis eviction policy was reviewed"
+    texts[90] = "the staging gateway port is 6543"  # "gateway port" weighs 1.8 of 7.3, 25 percent
+    texts[96] += "; the redis eviction policy is allkeys-lru"
+    store = MemoryStore("s1")
+    store.page_out([page(t) for t in texts], 0)
+    query = "gateway port redis eviction policy"
+    hits = store.search_approximate(query)
+    assert hits[2].id == ids(store)[90] and len(hits) == hits.total == 17
+    monkeypatch.setattr(S, "_second_page", lambda *args: None)
+    assert ids(store)[90] not in [h.id for h in store.search_approximate(query)]
+    assert store.search_approximate(query).total == 16
+    monkeypatch.undo()
+    text, _ = call(store, query)
+    assert len(DETAILED.findall(text)) == 3 and len(LISTED.findall(text)) == 10
+    assert "[4 more approximate matches not shown; use a more specific query]" in text
+
+
+@pytest.mark.parametrize("words", [("refreshtoken", "RefreshToken", "refreshToken"),
+                                   ("refreshToken", "refreshtoken", "RefreshToken"),
+                                   ("RefreshToken", "refreshToken", "refreshtoken")])
+def test_three_spellings_of_one_word_are_one_word(store, words):
+    by_turn = ids(store)
+    hits = store.search_approximate(" ".join(words) + " keychain")
+    assert hits.plan.words == ("refreshtoken", "keychain")
+    assert hits.plan.typed[0] == next(w for w in words if w != "refreshtoken")  # the first in camelCase
+    assert [h.id for h in hits] == [by_turn[1]]
+    assert how(hits[0]) == {"refreshtoken": ("exact", "refreshtoken"), "keychain": ("exact", "keychain")}
+
+
 def test_four_equally_rare_facts_on_four_pages_find_nothing():
     pages = entries("the kestrel nests", "an osprey dived", "a harrier hunted", "the condor soared",
                     *[f"filler {i}" for i in range(6)])

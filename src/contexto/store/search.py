@@ -389,10 +389,11 @@ SPECIFIC_MIN_CHARS = 3  # a shorter word (``5``, ``v2``) is too short to stand f
 # number, a path) is returned whatever its share, unless more than half the pages hold that word.
 APPROX_FLOOR = 0.3
 # The second-fact place (``_second_page``): the words the best page lacks that a page holds must weigh at
-# least this share of a word on no page, unless one of them is specific. One word passes on at most
-# sqrt((n + 1) / 2) - 1/2 of n pages: 6 of 100 (6.6 percent), 54 of 6,000 (0.9 percent).
+# least this share of a word on no page (a typo match at its full weight), unless one of them is specific
+# or stands next to its neighbour from the query. One word passes on at most sqrt((n + 1) / 2) - 1/2 of
+# n pages: 6 of 100 (6.6 percent), 54 of 6,000 (0.9 percent).
 SECOND_BAR = 0.5
-APPROX_LIMIT = 50  # hits returned, best first; ``Approximate.total`` counts every page over the floor
+APPROX_LIMIT = 50  # hits returned, best first; ``Approximate.total`` counts every page returned
 TYPO_MIN_CHARS = 6  # a shorter word is never matched with a letter changed
 TYPO_MAX_CHARS = 40  # nor a longer one: the pattern of its variants grows with the square of its length
 TYPO_WEIGHT = 0.5  # a word matched through a typo weighs half
@@ -475,7 +476,8 @@ class ApproxHit(NamedTuple):
 
 
 class Approximate(list):
-    """Approximate hits, best first, with how many pages passed the floor (``total``) and the ``Plan``."""
+    """Approximate hits, best first, with how many pages matched (``total``: those over the floor and the
+    second-fact page, which can be under it) and the ``Plan``."""
 
     total = 0
     plan: Plan | None = None
@@ -791,7 +793,8 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
         complete = [s for s in scored if s[0]]
         placed = max([s for s in complete if s[1]] or complete, key=lambda s: (s[5], s[6]))
     elif scored:
-        placed = _second_page(scored[0][7], rows, together, weight, math.log(1 + (n + 0.5) / 0.5), telling)
+        placed = _second_page(scored[0][7], rows, together, weight, math.log(1 + (n + 0.5) / 0.5), telling,
+                              plan.pairs, typo)
     else:
         placed = None
     if placed is not None and placed[7] not in [s[7] for s in scored[:SHOWN_IN_DETAIL]]:
@@ -824,18 +827,21 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
 
 
 def _second_page(first: int, rows: dict[int, tuple[SearchEntry, list[tuple[str, int] | None]]],
-                 together: dict[int, int], weight: list[float], nowhere: float, telling: list[bool]) -> tuple | None:
+                 together: dict[int, int], weight: list[float], nowhere: float, telling: list[bool],
+                 pairs: tuple[tuple[int, int], ...], typo: int | None) -> tuple | None:
     """The best page for the words that page ``first``, the best page of the query, does not hold: the
     second fact of a query whose two facts sit on two pages (D65). None when no page qualifies.
 
-    A page qualifies when it holds a specific word among those ``first`` lacks (``telling``: on at most
-    half the pages), or when the lacked words it holds weigh at least ``APPROX_FLOOR`` of all the lacked
-    words, so it is about them, and at least ``SECOND_BAR`` of ``nowhere``, the weight of a word on no
-    page, so that what it adds is not a leftover common word. The best such page is, in order: a turn
-    page before a context block; the larger weight of the lacked words; the larger weight of the whole
-    query, so a page that also holds the query's other words beats one that holds only the lacked word;
-    more pairs of words side by side; the newer page, so the latest value wins a tie (D28). It is
-    returned as a row of the main order."""
+    A page qualifies when the lacked words it holds weigh at least ``APPROX_FLOOR`` of all the lacked
+    words, so it is about them, and one of three things holds, so that what it adds is not a leftover
+    common word: one of those words is specific (``telling``: on at most half the pages); or they weigh
+    at least ``SECOND_BAR`` of ``nowhere``, the weight of a word on no page, with the word matched
+    through a typo (``typo``) counted at its full weight; or one of them stands next to its neighbour
+    as the query has them (a pair of ``pairs`` that the page holds, in ``together``). The best such
+    page is, in order: a turn page before a context block; the larger weight of the lacked words; the
+    larger weight of the whole query, so a page that also holds the query's other words beats one that
+    holds only the lacked word; more pairs of words side by side; the newer page, so the latest value
+    wins a tie (D28). It is returned as a row of the main order."""
     lacks = [j for j in range(len(weight)) if rows[first][1][j] is None]
     rest = sum(weight[j] for j in lacks)
     best = None
@@ -844,15 +850,19 @@ def _second_page(first: int, rows: dict[int, tuple[SearchEntry, list[tuple[str, 
         if i == first or not held:
             continue
         share = sum(weight[j] for j in held)
-        if not (any(telling[j] for j in held) or (share >= APPROX_FLOOR * rest and share >= SECOND_BAR * nowhere)):
+        if share < APPROX_FLOOR * rest:
+            continue
+        full = sum(weight[j] / (TYPO_WEIGHT if j == typo else 1.0) for j in held)  # the typo word unhalved
+        bits = together.get(i, 0)
+        beside = any(bits >> b & 1 and (j in held or k in held) for b, (j, k) in enumerate(pairs))
+        if not (any(telling[j] for j in held) or full >= SECOND_BAR * nowhere or beside):
             continue
         on = [j for j in range(len(weight)) if row[j] is not None]
         whole = sum(weight[j] for j in on)
-        pairs = together.get(i, 0).bit_count()
-        key = (not entry.context, share, whole, pairs, entry.turn, entry.id)
+        key = (not entry.context, share, whole, bits.bit_count(), entry.turn, entry.id)
         if best is None or key > best[0]:
             relevance = sum(weight[j] * _saturated(row[j][1]) for j in on)
-            best = (key, (False, not entry.context, whole, pairs, relevance, entry.turn, entry.id, i))
+            best = (key, (False, not entry.context, whole, bits.bit_count(), relevance, entry.turn, entry.id, i))
     return best[1] if best is not None else None
 
 
