@@ -74,9 +74,9 @@ from dataclasses import replace
 from typing import Any, NamedTuple
 
 from contexto.canonical import canonical_bytes, canonical_json, utf8
-from contexto.pdfpages import count_pages
+from contexto.pdfpages import PDF_MAX_PAGES, count_pages
 from contexto.store.render import OWN_TOOL_PREFIX, own_call_ids
-from contexto.tokens import TokenEstimator
+from contexto.tokens import PDF_PAGE_TOKENS, TokenEstimator, uncertain_documents
 
 STUB_MIN_BYTES = 2_048  # a result is stubbed only when its content is at least this many bytes
 STUB_MIN_RATIO = 2  # and at least this many times its stub
@@ -906,6 +906,10 @@ def _tightness(request: dict, messages: list[dict], sent: list[dict], state: Any
     return head, trigger(config) - (head + fixed + prompt) < HEADWAY_ROOMS * config.min_turn_room
 
 
+# What D60 counts a PDF at when its pages are not certain: the API's maximum, so it is never estimated low.
+UNCERTAIN_DOCUMENT_TOKENS = PDF_MAX_PAGES * PDF_PAGE_TOKENS
+
+
 class _Candidate(NamedTuple):
     i: int
     j: int
@@ -989,7 +993,11 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     sent = view(messages, state, dialect)
 
     def tokens(items: list[dict]) -> int:
-        return rw.estimate_items(estimator, [m for m in items if m is not FOLDED])
+        """Certain estimates only (Reviewer A at 7575c76f, finding 1): a PDF whose pages are not certain
+        counts as nothing here, so it never makes a result look over the bound on its own and paging it
+        never counts as freeing anything. Usage measures it once it is sent."""
+        kept = [m for m in items if m is not FOLDED]
+        return rw.estimate_items(estimator, kept) - UNCERTAIN_DOCUMENT_TOKENS * uncertain_documents(kept)
 
     def counted(i: int, item: dict) -> int:
         """A sent item's tokens for a decision: a fresh tool result with its margin."""
@@ -1007,6 +1015,9 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             result = hooks.result(messages[i], j)
             if (i, j) in done or result is None or not hooks.stubbable(result):
                 continue
+            certain = not uncertain_documents([result])
+            if not certain and i >= last_assistant:
+                continue  # unread and its cost unknown: sent once, as without in-turn paging
             call = hooks.call(messages, i, call_id)
             is_own = call_id in own
             text = stub_text(hooks, call, result, "" if is_own else PLACEHOLDER_PAGE)
@@ -1020,7 +1031,9 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             stubbed_item = hooks.with_stubs(sent[i], {j: text})
             plain = tokens([sent[i]]) - tokens([stubbed_item])
             saving = counted(i, sent[i]) - counted(i, stubbed_item)
-            if plain > 0:
+            if not certain:  # seen: stubbed like any result, counted as freeing only what is certain
+                plain, saving = max(plain, 0), max(saving, 0)
+            if plain > 0 or not certain:
                 (seen if i < last_assistant else unseen).append(
                     _Candidate(i, j, is_own, saving, plain, hooks.has_document(result), call, result))
 
@@ -1033,7 +1046,12 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     earlier = tokens(rw.window_items(sent[:start], state.k)) if start > state.k else 0
     freeable = ((earlier if may_page_turns else 0) + sum(counted(i, sent[i]) for r in rounds for i in r.removed)
                 + sum(c.saving for c in seen if c.i not in in_rounds and (c.i >= start or not may_page_turns)))
-    pressure = estimate + margin
+    # The estimate holds a fresh uncertain PDF at D60's count until usage measures it: the batch leaves
+    # that count out, so it pages nothing for it (over the bound by usage is the logged over_bound).
+    fresh = (sent[previous_n:] if state.last_input_tokens is not None
+             else rw.transform_messages(messages, state))
+    unknown = UNCERTAIN_DOCUMENT_TOKENS * uncertain_documents([m for m in fresh if m is not FOLDED])
+    pressure = estimate + margin - unknown
     headway = line - HEADWAY_ROOMS * config.min_turn_room
 
     def sized(cur: int) -> tuple[int, int]:
@@ -1083,7 +1101,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     # T, the room's own line) or be over the bound; and none starts for less than min_turn_room.
     after_rewrite = state.inturn.rewrote == previous_n and state.inturn.rewrote > 0
     may_rewrite = over_bound or (freeable >= config.min_turn_room
-                                 and (not after_rewrite or estimate > show))
+                                 and (not after_rewrite or estimate - unknown > show))
     if not (huge or may_rewrite):
         return state, None
     before = state
@@ -1095,7 +1113,8 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
 
     def pressed(new: Any) -> int:
         """``measured`` plus the margin of the fresh results still in the request."""
-        return measured(new) + fresh_margin(view(messages, new, dialect)[previous_n:], estimator, dialect)
+        return (measured(new) - unknown
+                + fresh_margin(view(messages, new, dialect)[previous_n:], estimator, dialect))
 
     def stub(chosen: list[_Candidate], current: Any) -> Any:
         by_turn: dict[int, list[_Candidate]] = {}
@@ -1145,7 +1164,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         # Reviewer A at 7575c76f, finding 2: every later step is sized from the request as it stands after
         # step 0, not with the stubbed results still counted (which kept steps 1 to 3 from running).
         may_rewrite = cur > config.bound or (freeable >= config.min_turn_room
-                                             and (not after_rewrite or measured(state) > show))
+                                             and (not after_rewrite or measured(state) - unknown > show))
     target, escalate = sized(cur)
     # Steps 1 to 3 change messages the previous request had: a rewrite of the cached prefix.
     rewriting = may_rewrite and cur > line
@@ -1204,7 +1223,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         if chosen:
             stubbed(chosen, True)
     if state is before:
-        if estimate > config.bound:
+        if estimate - unknown > config.bound:
             events.append({"event": "in_turn_exhausted", "epoch": state.epoch, "estimate": estimate,
                            "bound": config.bound})
         return state, None
@@ -1225,7 +1244,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
                    "turns_paged": counts["turns"], "pages": counts["pages"], "estimate_before": estimate,
                    "estimate_after": after, "margin": margin, "first_changed": first_changed,
                    "resent_tokens": resent, "messages": n})
-    if after > config.bound:
+    if after - unknown > config.bound:
         events.append({"event": "in_turn_exhausted", "epoch": state.epoch, "estimate": after,
                        "bound": config.bound})
     return state, after

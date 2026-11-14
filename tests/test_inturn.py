@@ -18,12 +18,14 @@ from contexto import inturn, launcher
 from contexto.canonical import canonical_bytes
 from contexto.codex import RESPONSES
 from contexto.commands import run as run_command
+from contexto.pdfpages import PDF_MAX_PAGES
 from contexto.rewrite import ANTHROPIC, COUNT_TOKENS, MESSAGES, Config, EpochState, RewriteEngine, _drop_cache_control
 from contexto.store import SessionStore, check_epoch
 from contexto.store.catalog import check_page
 from contexto.store.memory import MemoryStore
 from contexto.store.pages import RESULT_PAGE, ROUNDS_PAGE, build_page, index_line, page_id, render_index
 from contexto.store.render import recall_chunk
+from contexto.tokens import PDF_PAGE_TOKENS, uncertain_documents
 from inturn_harness import AGENT, MODEL, Cli, Refused, Sent, Upstream, blocks, check_pairing, output, png, tool
 from inturn_harness import BYTES_PER_TOKEN as BYTES
 from test_pdf_pages import simple_pdf
@@ -1216,9 +1218,9 @@ def test_a_document_result_is_stubbed_once_seen_and_unread_only_when_over_the_bo
     stub = cli.sent[-1].messages[i]["content"][j]["content"]
     assert "1 document, 10 pages" in stub and "run the call again to see the document" in stub
     assert cli.store.get_page(page_id)["messages"][-1]["content"][0]["content"] == [pdf]
-    # One document over the bound on its own is stubbed on arrival, once, with that reason.
-    # A damaged PDF: its pages cannot be counted, so it is estimated at PDF_MAX_PAGES, over the bound.
-    huge = {**pdf, "source": {**pdf["source"], "data": base64.b64encode(b"%PDF-1.7\n" + b"x" * 4_000).decode()}}
+    # One document over the bound on its own is stubbed on arrival, once, with that reason: 40 pages
+    # counted with certainty are 182,720 tokens, over the bound of 150,000.
+    huge = {**pdf, "source": {**pdf["source"], "data": base64.b64encode(simple_pdf(40)).decode()}}
     cli = Cli(memory(), head_bytes=64_000)
     cli.prompt("Read the scan.")
     cli.send([("Read", {"file_path": "scan.pdf"})])
@@ -1346,3 +1348,46 @@ def test_a_huge_unread_result_at_a_small_bound_leaves_the_request_under_it_with_
     assert [b["content"] for b in forwarded[1:]] == [b["content"] for b in cli.history[at]["content"][1:]]
     assert sent.room >= config.min_turn_room and sent.real <= config.bound
     assert not cli.events("in_turn_exhausted") and not cli.events("over_bound")
+
+
+class OnePagePdfs(Upstream):
+    """An upstream that counts a PDF whose pages the estimator cannot count as the one page it is."""
+
+    def tokens(self, request: dict) -> int:
+        over = (PDF_MAX_PAGES - 1) * PDF_PAGE_TOKENS
+        return super().tokens(request) - over * uncertain_documents(request["messages"])
+
+
+def test_a_pdf_whose_pages_are_not_certain_is_read_once_and_stubbed_only_once_seen():
+    # Reviewer A at 7575c76f, finding 1: D60 counts such a PDF at PDF_MAX_PAGES so it is never estimated
+    # low, and step 0 took that for "over the bound on its own": a one-page 22 KB PDF was stubbed on arrival
+    # three times of three, so inside a tool loop the model could never read it. Only a certain estimate
+    # decides that now; this one is sent once as v0.5.24 sends it, and stubbed by a later batch once seen.
+    scan = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                           "data": base64.b64encode(b"%PDF-1.7\n" + b"x" * 22_000).decode()}}
+    cli = Cli(memory(), head_bytes=64_000)
+    cli.upstream = OnePagePdfs()
+    cli.prompt("Read the scan and summarise it.")
+    for r in range(3):
+        cli.send([("Bash", {"command": f"ls {r}"})])
+        cli.results([output(f"ls-{r}", 800)])
+    arrivals = []
+    for attempt in range(3):
+        cli.send([("Read", {"file_path": "scan.pdf"})])
+        cli.results([[scan]])
+        arrivals.append(len(cli.history) - 1)
+        sent = cli.send([("Bash", {"command": f"wc {attempt}"})] if attempt < 2 else [("Read", {"file_path": "a"})])
+        assert sent.messages[-1]["content"][0]["content"] == [scan]  # forwarded whole
+        assert not [e for e in sent.events if e["event"] == "in_turn_batch" and e["unseen_results_stubbed"]]
+        if attempt < 2:
+            cli.results([output(f"wc-{attempt}", 800)])
+    assert len(cli.events("pdf_pages_uncertain")) == 3  # logged as today
+    # Seen, it is stubbed like any other result when later rounds need the room.
+    cli.results([output("a", RESULT)])
+    cli.loop(40, lambda r: output(f"later-{r}", RESULT))
+    stubbed = {i for i, _, _ in cli.state.inturn.stubs} | {i for _, ranges, _ in cli.state.inturn.folds
+                                                         for a, b in ranges for i in range(a, b + 1)}
+    assert set(arrivals) <= stubbed
+    assert not [e for e in batches(cli) if e["unseen_results_stubbed"] or e["documents_over_bound"]]
+    assert max(s.real for s in cli.sent) <= BOUND and not cli.events("in_turn_exhausted")
+    assert not [e for e in cli.usage_events if e["event"] == "over_bound"]
