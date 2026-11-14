@@ -104,7 +104,8 @@ above would trust it had it reached the proxy first. So `/clear`, which starts a
 session, is trusted, and so is `/resume` of a conversation a proxy on this session trusted before.
 The exception is a session from before Contexto recorded the Claude Code sessions it served (v0.5.11
 or older, or one whose `meta.json` could not be read): there the conversation a `/clear` starts
-after a restart is not trusted until the next `/clear`. Claude Code subagents
+after a restart is not trusted until a `/clear` in a later launch (the proxy reads the served sessions
+once, when it starts). Claude Code subagents
 are told apart by the `X-Claude-Code-Agent-Id` header Claude Code sends with their requests, and never
 take over as the main conversation. A request that carries `X-Claude-Code-Agent-Id` or a parent session id
 is never read for pins, even when it has the main conversation's key, as a fork of the main

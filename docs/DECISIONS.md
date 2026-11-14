@@ -2912,7 +2912,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
       session id the store had not served, and so is a `/resume` of a listed conversation, except on
       a store with no served session ids (from before D55, or a `meta.json` unreadable when the proxy
       started), where the conversation a `/clear` starts is not trusted, in that launch or later ones,
-      until the next `/clear`. A store with no readable record counts as new only when it has served
+      until a `/clear` in a later launch (the served ids are read once, at engine start). A store with no readable record counts as new only when it has served
       no Claude Code session and holds no trusted list, so a Codex store that ran an engine before is
       not new either (review B on #288, N24). A Mongolian free variation selector prints before a
       space only after a Mongolian letter (N25). A Codex child whose first prompt is byte-identical to a listed

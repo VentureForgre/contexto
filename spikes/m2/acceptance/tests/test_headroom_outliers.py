@@ -133,5 +133,7 @@ def test_the_engines_rule_17_reproduces_the_recommended_row():
     # seed, so the head is no longer 244 tokens low (18,838 before). 18,569 and $7.3209 since D69: the pin
     # line says only the user's own words are pinned (18,594 and $7.3187 before). 18,533 and $7.3242 since
     # D63: the example line says a hit can come from the running turn, 141 bytes, 36 tokens at 4 a token.
-    # 18,536 and $7.3239 since it names the turn a page was written in instead: 9 bytes shorter.
-    assert s["window_budget"][0] == 18_536 and s["usd"] == 7.3239
+    # 18,536 and $7.3239 since it names the turn a page was written in instead: 9 bytes shorter. 18,524
+    # and $7.325 since D69's search of earlier sessions: the pin line also names a search or recall of an
+    # earlier session, 49 bytes, 12 tokens at 4 a token.
+    assert s["window_budget"][0] == 18_524 and s["usd"] == 7.325

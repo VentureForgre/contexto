@@ -59,7 +59,7 @@ _BLANK_SYMBOLS = frozenset({0x2800, 0xFFFC})
 # shorthand format controls U+1BCA0 to U+1BCA3 and the musical formatting controls U+1D173 to U+1D17A
 # (review B round 8, N22). A space next to one makes it part of a run, so a space between each pair hides
 # nothing (review B round 7, N19); real text never puts a joiner next to a space. The Mongolian free
-# variation selectors can end a word, so one after a letter or mark is not made part of a run by a space
+# variation selectors can end a word, so one after a Mongolian letter or mark is not made part of a run by a space
 # (review A round 8, nit 2).
 _ZERO_WIDTH = frozenset({0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF,
                          0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, *range(0x180B, 0x1810), 0x16FE4,
@@ -118,7 +118,7 @@ def safe_text(text: str) -> str:
     direction control, a tag or annotation character, a lone surrogate, a private-use or unassigned
     code point, an invisible operator, a variation selector anywhere but right after a character it
     varies, a zero-width character next to another, a blank cell or a space (but a Mongolian free
-    variation selector after a letter or mark prints before a space), and a blank cell next to a
+    variation selector after a Mongolian letter or mark prints before a space), and a blank cell next to a
     zero-width character) as its backslash escape, and everything else as it is: backslashes, and the
     joiners, a variation selector after an emoji, a symbol or an ideograph or in a keycap, other format
     characters and spaces that text in many scripts and emoji need."""
