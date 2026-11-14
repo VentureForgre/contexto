@@ -15,8 +15,8 @@ contexto doctor (contexto 0.5.24)
 
 [ok]   Python 3.13.2 (3.12 or later)
 [ok]   Claude Code 2.1.318 at /usr/local/bin/claude (a tested version)
-[warn] Codex: 'codex' not found on PATH
-       -> Install Codex and put it on PATH to use `contexto run codex`
+[warn] Codex: 'codex' not found on PATH. Install Codex: curl -fsSL https://chatgpt.com/codex/install.sh | sh (other ways: https://learn.chatgpt.com/docs/codex/cli). If it is installed, add its directory to PATH.
+       -> Only `contexto run codex` needs it
 [ok]   Claude Code settings: read ~/.claude/settings.json
 [ok]   Claude Code upstream: http://127.0.0.1:8317 (from ANTHROPIC_BASE_URL in the env block of ~/.claude/settings.json)
 [skip] Codex upstream: not checked, codex is not on PATH or cannot be run
@@ -83,8 +83,10 @@ missing:
 - a project setting skipped because the folder is not trusted.
 
 When a CLI is missing, the checks that only matter for that CLI are skipped, not warned about.
-`provider` is skipped only when `claude` is not on PATH: the launcher reaches its refusal with a
-`claude` that is there but cannot start.
+`provider` is skipped only when `claude` is not on PATH or not executable (a broken symlink or a
+directory counts as not executable), because `contexto run claude` stops there before its refusal.
+A `claude` that is executable but cannot start (a missing `#!` interpreter, say) still gets the
+check: the launcher reaches its refusal with it.
 
 ## What doctor never does
 
@@ -121,7 +123,14 @@ Whether the CLI is on `PATH`, its version from `<cli> --version`, and whether th
 Contexto was tested with (`TESTED_VERSIONS` in `src/contexto/cliversions.py`; see
 [cli-updates.md](cli-updates.md)). An untested version is a warning, as it is in `contexto run`.
 A file on `PATH` that is not executable, is a broken symlink, or cannot be started (for example a
-missing `#!` interpreter) counts as missing, and the line says which.
+missing `#!` interpreter) counts as missing, and the line says which. When `codex` is not on `PATH`
+at all, the line gives Codex's install command (Claude Code's for `claude`), and the next step only
+says which command needs it.
+
+A `codex` that starts while this build of Contexto lacks its Codex support (the `contexto.codex`
+module) is a warning, `…, but codex support is not installed in this build`, with the step to
+reinstall Contexto: `contexto run codex` says the same and exits 2. Codex then counts as missing,
+and its two checks are skipped with that reason.
 
 ### `settings`
 
@@ -332,7 +341,7 @@ the exception's type. A check that could not be made has `{"error": <fault>}`, o
 | Check | `details` |
 |---|---|
 | `python` | `version`, `executable` |
-| `claude`, `codex` | `cli`, `path` (or `null`), `version` (or `null`), `tested` (`true`, `false`, or `null` when the version is unknown), `tested_versions`; `error` when the CLI is missing (`not_found`) or its version could not be read (`timeout`, `exit_<code>`, `unparsed`, or an error type) |
+| `claude`, `codex` | `cli`, `path` (or `null`), `version` (or `null`), `tested` (`true`, `false`, or `null` when the version is unknown), `tested_versions`; `error` when the CLI is missing (`not_found`), its version could not be read (`timeout`, `exit_<code>`, `unparsed`, or an error type), or, for `codex`, Contexto's Codex support is not installed (`codex_support_missing`) |
 | `settings` | `files`: one `{"kind", "state"}` for each file looked for, highest precedence first and the managed file last, where `kind` is `main-checkout-local`, `local`, `project`, `user` or `managed` and `state` is `read`, `absent` or `unusable`; an unusable file also has `problem`, what is wrong with it (the wording of the line). Never a path. |
 | `claude-upstream` | `origin` (`scheme://host[:port]`, or `null` when the URL is invalid), `source` (`default`, `env`, or `settings:<kind>` with kind `user`, `project`, `local` or `main-checkout-local`); `ignored` (the project file kinds skipped) when a base URL was skipped |
 | `codex-upstream` | `origin` and `source` (`codex-env` or `claude-<source>+/v1`), both `null` when there is none; `ignored` as above |
