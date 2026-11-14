@@ -603,7 +603,7 @@ request's text), and the toy with every `StubRef` naming its page as a whole, wi
 | `room_one` | every room is 1 token | room, recall | |
 | `lying_room` (reviewer A) | every room is 100,000 | room (truth) | 123 rooms over the line at request and 123 at response |
 | `in_place` (reviewer A) | clears the CLI's own oldest whole result for the send, restores it when the usage arrives | the run fails (rule 11) | passes every rule without `check_wire` |
-| `inflate` (reviewer A), toy lines 110,000 to 70,000 | once per loop, the request right after a batch is a batch of one more result, with an `estimate` of 999,999 published | cache (in a row) | the second rewrite comes to 69,153 by the upstream's count (76,068 at 1.1 x), under 110,000; 16 rewrites in the loop; the same lines without the defect pass |
+| `inflate` (reviewer A), toy lines 110,000 to 70,000 | once in a run, the request right after a batch is a batch of one more result, with an `estimate` of 999,999 published | cache (in a row) | the second rewrite comes to 69,153 by the upstream's count (76,068 at 1.1 x), under 110,000; 16 rewrites in the loop; the same lines without the defect pass |
 | `silent_older` (reviewer A) | from each turn start, every earlier turn's result is `[cleared]`, its rounds paged, its calls and prompt kept | storage | `multiturn`: 117 requests leave out up to 112 results; none lost |
 | `drop_older_stubs` (reviewer B) | from each turn start, an earlier turn's toy stub becomes `[result removed]` | storage | `multiturn`: 97 requests, up to 99 results |
 | `drop_older_rounds` | from each turn start, the rounds of earlier turns are removed and paged; prompts and final answers kept; nothing names the page | storage | `multiturn`: 117 requests, up to 112 results |

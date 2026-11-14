@@ -58,7 +58,7 @@ DEFECTS = ("", "junk_page", "strip_all", "stub_on_arrival", "rewrite_always", "n
 #   the others page none (reviewer A's "show once, then page");
 # - in_place: the CLI's own oldest whole result is cleared in place for the send and restored when the
 #   usage arrives;
-# - inflate: once per loop, the request right after a batch is a batch of one more result, and its request
+# - inflate: once in a run, the request right after a batch is a batch of one more result, and its request
 #   event publishes an estimate of 999,999 (reviewer A's inflating engine);
 # - silent_older: from each turn start on, every earlier turn's result is [cleared], with its rounds written
 #   to a page and its calls and prompt kept (reviewer A's SilentOlder);
@@ -119,7 +119,7 @@ class ToyPager:
         self.count = FakeUpstream()  # used as a tokenizer only
         self.states: dict[str, _State] = {}
         self.forms: dict[tuple[int, str, bool], tuple[dict, dict | None, int]] = {}
-        self.older_forms: dict[tuple[int, bool], tuple[dict, dict]] = {}
+        self.older_forms: dict[tuple[int, int], tuple[dict, dict]] = {}
         self.older_pages: dict[int, str] = {}  # OLDER: the turn's prompt index -> the page of what precedes it
         self.inflated = False
         self.junk: str | None = None

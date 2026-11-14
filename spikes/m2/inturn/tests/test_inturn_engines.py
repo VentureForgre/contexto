@@ -16,7 +16,7 @@ defects makes it wrong in one way, and the target written for that way fails it:
 - ``show_once``: every 4th request pages every result it is not the first to carry (reviewer A);
 - ``in_place``: the CLI's own oldest whole result is cleared in place for the send and restored after
   (reviewer A's ``InPlace``);
-- ``inflate``: once per loop, a second rewrite right after a batch, with an estimate of 999,999 published
+- ``inflate``: once in a run, a second rewrite right after a batch, with an estimate of 999,999 published
   for it (reviewer A's inflating engine);
 - ``silent_older``: from each turn start on, every earlier turn's result is ``[cleared]``, its rounds paged,
   its calls and prompt kept (reviewer A's ``SilentOlder``);
