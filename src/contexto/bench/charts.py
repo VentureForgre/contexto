@@ -19,11 +19,18 @@ background, and the three known arms differ in lightness as well as hue. An arm 
 not know gets a marker, a dash pattern and a colour of its own from a second list (``_styles``),
 by the order of the names, so it looks the same in both charts.
 
-Text. A manifest ``label`` is added to the title of every chart. A title or subtitle too long for
-one line is wrapped; a legend entry or a row label too long for its place is cut with three dots
-and keeps its full text as a tooltip (``<title>``). Widths are estimated (``text_width``): there
-are no font metrics here. A character XML 1.0 does not allow is replaced by U+FFFD, so the file is
-always well-formed.
+Text. A manifest ``label`` is added to the title of every chart. A title, subtitle or footnote
+too long for one line is wrapped to the chart's width; a legend entry or a row label too long for
+its place is cut with three dots and keeps its full text as a tooltip (``<title>``). A legend
+entry is cut in its label, so the series' basis after it ("(estimated)") is always drawn whole. A
+series with no points is not drawn and a footnote says so. Widths are estimated (``text_width``):
+there are no font metrics here. A character XML 1.0 does not allow is replaced by U+FFFD, so the
+file is always well-formed.
+
+The same results file gives the same bytes on every Python version from 3.12 to 3.15: which
+characters count as wide comes from a table in this module (``WIDE``, East Asian Width W or F in
+Unicode 17.0), not from the running Python's Unicode tables, which differ between versions for
+recently assigned characters. Words are split only at a space, tab, carriage return or line feed.
 
 Geometry, for anyone checking a plotted point. Both charts are ``WIDTH`` wide. In the request-size
 chart a point ``(history, size)`` is drawn at ``x = LINE_LEFT + history / x_top * LINE_PLOT_WIDTH``
@@ -34,10 +41,9 @@ last tick of each axis (``axis_top``). In the accuracy chart an accuracy ``p`` i
 
 from __future__ import annotations
 
+import bisect
 import math
 import re
-import textwrap
-import unicodedata
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -75,13 +81,40 @@ ACC_PLOT_WIDTH = WIDTH - ACC_LEFT - ACC_RIGHT
 ACC_SLOT = 16  # vertical space of one arm inside a row
 ACC_ROW_PAD = 14
 MAX_MARKERS = 40
-NOTE_WRAP = 118
 CHAR_WIDTH = 6.7  # an estimate for 12px text; there are no font metrics here
 TITLE_SIZE = 16
 CUT = "..."
 REPLACEMENT = "\ufffd"
 # What XML 1.0 allows in a document: tab, line feed, carriage return and the ranges below.
 _NOT_XML = re.compile("[^\t\n\r\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+_SPACE = re.compile("[ \t\r\n]+")
+# The code points of East Asian Width W or F in Unicode 17.0, as inclusive ranges: the characters
+# ``text_width`` counts twice. Fixed here so that a chart does not change with the Python version.
+WIDE = (
+    (0x1100, 0x115F), (0x231A, 0x231B), (0x2329, 0x232A), (0x23E9, 0x23EC), (0x23F0, 0x23F0), (0x23F3, 0x23F3),
+    (0x25FD, 0x25FE), (0x2614, 0x2615), (0x2630, 0x2637), (0x2648, 0x2653), (0x267F, 0x267F), (0x268A, 0x268F),
+    (0x2693, 0x2693), (0x26A1, 0x26A1), (0x26AA, 0x26AB), (0x26BD, 0x26BE), (0x26C4, 0x26C5), (0x26CE, 0x26CE),
+    (0x26D4, 0x26D4), (0x26EA, 0x26EA), (0x26F2, 0x26F3), (0x26F5, 0x26F5), (0x26FA, 0x26FA), (0x26FD, 0x26FD),
+    (0x2705, 0x2705), (0x270A, 0x270B), (0x2728, 0x2728), (0x274C, 0x274C), (0x274E, 0x274E), (0x2753, 0x2755),
+    (0x2757, 0x2757), (0x2795, 0x2797), (0x27B0, 0x27B0), (0x27BF, 0x27BF), (0x2B1B, 0x2B1C), (0x2B50, 0x2B50),
+    (0x2B55, 0x2B55), (0x2E80, 0x2E99), (0x2E9B, 0x2EF3), (0x2F00, 0x2FD5), (0x2FF0, 0x303E), (0x3041, 0x3096),
+    (0x3099, 0x30FF), (0x3105, 0x312F), (0x3131, 0x318E), (0x3190, 0x31E5), (0x31EF, 0x321E), (0x3220, 0x3247),
+    (0x3250, 0xA48C), (0xA490, 0xA4C6), (0xA960, 0xA97C), (0xAC00, 0xD7A3), (0xF900, 0xFAFF), (0xFE10, 0xFE19),
+    (0xFE30, 0xFE52), (0xFE54, 0xFE66), (0xFE68, 0xFE6B), (0xFF01, 0xFF60), (0xFFE0, 0xFFE6), (0x16FE0, 0x16FE4),
+    (0x16FF0, 0x16FF6), (0x17000, 0x18CD5), (0x18CFF, 0x18D1E), (0x18D80, 0x18DF2), (0x1AFF0, 0x1AFF3),
+    (0x1AFF5, 0x1AFFB), (0x1AFFD, 0x1AFFE), (0x1B000, 0x1B122), (0x1B132, 0x1B132), (0x1B150, 0x1B152),
+    (0x1B155, 0x1B155), (0x1B164, 0x1B167), (0x1B170, 0x1B2FB), (0x1D300, 0x1D356), (0x1D360, 0x1D376),
+    (0x1F004, 0x1F004), (0x1F0CF, 0x1F0CF), (0x1F18E, 0x1F18E), (0x1F191, 0x1F19A), (0x1F200, 0x1F202),
+    (0x1F210, 0x1F23B), (0x1F240, 0x1F248), (0x1F250, 0x1F251), (0x1F260, 0x1F265), (0x1F300, 0x1F320),
+    (0x1F32D, 0x1F335), (0x1F337, 0x1F37C), (0x1F37E, 0x1F393), (0x1F3A0, 0x1F3CA), (0x1F3CF, 0x1F3D3),
+    (0x1F3E0, 0x1F3F0), (0x1F3F4, 0x1F3F4), (0x1F3F8, 0x1F43E), (0x1F440, 0x1F440), (0x1F442, 0x1F4FC),
+    (0x1F4FF, 0x1F53D), (0x1F54B, 0x1F54E), (0x1F550, 0x1F567), (0x1F57A, 0x1F57A), (0x1F595, 0x1F596),
+    (0x1F5A4, 0x1F5A4), (0x1F5FB, 0x1F64F), (0x1F680, 0x1F6C5), (0x1F6CC, 0x1F6CC), (0x1F6D0, 0x1F6D2),
+    (0x1F6D5, 0x1F6D8), (0x1F6DC, 0x1F6DF), (0x1F6EB, 0x1F6EC), (0x1F6F4, 0x1F6FC), (0x1F7E0, 0x1F7EB),
+    (0x1F7F0, 0x1F7F0), (0x1F90C, 0x1F93A), (0x1F93C, 0x1F945), (0x1F947, 0x1F9FF), (0x1FA70, 0x1FA7C),
+    (0x1FA80, 0x1FA8A), (0x1FA8E, 0x1FAC6), (0x1FAC8, 0x1FAC8), (0x1FACD, 0x1FADC), (0x1FADF, 0x1FAEA),
+    (0x1FAEF, 0x1FAF8), (0x20000, 0x2FFFD), (0x30000, 0x3FFFD),)
+_WIDE_STARTS = tuple(start for start, _ in WIDE)
 
 ACCURACY = "accuracy"
 REQUEST_SIZE = "request-size"
@@ -114,11 +147,17 @@ def _el(tag: str, text: str | None = None, children: Sequence[str] = (), **attrs
     return f"<{tag}{parts}>{''.join(children)}{escape(_clean(text)) if text is not None else ''}</{tag}>"
 
 
+def _units(ch: str) -> int:
+    """2 for a wide character (``WIDE``), else 1."""
+    code = ord(ch)
+    i = bisect.bisect_right(_WIDE_STARTS, code) - 1
+    return 2 if i >= 0 and code <= WIDE[i][1] else 1
+
+
 def text_width(text: str, size: int = 12) -> float:
     """An estimate of the width of ``text`` in pixels at a font size: ``CHAR_WIDTH`` per character
     at 12px, in proportion at other sizes, and twice that for a wide (East Asian) character."""
-    units = sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
-    return units * CHAR_WIDTH * size / 12
+    return sum(_units(ch) for ch in text) * CHAR_WIDTH * size / 12
 
 
 def _shorten(text: str, size: int, limit: float) -> str:
@@ -132,17 +171,41 @@ def _shorten(text: str, size: int, limit: float) -> str:
 
 
 def _wrap(text: str, size: int, limit: float) -> list[str]:
-    """``text`` broken into lines no wider than ``limit`` pixels, a long word broken where it must be."""
-    widest = max((text_width(ch, size) for ch in text), default=text_width("x", size))
-    return textwrap.wrap(text, max(1, int(limit / widest))) or [""]
+    """``text`` broken at spaces into lines no wider than ``limit`` pixels, a word wider than a line
+    broken where it must be (text with no spaces, as in Chinese or Japanese, is such a word)."""
+    room = limit * 12 / (CHAR_WIDTH * size)  # in units of one narrow character
+    lines: list[str] = []
+    line, used = "", 0
+    for word in _SPACE.split(text.strip()):
+        width = sum(_units(ch) for ch in word)
+        if line and used + 1 + width <= room:
+            line, used = f"{line} {word}", used + 1 + width
+            continue
+        if line:
+            lines.append(line)
+        line, used = "", 0
+        for ch in word:
+            if line and used + _units(ch) > room:
+                lines.append(line)
+                line, used = "", 0
+            line, used = line + ch, used + _units(ch)
+    if line:
+        lines.append(line)
+    return lines or [""]
 
 
 def _text(x: float, y: float, text: str, size: int = 12, fill: str = INK_SECONDARY, anchor: str = "start",
-          limit: float | None = None, **attrs: Any) -> str:
-    """A line of text. With ``limit`` (pixels) a text too wide is cut with three dots and carries
-    its full text as a tooltip."""
-    text = _clean(text)
-    drawn = text if limit is None else _shorten(text, size, limit)
+          limit: float | None = None, keep: str = "", **attrs: Any) -> str:
+    """A line of text, ``text`` followed by ``keep``. With ``limit`` (pixels) a text too wide is cut
+    with three dots in ``text``, so ``keep`` is drawn whole, and carries its full text as a tooltip."""
+    whole = _clean(text + keep)
+    drawn = whole
+    if limit is not None and text_width(whole, size) > limit:
+        tail = _clean(keep)
+        room = limit - text_width(tail, size)
+        drawn = (_shorten(_clean(text), size, room) + tail) if tail and room > text_width(CUT, size) else (
+            _shorten(whole, size, limit))
+    text = whole
     children = [_el("title", text)] if drawn != text else []
     return _el("text", drawn, children, x=_n(x), y=_n(y), font_size=size, fill=fill, text_anchor=anchor, **attrs)
 
@@ -193,17 +256,18 @@ def _document(height: float, title: str, description: str, body: Sequence[str]) 
     return "\n".join(lines) + "\n"
 
 
-def _legend(entries: Sequence[tuple[str, str, bool]], y: float,
+def _legend(entries: Sequence[tuple[str, str, str, bool]], y: float,
             styles: Mapping[str, tuple[str, str, str]]) -> tuple[list[str], float]:
-    """A row of legend entries ``(series name, words, with line)``, wrapped to the width; an entry
-    wider than the chart is cut. Returns the elements and the y below the last row."""
+    """A row of legend entries ``(series name, label, basis words, with line)``, wrapped to the
+    width; an entry wider than the chart is cut in its label, so its basis stays whole. Returns the
+    elements and the y below the last row."""
     out: list[str] = []
     x = float(MARGIN)
-    for name, words, with_line in entries:
+    for name, words, basis, with_line in entries:
         colour, shape, dash = styles[name]
         key = 34 if with_line else 14
         room = WIDTH - 2 * MARGIN - key - 6
-        width = key + 6 + min(text_width(_clean(words)), room) + 22
+        width = key + 6 + min(text_width(_clean(words + basis)), room) + 22
         if x > MARGIN and x + width > WIDTH - MARGIN:
             x, y = float(MARGIN), y + 20
         if with_line:
@@ -213,7 +277,7 @@ def _legend(entries: Sequence[tuple[str, str, bool]], y: float,
                 line["stroke_dasharray"] = dash
             out.append(_el("line", **line))
         out.append(_marker(shape, x + key / 2, y - 4, colour))
-        out.append(_text(x + key + 6, y, words, fill=INK, limit=room, data_legend=name))
+        out.append(_text(x + key + 6, y, words, fill=INK, limit=room, keep=basis, data_legend=name))
         x += width
     return out, y + 12
 
@@ -244,7 +308,7 @@ def _head(title: str, subtitle: str) -> tuple[list[str], float]:
 def _footnotes(notes: Sequence[str], y: float) -> tuple[list[str], float]:
     out = []
     for note in notes:
-        for i, line in enumerate(textwrap.wrap(str(note), NOTE_WRAP) or [""]):
+        for i, line in enumerate(_wrap(_clean(note), 11, WIDTH - 2 * MARGIN)):
             out.append(_text(MARGIN, y, line, size=11, **({"data_note": "start"} if i == 0 else {})))
             y += 15
         y += 3
@@ -303,6 +367,12 @@ def _series_of(results: Mapping[str, Any]) -> dict[str, Any]:
     return {name: s for name, s in series.items() if isinstance(s, dict) and s.get("points")}
 
 
+def _series_label(name: str, series: Mapping[str, Any]) -> tuple[str, str]:
+    """A series' label and, after it, its basis in words: ``("Contexto", " (measured)")``."""
+    basis = series.get("basis")
+    return str(series.get("label") or LABELS.get(name, name)), f" ({BASIS_WORDS.get(basis, basis)})"
+
+
 def request_size_svg(results: Mapping[str, Any]) -> str:
     """The request-size chart of a results file (live or replay), as SVG text."""
     series = _series_of(results)
@@ -313,8 +383,7 @@ def request_size_svg(results: Mapping[str, Any]) -> str:
     x_top, x_step = axis_top(max(p[0] for s in series.values() for p in s["points"]))
     y_top, y_step = axis_top(max(bound, max(p[1] for s in series.values() for p in s["points"])))
     body, y = _head(title, _subtitle(results, seed=True))
-    entries = [(name, f"{s.get('label') or LABELS.get(name, name)} ({BASIS_WORDS.get(s.get('basis'), s.get('basis'))})",
-                True) for name, s in series.items()]
+    entries = [(name, *_series_label(name, s), True) for name, s in series.items()]
     legend, y = _legend(entries, y, styles)
     body += legend
     top = y + 14
@@ -344,7 +413,7 @@ def request_size_svg(results: Mapping[str, Any]) -> str:
     for name, s in series.items():
         colour, shape, dash = styles[name]
         points = s["points"]
-        words = f"{s.get('label') or LABELS.get(name, name)} ({BASIS_WORDS.get(s.get('basis'), s.get('basis'))})"
+        words = "".join(_series_label(name, s))
         line = {"points": " ".join(f"{_n(px(h))},{_n(py(size))}" for h, size in points), "fill": "none",
                 "stroke": colour, "stroke_width": 2, "stroke_linejoin": "round", "stroke_linecap": "round",
                 "data_series": name}
@@ -360,10 +429,13 @@ def request_size_svg(results: Mapping[str, Any]) -> str:
     body.append(_el("text", f"bound: {bound:,} tokens", x=_n(LINE_LEFT + 8), y=_n(py(bound) - 7), font_size=12,
                     fill=INK, stroke=SURFACE, stroke_width=4, paint_order="stroke", stroke_linejoin="round",
                     data_bound_label=bound))
-    notes, y = _footnotes(list(results.get("notes") or []), bottom + 66)
+    empty = [f"The {_series_label(name, s)[0]} series{_series_label(name, s)[1]} has no points, so it is not drawn."
+             for name, s in (results.get("request_series") or {}).items()
+             if isinstance(s, dict) and name not in series]
+    notes, y = _footnotes([*(results.get("notes") or []), *empty], bottom + 66)
     body += notes
     description = (f"{title}. The bound is {bound:,} tokens. Series: "
-                   + "; ".join(words for _, words, _ in entries) + ".")
+                   + "; ".join(words + basis for _, words, basis, _ in entries) + ".")
     return _document(y + 4, title, description, body)
 
 
@@ -406,7 +478,7 @@ def accuracy_svg(results: Mapping[str, Any]) -> str:
     title = _labelled("Accuracy by arm, with Wilson 95% intervals", results)
     styles = _styles(results)
     body, y = _head(title, _subtitle(results, seed=False))
-    legend, y = _legend([(name, LABELS.get(name, name), False) for name in arms], y, styles)
+    legend, y = _legend([(name, LABELS.get(name, name), "", False) for name in arms], y, styles)
     body += legend
     top = y + 10
     row_height = len(arms) * ACC_SLOT + ACC_ROW_PAD

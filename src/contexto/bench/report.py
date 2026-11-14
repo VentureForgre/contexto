@@ -749,6 +749,12 @@ def build(out_dirs: Iterable[Path | str] | Path | str, prices: Mapping[str, Any]
         notes.append(f"{_plural(left_out, 'main request')} of seed {first.first_seed}, repeat 0 "
                      f"{'is' if left_out == 1 else 'are'} not drawn, because {'its' if left_out == 1 else 'their'} "
                      "usage could not be read.")
+    undrawn = [arm for arm in first.arms if arm not in blocks[first.model]["request_series"]]
+    if undrawn:
+        notes.append(f"No line is drawn for {_and([_inline(arm) for arm in undrawn])}: "
+                     f"{'its session' if len(undrawn) == 1 else 'their sessions'} of seed {first.first_seed}, "
+                     f"repeat 0 {'has' if len(undrawn) == 1 else 'have'} no main request with a history length whose "
+                     "usage was read.")
     notes.append(f"History length is estimated from the script, not counted by a tokenizer: {BYTES_PER_TOKEN_LOG} "
                  f"bytes per token for log turns plus {REPLY_TOKENS} tokens per reply, and {BYTES_PER_TOKEN_TEXT} "
                  "bytes per token for probe turns.")
@@ -1430,8 +1436,9 @@ def write(out_dir: Path | str, sources: Iterable[Path | str] | None = None,
     chart is drawn in memory first, so a directory that cannot be reported on is an error before
     anything is touched (``RecordError``, ``ReportError``, ``PriceError``). Then ``_place`` moves
     the finished files into place, ``results.json`` last; what it cannot write is an ``OSError``,
-    and every file there before is as it was, even when a move failed partway. ``results["charts"]`` lists the charts written and
-    ``results["charts_skipped"]`` those the results cannot give, each with the reason.
+    and every file there before is as it was, even when a move failed partway.
+    ``results["charts"]`` lists the charts written and ``results["charts_skipped"]`` those the
+    results cannot give, each with the reason.
     """
     out_dir = Path(out_dir)
     results = build([out_dir] if sources is None else list(sources), prices)

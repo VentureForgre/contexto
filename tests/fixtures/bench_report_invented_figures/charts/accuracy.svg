@@ -80,8 +80,8 @@
 <g data-arm="contexto" data-row="toolloop"><title>Contexto, toolloop: 94.4% (34 of 36), 95% interval 81.9% to 98.5%</title><line x1="541.5" y1="625.0" x2="719.5" y2="625.0" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/><circle cx="676.4" cy="625.0" r="4.0" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"/></g>
 <g data-arm="full" data-row="toolloop"><title>Full context, toolloop: 97.2% (35 of 36), 95% interval 85.8% to 99.5%</title><line x1="584.1" y1="641.0" x2="730.7" y2="641.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/><rect x="702.5" y="637.3" width="7.4" height="7.4" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"/></g>
 <g data-arm="plain" data-row="toolloop"><title>Plain Claude Code, toolloop: 80.6% (29 of 36), 95% interval 65.0% to 90.2%</title><line x1="360.5" y1="657.0" x2="631.4" y2="657.0" stroke="#0a6b47" stroke-width="2" stroke-linecap="round"/><polygon points="527.6,652.4 532.0,660.6 523.2,660.6" fill="#0a6b47" stroke="#fcfcfb" stroke-width="1.5"/></g>
-<text x="24.0" y="738.0" font-size="11" fill="#52514e" text-anchor="start" data-note="start">Each point is the share of probes answered correctly and the line through it is the Wilson 95% interval; n is the</text>
-<text x="24.0" y="753.0" font-size="11" fill="#52514e" text-anchor="start">number of probes (one figure per arm when the arms differ). Scoring is exact match on synthetic sessions.</text>
+<text x="24.0" y="738.0" font-size="11" fill="#52514e" text-anchor="start" data-note="start">Each point is the share of probes answered correctly and the line through it is the Wilson 95% interval; n is the number</text>
+<text x="24.0" y="753.0" font-size="11" fill="#52514e" text-anchor="start">of probes (one figure per arm when the arms differ). Scoring is exact match on synthetic sessions.</text>
 <text x="24.0" y="771.0" font-size="11" fill="#52514e" text-anchor="start" data-note="start">The figures use repeat 0 of each seed. Intervals that overlap do not by themselves show that two arms are equal; the</text>
 <text x="24.0" y="786.0" font-size="11" fill="#52514e" text-anchor="start">paired comparison is in results.md.</text>
 </svg>

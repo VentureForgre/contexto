@@ -870,6 +870,17 @@ def test_a_session_may_record_its_own_cache_lifetime(tmp_path):
             "full context.") in report.render(results)
 
 
+def test_an_arm_with_no_line_on_the_request_size_chart_is_named_in_a_note(tmp_path):
+    out = make_run(tmp_path / "run", repeats=1, seeds=(11, 12), not_run=[("plain", 11)])
+    results = report.write(out)
+    assert sorted(results["request_series"]) == ["contexto", "full"]
+    note = ("No line is drawn for plain Claude Code: its session of seed 11, repeat 0 has no main request with a "
+            "history length whose usage was read.")
+    assert note in results["notes"]
+    assert "No line is drawn for plain Claude Code" in (out / "charts" / "request-size.svg").read_text(encoding="utf-8")
+    assert not any("No line is drawn" in n for n in report.build([make_run(tmp_path / "all", repeats=1)])["notes"])
+
+
 def test_a_cache_lifetime_other_than_5m_or_1h_is_refused_naming_the_manifest_and_the_field(tmp_path):
     out = make_run(tmp_path / "run", repeats=1, seeds=(11,), cache_ttl="2h")
     with pytest.raises(records.RecordError, match=r"manifest.json: field 'cache_ttl': expected one of '5m', '1h'"):

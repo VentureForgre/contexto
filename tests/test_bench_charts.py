@@ -600,7 +600,8 @@ def test_long_text_is_wrapped_or_shortened_and_never_leaves_the_canvas_or_enters
         assert "no model was run" in head and long_model[:40] in head.replace(" ", "")
     root = parse(charts.request_size_svg(results))
     legend = next(e for e in root.iter(f"{SVG}text") if e.get("data-legend") == "contexto")
-    assert shown(legend).endswith("...") and legend.find(f"{SVG}title").text == f"{long_label.strip()} (measured)"
+    assert shown(legend).endswith("... (measured)")
+    assert legend.find(f"{SVG}title").text == f"{long_label.strip()} (measured)"
     root = parse(charts.accuracy_svg(results))
     row = next(e for e in root.iter(f"{SVG}text") if e.get("data-row") == long_class)
     assert shown(row).endswith("...") and row.find(f"{SVG}title").text == long_class
@@ -618,6 +619,49 @@ def test_text_width_counts_wide_characters_twice():
     assert charts.text_width("abcd", 12) == pytest.approx(4 * charts.CHAR_WIDTH)
     assert charts.text_width("abcd", 16) > charts.text_width("abcd", 12)
     assert charts.text_width("\u6f22\u5b57", 12) == pytest.approx(charts.text_width("abcd", 12))
+
+
+@pytest.mark.parametrize("ch, units", [
+    ("\u6f22", 2), ("\uac00", 2), ("\uff21", 2), ("\u3042", 2), ("\U0001f600", 2),
+    # Assigned in Unicode 16 (Python 3.14 and later), unassigned before: wide by the module's own
+    # table on every Python version, so the same text gives the same chart.
+    ("\U0001fae9", 2), ("\U0001fadc", 2),
+    ("a", 1), ("\u00e9", 1), ("\u0416", 1), ("\u2028", 1),
+])
+def test_text_width_does_not_depend_on_the_pythons_unicode_tables(ch, units):
+    assert charts.text_width(ch, 12) == pytest.approx(units * charts.CHAR_WIDTH)
+
+
+def test_a_legend_entry_too_long_for_the_chart_keeps_its_basis_whole():
+    results = line_results(kind="replay")
+    long_label = "Contexto with a very long label that the replay writer chose " * 3
+    results["request_series"]["contexto"].update(basis="estimated", label=long_label.strip())
+    results["request_series"]["full"].update(basis="modelled", label=long_label.strip() + " x")
+    root = parse(charts.request_size_svg(results))
+    for name, basis in (("contexto", "estimated"), ("full", "modelled")):
+        legend = next(e for e in root.iter(f"{SVG}text") if e.get("data-legend") == name)
+        assert shown(legend).endswith(f"... ({basis})"), shown(legend)
+        assert right_edge(legend) <= charts.WIDTH - charts.MARGIN + 0.5
+        assert legend.find(f"{SVG}title").text.endswith(f" ({basis})")
+
+
+def test_a_note_in_wide_characters_is_wrapped_inside_the_chart():
+    note = "\u9577\u3044\u6ce8\u8a18" * 60
+    root = parse(charts.request_size_svg(line_results(notes=[note, "Short."])))
+    lines = [e for e in root.iter(f"{SVG}text") if e.get("font-size") == "11" and e.get("data-tick") is None
+             and e.get("data-bound-label") is None]
+    parts = [shown(e) for e in lines if shown(e) and shown(e) in note]
+    assert "".join(parts) == note and len(parts) > 1  # whole, on more than one line
+    for element in lines:
+        assert right_edge(element) <= charts.WIDTH - charts.MARGIN + 0.5, shown(element)
+
+
+def test_a_series_with_no_points_is_named_in_a_note_not_dropped_silently():
+    results = line_results(kind="replay")
+    results["request_series"]["plain"] = {"basis": "modelled", "label": "Plain Claude Code", "points": []}
+    root = parse(charts.request_size_svg(results))
+    assert [e.get("data-series") for e in root.iter(f"{SVG}polyline")] == ["contexto", "full"]
+    assert "The Plain Claude Code series (modelled) has no points, so it is not drawn." in all_text(root)
 
 
 # Telling the series apart
