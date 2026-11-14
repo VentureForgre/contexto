@@ -82,7 +82,13 @@ def check_metadata(metadata: bytes, pkg_info: bytes) -> str:
     check(not [c for c in classifiers if c.startswith("License ::")],
           "a License classifier is combined with the SPDX license expression")
     deprecated = sorted(c for c in classifiers if c in deprecated_classifiers)
-    check(not deprecated, f"deprecated classifiers, which PyPI refuses: {deprecated}")
+    replacements = "; ".join(
+        f"{c!r}: use {' or '.join(repr(r) for r in deprecated_classifiers[c])}" if deprecated_classifiers[c]
+        else f"{c!r}: no replacement, remove it"
+        for c in deprecated
+    )
+    check(not deprecated, f"deprecated classifiers, which PyPI refuses. Use the replacement listed, if any: "
+                          f"{replacements}")
     unknown = sorted(c for c in classifiers if c not in known_classifiers)
     check(not unknown, f"classifiers that are not in the pinned trove-classifiers: {unknown}. PyPI refuses a "
                        "classifier it does not list. If https://pypi.org/classifiers/ lists it, move the "
