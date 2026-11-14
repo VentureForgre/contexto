@@ -837,8 +837,8 @@ real sessions, and not queries a model would write.
   file cache, then a new child per side. Each child's first search, its first strict miss (its
   first `miss_*` call, `streamChunkedV3`) and its first call of each `miss_*` kind (`first
   miss_typo` is rep 0 of `stagng DB port`) are one-time costs, which the medians of 5 calls hide.
-  A fallback that pays 3 seconds once per process shows in the row of the first kind that runs the
-  costly stage: a cost on the typo step lands in `first miss_typo`, and the first strict miss and
+  A fallback that pays 3 seconds once per process shows in the row of the first kind whose first
+  query runs the costly stage: a cost on the typo step lands in `first miss_typo`, and the first strict miss and
   the steady `miss_typo` row stay near 1. A test checks this case. The rows are compared within a
   pass, where both sides ran under the same load. The side that goes first alternates by pass, so
   an odd pass and the next even pass are combined by geometric mean, which cancels the position.
@@ -1002,13 +1002,14 @@ ranged from 0.98 to 1.09, the first-strict-miss ratio from 0.98 to 1.01, and the
   percent faster. The paired ratio cancels it either way.
 - No first call shows a one-time cost on `main`. The paired ratios are 0.97 to 1.04, and each first
   call is at most 1 percent slower than the steady median of its kind. A fallback that builds
-  something on its first use shows in the first-call row of the first kind that reaches that code:
+  something on its first use shows in the first-call row of the first kind whose first query reaches that code:
   a typo step built on first use lands in `first miss_typo`. A cost paid on a later call of a kind
   shows in no row of the summary, only in `latency.csv`.
 - Two ratios fall outside their own range by pass: strict miss `none` (1.02, by pass 0.91 to 1.00)
   and `paraphrase` (1.08, by pass 0.94 to 1.02). Each median is over 12 values, 3 queries in 4
-  passes, and its middle two come from different queries. In pass 4 the paraphrase queries were
-  also slower on both sides (up to 1.05 s, against 0.34 to 0.58 s in the other passes). The by-pass
+  passes. For `paraphrase` its middle two come from different queries; for `none` on the baseline
+  side both are `GraphQL resolver dataloader`, in passes 2 and 3. In pass 4 the paraphrase queries were
+  also slower on both sides (medians up to 1.05 s, against 0.34 to 0.58 s in the other passes). The by-pass
   range is the better guide here.
 - Noise. In the steady-state rows the same code against itself gives 0.98 to 1.08, and 0.91 to 1.04
   for one kind in one pass. At a load like this one, read a change in those rows only when its
@@ -1019,6 +1020,31 @@ ranged from 0.98 to 1.09, the first-strict-miss ratio from 0.98 to 1.01, and the
   rows, the three fixed costly shapes among them, and the first call of each `miss_*` kind are
   where its cost shows. The three strict-hit rows and the first search should not move.
 - Peak RSS of the MCP child: 139 MB (this branch) and 141 MB (`main`).
+
+### After: D65 (`results/d65/after`)
+
+Run on 2026-11-13 at `045cd599`, a local merge of PR #267 at `5280096` with this bench (PR #266).
+Its `src/` is that of `5280096`; the baseline child ran `main` at `ef15af03`. Later commits on #267
+changed `src/` only in `contexto search --json` and in how `hit_view` builds its line, which gives
+the same bytes. The quality part, run again at `06da10f1`, gave the same 192 rows. Full tables are
+in `results/d65/after/summary.md`.
+
+Recall at 3, all probes of each class, before → after: exact 15 → 15 of 15; identifier 0 → 20 of
+23; paraphrase 0 → 34 of 42; question 0 → 26 of 30; typo 0 → 22 of 30; extra word 0 → 24 of 26;
+two-page 0 → 8 of 10 (either page: 10 of 10). Recall at 10 differs only for identifier (21) and
+two-page (9). False hits on the 16 `none` probes: 0 before, 0 after.
+
+Latency, through the MCP child, medians over 4 passes at load averages of 4.7 to 13:
+
+- **Strict hits:** rare 0.280 s against 0.280, common 0.258 against 0.254, multi 0.416 against
+  0.413. The tree / baseline ratio is 1.00 to 1.01, inside the noise band above.
+- **First search of a process:** 1.865 s against 1.851 (paired 0.99).
+- **Strict misses** (the fallback's work): 0.625 to 1.426 s against 0.259 to 0.585 s for the empty
+  answer before, 2.13 to 3.47 times. The costliest kinds are paraphrase (3.47), typo (3.18) and
+  question (2.91).
+- **First call of each `miss_*` kind:** 2.21 to 3.83 times. The ratios are steady across the four
+  passes (pairs within 0.12 of each other), and each is within 0.36 of its kind's steady ratio,
+  so the fallback pays no large cost on first use.
 
 ## Files
 

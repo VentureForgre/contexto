@@ -578,7 +578,7 @@ def first_calls(rows: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
     ``first search``, ``first strict miss`` (each side's first ``miss_*`` call in a pass) and
     ``first miss_<kind>`` for each ``miss_*`` kind (each side's first call of that kind in a pass, in the
     order the kinds were timed), the query, and ``{pass: {side: seconds}}``. A cost a child pays once,
-    on whichever stage of a miss it falls, lands in the row of the first kind that runs that stage."""
+    on whichever stage of a miss it falls, lands in the row of the first kind whose first query runs that stage."""
     out: dict[str, dict[str, Any]] = {call: {"query": "", "passes": {}} for call in FIRST_CALLS}
     seen: set[tuple[str, str, str]] = set()
     for r in rows:
@@ -697,7 +697,7 @@ def first_call_tables(rows: list[dict[str, str]], n: str, sides: list[str], both
     lines = [f"## First calls of a process at {int(n):,} pages", "",
              "Each pass starts a new child per side, so its first search, its first strict miss and its first call "
              "of each `miss_*` kind are one-time costs, which the medians above hide. A cost a child pays once, on "
-             "any stage of a miss, shows in the row of the first kind that runs that stage. The first strict miss "
+             "any stage of a miss, shows in the row of the first kind whose first query runs that stage. The first strict miss "
              "is also the first call of the first `miss_*` kind timed. The two sides are compared within a pass, "
              "under the same load. The side that goes first alternates by pass, so each odd pass is paired with the "
              "next even pass by geometric mean, which cancels the position. Paired: the geometric mean of those "

@@ -132,7 +132,7 @@ Peak RSS of the MCP child, MB: tree 139, baseline 141.
 
 ## First calls of a process at 6,000 pages
 
-Each pass starts a new child per side, so its first search, its first strict miss and its first call of each `miss_*` kind are one-time costs, which the medians above hide. A cost a child pays once, on any stage of a miss, shows in the row of the first kind that runs that stage. The first strict miss is also the first call of the first `miss_*` kind timed. The two sides are compared within a pass, under the same load. The side that goes first alternates by pass, so each odd pass is paired with the next even pass by geometric mean, which cancels the position. Paired: the geometric mean of those pairs. These rows rest on one call per side and pass, and are noisier than the rows above.
+Each pass starts a new child per side, so its first search, its first strict miss and its first call of each `miss_*` kind are one-time costs, which the medians above hide. A cost a child pays once, on any stage of a miss, shows in the row of the first kind whose first query runs that stage. The first strict miss is also the first call of the first `miss_*` kind timed. The two sides are compared within a pass, under the same load. The side that goes first alternates by pass, so each odd pass is paired with the next even pass by geometric mean, which cancels the position. Paired: the geometric mean of those pairs. These rows rest on one call per side and pass, and are noisier than the rows above.
 
 | call | query | tree, s | baseline, s | tree / baseline, paired | each pair |
 |---|---|---:|---:|---:|---|

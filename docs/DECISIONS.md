@@ -2705,6 +2705,86 @@ the owner's delegation. Open decisions are listed at the end with the options an
   outside the repository. Old commits, pull request diffs and pull request comments still hold the
   hostname (D42).
 
+- **D65. When no page holds every word, search returns approximate matches and says so.** Claude,
+  2026-11-14, under D0. Before, `contexto_search` and `contexto search` returned nothing unless one
+  paged-out turn held every word of the query (D34). An audit on 2026-11-12 found 10 of 19 probe
+  queries missed on a small store: a paraphrase, a question, `refresh_token` for a page that says
+  `refreshToken`, a typo, one extra word, and two facts on two pages. Now, when strict search has no
+  hit, a fallback runs in four steps that a query can combine
+  ([docs/search.md](search.md)):
+  1. Stop words (89) and punctuation at the ends of a word are dropped.
+  2. A word written as an identifier (`_`, `-` or `.` inside, or camelCase) is compared with its
+     separators removed, so `refresh_token`, `refreshToken`, `refresh-token` and `refresh.token`
+     find each other. This does not apply to a number, a version or a date, so `1.2` never finds
+     `12`.
+  3. Pages are ranked by the inverse-document-frequency weight of the query words they hold. A page
+     is returned at 30 percent of the query's weight, or whatever its share when it holds a specific
+     word (an identifier, a number, a path) that at most half the pages hold. The best page lacking
+     a word can be followed by a second-fact page that holds the missing words.
+  4. When no page holds a word of 6 to 40 letters as typed, one changed, added, dropped or swapped
+     letter is tolerated, at half weight and within a fixed amount of work per query.
+
+  At most six words are searched (the specific ones first) and at most 50 pages are listed. Every
+  reply says the matches are approximate, names the words searched when some were dropped, and under
+  each page names the words it matched (and how: as written, in another identifier style, or through
+  a typo) and the ones it did not. `contexto search --json` (D64) carries the same: `approximate`,
+  `searched`, and each hit's `matched` and `missing`. The server `INSTRUCTIONS` and the tool
+  description now describe this. The standing-rule pinning wording D51 measured is unchanged. D41's
+  open ranking text cap is not touched.
+
+  The fallback runs only when strict search finds nothing, not when it finds "too few". A query that
+  some page holds every word of gets the same pages in the same order as before.
+  `tests/test_search_golden.py` holds this against ids and replies recorded at `b0e2dbc`, before
+  any fallback; the acceptance runs depend on it. The cost is a stated limit. For
+  8 of the 192 probes, strict search returns pages without the expected one, so the fallback never
+  runs. Six of them are paraphrases of common words, such as `staging database port` against a page
+  that says "staging DB port".
+
+  It stays inside D34: no embeddings, no stemming, no model call, no new dependency, and the same
+  store and query always give the same result. The one-letter typo step is the narrowest fuzzy match
+  the brief asked for. It applies only to a word no page holds as typed, so it never changes a strict
+  result.
+
+  Measured at zero spend on the 6,000-page synthetic store (`spikes/m2/scale/store/fallback_bench.py`,
+  192 probes in `fallback_probes.py`, results under `spikes/m2/scale/store/results/d65/`), before →
+  after, recall at 3 (at 10 where it differs):
+
+  | class | probes | before | after |
+  |---|---:|---:|---:|
+  | exact | 15 | 15 | 15 |
+  | identifier | 23 | 0 | 20 (at 10: 21) |
+  | paraphrase | 42 | 0 | 34 |
+  | question | 30 | 0 | 26 |
+  | typo | 30 | 0 | 22 |
+  | extra word | 26 | 0 | 24 |
+  | two-page, both pages | 10 | 0 | 8 (at 10: 9) |
+
+  For the two-page class, either page is in the top 3 for 10 of 10. False hits on the 16 queries that
+  should find nothing: 0 before, 0 after. The probes are split into a half the rules were tuned on and a
+  held-out half. The held-out half scores lower on paraphrases (15 of 21 against 19 of 21) and on
+  two-page queries (3 of 5 against 5 of 5), higher on identifiers (12 of 12 against 8 of 11), and
+  the same on the rest; the results summary gives both.
+
+  Latency, through an MCP child over stdio, medians of 4 passes at load averages of 4.7 to 13, after
+  vs before:
+  - **Queries with a strict hit:** unchanged at 0.26 to 0.42 s (ratio 1.00 to 1.01).
+  - **First search of a process:** 1.87 vs 1.85 s.
+  - **Queries strict search misses:** 0.63 to 1.43 s, against 0.26 to 0.59 s for the empty answer
+    they got before (2.1 to 3.5 times).
+
+  A miss costs more because it now does work, and that cost lands only on queries that used to
+  return nothing. The audit's figure of 0.13 to 0.25 s was measured on an idle machine; these runs
+  shared the machine with other test suites.
+
+  Options considered:
+  - **Falling back on "too few" hits:** rejected, because it changes strict results that the
+    acceptance runs depend on.
+  - **Returning every page that holds any word:** rejected, because of false hits on queries that
+    should find nothing.
+  - **An edit distance over every word:** rejected, because of cost at 6,000 pages and false matches
+    between short words.
+  - **Stemming:** rejected by D34.
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.
