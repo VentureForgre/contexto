@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -41,8 +41,13 @@ class State:
     stale: frozenset[str]  # ids with a file source whose hash differs or file missing
 
 
-def derive(records: Sequence[Record], root: Path | None = None) -> State:
-    """Derived state of ``records``; staleness is checked only when a project ``root`` is given."""
+def derive(records: Sequence[Record], root: Path | None = None, *, unordered: Collection[tuple[str, str]] = (),
+           ignored: Collection[tuple[str, str]] = ()) -> State:
+    """Derived state of ``records``; staleness is checked only when a project ``root`` is given.
+    ``unordered`` holds (record id, superseded id) pairs that count whatever their order in ``records``
+    (D69: a record that supersedes one of another session's, whose clock may be behind); ``ignored``
+    holds (record id, superseded or closed id) pairs that do not count (D69: a removal of another
+    session's record not made in the main conversation)."""
     records = tuple(records)
     position = {r.id: i for i, r in enumerate(records)}
 
@@ -50,14 +55,15 @@ def derive(records: Sequence[Record], root: Path | None = None) -> State:
     for i, r in enumerate(records):
         for target in r.supersedes:
             # Only a later record can supersede; ids that are unknown or later are ignored.
-            if position.get(target, i) < i:
+            j = position.get(target, i)
+            if (j < i or (j != i and (r.id, target) in unordered)) and (r.id, target) not in ignored:
                 superseding.setdefault(target, []).append(r.id)
     superseded_by = MappingProxyType({k: tuple(v) for k, v in superseding.items()})
 
     active = tuple(r for r in records if r.id not in superseded_by)
 
     # A superseded closure no longer closes anything, so its obligation reopens if still active.
-    closed = {r.target for r in active if r.kind == "closure"}
+    closed = {r.target for r in active if r.kind == "closure" and (r.id, r.target) not in ignored}
     open_obligations = tuple(r for r in active if r.kind == "obligation" and r.id not in closed)
 
     by_topic: dict[str, list[str]] = {}

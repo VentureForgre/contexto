@@ -2704,6 +2704,167 @@ the owner's delegation. Open decisions are listed at the end with the options an
   so the next release follows v0.5.24. A backup of each release's notes, assets and tags is kept
   outside the repository. Old commits, pull request diffs and pull request comments still hold the
   hostname (D42).
+- **D69. Project memory: a new session starts with what the project's earlier sessions left open.**
+  Claude, 2026-11-13, under D0, on the owner's brief after the 2026-11-12 audit; contract change (new
+  rule 19; rules 1 and 16 amended). The audit found that nothing crossed sessions: each launch without
+  `--resume` got a new store, and search read one session. A new session now starts with the open
+  obligations and active decisions the model pinned in earlier sessions of the same project. Zero
+  spend: synthetic sessions through the real engine and real stores, stub CLIs, no model calls. User
+  guide: `docs/project-memory.md`.
+  - **Project identity.** A session's project is the nearest directory, from its resolved working
+    directory up, that holds a `.git` entry (a directory or a file), else the resolved working
+    directory itself (`contexto.store.project.project_root`). `set_workdir` records it in `meta.json`
+    as `project`. Subdirectories of a repository are one project, since they are one checkout. A
+    linked worktree or a submodule, whose `.git` is a file, is its own project, because it is another
+    checkout on another task, and its rules need not hold in the main checkout. Roots are compared as
+    path strings, so a symlinked path and its target are one project, and nothing passes between two
+    roots, two that share a path prefix included. No `git` process is run, since a repository's
+    configuration can run code (D52). A `.git` at the home directory or the filesystem root is
+    ignored: dotfiles kept in a repository would otherwise make every directory one project.
+  - **Which sessions a session sees.** The sessions of the same root, with project memory on,
+    created before it: the modification time of `page.key`, as `sessions list` shows it, ties by id.
+    A new session now stamps `page.key` from the clock its records use, because the kernel's file
+    clock can lag it by milliseconds on Linux and a pin made just before the session would look newer.
+    So of two sessions running at once, the later carries what the earlier had pinned when the later
+    started and nothing passes the other way, so they never feed each other. There is no index file: a pruned session is gone at the next listing.
+  - **What is carried.** The project state is derived over the records of the earlier sessions and the
+    session's own, in `created_at` order with each session's line order kept, so a closure or a
+    superseding record in any session closes or replaces a record of another. Carried: its open
+    obligations, then its active decisions, newest first in each, that were pinned in the main
+    conversation (below), created no later than the session, and not forgotten. Verified facts are
+    not carried, because their file sources are relative to another session's working directory and
+    their staleness cannot be checked from this one. Closed, superseded and forgotten records are not
+    carried. Additions are frozen at the session's start, so the set the model saw at the first
+    request does not grow mid-session; removals (a closure, a replacement, `forget`, a prune) apply
+    whenever they happen. A record id found in two sessions (a copied directory) counts once.
+  - **How it reaches the model (rule 19).** The store renders the carried records as a section after
+    the session's own groups, under its own heading, inside the one pin budget (6,000 tokens): the
+    session's own records first, then the carried ones, then the omitted line, which counts both.
+    Before rule 19 a session's requests held nothing pinned until the first rotation, because there is
+    no preamble at `k = 0`. Now, when the engine creates the main conversation's state at a request
+    the dialect judges a session start (Claude Code: a request with a tool list; Codex: every
+    request), it reads `store.carried_text(pin_budget)` once and puts it ahead of the first turn-start
+    message's content, as user-role text, on every request while `k = 0`. The prefix stays
+    byte-identical until the first rotation, and from then on the preamble's pinned text holds the
+    section. A conversation that becomes main later, and an epoch resumed from a record without the
+    text, get the records at their first rotation, since adding them mid-epoch would change the
+    cached prefix. The main conversation after `/clear` is new and reads its own. With nothing
+    carried, every request, event and epoch record is byte for byte what v0.5.24 produced (tested
+    against recorded hashes, both dialects).
+  - **Trust.** A carried record is model-written text replayed into a new session, and pages hold
+    untrusted tool output and web content, so a pin that injected text caused would now persist. The
+    defence, as built:
+    1. The records are presented as records from an earlier session, under a heading
+       (`CARRIED_HEADING` in `store/pinned.py`) that says the model pinned them then, that they are
+       not instructions from the system or from the user of this session, to follow one only while
+       it fits what the user asks now, and to tell the user if one looks wrong; it names
+       `contexto_close` and `contexto_pin` with `supersedes`. The text is never part of `system`.
+    2. Only ledger records are carried, never page text.
+    3. Only pins made in the main conversation. `contexto_pin` records the author `model:main`
+       exactly when, at the pin, the main conversation's room is published and no side room (D40) is
+       live, and `model` otherwise; only `model:main` records are carried. The MCP server cannot tell
+       which conversation called it, so a pin made while a subagent or side request can call a tool is
+       left unmarked, the main conversation's included: that loses a carry and never gains one. The
+       mark is written whether project memory is on or off. Closures keep `model`.
+    4. Each record is one line in every text the model gets (body, topic and owner flattened, a
+       session label character that does not print shown as `?`), so it cannot start a line that
+       poses as a heading or another record. Its topic and owner are cut at 80 characters there, and
+       in the budgeted text (the start text and the preamble) its body at 500.
+    5. The user sees them: the start line, `contexto state` (under a heading written for a person)
+       and `contexto project show`, which prints a character that does not print as its escape.
+    6. The user removes them: `contexto project forget`, `contexto sessions prune`, or the model's
+       `contexto_close` (or `contexto_pin` with `supersedes`).
+
+    Residue: text injected into the main conversation that persuades the model to pin something is
+    carried like any other main pin; there the heading is the only defence, and its effect on a live
+    model is unmeasured. A main pin made while a subagent's room is live is not carried. Records
+    written by releases before this one (author `model`) are never carried.
+  - **Control.** `contexto run --no-project-memory` (before the CLI's name, both CLIs), or
+    `CONTEXTO_PROJECT_MEMORY` set to `0`, `false`, `off` or `no` (any case, surrounding space
+    ignored), turns it off for the launch. `1`, `true`, `on`, `yes`, empty or unset leaves it on; any
+    other value leaves it on and prints one line naming the accepted values, so a typing error never
+    turns it off unasked. Off means the session carries nothing and gives nothing to later sessions;
+    its own pins work as before. The launcher records `project_memory: false` in `meta.json` before
+    the proxy starts and before the CLI can start the MCP server, since both read it from the store.
+    If that write fails the launch stops with exit 1 and removes the new session: a session running
+    with memory on against the user's request is worse than no session. A resumed session that
+    recorded `false` stays off without the option, and the printed resume command repeats it. A launch
+    with memory on records nothing, so no launch turns a session back on. Placed after `codex`, the
+    option goes to Codex unchanged, as `--bound` does; after `claude` it is refused with the command to
+    run (exit 2).
+  - **Start line and log.** After the session line and before the CLI starts, the launcher prints one
+    line on stderr when the project has an earlier session:
+    `contexto: project memory: N records carried from S of E earlier sessions in ROOT (list: contexto project show; off: --no-project-memory)`,
+    with `0 records carried; E earlier sessions can be searched in ROOT` when nothing is carried and
+    `; K sessions skipped as damaged or unreadable` when some were. A root that does not print is
+    shown with `repr()`. The session log gets one content-free `project_memory` event (`on`,
+    `earlier`, `carried`, `carried_sessions`, `skipped`, `unreadable`, or `error` with a class name),
+    never the path. The engine logs `start_text` (estimated tokens) once, or
+    `start_text_unavailable` (error class) when the store fails; the request is then sent with nothing
+    carried and the engine does not enter degraded mode.
+  - **`contexto project show|forget`.** `show [--dir PATH] [--json]` lists the project's sessions
+    newest first and the records a session started now would carry, and changes nothing. `forget
+    [--dir PATH] (--record ID ... | --session ID ... | --all) [--yes]` adds record ids to their
+    origin session's `forgotten` list (`--record`, only records carried now) or sets
+    `project_memory: false` (`--session`, `--all`). Nothing is deleted; the output ends with the
+    `contexto sessions prune --session ID --yes` command for each session touched. It asks on stderr
+    unless `--yes`, and with no terminal it refuses. A running session that is forgotten keeps
+    running, stops contributing, and stops carrying (its requests from its next rotation). No command
+    undoes a forget. A `--dir` that does not exist is an error, so the sessions of a deleted directory
+    are reached through `contexto sessions prune`. Exit codes: 0, 1 when anything asked for was not
+    done (or the answer was not yes), 2 for usage, 130 for Ctrl+C at the question.
+  - **Concurrency and damage.** Earlier sessions are read with no lock, and nothing is created or
+    logged in them. `meta.json` and `ledger.jsonl` are opened as regular files only, never through a
+    symlink and never waiting on a FIFO, and a ledger line a live writer has half written is dropped
+    like a crash-truncated tail. An earlier ledger that does not verify above its tail (a line that is
+    not a record, a changed record, a broken chain) is skipped whole and counted, and the reading
+    session logs `project_session_skipped` with the error class once per process; a session whose
+    `meta.json` cannot be read as an object is left out and counted as unreadable. Neither stops the
+    reading session. A session pruned mid-read reads as absent. A close checks, under the ledger lock,
+    a project view made then, so a closure another session wrote just before is honoured. Forgetting
+    is the one write to another session: `contexto project forget` writes that session's `meta.json`
+    atomically under its `live.lock` (shared, so a prune cannot remove the session under it) and
+    `meta.lock`, by the user's command and never by a running session, and keeps the directory's
+    modification time, so the session's last activity does not change.
+  - **Stores from earlier releases.** A store without `project` joins the project of its recorded
+    `workdir` and is listed and counted, but its records are never carried (author `model`). A store
+    with no working directory (`contexto proxy` or `contexto mcp` run by hand) is in no project. The
+    epoch record's `start_text` is optional and written only when it is not empty: a v0.5.24 record
+    resumes with none. A v0.5.24 engine refuses a record that has the field, so after a downgrade such
+    a session reads no record and starts from epoch 0 (`epoch_not_resumed`, `no_record`): one
+    rotation's cost, and only for a session that carried records.
+  - **Accounting, measured.** The start text is part of the first turn-start message as sent, so the
+    pre-send estimate, rule 5's check, the published recall room and both rotation conditions count
+    it, once. Synthetic sessions at bound 50,000, head about 4,600 tokens, headroom floor 6,000, against
+    a control whose earlier records were pinned by a subagent and so not carried (Messages API): with
+    a carried section of 966 estimated tokens (3,380 bytes) the first estimate was 6,687 against 5,710
+    and the first room 37,313 against 38,290; with 5,404 (18,912 bytes), 11,131 and 32,869. No request
+    went over the bound (largest 41,698 and 41,122 of 50,000, control 41,456), and the first rotation
+    came at request 34 and 30 against 36. The head measured from the first usage does not hold the
+    start text, so `F` counts the section once, in the preamble. At 4.0 bytes a token the measured
+    head equals the control's to 1 token. At 3.0 bytes a token, denser than the 3.5 seed, the head
+    keeps 163 tokens of the 966-token section and 904 of the 5,404-token one (rule 19 states the same
+    sections at 3.0 bytes a token: 1,127 and 6,304 tokens), so `F` is high and `W` low by that much,
+    the safe direction: with the larger section `W` was 30,199 against 37,408, of which 6,305 is the
+    preamble's carried section and 904 the over-count. The Responses API measured the same 163 and 904.
+  - **Launch cost, measured.** Building the start line with 50 earlier sessions of 20 records each
+    took 38 to 56 ms cold (median about 50) and 6 to 8 ms warm, in process, on a machine at load
+    average 35 to 50; with 150 sessions of other projects also in the home, 60 to 240 ms cold, since
+    finding a project's sessions reads the `meta.json` of every session; with memory off, 0.2 to
+    0.3 ms. The test that builds the 50-session case reads each earlier session's `meta.json` and
+    ledger once, and printed 16.9 ms cold on 2026-11-13 at load average about 9.
+  - **Two pull requests.** This one holds the identity, the carry-over, rule 19, the off switch, the
+    start line and `contexto project show|forget`. Carry-over ships together with its off switch and
+    its forget command, so no release carries records without a way to refuse and remove them.
+    Search and recall across a project's earlier sessions, and their measurements, follow in the
+    next pull request.
+  - **Not confirmed live.** No live model call was made for this work. Whether a model follows,
+    questions or closes carried records as the heading asks is unmeasured, and so is the behaviour on
+    real Claude Code and Codex binaries (the launch tests run stub CLIs). To confirm: in one
+    directory, run `contexto run claude`, state a standing rule and let the model pin it, and exit;
+    run `contexto run claude` again and check the start line, `contexto state`, and that the first
+    reply honours the rule; then run `contexto project forget`. That costs live tokens and needs the
+    owner's approval.
 
 ## Open decisions
 

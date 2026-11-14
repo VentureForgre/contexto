@@ -1,6 +1,7 @@
 # Contexto status
 
-Updated 2026-11-06 by claude (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
+Updated 2026-11-13 by claude (D69, project memory, the first of its two pull requests, unreleased).
+Before that, 2026-11-06 (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
 D48 to D61, live acceptance run #4, and deleting the v0.1.0 to v0.4.0 releases, D62). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
@@ -26,11 +27,20 @@ compaction never fires, and accuracy equals full context.
   `contexto run codex` with no trust check, and no Host or Origin check on the proxy). The fix round
   (PRs #232 to #250, D48 to D61, v0.5.9 to v0.5.24) fixed all of them, each PR with two reviewer
   agents; details under "QA run and fix round" below.
+- Project memory (D69, unreleased, the first of two pull requests): a new session starts with the
+  open obligations and active decisions the model pinned in the main conversation of earlier
+  sessions of the same project (the git repository it started in, a linked worktree or submodule
+  being its own, else the directory). The model sees them as records from an earlier session, not
+  instructions, inside the 6,000-token pin budget. `contexto run` prints how many were carried,
+  `contexto project show` lists them, `contexto project forget` removes them, and
+  `--no-project-memory` or `CONTEXTO_PROJECT_MEMORY=0` turns it off. Contract rule 19. Tested at zero
+  spend only; no live model call. Guide: `docs/project-memory.md`.
 - Latest release: v0.5.24 (main d38e87d, 2026-11-06). Releases from v0.5.13 on carry `SHA256SUMS`
   and a build provenance attestation (PR #233).
 - Tests: 3185 passed, 1 skipped, 1 xfailed on macOS, Python 3.13 (local run on PR #250's head before
   its review fixes, 2026-11-06; main d38e87d collects the same 3,187 tests). PR #250's final head
-  passed CI on Linux and macOS, Python 3.12 to 3.15.
+  passed CI on Linux and macOS, Python 3.12 to 3.15. D69 added the `tests/test_project*.py` files
+  since; they are not in that count.
 - Tested CLI versions (`TESTED_VERSIONS`): Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318;
   codex-cli 0.154.0, 0.163.0 and 0.166.0 (D56). 2.1.318 has the full live acceptance; 2.1.314 and
   0.166.0 the zero-spend routine only.
@@ -551,6 +561,9 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   overheads in the start warning, `pdf_uncertain` only when the PDF is the cause).
 - D62: the v0.1.0 to v0.4.0 releases and tags are deleted, because their source archives held the
   owner's proxy hostname; their commits stay on `main`.
+- D69: project memory. A new session carries the open obligations and active decisions pinned in
+  the main conversation of its project's earlier sessions, as records and not instructions, with a
+  start line, `contexto project show|forget` and an off switch shipped in the same pull request.
 
 ## Open follow-ups
 
@@ -584,7 +597,7 @@ Still open:
   minimum-room rotation (A12) nothing to restore, so later turn starts keep their window (about 34,200 real, room 806,
   `turn_room_low` logged once); PR #232 review B's finding 1.
 
-## What is left (as of 2026-11-06)
+## What is left (as of 2026-11-13)
 
 Definition of done for this project: M2 acceptance passed on both CLIs (done), every release
 from v0.5.0 on published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
@@ -600,6 +613,11 @@ D53 (#239, v0.5.16), D57 (#241, v0.5.17), D58 (#235, v0.5.19), D54 (#236, v0.5.2
 the replay fix (#247) in v0.5.21, D59 (#246, v0.5.22), D60 (#248, v0.5.23), the docs pass (#249) and
 D61 (#250, v0.5.24). Live acceptance run #4 passed on v0.5.20. Left: the open follow-ups above.
 
+D69 (project memory): the first pull request (carry-over, rule 19, the off switch, the start line,
+`contexto project show|forget`) is under review, unreleased. Left: the second pull request, search
+and recall across a project's earlier sessions (`contexto_search` and `contexto_recall`) with the
+measurements of what a later session can reach and what it costs.
+
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
   cheaper in replays, but it shows the model less, so it needs an accuracy run first (A28).
@@ -611,6 +629,12 @@ Measured candidates deliberately not pursued (each would need a live run or new 
   project file (D52): for now the README says to pin `--upstream` in such a repository.
 
 Needs the owner:
+- D69's live check: no live model call was made, so whether a model follows, questions or closes
+  carried records as their heading asks is unmeasured, and so is project memory on real Claude Code
+  and Codex binaries. The check is two `contexto run claude` sessions in one directory (in the first,
+  state a standing rule and let the model pin it; in the second, check the start line,
+  `contexto state`, and that the first reply honours the rule; then `contexto project forget`). It
+  costs live tokens and needs the owner's approval.
 - Live checks the fix round could not run at zero spend: D51's "keep it open until the user
   withdraws it" wording (added after the live run, not measured live), standing-rule pinning on
   claude-opus-5-5 and on Codex, and the full acceptance on Claude Code 2.1.314 (run #4 covered
@@ -709,6 +733,18 @@ Needs the owner:
   pre-send check is then the only bound check, and a head denser than the 3.5 text seed is estimated
   low, so tool-loop requests can go over the bound unflagged (D61: 12 of 32 synthetic Codex sessions;
   445 requests in reviewer A's 1,440).
+- Project memory (D69, unreleased): only pins made in the main conversation are carried, so a pin
+  made while a subagent or side request has a live recall budget is not, the main conversation's
+  included. Records pinned by v0.5.24 and earlier are never carried, so project memory starts empty.
+  Text injected into the main conversation (a web page, a file, a tool result) that persuades the
+  model to pin something is carried into later sessions like any other main pin; the heading that
+  calls them records, not instructions, is the defence there, and no live model has been measured
+  against it. Each git worktree and submodule is its own project. A session never carries from one
+  started after it, and adds nothing pinned elsewhere after it started. Verified facts are not
+  carried. An earlier session whose ledger does not verify gives nothing until it is repaired or
+  pruned. The carried records share the 6,000-token pin budget, the session's own first. Starting a
+  session reads the `meta.json` of every session in the home: 38 to 56 ms cold with 50 earlier
+  sessions of 20 records, 60 to 240 ms with 150 sessions of other projects also there.
 - Standing rules (D51): the model is told to pin a rule as an obligation when it is stated and keep
   it open. Measured on one model (claude-haiku-5-5) with 8 rules stated in their own turn; the
   "keep it open" words were added after that run and are unmeasured. A rule the model does not pin

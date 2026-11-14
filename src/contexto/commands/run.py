@@ -10,6 +10,7 @@ import argparse
 import sys
 
 from contexto.launcher import BOUND_GUARD, DEFAULT_BOUND, options_from_args, run_claude
+from contexto.paths import PROJECT_MEMORY_ENV
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -44,6 +45,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--no-version-check", action="store_true",
                         help="do not compare the CLI's --version with the versions Contexto was tested with "
                              "(also CONTEXTO_NO_VERSION_CHECK=1)")
+    parser.add_argument("--no-project-memory", action="store_true",
+                        help="keep this session out of project memory: it carries nothing from the earlier "
+                             "sessions of this directory's project (a resumed session stops sending what it "
+                             "carried) and gives nothing to "
+                             f"later ones (also {PROJECT_MEMORY_ENV}=0, false, off or no). The session records "
+                             "it, so resuming it later stays off without this option")
     parser.add_argument("cli", choices=["claude", "codex"], help="the CLI to run")
     parser.add_argument("cli_args", nargs=argparse.REMAINDER, help="arguments passed to the CLI unchanged")
     try:

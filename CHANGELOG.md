@@ -11,6 +11,21 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
+- A new session starts with the open obligations and active decisions the model pinned in earlier
+  sessions of the same project, so a standing rule pinned yesterday is in view from the first
+  request. A project is the git repository the session started in (a linked worktree or a
+  submodule is its own), else the directory itself. Only pins made in the main conversation are
+  carried, and the model sees them as records from an earlier session, not as instructions. See
+  [docs/project-memory.md](docs/project-memory.md).
+- At start, `contexto run` prints how many records were carried and from how many sessions, and
+  `contexto state` lists them under their own heading.
+- `contexto project show` lists a project's sessions and what a new session would carry.
+  `contexto project forget --record ID`, `--session ID` or `--all` takes records or sessions out of
+  it; nothing is deleted until `contexto sessions prune`.
+- `contexto run --no-project-memory`, or `CONTEXTO_PROJECT_MEMORY=0`, keeps a session out of
+  project memory: it carries nothing and gives nothing to later sessions. It stays off when you
+  resume it.
+- Records pinned before this release are never carried, so project memory starts empty.
 - `contexto state`, `contexto search` and `contexto recall` take `--json`. Each prints one object,
   described in the command's `--help`; an error is still one line on stderr with the usual exit
   code.

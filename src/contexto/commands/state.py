@@ -1,9 +1,12 @@
 """``contexto state``: the session's full pinned state, without the budget cap.
 
 By default for a person (D57): the pinned records by group, or "No pinned records.", then how many
-turns are paged out and the commands that list and search them. ``--raw`` prints the text the MCP
-``contexto_state`` tool gives the model, whose opening lines are instructions to the model. ``--json``
-prints the same records and count as one JSON object for a script (D64).
+turns are paged out and the commands that list and search them. Records carried from earlier
+sessions of the project (D69) follow the session's own, each with its session and date. ``--raw``
+prints the text the MCP ``contexto_state`` tool gives the model, whose opening lines and carried
+heading are addressed to the model. Every character of a stored record that does not print is shown as
+its escape, in both forms, as ``contexto project show`` shows it. ``--json`` prints the same records,
+the carried ones under ``carried``, and the count as one JSON object for a script (D64).
 """
 
 from __future__ import annotations
@@ -12,11 +15,11 @@ import argparse
 import json
 import os
 
-from contexto.commands._common import EXIT_OK, add_session_option, fail, say_session
+from contexto.commands._common import EXIT_OK, add_session_option, fail, safe_text, say_session
 from contexto.paths import contexto_home
 from contexto.store import SessionNotFoundError, SessionStore
 from contexto.store.ledger import LedgerError
-from contexto.store.pinned import GROUPS, pinned_items, render_state
+from contexto.store.pinned import GROUPS, READABLE_CARRIED_HEADING, pinned_items, render_state
 from contexto.store.sessions import select_session
 
 
@@ -29,7 +32,9 @@ def register(subparsers) -> None:
                     "list of records, newest first, with id, kind, body, created_at, owner, topic, stale and "
                     "conflict), conflicts (topic and record_ids), staleness_checked, and pages (the number "
                     "of turns paged out; null, with the error on stderr and exit 1, when they cannot be "
-                    "listed). stale is null when staleness_checked is false.")
+                    "listed). stale is null when staleness_checked is false. carried lists the records "
+                    "carried from earlier sessions of the project (D69), in the order they are carried, with "
+                    "id, kind, body, created_at, owner, topic, conflict, session (its full id), label and date.")
     add_session_option(parser)
     form = parser.add_mutually_exclusive_group()
     form.add_argument("--raw", action="store_true",
@@ -51,13 +56,15 @@ def run(args: argparse.Namespace) -> int:
         return run_json(store)
     try:
         if args.raw:
-            print(store.state_text())
+            print(terminal(store.state_text()))
             return EXIT_OK
         root = store.workdir()
-        pinned = render_state(store.state(root), staleness_checked=root is not None, opening=())
+        state, carried = store.pinned_state(root)
+        pinned = render_state(state, staleness_checked=root is not None, opening=(),
+                              carried=carried, carried_heading=READABLE_CARRIED_HEADING, quoted=False)
     except LedgerError as e:
         return fail(f"cannot read the ledger of session {session_id}: {e}")
-    print(pinned or "No pinned records.")
+    print(terminal(pinned) or "No pinned records.")
     print()
     try:
         pages = page_count(store)
@@ -70,6 +77,12 @@ def run(args: argparse.Namespace) -> int:
     else:
         print("No turns paged out yet.")
     return EXIT_OK
+
+
+def terminal(text: str) -> str:
+    """``text`` with each line's characters that do not print shown as escapes (``safe_text``): a
+    stored record's text cannot move the cursor, erase a line or reorder what is shown (D69)."""
+    return "\n".join(safe_text(line) for line in text.split("\n"))
 
 
 def page_count(store: SessionStore) -> int:
@@ -92,7 +105,7 @@ def run_json(store: SessionStore) -> int:
     session_id = store.session_id
     try:
         root = store.workdir()
-        state = store.state(root)
+        state, carried = store.pinned_state(root)
     except LedgerError as e:
         return fail(f"cannot read the ledger of session {session_id}: {e}")
     conflicted = {rid for c in state.conflicts for rid in c.record_ids}
@@ -107,6 +120,10 @@ def run_json(store: SessionStore) -> int:
     except OSError as e:
         pages, unreadable = None, f"the pages of session {session_id} cannot be read: {e}"
     conflicts = [{"topic": c.topic, "record_ids": list(c.record_ids)} for c in state.conflicts]
-    print(json.dumps({"session": session_id, "pinned": pinned, "conflicts": conflicts,
+    carried_out = [{"id": c.record.id, "kind": c.record.kind, "body": c.record.body,
+                    "created_at": c.record.created_at, "owner": c.record.owner, "topic": c.record.topic,
+                    "conflict": c.conflict, "session": c.session, "label": c.label, "date": c.date}
+                   for c in carried]
+    print(json.dumps({"session": session_id, "pinned": pinned, "conflicts": conflicts, "carried": carried_out,
                       "staleness_checked": root is not None, "pages": pages}, indent=2, sort_keys=True))
     return fail(unreadable) if unreadable else EXIT_OK

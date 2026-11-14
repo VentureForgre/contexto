@@ -24,8 +24,10 @@ most one eligible request.
 
 **Does it send anything anywhere?** No. The proxy listens on `127.0.0.1` only and forwards your
 CLI's own requests to the upstream you configured. There is no telemetry and no update check. The
-MCP server opens no network socket. Besides paging the prompt, the one thing Contexto adds to
-requests is an `X-Session-Affinity` header, a salted hash of the session id, and only for upstreams
+MCP server opens no network socket. Besides paging the prompt, and putting the records a new
+session carries from earlier sessions of its project ahead of its first message
+([Project memory](project-memory.md)), the one thing Contexto adds to requests is an
+`X-Session-Affinity` header, a salted hash of the session id, and only for upstreams
 that are not a vendor API ([Troubleshooting](troubleshooting.md)). The version check runs `claude --version` or
 `codex --version` locally.
 
@@ -35,4 +37,6 @@ that are not a vendor API ([Troubleshooting](troubleshooting.md)). The version c
 `contexto run --session <full id> claude --resume <id>` names the session yourself. For Codex:
 `contexto run --session <id> codex resume --last`. `--session` takes a full id: a prefix of existing
 ids exits 2, and an unknown full id starts a new, empty session with that id, so check it with
-`contexto sessions list`.
+`contexto sessions list`. A new session in the same repository or directory does not see the earlier
+session's turns, but it starts with the open obligations and decisions the model pinned there
+([Project memory](project-memory.md)).

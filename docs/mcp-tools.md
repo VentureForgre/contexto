@@ -14,8 +14,16 @@ not start it by hand.
 | `contexto_search(query)` | Finds turns that contain every word of the query (details below) |
 | `contexto_recall(page_id, offset?)` | A paged-out turn word for word, thinking omitted. Each call returns at most 32,000 characters and about a quarter of the window budget (12,000 characters until the proxy has recorded the window), and at most half of the turn's remaining recall budget; continue with `offset` |
 | `contexto_pin(kind, text, supersedes?, epistemic?, provenance?)` | Record an event, decision, obligation, artifact, or reference in the session ledger. `epistemic` is `verified`, `reported`, `summary`, or `hypothesis`. Decisions and obligations always show in the pinned state; an event, artifact, or reference shows there only when verified with a provenance source, and the reply says so when it will not |
-| `contexto_close(obligation_id, note)` | Close an open obligation |
-| `contexto_state()` | The full pinned state, with no pin-budget cap. It is charged against the turn's recall budget and cut at a whole line, with a trailer, when the budget runs out |
+| `contexto_close(obligation_id, note)` | Close an open obligation, including one carried from an earlier session of the project |
+| `contexto_state()` | The full pinned state, with no pin-budget cap, then the records carried from earlier sessions of the project. It is charged against the turn's recall budget and cut at a whole line, with a trailer, when the budget runs out |
+
+**Carried records.** A new session starts with the open obligations and active decisions the model
+pinned in the main conversation of earlier sessions of the same project
+([Project memory](project-memory.md)). `contexto_close` closes a carried obligation, and
+`contexto_pin` with `supersedes` replaces a carried decision; `supersedes` may name a record of an
+earlier session only while it is carried. The closure or the new record is written to the current
+session's ledger, and later sessions find the record closed or replaced. A pin made while a subagent
+or side request has a live recall budget is not carried into later sessions.
 
 **Search.** `contexto_search` finds turns holding every word of the query, in any case and any
 order. Words match as substrings, so identifiers and paths work; there is no stemming and no fuzzy

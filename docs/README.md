@@ -19,6 +19,8 @@ install it and how to start it.
   where, and the commands that inspect and remove sessions.
 - [standing-rules.md](standing-rules.md): how a rule you give once stays in view after its turn is
   paged out.
+- [project-memory.md](project-memory.md): what a new session carries from the earlier sessions of
+  its project, what the model is shown, and how to see, remove or turn it off.
 - [mcp-tools.md](mcp-tools.md): the five MCP tools the model gets, how search ranks, and the recall
   budget.
 - [faq.md](faq.md): subscription logins, API keys, cost, what is sent where, and continuing a

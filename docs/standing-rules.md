@@ -22,3 +22,8 @@ If a rule matters:
 - state it at the start of its own message, or
 - ask the model to pin it ("pin that as an obligation"), and
 - check with `contexto state`, which prints the pinned state.
+
+A rule the model pinned in the main conversation also starts the project's next session: a new
+session in the same repository or directory carries the open obligations of earlier ones, so the
+rule is in view from its first request until it is closed or forgotten
+([Project memory](project-memory.md)).

@@ -94,6 +94,24 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   Within one engine call each message is hashed once and the request's turn starts are found once
   (``request_scope``), since the input is never mutated.
 - ``count_tokens`` (rule 11) gets the current epoch's transform with no side effects.
+- Project memory at a session's start (rule 19, D69). When the engine creates the state of the main
+  conversation at a request the dialect judges a session start by, it reads
+  ``store.carried_text(pin_budget)`` once (the records carried from the project's earlier sessions) and
+  keeps it as the state's ``start_text``. While ``k == 0`` the first turn-start message gets it ahead of
+  its own content on every request, ``count_tokens`` included, so the prefix is byte-identical until the
+  first rotation, except that a turn start (or a resume from the epoch record) that finds the carried
+  text changed by a removal sends the new one from then on (``start_text_changed``, one cache miss);
+  items before that message stay as sent. Past ``k == 0`` it is not sent: the preamble's
+  pinned text holds the same records. It is sized as part of that message, so the pre-send estimate, the
+  over-bound check, the published room and the rotation conditions count it, and the head measured from
+  the first usage does not hold it (it is in the window that measurement takes off the input), so ``F``
+  counts the records once, in the preamble. A state that already exists never gets one (an epoch resumed
+  from a record without it, a conversation that becomes main later), since the cached prefix would
+  change; it gets the records in the preamble at its first rotation. A store without the method carries
+  nothing; one that fails there reads as nothing carried, logs ``start_text_unavailable`` and neither
+  fails the request nor enters degraded mode. The epoch record holds ``start_text`` only when it is not
+  empty and ``k == 0``. Degraded mode sends it (the same transform); ``fallback_failed`` sends the CLI's request, which
+  has none.
 - Transform failures (rule 14, PR #52; manager-1 2026-10-16 02:00Z): a ``PageConflictError`` is a
   ``page_conflict``; ``OSError``, ``LedgerError``, ``KeyFileError``, ``SessionNotFoundError`` and
   ``PageNotFoundError`` (from ``quarantine_page``) are a ``store_error``. Either one at a turn start
@@ -141,6 +159,7 @@ from typing import Any, ClassVar, NamedTuple, Protocol
 
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
 from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
+from contexto.mainrecords import MainRecords
 from contexto.pdfpages import PDF_MAX_PAGES
 from contexto.store import KeyFileError, PageConflictError, PageNotFoundError, SessionNotFoundError, side_room_live
 from contexto.store.ledger import LedgerError
@@ -211,6 +230,7 @@ class Store(Protocol):
     def window_model(self) -> str | None: ...
     def set_turn_room(self, turn_id: str, room_tokens: int) -> None: ...
     # Optional (D40): set_side_room(room_id, room_tokens | None); without it side rooms are not published.
+    # Optional (D69): carried_text(budget_tokens) -> str; without it a session starts with nothing carried.
     def quarantine_page(self, page_id: str) -> Any: ...
     def set_retained(self, epoch: int, k: int, turns: list[dict]) -> None: ...  # lane B PR #128, contract PR #125
 
@@ -289,6 +309,9 @@ class EpochState:
     # Rule 3: (messages, hash of the last message) of the newest request sent whose usage has not arrived;
     # only that request's usage is paired with last_sent_bytes and last_estimate. Per-request, never recorded.
     pending_usage: tuple[int, str] | None = None
+    # D69 (rule 19): the records carried from the project's earlier sessions, read once when the main
+    # conversation's state is created and sent while k == 0; past that the preamble's pinned text holds them.
+    start_text: str = ""
 
 
 # Message classification -------------------------------------------------------------------------
@@ -1138,6 +1161,13 @@ def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
             m = strip_thinking(m)
         if m is not None:  # a dialect may drop an item entirely (Responses reasoning items)
             out.append(m)
+    if state.k == 0 and state.start_text:
+        # D69 (rule 19): before the first rotation there is no preamble, so the carried records go ahead of
+        # the first turn-start message's own content, where the preamble goes later. The lead items before
+        # it stay as sent, and the message's form is the same on every request, so the prefix is stable.
+        start = next((i for i, m in enumerate(out) if d.is_turn_start(m)), None)
+        if start is not None:
+            out[start] = d.merge_first(out[start], [], state.start_text)
     if state.k == 0 or not out:
         return out
     lead = list(messages[: d.lead_count(messages)])  # items before the first turn start stay first
@@ -1739,26 +1769,28 @@ def names_of(events: list[dict]) -> list[str]:
 
 
 def rewrite(request: dict, state: EpochState | None, store: Store, config: Config,
-            estimator: TokenEstimator, dialect: Dialect | None = None) -> tuple[dict, EpochState, list[dict]]:
+            estimator: TokenEstimator, dialect: Dialect | None = None,
+            start_text: str = "") -> tuple[dict, EpochState, list[dict]]:
     """Return (upstream_request, new_state, events) for one request (``/v1/messages`` by default;
-    pass ``dialect`` for another API)."""
+    pass ``dialect`` for another API). ``start_text`` (D69) is kept by a state created here; a state
+    that exists keeps its own."""
     token = _DIALECT.set(dialect or ANTHROPIC)
     try:
         with request_scope(request.get(_dialect().field)):
-            return _rewrite(request, state, store, config, estimator)
+            return _rewrite(request, state, store, config, estimator, start_text)
     finally:
         _DIALECT.reset(token)
 
 
 def _rewrite(request: dict, state: EpochState | None, store: Store, config: Config,
-             estimator: TokenEstimator) -> tuple[dict, EpochState, list[dict]]:
+             estimator: TokenEstimator, start_text: str = "") -> tuple[dict, EpochState, list[dict]]:
     field_name = _dialect().field
     messages = request.get(field_name) or []
     n = len(messages)
     events: list[dict] = []
     fingerprint = head_fingerprint(request)
     if state is None:
-        state = EpochState(head_fingerprint=fingerprint, head_size=head_size(request))
+        state = EpochState(head_fingerprint=fingerprint, head_size=head_size(request), start_text=start_text)
     previous_n = len(state.hashes)
 
     # Rule 10: the stored messages must still match.
@@ -2180,9 +2212,12 @@ def epoch_record(state: EpochState, request: dict, messages: list[dict], key: st
                  config: Config) -> dict:
     """The record ``set_epoch`` writes: every field of ``state`` that decides later request bytes or
     rotation decisions, the configuration, and the anchor. Per-request values (the previous request's
-    hashes, sizes, and estimates) are not in it."""
+    hashes, sizes, and estimates) are not in it. ``start_text`` (D69) is in it only when there is one and
+    it can still be sent (``k == 0``), so a session that carries nothing, or has rotated, writes the record
+    of the releases before it."""
     hashes = state.hashes if len(state.hashes) == len(messages) else tuple(message_hash(m) for m in messages)
-    return {**{name: getattr(state, name) for name in RECORD_INT},
+    return {**({"start_text": state.start_text} if state.start_text and state.k == 0 else {}),
+            **{name: getattr(state, name) for name in RECORD_INT},
             "pinned_text": state.pinned_text, "index_text": state.index_text,
             "preamble_sha256": preamble_sha256(config, state.pinned_text, state.index_text),
             "head_fingerprint": state.head_fingerprint, "dialect": dialect.name, "conversation": key,
@@ -2225,6 +2260,10 @@ def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dia
                        **{name: record[name] for name in RECORD_INT})
     if record.get("head_rule") != HEAD_RULE:
         state = replace(state, head_tokens=None, window_budget=None)
+    if "start_text" in record:  # D69: optional, so a record written before it resumes with none
+        if not isinstance(record["start_text"], str):
+            raise ValueError("epoch record field start_text")
+        state = replace(state, start_text=record["start_text"])
     return state, ""
 
 
@@ -2279,6 +2318,7 @@ class RewriteEngine:
         # D38: which CLI version sends the requests, and was the session start recognised?
         self.clients = ClientVersions()
         self._side_rooms: dict[str, _SideRoom] = {}  # D40: the side rooms this engine opened, by id
+        self._main_records = MainRecords()  # D69: the main conversation's own pins and closures
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
@@ -2300,8 +2340,10 @@ class RewriteEngine:
             return count_tokens_view(request, state), headers, [{"event": "count_tokens", "epoch": epoch}]
         restore = self._restore(window_model_name(request)) if self._restore_pending else None
         resumed: list[dict] = []
+        from_record = False
         if state is None and not self._record_consumed:
             state, resumed = self._resume(key, request, dialect)
+            from_record = state is not None
         # Only the main conversation publishes the window (W, ratio, model): the store holds one, which
         # sizes contexto_recall's per-call limit and the next engine's restore. Main is committed before
         # the transform, whose turn-start rotation may publish the window, so a request that fails after
@@ -2323,10 +2365,16 @@ class RewriteEngine:
         session = self._cli_sessions.get(key)
         if not main and session and session.id in self._displaced and self._session_mains.get(session.id) == key:
             self._displaced[session.id] = False  # still running beside the new main: not a /resume later
+        start_text = ""
+        if state is None and main and dialect.judges_session_start(request):
+            start_text, started = self._start_text()  # D69: a new main conversation at a real session start
+            resumed.extend(started)
+        elif state is not None and main and state.k == 0 and state.start_text:
+            state = self._refresh_start_text(state, request, dialect, from_record, resumed)
         owner = _WINDOW_OWNER.set(main)
         try:
             upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator,
-                                                         dialect)
+                                                         dialect, start_text)
         finally:
             _WINDOW_OWNER.reset(owner)
         events[0:0] = resumed
@@ -2345,6 +2393,7 @@ class RewriteEngine:
         if main and endpoint != COUNT_TOKENS:
             closes: list[dict] = []
             self._close_finished_side_rooms(request.get(dialect.field) or [], dialect, closes)
+            self._confirm_main_records(key, request.get(dialect.field) or [], closes)
             events[-1:-1] = closes  # the engine's request event stays last
         # Per-turn recall budget, request-time publish (contract PR #69, kept by 367916a): before forwarding, from the
         # pre-send estimate. No max_tokens reservation (intake 03:22Z): Claude Code sends max_tokens up
@@ -2362,6 +2411,68 @@ class RewriteEngine:
                 events[-1:-1] = failures  # the engine's request event stays last
         self._write_epoch(key, request, dialect, events)
         return upstream, headers, [restore, *events] if restore else events
+
+    def _confirm_main_records(self, key: str, messages: list, events: list[dict]) -> None:
+        """D69: record in the store the ids of the records the main conversation's own history shows it
+        made (``contexto.mainrecords``), reading only the messages it has not read before. A store
+        without the method records nothing; a failure is the content-free ``main_records_unavailable``
+        with the error's class, never a failed request or degraded mode."""
+        add = getattr(self.store, "add_main_records", None)
+        if not callable(add):
+            return
+        try:
+            found = self._main_records.scan(key, messages)
+            if found:
+                add(found)
+        except Exception as error:
+            events.append({"event": "main_records_unavailable", "error": type(error).__name__})
+
+    def _refresh_start_text(self, state: EpochState, request: dict, dialect: Dialect, from_record: bool,
+                            events: list[dict]) -> EpochState:
+        """D69 (rule 19): a removal reaches a running or resumed session. At a turn start of the main
+        conversation while ``k == 0``, and at the request that resumed it from an epoch record, the
+        carried text is read again; when it differs (a record closed, replaced or forgotten, project
+        memory turned off, or a conflict mark changed) the state sends the new one from this request on,
+        at the price of one cache miss, and ``start_text_changed`` says so with its estimated tokens.
+        Additions are frozen at the session's start, so the text never gains a record. A store that
+        fails here keeps what it sent and logs ``start_text_unavailable``."""
+        if not from_record:
+            token = _DIALECT.set(dialect)
+            try:
+                due = at_turn_start(request.get(dialect.field) or [])
+            finally:
+                _DIALECT.reset(token)
+            if not due:
+                return state
+        reader = getattr(self.store, "carried_text", None)
+        try:
+            text = reader(self.config.pin_budget) if callable(reader) else ""
+        except Exception as error:
+            events.append({"event": "start_text_unavailable", "epoch": state.epoch, "error": type(error).__name__})
+            return state
+        if not isinstance(text, str) or text == state.start_text:
+            return state
+        events.append({"event": "start_text_changed", "epoch": state.epoch,
+                       "tokens": self.estimator.estimate(text) if text else 0})
+        return replace(state, start_text=text)
+
+    def _start_text(self) -> tuple[str, list[dict]]:
+        """D69 (rule 19): the records the session carries from its project's earlier sessions
+        (``store.carried_text``, within the pin budget), for the state about to be created, and the
+        content-free event that says so (``start_text`` with its estimated tokens). A store without the
+        method carries nothing. A store that fails here reads as nothing carried and logs
+        ``start_text_unavailable`` with the error's class: it never fails the request and is not degraded
+        mode, since nothing is paged and nothing sent depends on it."""
+        reader = getattr(self.store, "carried_text", None)
+        if not callable(reader):
+            return "", []
+        try:
+            text = reader(self.config.pin_budget)
+        except Exception as error:
+            return "", [{"event": "start_text_unavailable", "epoch": 0, "error": type(error).__name__}]
+        if not isinstance(text, str) or not text:
+            return "", []
+        return text, [{"event": "start_text", "epoch": 0, "tokens": self.estimator.estimate(text)}]
 
     def tools_verdict(self) -> dict | None:
         """At exit: ``mcp_tools_missing`` if the main conversation ended without Contexto's tools and that

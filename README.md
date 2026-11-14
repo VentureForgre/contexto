@@ -41,6 +41,8 @@ What it includes:
   `contexto search`, `recall` and `state` to read what a session stored.
 - Resuming a Claude Code conversation (`--resume`, `--continue`) through the Contexto session that
   served it, so its pages and pins carry over.
+- Project memory: a new session starts with the open obligations and decisions pinned in earlier
+  sessions of the same project ([Project memory](docs/project-memory.md)).
 - A per-session `X-Session-Affinity` header for proxies that spread requests over several accounts,
   so a session's prompt cache stays on one ([Troubleshooting](docs/troubleshooting.md)).
 - A warning when Claude Code or Codex is a version Contexto was not tested with. New CLI versions
@@ -120,6 +122,8 @@ The index of everything under `docs/` is [docs/README.md](docs/README.md). The g
 - [Sessions](docs/sessions.md): how to tell it is working, what is stored and where, and the
   commands that inspect and remove sessions.
 - [Rules you give once](docs/standing-rules.md): how a standing rule stays in view after paging.
+- [Project memory](docs/project-memory.md): what a new session carries from earlier sessions of its
+  project, and how to see, remove or turn it off.
 - [MCP tools](docs/mcp-tools.md): the tools the model gets, how search ranks, and the recall budget.
 - [FAQ](docs/faq.md): subscriptions, API keys, cost, what is sent where, and continuing a session.
 - [Troubleshooting](docs/troubleshooting.md): the warnings and errors you are most likely to see,

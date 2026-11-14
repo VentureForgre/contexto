@@ -25,6 +25,7 @@ contexto run [options] codex [codex arguments]
 | `--codex-key-helper CMD` | see [Codex](codex.md) | Command that prints the API key (Codex, API-key mode). |
 | `--codex-upstream URL` | see [Codex](codex.md) | Upstream for Codex requests, including its version path. |
 | `--no-version-check` | off | Skip the check of `claude --version` or `codex --version` against the versions Contexto was tested with. |
+| `--no-project-memory` | off | Keep this session out of [project memory](project-memory.md): it carries nothing from the earlier sessions of its project and gives nothing to later ones. The session records it, so a resume stays off without the option. |
 
 For Claude Code, the launcher:
 
@@ -98,6 +99,7 @@ request is in flight (Esc), the proxy stops the upstream response at once and lo
 | `ANTHROPIC_BASE_URL` | `run`, `proxy` | Upstream, when no settings file sets one (see [Troubleshooting](troubleshooting.md)). |
 | `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` | `run`, `proxy` | Read, never set, by Contexto: when truthy, no project `.claude/` settings file is used, as Claude Code does in `-p` mode (see [Troubleshooting](troubleshooting.md)). |
 | `CONTEXTO_NO_VERSION_CHECK` | `run` | `1` skips the CLI version check, like `--no-version-check`. |
+| `CONTEXTO_PROJECT_MEMORY` | `run` | `0`, `false`, `off` or `no` (any case) turns [project memory](project-memory.md) off for the launch, like `--no-project-memory`. `1`, `true`, `on`, `yes` or unset leaves it on; any other value leaves it on and prints a warning. |
 
 ## Upstreams and CLIProxyAPI
 
