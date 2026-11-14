@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from decimal import Decimal
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from contexto.statusline import (
     RESTART_NOTICE,
     installed_command,
     launch_status_line,
+    render,
     settings_files,
     short_tokens,
     status_line,
@@ -36,6 +38,7 @@ from test_stats import ENTER, LEAVE, launch, long_session_log, mcp, request, rot
 CLAUDE_ID = "0acd81f6-1f21-40f8-ab64-5c09545905cf"
 OTHER_ID = "7d0e5a0b-3f0c-4c57-9d5e-0c4f6a0d1b22"
 OWN = {"statusLine": {"type": "command", "command": "echo mine"}}
+NOTICE_LINE = "ctx: your status line needs a restart\n"  # what the installed command prints once the user has one
 
 
 def pages(home: Path, session: str, count: int) -> None:
@@ -145,6 +148,46 @@ def test_tokens_are_shortened_and_never_rounded_up():
         "0", "950", "1k", "9.4k", "9.9k", "10k", "149k", "150k", "999k", "1M", "1.9M", "12M"]
 
 
+def shown_value(text: str) -> Decimal:
+    """The number a reader takes from one side of ``112k/150k``."""
+    text = text.lstrip("~")
+    scale = {"k": 1_000, "M": 1_000_000}.get(text[-1:], 1)
+    return Decimal(text[:-1] if scale > 1 else text) * scale
+
+
+def test_a_prompt_over_or_under_the_bound_never_reads_as_equal_to_it():
+    """Reviewer B, PR #276: rounding both numbers down showed 1,099,999 against a bound of 1M as ``1M/1M``,
+    150,900 against 150k as ``150k/150k``, and 150,200 against 150,500 as ``150k/150k``. When the two
+    differ but shorten alike, they get the decimals it takes to tell them apart."""
+    def line(prompt: int, bound: int, source: str = "usage") -> str:
+        return render({"prompt": prompt, "prompt_source": source, "bound": bound})
+
+    assert line(1_099_999, 1_000_000) == "ctx 1.09M/1M"
+    assert line(150_900, 150_000) == "ctx 150.9k/150k"
+    assert line(150_200, 150_500) == "ctx 150.2k/150.5k"
+    assert line(10_400, 10_000) == "ctx 10.4k/10k"
+    assert line(150_001, 150_000) == "ctx 150.001k/150k"
+    assert line(1_000_001, 1_000_000) == "ctx 1.000001M/1M"
+    assert line(9_450, 9_400) == "ctx 9.45k/9.4k"
+    assert line(12_400_000, 12_000_000) == "ctx 12.4M/12M"
+    assert line(150_900, 150_000, "estimate") == "ctx ~150.9k/150k"
+    # Unchanged when they shorten differently, or are equal.
+    assert line(149_999, 150_000) == "ctx 149k/150k"
+    assert line(150_000, 150_000) == "ctx 150k/150k"
+    assert line(212_000, 150_000) == "ctx 212k/150k"
+    # Every pair near a bound: the order a reader sees is the true order.
+    for bound in (1_000, 9_400, 9_999, 10_000, 64_000, 150_000, 150_500, 999_999, 1_000_000, 1_000_500,
+                  12_000_000):
+        for delta in (*range(-1_200, 1_201, 7), -1, 1, -99, 99, -100, 100, -999, 999, -100_000, 100_000):
+            prompt = bound + delta
+            if prompt < 0:
+                continue
+            shown, bound_text = line(prompt, bound).removeprefix("ctx ").split("/")
+            seen, limit = shown_value(shown), shown_value(bound_text)
+            assert (seen > limit) == (prompt > bound) and (seen < limit) == (prompt < bound), (prompt, bound)
+            assert seen <= prompt and limit <= bound  # still never rounded up
+
+
 def test_a_damaged_log_is_read_as_far_as_it_goes(tmp_path):
     lines = [*launch(0), request(1, tokens=50_000), b'{"event":"request","method":"POST","path":"/v1/mess',
              b"\xff\xfe not json", "[1, 2]", "null", request(2, tokens=71_000), mcp("recall", 3),
@@ -210,7 +253,11 @@ LOG_SHAPES = {
     "stopped_by_usage_event": lambda: [*launch(0), request(1, tokens=70_000, usage_events=(store_error(), ENTER))],
     "stopped_then_new_run": lambda: [*launch(0), request(1, degraded=True, events=(store_error(), ENTER)),
                                      *launch(50, bound=64_000)],
-    "stopped_main_then_side": lambda: [*launch(0), request(1, degraded=True, events=(store_error(), ENTER)),
+    # Tool calls in one run, then a second launch: the counts are the session's, not the latest run's.
+    "tools_then_new_run": lambda: [*launch(0), request(1, tokens=40_000), mcp("recall", 2), mcp("search", 3),
+                                   mcp("recall", 4, ok=False), *launch(50), request(51, tokens=20_000),
+                                   mcp("search", 52)],
+    "stopped_main_then_side": lambda:[*launch(0), request(1, degraded=True, events=(store_error(), ENTER)),
                                        request(2, tokens=3_000, main=False)],
     "enter_without_engine_line": lambda: [*launch(0), {
         "event": "request", "method": "POST", "path": "/v1/messages", "status": 200, "ts": ts(1),
@@ -290,7 +337,7 @@ def test_the_session_is_the_option_then_the_environment_then_the_one_serving_cla
     held = [serving(tmp_path, "aaaa11"), serving(tmp_path, "bbbb22", OTHER_ID), serving(tmp_path, "cccc33", "x-1")]
     by_stdin = command(tmp_path, stdin=claude_stdin())
     assert (by_stdin.returncode, by_stdin.stdout, by_stdin.stderr) == (0, "ctx 11k/150k\n", "")
-    by_env = command(tmp_path, stdin=claude_stdin(), env={"CONTEXTO_SESSION": "bbbb22"})
+    by_env = command(tmp_path, stdin=claude_stdin(OTHER_ID), env={"CONTEXTO_SESSION": "bbbb22"})
     assert by_env.stdout == "ctx 22k/150k\n"
     by_option = command(tmp_path, "--session", "cccc33", stdin=claude_stdin(), env={"CONTEXTO_SESSION": "bbbb22"})
     assert by_option.stdout == "ctx 33k/150k\n"
@@ -345,11 +392,41 @@ def test_stdin_names_only_a_session_that_is_serving_now(tmp_path):
     # Two sessions served the conversation (a resume that got a new session): the one in use shows.
     old = serving(tmp_path, "bbbb22", seen_at=2_000_000_000.0)
     new = serving(tmp_path, "cccc33", seen_at=1_000_000_000.0)
-    assert command(tmp_path, stdin=claude_stdin()).stdout == "ctx 22k/150k\n"  # both open: the last to serve it
+    # Both open (two launches on one conversation): either could be this window's, so neither is shown
+    # (Reviewer B, PR #276: picking the last to see it showed one launch's numbers in the other's window).
+    assert command(tmp_path, stdin=claude_stdin()).stdout == ""
+    assert statusline.serving_session(tmp_path, CLAUDE_ID) is None
     old.release()
     assert command(tmp_path, stdin=claude_stdin()).stdout == "ctx 33k/150k\n"
     new.release()
     assert command(tmp_path, stdin=claude_stdin()).stdout == ""
+
+
+def test_the_environment_s_session_counts_only_while_open_and_serving_the_claude_code_session(tmp_path):
+    """Reviewer B, PR #276: ``CONTEXTO_SESSION`` left set in a shell (the readers default to it) made a plain
+    ``claude`` show that session's old numbers under a conversation it never served. When stdin names a
+    Claude Code session, the variable's session is shown only while a launch has it open and its records
+    say it served that conversation."""
+    store = serving(tmp_path, "aaaa11")  # serves CLAUDE_ID
+    write_log(tmp_path, "zzzz99", [*launch(0), request(1, tokens=99_000)])  # served nothing, never opened
+
+    def shown(stdin, session="aaaa11", *args):
+        done = command(tmp_path, *args, stdin=stdin, env={"CONTEXTO_SESSION": session})
+        assert (done.returncode, done.stderr) == (0, "")
+        return done.stdout
+
+    assert shown(claude_stdin()) == "ctx 11k/150k\n"  # open, and serving this conversation
+    assert shown(claude_stdin(OTHER_ID)) == ""  # open, but this conversation is not one it serves
+    assert shown(claude_stdin(), "zzzz99") == ""
+    store.release()
+    assert shown(claude_stdin()) == ""  # served it, but no launch has it open: a plain `claude --resume`
+    assert shown(claude_stdin(OTHER_ID)) == ""  # the review's case
+    # Without a Claude Code session on stdin (run by hand), the variable names the session, as for every reader.
+    for stdin in ("", None, "not json", '{"session_id": 7}', '{"model": "x"}'):
+        assert shown(stdin) == "ctx 11k/150k\n", stdin
+    # --session is the user's own choice: shown whatever stdin says.
+    assert shown(claude_stdin(OTHER_ID), "aaaa11", "--session", "zzzz99") == "ctx 99k/150k\n"
+    assert shown(claude_stdin(OTHER_ID), "", "--session=aaaa11") == "ctx 11k/150k\n"
 
 
 def test_the_served_lookup_reads_what_the_launcher_records(tmp_path):
@@ -388,6 +465,31 @@ def test_the_command_does_not_wait_for_a_terminal_or_a_silent_pipe(tmp_path):
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=clean_env(tmp_path))
     assert proc.stdout.read() == "ctx 50k/150k\n" and proc.wait(timeout=30) == 0
     proc.stdin.close()
+
+
+def test_a_terminal_on_stdin_is_never_waited_on(monkeypatch):
+    """Reviewer A, PR #276: without the terminal check every test still passed, because the half-second
+    deadline also ends the wait. The check is held here by the code path, not by a time: a terminal is
+    not even polled."""
+    import select
+
+    polled = []
+    real = select.select
+    monkeypatch.setattr(select, "select", lambda *a: (polled.append(a), real(*a))[1])
+    leader, follower = pty.openpty()
+    try:
+        with os.fdopen(os.dup(follower), "rb", buffering=0) as terminal:
+            assert statusline.stdin_object(terminal) is None
+        assert polled == []
+        read, write = os.pipe()  # the same call on a pipe does poll it: the patch above is seen
+        os.write(write, claude_stdin().encode())
+        os.close(write)
+        with os.fdopen(read, "rb", buffering=0) as pipe:
+            assert statusline.stdin_object(pipe)["session_id"] == CLAUDE_ID
+        assert polled
+    finally:
+        os.close(leader)
+        os.close(follower)
 
 
 def test_stdin_json_is_read_without_waiting_for_the_pipe_to_close(tmp_path):
@@ -671,7 +773,7 @@ def test_the_command_is_quoted_for_a_shell(tmp_path, name):
     # And the user's file gaining a status line is seen through the same quoting.
     put(own, OWN)
     done = subprocess.run(["/bin/sh", "-c", text], capture_output=True, text=True, timeout=60, env=env, cwd=tmp_path)
-    assert done.stdout == RESTART_NOTICE + "\n"
+    assert done.stdout == NOTICE_LINE
 
 
 def test_a_session_id_that_starts_with_a_dash_stays_one_argument(tmp_path):
@@ -709,11 +811,20 @@ def test_a_status_line_the_user_sets_up_mid_session_gets_a_notice_in_place_of_th
     assert command(tmp_path, *args).stdout == "ctx 50k/150k\n"
     put(project, {"statusLine": {"type": "command", "command": f"touch {shlex.quote(str(marker))}"}})
     done = command(tmp_path, *args)
-    assert (done.returncode, done.stdout, done.stderr) == (0, RESTART_NOTICE + "\n", "")
-    assert "contexto run claude" in RESTART_NOTICE and len(RESTART_NOTICE) < 80 and "\n" not in RESTART_NOTICE
+    assert (done.returncode, done.stdout, done.stderr) == (0, NOTICE_LINE, "")
+    assert NOTICE_LINE == f"ctx: {RESTART_NOTICE}\n" and "\n" not in RESTART_NOTICE
+    # Reason first, and whole on a 40-column row (the first notice was 68 characters, cut before its reason).
+    assert NOTICE_LINE.startswith("ctx: your status line") and len(NOTICE_LINE.rstrip("\n")) <= 40
     assert not marker.exists()
     # The notice does not need the session: it is about the settings.
-    assert command(tmp_path, "--session", "gone", f"--own-settings={project}").stdout == RESTART_NOTICE + "\n"
+    assert command(tmp_path, "--session", "gone", f"--own-settings={project}").stdout == NOTICE_LINE
+    # Stopped paging matters more than the notice (Reviewer B, PR #276: the notice had hidden it): the
+    # marker stays first, and the notice follows it.
+    write_log(tmp_path, "s1", [*launch(0), request(1, tokens=212_000, degraded=True, events=(store_error(), ENTER))])
+    assert command(tmp_path, *args).stdout == f"ctx PAGING STOPPED (disk full) · {RESTART_NOTICE}\n"
+    assert command(tmp_path, *args, "--color").stdout == (
+        f"ctx \x1b[1;31mPAGING STOPPED (disk full)\x1b[0m · {RESTART_NOTICE}\n")
+    write_log(tmp_path, "s1", [*launch(0), request(1, tokens=50_000)])
     # A file that cannot be read mid-session is not a reason to hide the numbers.
     for content in ("{broken", "[]", "", "{}"):
         put(project, content)
@@ -794,7 +905,7 @@ def test_run_claude_installs_a_status_line_that_shows_the_session(env, upstream,
     put(Path(env["HOME"]) / ".claude" / "settings.json", OWN)
     later = subprocess.run(["/bin/sh", "-c", record["settings"]["statusLine"]["command"]], input=claude_stdin(),
                            capture_output=True, text=True, timeout=60, env=bare, cwd=cwd)
-    assert later.stdout == RESTART_NOTICE + "\n"
+    assert later.stdout == NOTICE_LINE
     assert "statusline" not in done.stderr.lower()  # the launcher says nothing about it on stderr
 
 
@@ -868,13 +979,16 @@ def test_the_documented_script_appends_contexto_s_line_to_its_own(tmp_path):
         return done.returncode, done.stdout, done.stderr
 
     # Inside `contexto run claude`: the launcher's CONTEXTO_SESSION reaches the script (measured).
-    assert shown(claude_stdin(OTHER_ID), CONTEXTO_SESSION="aaaa11") == (0, "my project | ctx 11k/150k\n", "")
+    assert shown(claude_stdin(), CONTEXTO_SESSION="aaaa11") == (0, "my project | ctx 11k/150k\n", "")
     # Without it, the Claude Code session on stdin names the Contexto session serving it.
     assert shown(claude_stdin()) == (0, "my project | ctx 11k/150k\n", "")
     # A plain `claude` session Contexto is not serving, and a machine without contexto: the script's own line.
     assert shown(claude_stdin(OTHER_ID)) == (0, "my project\n", "")
     assert shown(claude_stdin(), PATH="/usr/bin:/bin") == (0, "my project\n", "")
-    del held
+    # The same plain session with CONTEXTO_SESSION left set in the shell (Reviewer B, PR #276): not its line.
+    assert shown(claude_stdin(OTHER_ID), CONTEXTO_SESSION="aaaa11") == (0, "my project\n", "")
+    held.release()
+    assert shown(claude_stdin(), CONTEXTO_SESSION="aaaa11") == (0, "my project\n", "")
 
 
 def test_the_documentation_names_what_the_code_does():
@@ -886,6 +1000,20 @@ def test_the_documentation_names_what_the_code_does():
     for note in ("added", "off:flag", "off:env", "own:", "hooks_off:", "unreadable:", "managed_hooks_only",
                  "unsafe_path", "error"):
         assert f"`{note}" in docs, note
+    assert NOTICE_LINE.rstrip("\n") in docs and "NO_COLOR" in docs and "PYTHONIOENCODING=ascii" in docs
+
+
+def test_paged_is_described_as_page_files_from_every_conversation_not_turns():
+    """Reviewer B, PR #276: ``N paged`` counts the page files in the store. A page from the bounded fallback
+    holds a carried message, not a turn, and a subagent's pages count too (docs/stats.md: "pages")."""
+    root = Path(__file__).resolve().parent.parent
+    docs = (root / "docs" / "statusline.md").read_text()
+    row = next(line for line in docs.splitlines() if line.startswith("| `41 paged`"))
+    changelog = (root / "CHANGELOG.md").read_text()
+    entry = changelog[changelog.index("`contexto run claude` shows Contexto's numbers"):].split("\n- ", 1)[0]
+    for text in (row, " ".join(statusline.DESCRIPTION.split()), " ".join(entry.split())):
+        assert "turns paged" not in text.lower(), text
+        assert "page files" in text and "every conversation" in text, text
 
 
 def test_the_version_comes_from_the_contexto_proxy_distribution_and_is_still_looked_up_lazily(monkeypatch):

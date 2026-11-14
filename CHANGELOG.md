@@ -40,9 +40,17 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   session id).
 - `contexto run claude` shows Contexto's numbers in Claude Code's status line, for example
   `ctx 112k/150k · 41 paged · 3 recalls · 5 searches`, and `PAGING STOPPED` when the store fails.
+  `41 paged` counts the page files kept on disk for the whole session, from every conversation in
+  it (subagents' too), which the model can read back; it is not a count of turns. A prompt that
+  differs from the bound but would shorten to the same text gets decimals (`150.9k/150k`), so one
+  over the bound never reads as at it.
   It is added only when no settings file Claude Code reads has a status line of its own, because
-  Contexto's would replace it; `--no-statusline` or `CONTEXTO_NO_STATUSLINE=1` turns it off.
-  `contexto statusline` prints the line, so a status line script of your own can include it. See
+  Contexto's would replace it; `--no-statusline` or `CONTEXTO_NO_STATUSLINE=1` turns it off. A status
+  line you set up mid-session gets `ctx: your status line needs a restart`, after `PAGING STOPPED`
+  when paging is stopped.
+  `contexto statusline` prints the line, so a status line script of your own can include it. When
+  Claude Code names its session on stdin, the script shows `$CONTEXTO_SESSION`'s numbers only while
+  that session is open and serving it, and nothing when two open launches serve it. See
   docs/statusline.md.
 
 ## 0.5.24 (2026-11-06)

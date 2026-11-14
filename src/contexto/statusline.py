@@ -16,7 +16,8 @@ Rules this module keeps:
   the command prints nothing and exits 0 for any error, a missing session, or a mistyped option.
 - **A wrong session's numbers are worse than none.** The session is ``--session``, else
   ``$CONTEXTO_SESSION``, else the session that is serving the Claude Code session named on stdin right
-  now. There is no "most recent session".
+  now. When stdin names a Claude Code session, ``$CONTEXTO_SESSION`` counts only if it is open and
+  serving that one, and two open sessions serving it give none. There is no "most recent session".
 - **It is fast.** It runs in its own process each time, so it loads neither the proxy, the engine nor
   the store, and it reads only what the line shows: the end of the log for the current prompt and
   whether paging is stopped, and the few lines that hold a launch or a tool call (``quick_numbers``).
@@ -54,7 +55,7 @@ STOPPED_HINT = "see contexto stats"
 CAUSES = {"disk_full": "disk full", "no_access": "store not writable", "page_conflict": "page conflict",
           "store": "store error"}
 RED, RESET = "\x1b[1;31m", "\x1b[0m"
-RESTART_NOTICE = "contexto: restart `contexto run claude` to show your own status line"
+RESTART_NOTICE = "your status line needs a restart"  # of `contexto run claude`; ``restart_line`` prints it
 
 NO_STATUSLINE_ENV = "CONTEXTO_NO_STATUSLINE"
 SESSION_ENV = "CONTEXTO_SESSION"
@@ -72,18 +73,43 @@ MARKED = (b"mcp_call", b"launch", b"proxy_start")
 # The line --------------------------------------------------------------------------------------------
 
 def short_tokens(n: int) -> str:
-    """``950``, ``9.4k``, ``112k``, ``1.9M``: rounded down, so a prompt just under the bound never reads
-    as having reached it."""
+    """``950``, ``9.4k``, ``112k``, ``1.9M``: rounded down, never up. Against the bound, ``prompt_and_bound``
+    adds the decimals it takes to keep the two apart."""
     n = max(0, n)
     if n < 1_000:
         return str(n)
     if n < 10_000:
-        whole, tenth = divmod(n // 100, 10)
-        return f"{whole}.{tenth}k" if tenth else f"{whole}k"
+        return _decimals(n, 1_000, "k", 1)
     if n < 1_000_000:
         return f"{n // 1_000}k"
-    whole, tenth = divmod(n // 100_000, 10)
-    return f"{whole}.{tenth}M" if tenth and whole < 10 else f"{whole}M"
+    return _decimals(n, 1_000_000, "M", 1 if n < 10_000_000 else 0)
+
+
+def _decimals(n: int, unit: int, suffix: str, places: int) -> str:
+    """``n`` in ``unit``s, rounded down to ``places`` decimals, without trailing zeros."""
+    whole, part = divmod(n * 10 ** places // unit, 10 ** places)
+    digits = f"{part:0{places}d}".rstrip("0") if places else ""
+    return f"{whole}.{digits}{suffix}" if digits else f"{whole}{suffix}"
+
+
+def prompt_and_bound(prompt: int, bound: int) -> tuple[str, str]:
+    """The two sides of ``112k/150k``. Each is rounded down, so two numbers that differ can shorten alike:
+    150,900 against a bound of 150,000 would read ``150k/150k``, as if at the bound and not over it, and
+    150,200 against 150,500 as if it had reached it (PR #276's review). Then both get the decimals it
+    takes to tell them apart (``150.9k/150k``, ``150.2k/150.5k``, ``1.09M/1M``). Rounding down keeps the
+    order: a prompt over the bound always reads as more than it, one under as less, and only one at the
+    bound reads as equal. Equal text means the same unit, so three places of ``k`` or six of ``M`` are
+    whole tokens and always differ."""
+    prompt, bound = max(0, prompt), max(0, bound)
+    shown = short_tokens(prompt), short_tokens(bound)
+    if prompt == bound or shown[0] != shown[1] or bound < 1_000:
+        return shown
+    unit, suffix, most = (1_000_000, "M", 6) if bound >= 1_000_000 else (1_000, "k", 3)
+    for places in range(1, most + 1):
+        shown = _decimals(prompt, unit, suffix, places), _decimals(bound, unit, suffix, places)
+        if shown[0] != shown[1]:
+            break
+    return shown
 
 
 def separator_for(encoding: str | None) -> str:
@@ -102,14 +128,13 @@ def render(numbers: Mapping[str, Any], *, color: bool = False, separator: str = 
     parts: list[str] = []
     stopped = numbers.get("stopped") is True
     if stopped:
-        cause = CAUSES.get(numbers.get("cause"))
-        marker = f"{STOPPED} ({cause})" if cause else STOPPED
-        parts.append(f"{RED}{marker}{RESET}" if color else marker)
+        parts.append(stopped_marker(numbers, color=color))
     prompt, bound = numbers.get("prompt"), numbers.get("bound")
     bound = bound if isinstance(bound, int) and bound > 0 else None
     if isinstance(prompt, int):
-        text = ("~" if numbers.get("prompt_source") == "estimate" else "") + short_tokens(prompt)
-        parts.append(f"{text}/{short_tokens(bound)}" if bound else text)
+        mark = "~" if numbers.get("prompt_source") == "estimate" else ""
+        parts.append("{}{}/{}".format(mark, *prompt_and_bound(prompt, bound)) if bound
+                     else mark + short_tokens(prompt))
     elif bound:
         parts.append(f"bound {short_tokens(bound)}")
     if numbers.get("paged"):
@@ -122,6 +147,27 @@ def render(numbers: Mapping[str, Any], *, color: bool = False, separator: str = 
             if count:
                 parts.append(f"{count:,} {one if count == 1 else many}")
     return f"{PREFIX} {separator.join(parts)}" if parts else ""
+
+
+def stopped_marker(numbers: Mapping[str, Any], *, color: bool = False) -> str:
+    """``PAGING STOPPED (disk full)``, in red on request."""
+    cause = CAUSES.get(numbers.get("cause"))
+    marker = f"{STOPPED} ({cause})" if cause else STOPPED
+    return f"{RED}{marker}{RESET}" if color else marker
+
+
+def restart_line(home: Path, session_id: str | None, *, color: bool = False, separator: str = SEPARATOR) -> str:
+    """What the installed command prints once a settings file has a status line of the user's own:
+    ``ctx: your status line needs a restart``, reason first and short enough for a 40-column row. When
+    paging is stopped the marker comes first and the notice after it, because that matters more and a
+    narrow row cuts from the end (PR #276's review: the notice had hidden the marker). Never raises."""
+    try:
+        numbers = session_numbers(home, session_id) if session_id else None
+        if numbers and numbers.get("stopped") is True:
+            return f"{PREFIX} {stopped_marker(numbers, color=color)}{separator}{RESTART_NOTICE}"
+    except Exception:
+        pass
+    return f"{PREFIX}: {RESTART_NOTICE}"
 
 
 def status_line(home: Path, session_id: str, *, color: bool = False, separator: str = SEPARATOR) -> str:
@@ -322,22 +368,30 @@ def served_by(home: Path, claude_session: str) -> list[tuple[float, str]]:
         names = os.listdir(Path(home) / "sessions")
     except OSError:
         return []
-    needle = claude_session.encode("utf-8", "replace")
     found = []
     for name in names:
-        if not _is_session(home, name):
-            continue
-        try:
-            data = read_regular(session_dir(home, name) / "meta.json")
-            meta = json.loads(data) if needle in data else None
-        except (OSError, ValueError, RecursionError):
-            continue
-        every = meta.get("cli_sessions") if isinstance(meta, dict) else None
-        ids = every.get("claude") if isinstance(every, dict) else None
-        seen_at = ids.get(claude_session) if isinstance(ids, dict) else None
-        if isinstance(seen_at, (int, float)) and not isinstance(seen_at, bool) and math.isfinite(seen_at):
-            found.append((float(seen_at), name))
+        seen_at = served_at(home, name, claude_session)
+        if seen_at is not None:
+            found.append((seen_at, name))
     return found
+
+
+def served_at(home: Path, session_id: str, claude_session: str) -> float | None:
+    """When session ``session_id``'s records say it last served Claude Code session ``claude_session``, or
+    None when they do not say it did (or cannot be read)."""
+    if not _is_session(home, session_id):
+        return None
+    try:
+        data = read_regular(session_dir(home, session_id) / "meta.json")
+        meta = json.loads(data) if claude_session.encode("utf-8", "replace") in data else None
+    except (OSError, ValueError, RecursionError):
+        return None
+    every = meta.get("cli_sessions") if isinstance(meta, dict) else None
+    ids = every.get("claude") if isinstance(every, dict) else None
+    seen_at = ids.get(claude_session) if isinstance(ids, dict) else None
+    if isinstance(seen_at, (int, float)) and not isinstance(seen_at, bool) and math.isfinite(seen_at):
+        return float(seen_at)
+    return None
 
 
 def session_live(home: Path, session_id: str) -> bool:
@@ -362,12 +416,21 @@ def session_live(home: Path, session_id: str) -> bool:
 
 
 def serving_session(home: Path, claude_session: str) -> str | None:
-    """The Contexto session that is serving ``claude_session`` now: one whose records name it and that a
-    launch has open, the last to have seen it if there are several. A session that served the
-    conversation in an earlier run is not it: a plain ``claude --resume`` of that conversation does not
-    go through Contexto, and the old numbers would describe nothing on screen."""
-    live = [found for found in served_by(home, claude_session) if session_live(home, found[1])]
-    return max(live)[1] if live else None
+    """The Contexto session that is serving ``claude_session`` now: the one whose records name it and that
+    a launch has open. A session that served the conversation in an earlier run is not it: a plain
+    ``claude --resume`` of that conversation does not go through Contexto, and the old numbers would
+    describe nothing on screen. Two open launches on one conversation give None: either could be the
+    window asking, and a guess showed one's numbers in the other's (PR #276's review)."""
+    live = [name for _, name in served_by(home, claude_session) if session_live(home, name)]
+    return live[0] if len(live) == 1 else None
+
+
+def serves_now(home: Path, session_id: str, claude_session: str) -> bool:
+    """Whether ``session_id`` is open and its records say it served ``claude_session``: the test a session
+    from ``$CONTEXTO_SESSION`` must pass when stdin names a Claude Code session. The variable outlives the
+    launch that set it in a shell where the user exported it (the readers default to it), and there it
+    would show an old session's numbers under a conversation that session never served."""
+    return served_at(home, session_id, claude_session) is not None and session_live(home, session_id)
 
 
 def stdin_object(stream: Any) -> dict[str, Any] | None:
@@ -569,24 +632,29 @@ def launch_status_line(session_id: str, home: Path, cwd: Path, *, enabled: bool 
 DESCRIPTION = (
     "Print one short line about a Contexto session for Claude Code's status line, for example "
     "'ctx 112k/150k · 41 paged · 3 recalls · 5 searches': the main conversation's latest prompt against "
-    "the bound, the turns paged out, and the recall and search calls the model made. 'PAGING STOPPED' comes "
-    "first when a store failure has stopped paging. The session is --session, else $CONTEXTO_SESSION, else "
-    "the session serving the Claude Code session named by session_id in the JSON on stdin. With no "
-    "session, or on any error, it prints nothing and exits 0, so a status line script of your own can "
-    "call it and append what it prints. docs/statusline.md has the details.")
+    "the bound; the page files kept on disk for the whole session, from every conversation in it "
+    "(subagents' too), which the model can read back; and the recall and search calls the model made. "
+    "'PAGING STOPPED' comes first when a store failure has stopped paging. The session is --session, else "
+    "$CONTEXTO_SESSION, else the session serving the Claude Code session named by session_id in the JSON "
+    "on stdin; when stdin names one, $CONTEXTO_SESSION counts only while a launch has it open and it has "
+    "served that Claude Code session. With no session, or on any error, it prints nothing and exits 0, so "
+    "a status line script of your own can call it and append what it prints. docs/statusline.md has the "
+    "details.")
 
 
 def add_arguments(parser: Any) -> None:
     parser.add_argument("--session", metavar="ID", default=None,
-                        help="session id, or a unique prefix of one (default: $CONTEXTO_SESSION, else the "
-                             "session serving the Claude Code session named on stdin)")
+                        help="session id, or a unique prefix of one, shown whatever stdin names (default: "
+                             "$CONTEXTO_SESSION, else the session serving the Claude Code session named on "
+                             "stdin)")
     parser.add_argument("--home", metavar="DIR", default=None,
                         help="data directory (default: $CONTEXTO_HOME, else ~/.contexto)")
     parser.add_argument("--color", action="store_true",
                         help="mark stopped paging in red (ANSI); everything else stays plain")
     parser.add_argument("--own-settings", metavar="FILE", action="append", default=[],
                         help="a Claude Code settings file to check at each run: if it now has a statusLine, "
-                             "print a note to restart `contexto run claude` in place of the numbers. "
+                             "print a note to restart `contexto run claude` in place of the numbers (after "
+                             "PAGING STOPPED, when paging is stopped). "
                              "`contexto run claude` passes these; a script of your own does not need them")
 
 
@@ -618,20 +686,36 @@ def _discard_stdout() -> None:
 
 def _line(args: Any, stdin: Any, env: Mapping[str, str] | None, encoding: str | None) -> str:
     env = os.environ if env is None else env
+    separator = separator_for(encoding)
     if args.own_settings and own_status_line(args.own_settings):
-        return RESTART_NOTICE
+        try:
+            home = absolute_home(args.home) if args.home else contexto_home(env)
+            session = find_session(home, args.session) if args.session is not None else None
+        except Exception:  # the notice is about the settings; it does not need the session
+            home, session = Path(), None
+        return restart_line(home, session, color=bool(args.color), separator=separator)
     home = absolute_home(args.home) if args.home else contexto_home(env)
-    if args.session is not None:
-        session = find_session(home, args.session)
-    elif env.get(SESSION_ENV):
-        session = find_session(home, env[SESSION_ENV])
-    else:  # only now is stdin read: a session named above never waits on it
-        given = stdin_object(sys.stdin if stdin is None else stdin)
-        claude_session = given.get("session_id") if given else None
-        session = serving_session(home, claude_session) if isinstance(claude_session, str) and claude_session else None
+    session = _session(args, home, stdin, env)
     if session is None:
         return ""
-    return status_line(home, session, color=bool(args.color), separator=separator_for(encoding))
+    return status_line(home, session, color=bool(args.color), separator=separator)
+
+
+def _session(args: Any, home: Path, stdin: Any, env: Mapping[str, str]) -> str | None:
+    """``--session`` as given (the user named it: stdin is never read); else ``$CONTEXTO_SESSION``, which
+    must be open and serving the Claude Code session on stdin when stdin names one (``serves_now``);
+    else the session serving that Claude Code session."""
+    if args.session is not None:
+        return find_session(home, args.session)
+    given = stdin_object(sys.stdin if stdin is None else stdin)
+    claude_session = given.get("session_id") if given else None
+    claude_session = claude_session if isinstance(claude_session, str) and claude_session else None
+    if env.get(SESSION_ENV):
+        session = find_session(home, env[SESSION_ENV])
+        if session is None or claude_session is None:
+            return session
+        return session if serves_now(home, session, claude_session) else None
+    return serving_session(home, claude_session) if claude_session else None
 
 
 def main(argv: Sequence[str] | None = None, *, stdin: Any = None, stdout: Any = None,

@@ -21,14 +21,17 @@ sent anywhere.
 | `ctx` | The line is Contexto's. |
 | `112k/150k` | The current prompt against the bound. The first number is the input of the main conversation's most recent model request, as the API counted it (`prompt.last_tokens` in [docs/stats.md](stats.md)). It is the latest request, not the session's peak, so it falls after a rotation. The second number is `--bound`. |
 | `~77k/150k` | The same, when the API reported no usage for that request: `~` marks Contexto's own estimate. |
-| `bound 150k` | Shown alone before the first model request of a session. |
-| `41 paged` | Turns paged out and kept on disk: the page files in the session's store now (`pages.count`). The model can read each of them back. |
+| `bound 150k` | Shown alone before the first model request of a new session. A resumed session starts with the previous run's latest prompt instead (`61k/150k`), as `contexto stats` does. |
+| `41 paged` | The page files kept on disk for the whole session (`pages.count`), from every conversation in it, subagents' included, and every run. The model can read each of them back. It is not a count of your conversation's turns: a page usually holds one turn, but a page from the bounded fallback holds one carried message, and a subagent's request that pages adds to it while your prompt stays where it was. |
 | `3 recalls` | Calls of the `contexto_recall` tool that succeeded, over the whole session. |
 | `5 searches` | Calls of the `contexto_search` tool that succeeded, over the whole session. |
 | `PAGING STOPPED (disk full)` | The store failed and Contexto has stopped paging: requests go out unpaged and can exceed the bound. See below. |
 
-Numbers are shortened and rounded down (`9.4k`, `112k`, `1.9M`), so a prompt just under the bound
-never reads as having reached it.
+Numbers are shortened and rounded down (`9.4k`, `112k`, `1.9M`). When the prompt and the bound differ
+but would shorten to the same text, both get the decimals it takes to tell them apart: `150.9k/150k`
+is over a bound of 150,000, `150.2k/150.5k` is under a bound of 150,500, and `1.09M/1M` is 1,099,999
+against a bound of a million. So a prompt over the bound always reads as more than it, a prompt under
+it as less, and only a prompt exactly at the bound shows the same number twice.
 
 A part is left out when the session has no data for it. A session that has paged nothing shows
 `ctx 18k/150k`. A log with no `launch` line has no bound and shows `ctx 61k`. Failed tool calls are
@@ -51,7 +54,9 @@ mode, [docs/stats.md](stats.md#when-the-store-fails-degraded-mode)). The line th
 writable`, `page conflict` or `store error`.
 The recall counts give way to `see contexto stats`, which prints what happened and what to do.
 `contexto run claude` asks for colour, so the marker is red there; everything else on the line is
-plain text. The marker goes when paging resumes, and a new `contexto run` always starts paging.
+plain text. With `NO_COLOR` set to a non-empty value when you start `contexto run claude`, it does
+not ask, and the marker is plain. The marker goes when paging resumes, and a new `contexto run` always
+starts paging.
 
 ## When `contexto run claude` adds it
 
@@ -128,17 +133,29 @@ order:
 1. `--session ID`: a session id or a unique prefix of one.
 2. `$CONTEXTO_SESSION`. `contexto run` sets it for the CLI it runs, and Claude Code passes its
    environment to the status line command (measured), so inside `contexto run claude` no option is
-   needed.
+   needed. When the JSON on stdin names a Claude Code session (`session_id`), the variable's session
+   counts only while a `contexto run` has it open and has served that Claude Code session; otherwise
+   nothing is printed. The variable can outlive the launch that set it, if you exported it in a shell
+   for `contexto stats`, and a plain `claude` started there would otherwise show that old session's
+   numbers.
 3. The Contexto session that is serving the Claude Code session named by `session_id` in the JSON
-   on stdin. It counts only while a `contexto run` has that session open.
+   on stdin. It counts only while a `contexto run` has that session open. If two open launches serve
+   the same Claude Code session, either could be the one asking, so nothing is printed.
 
 There is no fourth step. If none of the three names a session, nothing is printed. In a plain
 `claude` session that Contexto is not serving, that is the right answer: a line with another
 session's numbers would be wrong. A session named by `--session` or `$CONTEXTO_SESSION` that does not
-exist also prints nothing; it does not fall through to stdin.
+exist also prints nothing; it does not fall through to stdin. `--session` is taken as given: you
+named it.
 
-Stdin is read only for step 3. A terminal on stdin is not read, and a pipe that stays silent is given
-up on after half a second, so running the command by hand does not hang.
+Contexto learns which Claude Code session it serves from that session's model requests. So in steps
+2 and 3 a conversation shows nothing until its first request goes through Contexto: at the start of
+a new session and after `/clear`. The command `contexto run claude` installs names its session with
+`--session` and shows `bound 150k` from the start.
+
+Stdin is read for steps 2 and 3. A terminal on stdin is not read, and a pipe that stays silent is
+given up on after half a second, so running the command by hand does not hang; with no Claude Code
+session on stdin, step 2 takes the variable's session as it is.
 
 A working script, which appends Contexto's part to its own:
 
@@ -163,7 +180,8 @@ The script needs `contexto` on `PATH`. If you start Contexto another way (`uv ru
 virtual environment), give the full path of the `contexto` program in the script.
 
 `--color` marks stopped paging in red with ANSI codes; without it the output has no escape codes.
-When the output's encoding has no `·` (a `C` locale), the parts are separated by ` | ` instead.
+When the output's encoding has no `·`, the parts are separated by ` | ` instead. A `C` locale is not
+enough for that: Python still writes UTF-8 there (measured). `PYTHONIOENCODING=ascii` is.
 
 ## If you set up a status line during a session
 
@@ -171,10 +189,18 @@ When the output's encoding has no `·` (a `C` locale), the parts are separated b
 claude`, Contexto's `--settings` still ranks above that file until you restart, so your new line
 would not appear and Contexto's would stay (measured: Claude Code kept running the `--settings`
 command). So the command Contexto installs checks your settings files each time it runs. Once one of
-them has a `statusLine`, it prints this in place of the numbers:
+them has a `statusLine`, it prints this in place of the numbers until you restart `contexto run
+claude`:
 
 ```
-contexto: restart `contexto run claude` to show your own status line
+ctx: your status line needs a restart
+```
+
+If paging has stopped, the marker stays first, because it matters more and a narrow terminal cuts the
+line from the end:
+
+```
+ctx PAGING STOPPED (disk full) · your status line needs a restart
 ```
 
 After the restart, Contexto finds your status line and adds none. It never runs your command itself.
