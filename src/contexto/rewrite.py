@@ -193,7 +193,7 @@ STORE_FAILURES = (PageConflictError, *STORE_ERRORS)
 WINDOW_RATIO_CHANGE = 0.01  # set_window: republish when the measured ratio moves more than this share
 RESTORED_RATIO_WEIGHT = 10_000  # tokens: a restored ratio counts like one mid-sized request (A8)
 # D69: the reasons a conversation takes main (D50) after which its own history confirms its pins and
-# closures (``after_side_request`` only when ``_first_trusted`` also holds: ``_trusted_takeover``);
+# closures (all but ``compacted`` only when ``_first_trusted`` also holds: ``_trusted_takeover``);
 # ``more_turn_starts`` is not one of them (a subagent without its header, a Codex child), and trusts only a
 # conversation in ``trusted_conversations``.
 TRUSTED_MAIN_REASONS = frozenset({"new_cli_session", "resumed_cli_session", "compacted", "after_side_request"})
@@ -2590,19 +2590,21 @@ class RewriteEngine:
         self._mismatches.update(found)
         return hints, judged, events
     def _first_trusted(self, key: str) -> bool:
-        """D69: whether the engine's first main conversation is trusted. Only when the engine has no record
-        of an earlier main (a new session), when an earlier engine on this store trusted this conversation
-        (``trusted_conversations``), when the record names it and does not say ``untrusted``, or when this
-        is a Claude Code request in a session id the store had not served before this engine started,
-        with no agent id and no parent (a new CLI session; a store with no served ids counts none as
-        new). Otherwise a restart would
+        """D69: whether the engine's first main conversation is trusted. Only when the store is new (no
+        readable epoch record and no Claude Code session served before this engine started), when an
+        earlier engine on this store trusted this conversation (``trusted_conversations``), when the record
+        names it and does not say ``untrusted``, or when this is a Claude Code request in a session id the
+        store had not served before this engine started, with no agent id and no parent (a new CLI session;
+        a store with no served ids counts none as new). A store that served sessions and has no readable
+        record (a failed record write, a damaged ``epoch.json``, another version's record) is not new: only
+        the list and the new-session test trust there (review B round 8, N21). Otherwise a restart would
         trust whichever conversation reached it first, such as a subagent without its agent id or a Codex
         child, while the user's conversation waits on it (review B round 5, N13); such a first main is not
         trusted until it takes main by a trusted rule, which costs a carry and never gains one."""
         record = self._record
-        if record is None or key in self._trusted_before:
+        if key in self._trusted_before or (record is None and not self._served_before):
             return True
-        if record.get("conversation") == key:
+        if record is not None and record.get("conversation") == key:
             return record.get("untrusted") is not True
         # A record with no served session ids (a store from before D55, an unreadable meta.json) cannot say
         # which session ids are new, so none is (review A round 6, finding 3).
@@ -2614,13 +2616,17 @@ class RewriteEngine:
 
     def _trusted_takeover(self, key: str) -> bool:
         """D69: whether ``key``, which has just taken main from another conversation, is trusted. By a
-        session rule or a compaction (``TRUSTED_MAIN_REASONS``), by ``after_side_request`` only when the
-        first-main rules trust it (``_first_trusted``): after a restart a tool-less side request is main
-        untrusted, and the next conversation seen with a tool list could be a subagent without its agent
-        id (review B round 7, N17). By ``more_turn_starts`` only when an earlier engine trusted it
-        (``trusted_conversations``): the user's conversation retaking main after a restart where something
-        else came first (review A round 7, finding 2)."""
-        if self._main_reason == "after_side_request":
+        compaction (``compacted``). By ``after_side_request``, ``new_cli_session`` or
+        ``resumed_cli_session`` only when the first-main rules trust it (``_first_trusted``), which in a
+        new store's engine they always do: after a restart a tool-less side request is main untrusted, and
+        the next conversation seen with a tool list could be a subagent without its agent id (review B
+        round 7, N17); and the engine knows no session's owner from before it started, so a subagent
+        without its agent id in a session that was cleared before the restart takes main as a new or
+        resumed session (review B round 8, N21). A genuine ``/clear`` after a restart is a session id the
+        store had not served, and a ``/resume`` target is listed. By ``more_turn_starts`` only when an
+        earlier engine trusted it (``trusted_conversations``): the user's conversation retaking main after
+        a restart where something else came first (review A round 7, finding 2)."""
+        if self._main_reason in ("after_side_request", "new_cli_session", "resumed_cli_session"):
             return self._first_trusted(key)
         return self._main_reason in TRUSTED_MAIN_REASONS or key in self._trusted_before
 
