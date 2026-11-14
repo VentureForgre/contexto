@@ -1064,7 +1064,7 @@ def test_the_preamble_base_follows_the_fixed_lines():
     from contexto.store.recall import DEFAULT_LINES
     from contexto.tokens import estimate_tokens
 
-    assert budget.Params().preamble_base == estimate_tokens("\n".join(DEFAULT_LINES)) == 409
+    assert budget.Params().preamble_base == estimate_tokens("\n".join(DEFAULT_LINES)) == 422
 
 
 def test_tool_rounds_are_calibrated_on_live_run_3():

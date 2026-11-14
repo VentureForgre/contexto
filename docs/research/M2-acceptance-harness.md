@@ -321,10 +321,10 @@ KB, head 47,900, bound 150,000, 2 recalls sized by B9 (below).
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,897,436 | 6,581,444 |
+| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,897,982 | 6,582,120 |
 | Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,686,349 | 2,874,353 |
 | Full-context baseline through a plain CLI session (alternative) | 5,060,042 | - |
-| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,583,785** | **9,455,797** |
+| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,584,331** | **9,456,473** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and
