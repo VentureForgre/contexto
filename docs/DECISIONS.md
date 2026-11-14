@@ -2862,8 +2862,11 @@ the owner's delegation. Open decisions are listed at the end with the options an
     files the same way, so a project file Claude Code ignores (one holding `NaN`, say) that turns
     the hints on makes a launch `forwarded`; a repository gains nothing by it that a valid file
     would not give it. A settings file that does not parse (a comment, a trailing comma) refuses
-    only when its text could name a switch (it contains `CLAUDE_CODE_USE_` or a `\u` escape):
-    Claude Code does not load such a file (measured on 2.1.322), so otherwise it turns nothing on.
+    only when its bytes could name a switch (they contain `CLAUDE_CODE_USE_`, a `\u` escape, or a
+    NUL byte, which a wide encoding has): Claude Code does not load such a file (measured on
+    2.1.322), so otherwise it turns nothing on. Claude Code does load UTF-16LE that starts with its
+    byte order mark (measured; a switch on there sent every request to Bedrock), so Contexto reads
+    that encoding too; UTF-16BE, UTF-16LE without the mark and UTF-32 it does not load.
     One more change to the base URL's resolution than the byte order mark and the size bound: a
     settings file nested deeper than 512 levels is unreadable for the bounded loader, so a base URL
     in it is not used and the next file's is; Claude Code would read it. No real settings file nests

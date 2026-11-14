@@ -312,7 +312,7 @@ class SettingsFile(NamedTuple):
     problem: str | None  # why a file that is there could not be read, as "is ..."; else None
     # For a file with a ``problem``: whether it might set a cloud-provider switch. False only for a file
     # that was read whole but is not valid JSON, and whose text neither names ``CLAUDE_CODE_USE_`` nor
-    # holds a ``\u`` escape that could spell it.
+    # holds a NUL byte (a wide encoding hides the name) or a ``\u`` escape that could spell it.
     may_name_provider: bool = True
 
 
@@ -321,7 +321,8 @@ def read_settings_file(path: Path) -> SettingsFile:
 
     Opened without blocking and checked to be a regular file before a byte is read, so a FIFO or a
     device at that path is never read; at most ``SETTINGS_FILE_LIMIT`` bytes; decoded as UTF-8 with a
-    byte order mark accepted, as Claude Code accepts one (measured on 2.1.322, D70); parsed with
+    byte order mark accepted, as Claude Code accepts one, and UTF-16LE read when it starts with its own
+    byte order mark, as Claude Code reads it (both measured on 2.1.322, D70); parsed with
     ``contexto.canonical.loads_bounded``.
 
     ``data`` is the file's JSON object. An empty or blank file, and a document that is not an object,
@@ -360,11 +361,14 @@ def read_settings_file(path: Path) -> SettingsFile:
         return SettingsFile(None, f"is larger than {SETTINGS_FILE_LIMIT // (1024 * 1024)} MiB")
     raw = b"".join(chunks)
     try:
-        text = raw.decode("utf-8-sig")
+        # Claude Code 2.1.322 loads UTF-8, with or without a byte order mark, and UTF-16LE that starts
+        # with one (measured, D70); it does not load UTF-16BE, UTF-16LE without the mark, or UTF-32.
+        text = raw[2:].decode("utf-16-le") if raw.startswith(b"\xff\xfe") else raw.decode("utf-8-sig")
         data = loads_bounded(text) if text.strip() else {}
     except (ValueError, RecursionError):  # UnicodeDecodeError and JSONTooDeepError are ValueErrors
+        # A NUL byte: a wide encoding, in which the switch's name is not the UTF-8 bytes looked for.
         return SettingsFile(None, "is not valid JSON",
-                            PROVIDER_PREFIX.encode() in raw or b"\\u" in raw)
+                            PROVIDER_PREFIX.encode() in raw or b"\\u" in raw or b"\x00" in raw)
     return SettingsFile(data if isinstance(data, dict) else {}, None)
 
 

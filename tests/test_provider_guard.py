@@ -208,6 +208,28 @@ def test_a_file_that_does_not_parse_and_could_name_a_switch_still_refuses(tree, 
     assert found is not None and found.unread
 
 
+@pytest.mark.parametrize("where", ["user", "project"])
+def test_a_utf16le_file_with_a_byte_order_mark_is_read_as_claude_code_reads_it(tree, where):
+    """Reviewer A, round 3 (measured on 2.1.322): Claude Code loads a UTF-16LE settings file that starts
+    with a byte order mark, and with the switch on there it went to Bedrock while the guard, which saw
+    no UTF-8 text naming the switch, let the launch through."""
+    path = tree["home"] / USER if where == "user" else tree["cwd"] / PROJECT
+    write(path, b"\xff\xfe" + env_block('"1"').encode("utf-16-le"))
+    assert places(guard(tree)) == {BEDROCK: (f"settings:{where}",)}
+    off = tree["home"] / "off" / USER
+    write(off, b"\xff\xfe" + env_block('"0"').encode("utf-16-le"))
+    assert upstream.read_settings_file(off) == upstream.SettingsFile({"env": {BEDROCK: "0"}}, None)
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-be", "utf-16-le", "utf-32"])
+def test_a_wide_file_claude_code_does_not_load_still_refuses_when_it_could_name_a_switch(tree, encoding):
+    """UTF-16BE, UTF-16LE without the mark and UTF-32 are not loaded by Claude Code (measured), but the
+    switch's name in them is not the UTF-8 bytes the parse rule looks for; their NUL bytes count."""
+    write(tree["cwd"] / PROJECT, env_block('"1"').encode(encoding))
+    found = guard(tree)
+    assert found is not None and found.unread
+
+
 def test_a_number_past_the_largest_double_reads_as_infinity_and_is_off(tree):
     """Reviewer B, round 2: a JSON integer of 309 or more digits raised OverflowError and the launch
     ended with a traceback. Claude Code reads such a number as Infinity, which is off."""

@@ -10,7 +10,7 @@ The exit codes of the `contexto` commands. The Command column names the subcomma
 | `run` | the CLI's | Claude Code's or Codex's own exit code |
 | `run` | 128 + N | The CLI died from signal N |
 | `run` | 1 | Contexto could not start: the proxy, or the session store (for example a `CONTEXTO_HOME` that exists but cannot be written) |
-| `run` | 2 | Usage error, for example `--bound` above 170,000 or not above the headroom floor (25,000 by default), an invalid `--session` id or one that only starts existing ids, a `CONTEXTO_HOME` that is a file, a `--settings` after `claude`, a cloud-provider switch such as `CLAUDE_CODE_USE_BEDROCK` that is on in the environment or a Claude Code settings file (Claude Code would then bypass Contexto), no Codex key helper, or a Codex upstream that would be Anthropic's API |
+| `run` | 2 | Usage error, for example `--bound` above 170,000 or not above the headroom floor (25,000 by default), an invalid `--session` id or one that only starts existing ids, a `CONTEXTO_HOME` that is a file, a `--settings` after `claude`, a cloud-provider switch such as `CLAUDE_CODE_USE_BEDROCK` that is on in the environment or a Claude Code settings file (Claude Code would then bypass Contexto), a Claude Code settings file Contexto cannot read and that could set such a switch, no Codex key helper, or a Codex upstream that would be Anthropic's API |
 | `run` | 127 | `claude` or `codex` is not on `PATH` (checked before anything starts), or cannot be executed |
 | `run` | 130 | Ctrl+C during the version check or while waiting for another launch to choose its session, before the CLI started |
 | `proxy` | 1 | Could not start: a port in use or not allowed (for example `--port 1`), an invalid upstream, or a `CONTEXTO_HOME` that cannot be written |
