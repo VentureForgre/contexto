@@ -11,7 +11,13 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
-Nothing yet.
+- On Claude Code a long tool loop, in the main conversation or a subagent, no longer goes over the
+  bound: Contexto now pages inside the running turn. Older tool results become stubs that name a
+  page, which `contexto_recall` returns word for word, and the oldest tool rounds of a very long
+  loop fold into one page with a note. What you type mid-turn stays in view. See
+  [docs/in-turn-paging.md](docs/in-turn-paging.md).
+- Codex tool loops are sent as before.
+- `contexto run --no-in-turn-paging` or `CONTEXTO_IN_TURN_PAGING=0` turns it off.
 
 ## 0.5.24 (2026-11-06)
 

@@ -49,10 +49,17 @@ def send(dialect: str, change):
     return upstream.respond("main", client.endpoint, request, last), upstream
 
 
+def loop(rounds: int) -> scripts.Conversation:
+    """``loop120``'s shape with rounds of 60 tokens and no probe, however many rounds."""
+    steps = tuple(scripts.tool_step(scripts.MAIN, 0, i, 60) for i in range(rounds))
+    prompt = "Task 1: " + scripts.prose(f"{scripts.MAIN}/prompt/0", 600)
+    return scripts.Conversation(scripts.MAIN, (scripts.Turn(prompt, (*steps, scripts.final_step(scripts.MAIN, 0, rounds))),))
+
+
 def drive(dialect: str, rounds: int, edit):
     """A whole turn of ``rounds`` rounds where ``edit(i, request)`` edits a deep copy of request ``i``
     before it is sent, as an engine would. Returns the upstream and the replies."""
-    conversation = scripts.loop120(rounds=rounds, result_tokens=60).conversations[0]
+    conversation = loop(rounds)
     client = cli.CLIS[dialect](conversation)
     upstream = FakeUpstream()
     (turn,) = conversation.turns
@@ -233,7 +240,10 @@ def test_a_thinking_block_is_bound_to_what_comes_before_it_in_its_own_message():
     assert send("claude", text_behind)[0].violations == {}
 
 
-def test_moving_the_cache_breakpoint_and_the_prompts_form_change_nothing():
+def test_moving_the_cache_breakpoint_and_the_prompts_form_change_no_content_but_change_the_read():
+    """Content is compared without ``cache_control``, so the request is an append. What the cache
+    reads follows the breakpoints: with its only message breakpoint on the prompt, which no earlier
+    request marked, it reads the head, through the system breakpoint, and nothing after it."""
     def change(request):
         for message in request["messages"]:
             if isinstance(message["content"], list):
@@ -242,9 +252,10 @@ def test_moving_the_cache_breakpoint_and_the_prompts_form_change_nothing():
         request["messages"][0]["content"] = [{"type": "text", "text": request["messages"][0]["content"],
                                               "cache_control": {"type": "ephemeral"}}]
     client, _, replies, _ = play("claude")
-    reply, _ = send("claude", change)
+    reply, upstream = send("claude", change)
     assert reply.violations == {} and not reply.rewrite
-    assert reply.cache_read == replies[-1].input_tokens  # the whole previous request
+    assert reply.cache_read_any == replies[-1].input_tokens  # the whole previous request was sent before
+    assert reply.cache_read == upstream.head_tokens(client.endpoint, client.request()) == 15_101
 
 
 def _edit_thinking_text(request):
@@ -412,9 +423,25 @@ def test_every_messages_kind_has_an_example_above():
                    _edit_thinking_text, lambda r: r["messages"].append("text"), twice,
                    lambda r: r["messages"].insert(0, {"role": "assistant", "content": "Hello."}),
                    lambda r: r["messages"][results(2)]["content"].insert(0, {"type": "text", "text": "x"}),
-                   lambda r: strip_thinking(r["messages"][assistant(2)])):
+                   lambda r: strip_thinking(r["messages"][assistant(2)]), _two_more_breakpoints):
         seen |= set(send("claude", change)[0].violations)
     assert seen == set(MESSAGES_KINDS)
+
+
+def _two_more_breakpoints(request):
+    for r in (0, 1):
+        request["messages"][results(r)]["content"][0]["cache_control"] = {"type": "ephemeral"}
+
+
+def test_at_most_four_breakpoints():
+    """Claude Code marks both system blocks and the newest message; an engine may add one more."""
+    client, _, _, _ = play("claude")
+    marked = [b for b in client.request()["system"] if "cache_control" in b]
+    assert len(marked) == 2
+    one_more = send("claude", lambda r: r["messages"][results(0)]["content"][0].update(cache_control={"type": "ephemeral"}))
+    assert one_more[0].violations == {}
+    reply, upstream = send("claude", _two_more_breakpoints)
+    assert reply.violations == {"too_many_breakpoints": 1} and upstream.rejected == 1
 
 
 # Responses ------------------------------------------------------------------------------------------
@@ -590,12 +617,17 @@ def test_an_edit_cuts_the_cache_at_the_first_changed_item(dialect):
     first = 2 if dialect == "claude" else LEAD + 1  # the items of the first request
     head = replies[0].input_tokens - sum(upstream.tokens(dialect, item) for item in client.items[:first])
     reply = upstream.respond("main", client.endpoint, request, last, appended=client.items[-new:])
-    assert reply.first_changed == k and reply.cache_read == head + kept
+    assert reply.first_changed == k and reply.cache_read_any == head + kept
     assert reply.invalidated == replies[-1].input_tokens - (head + kept)
     again = sum(upstream.tokens(dialect, item) for item in request[field][k:-new])
-    assert reply.resent == again == reply.input_tokens - reply.cache_read - sum(
-        upstream.tokens(dialect, item) for item in client.items[-new:])
-    assert reply.resent < reply.invalidated  # the cleared result is smaller than the original
+    added = sum(upstream.tokens(dialect, item) for item in client.items[-new:])
+    assert reply.resent_any == again == reply.input_tokens - reply.cache_read_any - added
+    assert reply.resent_any < reply.invalidated  # the cleared result is smaller than the original
+    if dialect == "codex":  # automatic prefix caching: the two figures are one
+        assert (reply.cache_read, reply.resent) == (reply.cache_read_any, reply.resent_any)
+    else:  # the newest prefix a breakpoint wrote before the edit ends at round 0's results
+        marked = head + sum(upstream.tokens(dialect, item) for item in client.items[:results(0) + 1])
+        assert reply.cache_read == marked and reply.resent == reply.input_tokens - marked - added
 
 
 @pytest.mark.parametrize("dialect", ["claude", "codex"])
@@ -618,8 +650,10 @@ def test_a_larger_batch_resends_less_though_it_invalidates_the_same(dialect):
         new_tokens = sum(upstream.tokens(dialect, item) for item in new)
         if stubbed == 9:  # the round added since is stubbed too: it counts as it was forwarded
             new_tokens = sum(upstream.tokens(dialect, item) for item in request[field][-len(new):])
-        assert reply.resent == reply.input_tokens - reply.cache_read - new_tokens
-        measured.append((reply.invalidated, reply.resent, replies[-1].input_tokens))
+        assert reply.resent_any == reply.input_tokens - reply.cache_read_any - new_tokens
+        if dialect == "claude":  # the edit is more than 20 blocks before the newest breakpoint: the head only
+            assert reply.cache_read == upstream.head_tokens(client.endpoint, request)
+        measured.append((reply.invalidated, reply.resent_any, replies[-1].input_tokens))
     (invalidated_6, resent_6, previous), (invalidated_9, resent_9, _) = measured
     assert invalidated_6 == invalidated_9 > 0.3 * previous
     assert resent_9 < 0.5 * resent_6 < 0.25 * invalidated_6
@@ -652,8 +686,97 @@ def test_a_request_that_only_drops_the_previous_requests_tail_is_a_rewrite():
     request = copy.deepcopy(client.request())
     del request["messages"][assistant(1):]  # round 1, sent before, and round 2 are gone
     reply = upstream.respond("main", client.endpoint, request, last)
-    assert reply.first_changed == assistant(1) and reply.resent == 0
+    assert reply.first_changed == assistant(1) and reply.resent_any == 0
     assert reply.invalidated == replies[-1].input_tokens - reply.input_tokens
+    # The newest message's breakpoint went with round 2: only the system breakpoint is left to read at.
+    head = upstream.head_tokens(client.endpoint, request)
+    assert reply.cache_read == head and reply.resent == reply.input_tokens - head
+
+
+# The Messages cache, by breakpoints -----------------------------------------------------------------------
+#
+# Block positions in play("claude")'s requests: the prompt 0, the environment message 1, then round r's
+# thinking at 2 + 3r, its tool_use at 3 + 3r and its tool_result at 4 + 3r. Claude Code's breakpoints:
+# both system blocks and the newest message's last block.
+
+HEAD = 15_101
+
+
+def _history_after(rounds: int) -> list[dict]:
+    """The CLI's history after ``rounds`` rounds of 60 tokens, as the upstream answered them."""
+    conversation = loop(rounds)
+    client = cli.ClaudeCode(conversation)
+    upstream = FakeUpstream()
+    (turn,) = conversation.turns
+    client.prompt(turn)
+    for step in turn.steps[:-1]:
+        client.take(upstream.respond("main", client.endpoint, client.request(), step).output, step)
+    return client.history
+
+
+def _tokens(messages: list[dict]) -> int:
+    upstream = FakeUpstream()
+    return sum(upstream.tokens("claude", m) for m in messages)
+
+
+def _stub_round_1(rounds: int):
+    def edit(i, request):
+        if i == rounds:  # the turn's last request, after every round
+            request["messages"][results(1)]["content"][0]["content"] = STUB
+    return edit
+
+
+def test_a_breakpoint_reads_a_prefix_up_to_20_blocks_before_it_and_no_further():
+    """After round 1's result is stubbed, the newest prefix a breakpoint wrote that is still intact ends
+    at round 0's result (block 4). The newest message's breakpoint is at block 3n + 1 after n rounds:
+    18 blocks after it for 7 rounds, 21 for 8."""
+    _, replies = drive("claude", 7, _stub_round_1(7))
+    assert replies[-1].first_changed == results(1)
+    assert replies[-1].cache_read == HEAD + _tokens(_history_after(7)[:results(0) + 1])
+    _, replies = drive("claude", 8, _stub_round_1(8))
+    assert replies[-1].cache_read == HEAD  # the system breakpoint's read
+    assert replies[-1].cache_read_any == HEAD + _tokens(_history_after(8)[:results(1)])
+
+
+def test_a_breakpoint_the_engine_keeps_at_a_stable_position_is_read_after_a_rewrite_behind_it():
+    """A breakpoint on the requests before the rewrite, at the block where the kept prefix will end,
+    writes that prefix; the rewrite request reads it back however far its newest breakpoint is."""
+    stable = assistant(0)  # round 0's tool_use, block 3; the rewrite stubs round 1's result
+
+    def edit(mark):
+        def change(i, request):
+            if mark and i >= 1:
+                request["messages"][stable]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+            if i == 14:  # with rounds 2 to 13 stripped, the newest breakpoint is 27 blocks after round 0's result
+                request["messages"][results(1)]["content"][0]["content"] = STUB
+                for r in range(2, 14):  # the batch's rule: thinking from the first change on goes
+                    strip_thinking(request["messages"][assistant(r)])
+        return change
+
+    _, marked = drive("claude", 14, edit(True))
+    _, unmarked = drive("claude", 14, edit(False))
+    history = _history_after(14)
+    assert marked[-1].first_changed == unmarked[-1].first_changed == results(1)
+    assert marked[-1].cache_read == HEAD + _tokens(history[:stable + 1]) < marked[-1].cache_read_any
+    assert unmarked[-1].cache_read == HEAD
+    assert marked[-1].resent < unmarked[-1].resent
+    assert [r.violations for r in marked] == [{}] * 15  # four breakpoints: two system, the stable one, the newest
+
+
+def test_a_new_prompt_merged_into_another_message_is_not_counted_as_re_sent():
+    """At a turn start the engine may join the new prompt to the message it puts first (the paged
+    history's index). The prompt is new, wherever it is placed."""
+    client, upstream, replies, last = play("claude", finish=True)
+    client.history.append({"role": "user", "content": "Next task: tidy the store module."})
+    request = copy.deepcopy(client.request())
+    index = {"role": "user", "content": [{"type": "text", "text": "[index of paged turns]"},
+                                         {"type": "text", "text": "Next task: tidy the store module."}]}
+    request["messages"] = [index]
+    reply = upstream.respond("main", client.endpoint, request, scripts.Step("thinking"),
+                             appended=client.history[-1:])
+    prompt = upstream.tokens("claude", client.history[-1])
+    assert reply.first_changed == 0
+    assert reply.resent_any == reply.input_tokens - reply.cache_read_any - prompt
 
 
 def test_wire_bytes_are_the_request_as_the_proxy_writes_it():

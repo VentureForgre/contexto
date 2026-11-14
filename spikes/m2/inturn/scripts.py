@@ -157,6 +157,7 @@ class Call:
     tail: str = ""
     images: tuple[Image, ...] = ()
     texts: tuple[str, ...] = ()  # a Contexto tool's reply, block by block, as its handler returned it
+    parts: bool = False  # exec only: Codex returns the output as a list of input_text parts, not a string
 
 
 @dataclass(frozen=True)
@@ -255,20 +256,20 @@ def _arg(tool: str, seed: str) -> str:
 
 
 def scripted_call(conversation: str, turn: int, step: object, n: int, tool: str, tokens: int,
-                  images: tuple[Image, ...] = ()) -> Call:
+                  images: tuple[Image, ...] = (), parts: bool = False) -> Call:
     seed = f"{conversation}/{turn}/{step}" + (f"/{n}" if n else "")
     kind = "bash" if tool in ("screenshot", "exec") else tool
     text, head, tail = result_text(kind, seed, tokens)
-    return Call(call_key(conversation, turn, step, n), tool, _arg(tool, seed), text, head, tail, images)
+    return Call(call_key(conversation, turn, step, n), tool, _arg(tool, seed), text, head, tail, images, parts=parts)
 
 
 def tool_step(conversation: str, turn: int, step: int, tokens: int, *, thinking: int = 220,
               tool: str | None = None, images: tuple[Image, ...] = (), notice: str = "", parallel: int = 1,
-              reminder: str = "") -> Step:
+              reminder: str = "", parts: bool = False) -> Step:
     """A round: short thinking, ``parallel`` tool calls, and a result of ``tokens`` tokens for each."""
     seed = f"{conversation}/{turn}/{step}"
     calls = tuple(scripted_call(conversation, turn, step, n, tool or TOOL_CYCLE[(step + n) % len(TOOL_CYCLE)],
-                                tokens, images if n == 0 else ()) for n in range(parallel))
+                                tokens, images if n == 0 else (), parts) for n in range(parallel))
     return Step(thinking_text(seed, thinking), calls=calls, notice=notice, reminder=reminder)
 
 
@@ -371,17 +372,24 @@ def mixed(rounds: int = 45, single_tokens: int = 4_000, parallel_tokens: int = 2
     """The round shapes the other loops lack. Every third round makes three tool calls, answered in one
     message (Codex: three calls, then three outputs). One round in four has a ``<system-reminder>`` text
     block after its results (Claude Code only). One round in five runs Codex's code-mode ``exec``, a
-    ``custom_tool_call`` with a ``custom_tool_call_output`` (on Claude Code the same command through Bash)."""
+    ``custom_tool_call`` with a ``custom_tool_call_output`` (on Claude Code the same command through Bash);
+    the second, fourth and so on of those return their output as a list of ``input_text`` parts, the
+    others as a string."""
     steps = []
+    execs = 0
     for i in range(rounds):
         reminder = REMINDER if i % 4 == 2 else ""
         if i % 3 == 0:
             steps.append(tool_step(MAIN, 0, i, parallel_tokens, parallel=3, reminder=reminder))
+        elif i % 5 == 1:
+            steps.append(tool_step(MAIN, 0, i, single_tokens, tool="exec", reminder=reminder, parts=execs % 2 == 1))
+            execs += 1
         else:
-            steps.append(tool_step(MAIN, 0, i, single_tokens, tool="exec" if i % 5 == 1 else None, reminder=reminder))
+            steps.append(tool_step(MAIN, 0, i, single_tokens, reminder=reminder))
     counts = {"parallel_rounds": sum(1 for s in steps if len(s.calls) > 1),
               "reminders": sum(1 for s in steps if s.reminder),
-              "exec_rounds": sum(1 for s in steps if s.calls[0].tool == "exec")}
+              "exec_rounds": sum(1 for s in steps if s.calls[0].tool == "exec"),
+              "exec_parts_rounds": sum(1 for s in steps if s.calls[0].parts)}
     steps = with_probes(MAIN, 0, steps, probe_points(rounds))
     turn = Turn("Task 1: " + prose("mixed/prompt", 600), (*steps, final_step(MAIN, 0, rounds)))
     return Scenario("mixed", (Conversation(MAIN, (turn,)),),

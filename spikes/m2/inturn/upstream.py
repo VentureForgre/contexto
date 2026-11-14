@@ -19,6 +19,8 @@ Messages API (``docs/research/M0-interception.md``, "Constraints"; contract rule
   Text after the results is valid (Claude Code puts reminders there).
 - ``first_message_not_user``: the first message that is not a role ``system`` one is not a user message.
 - ``empty_content``: a user or assistant message with no content, or a text block with no text.
+- ``too_many_breakpoints``: more than 4 blocks carry ``cache_control`` (``tools``, ``system`` and the
+  messages' top-level blocks together; "at most 4 breakpoints", M0-interception.md, "Prompt caching").
 - ``system_before_first_user``: a role ``system`` message before the first user message (measured 400).
 - ``thinking_binding``: a thinking block whose prefix changed. On 5.x models "nothing before the
   thinking block" may change: ``system``, ``tools``, the earlier messages, and the blocks ahead of it
@@ -65,15 +67,25 @@ Counted as information (``info``), per request:
   research records it as valid (the strip was a removal from the end when it was made; the later
   blocks are appends); no live run has confirmed it inside a tool loop.
 
-The prompt cache: ``cache_read`` is the longest prefix (the head, then item by item, on the JSON with
-``cache_control`` ignored and a string ``content`` read as one text block) that an earlier request of
-the same conversation began with. There is no minimum length, no expiry, no limit on breakpoints and
-no 20-block lookback.
+The prompt cache. Prefixes are compared on the JSON with ``cache_control`` ignored and a string
+``content`` read as one text block. There is no minimum length and no expiry.
+
+- Messages (breakpoints, as the API caches): a request writes one entry at each block that carries
+  ``cache_control``: the prefix up to and including that block (``tools`` blocks, then ``system``
+  blocks, then each message's top-level content blocks, in that order). It reads, for each of its own
+  breakpoints, the longest stored prefix that ends at that block or at one of the 20 blocks before it
+  (the 20-block lookback); ``cache_read`` is the longest of those. A prefix that no earlier request
+  marked is never read, however often it was sent.
+- Responses (automatic prefix caching): ``cache_read`` is the longest prefix, the head then item by
+  item, that an earlier request of the same conversation began with.
+- ``cache_read_any`` is the Responses rule on either API: on Messages it is an upper bound on the
+  read, and the re-sent count it gives (``resent_any``) a lower bound.
 
 Two numbers describe a prefix rewrite. ``invalidated`` is the previous request's tokens from its first
 changed item to its end: the cache the rewrite threw away. ``resent`` is what the rewrite cost: the
 request's uncached tokens less the tokens of the items the CLI added since its previous request (an
-added item counts as the engine forwarded it, when that is smaller).
+added item counts as the engine forwarded it, when that is smaller; one the engine merged into another
+message, such as a new prompt joined to an index message, counts in full when all its text is there).
 """
 
 from __future__ import annotations
@@ -88,7 +100,7 @@ from typing import Any, NamedTuple
 
 from inturn import cli
 from inturn.scripts import Step, digest
-from inturn.tokenizer import block_tokens, canonical, dumps, item_tokens, message_tokens, value_tokens
+from inturn.tokenizer import ITEM_TOKENS, block_tokens, canonical, dumps, item_tokens, message_tokens, value_tokens
 
 KEY = b"inturn fake upstream: not a secret"
 THINKING_TYPES = ("thinking", "redacted_thinking")
@@ -97,12 +109,14 @@ HOSTED_CALL_TYPES = frozenset({"web_search_call", "file_search_call", "image_gen
 MODEL_ROLES = ("assistant", "call", "hosted")
 MESSAGES_KINDS = ("tool_use_without_result", "tool_result_without_use", "duplicate_tool_use",
                   "duplicate_tool_result", "text_before_tool_result", "first_message_not_user", "empty_content",
-                  "system_before_first_user", "thinking_binding", "thinking_modified",
+                  "too_many_breakpoints", "system_before_first_user", "thinking_binding", "thinking_modified",
                   "thinking_removed_outside_rewrite", "not_an_object")
 RESPONSES_KINDS = ("call_without_output", "call_with_several_outputs", "output_without_call",
                    "output_kind_mismatch", "duplicate_call", "reasoning_without_following", "reasoning_modified",
                    "reasoning_removed_outside_rewrite", "not_an_object")
 NO_BLOCKS = b"[]"
+MAX_BREAKPOINTS = 4
+LOOKBACK = 20  # Messages: blocks before a breakpoint at which a stored prefix is still found
 
 
 def _sha(data: bytes) -> bytes:
@@ -149,6 +163,12 @@ class Item(NamedTuple):
     empty: bool
     misplaced: bool  # Messages: a block of another kind ahead of a tool_result
     reasoning: str  # a Responses reasoning item's id
+    # Messages, per top-level content block: a hash of the message's other fields and its blocks up to
+    # this one, the message's tokens up to this one (its 4 per-message tokens on the first), and
+    # whether the block carries cache_control. Responses: empty.
+    partials: tuple[bytes, ...] = ()
+    cums: tuple[int, ...] = ()
+    marks: tuple[bool, ...] = ()
 
 
 class _Head(NamedTuple):
@@ -156,6 +176,9 @@ class _Head(NamedTuple):
     tokens: int
     marked: bool
     wire: dict[str, int]  # per head field, its bytes as sent
+    # Messages: per block of tools then system, a hash of the head up to it, the head's tokens up to it,
+    # and whether it carries cache_control. Responses: empty.
+    positions: tuple[tuple[bytes, int, bool], ...] = ()
 
 
 class _Sent(NamedTuple):
@@ -175,7 +198,7 @@ class Reply(NamedTuple):
     tool_calls: bool
     call_ids: tuple[str, ...]
     input_tokens: int
-    cache_read: int
+    cache_read: int  # Messages: by breakpoints. Responses: the longest prefix sent before
     wire_bytes: int
     first_changed: int | None  # a prefix rewrite: the index of the first item that differs from the previous request
     invalidated: int | None  # a prefix rewrite: the previous request's tokens from that item to its end
@@ -183,10 +206,21 @@ class Reply(NamedTuple):
     latest_missing: bool  # the newest response of the turn in flight arrived without its thinking
     violations: dict[str, int]  # this request's, by kind
     items: list[Item]  # the request's items as read
+    cache_read_any: int = 0  # the longest prefix any earlier request of the conversation sent (both APIs)
+    resent_any: int | None = None  # resent with cache_read_any: on Messages, a lower bound
+    output_tokens: int = 0
 
     @property
     def rewrite(self) -> bool:
         return self.first_changed is not None
+
+
+def _texts(item: Any) -> list[str]:
+    """The texts a message or input item holds: a string content, or its text and input_text parts."""
+    content = item.get("content") if isinstance(item, dict) else None
+    if isinstance(content, str):
+        return [content] if content else []
+    return [b["text"] for b in content or [] if isinstance(b, dict) and isinstance(b.get("text"), str) and b["text"]]
 
 
 class _Emitted(NamedTuple):
@@ -206,6 +240,7 @@ class FakeUpstream:
         self._pinned_heads: dict[tuple, tuple[list, _Head]] = {}  # and its head values (see pin_head)
         self._sent: dict[str, _Sent] = {}
         self._cached: dict[str, set[bytes]] = {}  # per conversation: a hash of each prefix it has sent
+        self._marked: dict[str, set[bytes]] = {}  # per conversation, Messages: the prefixes written at breakpoints
         self._emitted: dict[str, list[_Emitted]] = {}  # per conversation: every response, in order
         self._loop_start: Counter[str] = Counter()  # per conversation: the first response of the turn in flight
         self._covered: dict[str, set[int]] = {}  # per conversation: the responses a prefix rewrite covers
@@ -240,11 +275,21 @@ class FakeUpstream:
         returned = [b for b in blocks if b.get("type") == "tool_result" and isinstance(b.get("tool_use_id"), str)]
         kinds = [b.get("type") for b in blocks]
         last = max((i for i, kind in enumerate(kinds) if kind == "tool_result"), default=-1)
+        sent_blocks = message.get("content") if isinstance(message.get("content"), list) else every
+        partial = _sha(dumps({k: v for k, v in plain.items() if k != "content"}).encode())
+        partials, cums, marks, running = [], [], [], ITEM_TOKENS
+        for block, sent_block in zip(every, sent_blocks):
+            partial = _sha(partial + _sha(dumps(block).encode()))
+            running += block_tokens(block)
+            partials.append(partial)
+            cums.append(running)
+            marks.append(isinstance(sent_block, dict) and "cache_control" in sent_block)
         item = Item(role, "", full, bare, message_tokens(plain), len(raw.encode()), marked,
                     tuple(b["id"] for b in blocks if b.get("type") == "tool_use" and isinstance(b.get("id"), str)),
                     tuple(b["tool_use_id"] for b in returned),
                     tuple(_sha(canonical(b.get("content")).encode()) for b in returned),
-                    tuple(thinking), empty, any(kind != "tool_result" for kind in kinds[:last + 1]), "")
+                    tuple(thinking), empty, any(kind != "tool_result" for kind in kinds[:last + 1]), "",
+                    tuple(partials), tuple(cums), tuple(marks))
         self._items[True, raw] = item
         return item
 
@@ -338,10 +383,29 @@ class FakeUpstream:
         plain = [without_cache_control(v) for v in values]
         head = _Head(_sha(dumps(dict(zip(fields, plain))).encode()), sum(value_tokens(v) for v in plain),
                      any('"cache_control"' in text for text in raw.values()),
-                     {f: len(text.encode()) for f, text in raw.items() if f in request})
+                     {f: len(text.encode()) for f, text in raw.items() if f in request},
+                     self._head_positions(values, plain) if claude else ())
         if pin:
             self._pinned_heads[key] = (values, head)
         return head
+
+    @staticmethod
+    def _head_positions(values: list, plain: list) -> tuple[tuple[bytes, int, bool], ...]:
+        """The Messages head's blocks, ``tools`` then ``system``: the hash of the head up to each, its
+        tokens up to each, and whether it carries ``cache_control``. A string ``system`` is one block."""
+        positions = []
+        key, before = _sha(b"head"), 0
+        for raw, value in zip(values, plain):  # tools, then system
+            if isinstance(value, list):
+                for n, block in enumerate(value):
+                    key = _sha(key + _sha(dumps(block).encode()))
+                    positions.append((key, before + value_tokens(value[:n + 1]),
+                                      isinstance(raw[n], dict) and "cache_control" in raw[n]))
+            elif value is not None:
+                key = _sha(key + _sha(dumps(value).encode()))
+                positions.append((key, before + value_tokens(value), False))
+            before += value_tokens(value)
+        return tuple(positions)
 
     def pin_head(self, endpoint: str, request: dict) -> None:
         """Read the CLI's own head values once, on the same condition as ``pin``."""
@@ -407,9 +471,11 @@ class FakeUpstream:
         if content is not None:
             covered.update(e for e, (index, _) in enumerate(where) if index is None or index >= content)
         outside = sum(1 for e, (_, kept) in enumerate(where) if emitted[e].thinking and not kept and e not in covered)
+        marks = self._breakpoints(head, items) if claude else []
         if claude:
             self._check_messages(items, bare, found)
             found["thinking_removed_outside_rewrite"] = outside
+            found["too_many_breakpoints"] = int(len(marks) > MAX_BREAKPOINTS)
         else:
             self._check_responses(items, found)
             found["reasoning_removed_outside_rewrite"] = outside
@@ -421,7 +487,7 @@ class FakeUpstream:
         for kind in found:
             self.violations[kind] += 1
 
-        # The cache: every prefix an earlier request of the conversation began with can be read.
+        # The cache. Any prefix: every prefix an earlier request of the conversation began with.
         cached = self._cached.setdefault(conversation, set())
         low, high = -1, len(chain) - 1  # the largest i with chain[i] cached; the set is prefix-closed
         while low < high:
@@ -430,12 +496,22 @@ class FakeUpstream:
                 low = middle
             else:
                 high = middle - 1
-        cache_read = totals[low] if low >= 0 else 0
+        cache_read_any = totals[low] if low >= 0 else 0
         cached.update(chain[low + 1:])
+        written = 0
+        if claude:  # breakpoints: see the module's docstring
+            stored = self._marked.setdefault(conversation, set())
+            cache_read = max((self._lookup(head, items, chain, totals, mark, stored) for mark in marks), default=0)
+            stored.update(self._key(head, items, chain, mark) for mark in marks)
+            written = max((self._tokens(head, items, totals, mark) for mark in marks), default=0)
+        else:
+            cache_read = cache_read_any
         total = totals[-1]
-        resent = None
+        resent = resent_any = None
         if first is not None:
-            resent = max(0, total - cache_read - self._new_tokens(claude, items, appended))
+            new = self._new_tokens(claude, items, appended, sent)
+            resent = max(0, total - cache_read - new)
+            resent_any = max(0, total - cache_read_any - new)
         self._sent[conversation] = _Sent(digests, chain, bares, bare, totals, [b for _, b in plain])
 
         n = len(emitted)
@@ -443,8 +519,6 @@ class FakeUpstream:
             output = self._messages_reply(step, bare[-1])
             answer = _Emitted(tuple(b["id"] for b in output if b["type"] == "tool_use"), "1" if step.thinking else "",
                               self.message({"role": "assistant", "content": output}).bare)
-            marks = [i for i, item in enumerate(items) if item.marked]
-            written = totals[marks[-1] + 1] if marks else (totals[0] if head.marked else 0)
             creation = max(0, written - cache_read)
             usage = {"input_tokens": total - cache_read - creation, "cache_read_input_tokens": cache_read,
                      "cache_creation_input_tokens": creation, "output_tokens": sum(block_tokens(b) for b in output)}
@@ -461,7 +535,50 @@ class FakeUpstream:
             self._loop_start[conversation] = len(emitted)  # the turn is over
         return Reply(output, usage, bool(answer.call_ids), answer.call_ids, total, cache_read,
                      self._wire(request, field, head, items), first, invalidated, resent, latest_missing,
-                     dict(found), items)
+                     dict(found), items, cache_read_any, resent_any, usage["output_tokens"])
+
+    # The Messages cache's positions ------------------------------------------------------------------
+    #
+    # A position is (i, j): block j of message i, or of the head when i is -1.
+
+    @staticmethod
+    def _breakpoints(head: _Head, items: list[Item]) -> list[tuple[int, int]]:
+        marks = [(-1, j) for j, (_, _, marked) in enumerate(head.positions) if marked]
+        return marks + [(i, j) for i, item in enumerate(items) if item.marked for j, m in enumerate(item.marks) if m]
+
+    @staticmethod
+    def _key(head: _Head, items: list[Item], chain: list[bytes], at: tuple[int, int]) -> bytes:
+        i, j = at
+        return head.positions[j][0] if i < 0 else _sha(chain[i] + items[i].partials[j])
+
+    @staticmethod
+    def _tokens(head: _Head, items: list[Item], totals: list[int], at: tuple[int, int]) -> int:
+        i, j = at
+        return head.positions[j][1] if i < 0 else totals[i] + items[i].cums[j]
+
+    @staticmethod
+    def _before(head: _Head, items: list[Item], at: tuple[int, int]) -> tuple[int, int] | None:
+        i, j = at
+        if j > 0:
+            return i, j - 1
+        while i > 0:
+            i -= 1
+            if items[i].partials:
+                return i, len(items[i].partials) - 1
+        return (-1, len(head.positions) - 1) if i == 0 and head.positions else None
+
+    def _lookup(self, head: _Head, items: list[Item], chain: list[bytes], totals: list[int],
+                mark: tuple[int, int], stored: set[bytes]) -> int:
+        """The tokens one breakpoint reads: the longest stored prefix ending at it or within the
+        ``LOOKBACK`` blocks before it; 0 when there is none."""
+        at: tuple[int, int] | None = mark
+        for _ in range(LOOKBACK + 1):
+            if at is None:
+                return 0
+            if self._key(head, items, chain, at) in stored:
+                return self._tokens(head, items, totals, at)
+            at = self._before(head, items, at)
+        return 0
 
     @staticmethod
     def _chain(seed: bytes, digests: list[bytes], previous: tuple[list[bytes], list[bytes]] | None) -> list[bytes]:
@@ -478,15 +595,18 @@ class FakeUpstream:
             chain.append(_sha(chain[-1] + item))
         return chain
 
-    def _new_tokens(self, claude: bool, items: list[Item], appended: Sequence[dict]) -> int:
+    def _new_tokens(self, claude: bool, items: list[Item], appended: Sequence[dict], sent: Sequence[Any]) -> int:
         """Tokens of the items the CLI added since its previous request, each as the engine forwarded it
         when that is smaller. An added item is found again by its content, else by the tool call it
-        makes or answers; one that cannot be found counts as 0."""
+        makes or answers, else, when the engine merged it into another message, by its text: if every
+        text it holds is in the forwarded request, it counts in full. One that cannot be found counts
+        as 0."""
         by_digest = {item.digest: item for item in items}
         by_bare = {item.bare: item for item in items}
         by_use = {use: item for item in items for use in item.uses}
         by_result = {result: item for item in items for result in item.results}
         total = 0
+        forwarded: str | None = None
         for raw in appended:
             own = self.read(claude, raw)
             match = (by_digest.get(own.digest) or by_bare.get(own.bare)
@@ -494,6 +614,12 @@ class FakeUpstream:
                      or (by_result.get(own.results[0]) if own.results else None))
             if match is not None:
                 total += min(own.tokens, match.tokens)
+                continue
+            texts = _texts(raw)
+            if texts:
+                forwarded = "\n".join(dumps(i) for i in sent) if forwarded is None else forwarded
+                if all(dumps(text)[1:-1] in forwarded for text in texts):
+                    total += own.tokens
         return total
 
     # Where the model's responses are in a request -------------------------------------------------

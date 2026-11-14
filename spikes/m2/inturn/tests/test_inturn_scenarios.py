@@ -40,7 +40,7 @@ SIZES = {
     ("multiturn", "claude"): {"requests": 120, "rounds": 110, "probes": 2, "calls": 110, "result_tokens": 519_070, "largest_result": 5_037, "images": 0},
     ("multiturn", "codex"): {"requests": 120, "rounds": 110, "probes": 2, "calls": 110, "result_tokens": 519_186, "largest_result": 5_039, "images": 0},
     ("mixed", "claude"): {"requests": 50, "rounds": 45, "probes": 2, "calls": 75, "result_tokens": 230_775, "largest_result": 4_037, "images": 0},
-    ("mixed", "codex"): {"requests": 50, "rounds": 45, "probes": 2, "calls": 75, "result_tokens": 230_863, "largest_result": 4_040, "images": 0},
+    ("mixed", "codex"): {"requests": 50, "rounds": 45, "probes": 2, "calls": 75, "result_tokens": 230_905, "largest_result": 4_054, "images": 0},
 }
 FULL_SMALL = {
     "claude": {"requests": 1_505, "rounds": 1_500, "probes": 2, "calls": 1_500, "result_tokens": 655_500, "largest_result": 437, "images": 0},
@@ -62,7 +62,7 @@ SCRIPTED = {
     ("multiturn", "claude"): {"main": 558_219},
     ("multiturn", "codex"): {"main": 558_140},
     ("mixed", "claude"): {"main": 257_772},
-    ("mixed", "codex"): {"main": 256_043},
+    ("mixed", "codex"): {"main": 256_085},
 }
 
 
@@ -158,10 +158,11 @@ def test_the_subagent_has_contextos_tools_and_cannot_launch_an_agent():
 def test_the_mixed_scenario_has_the_round_shapes_the_other_loops_lack():
     scenario = scripts.build("mixed")
     assert scenario.size == {"rounds": 45, "single_tokens": 4_000, "parallel_tokens": 2_400, "parallel_rounds": 15,
-                             "reminders": 11, "exec_rounds": 6}
+                             "reminders": 11, "exec_rounds": 6, "exec_parts_rounds": 3}
     (turn,) = scenario.conversations[0].turns
     parallel = next(step for step in turn.steps if len(step.calls) == 3 and step.reminder)
     custom = next(step for step in turn.steps if step.calls and step.calls[0].tool == "exec")
+    parts = next(step for step in turn.steps if step.calls and step.calls[0].parts)
     claude, codex = cli.ClaudeCode(scenario.conversations[0]), cli.Codex(scenario.conversations[0])
     _, results = claude.take([cli.claude_tool_use(call) for call in parallel.calls], parallel)
     assert [block["type"] for block in results["content"]] == ["tool_result"] * 3 + ["text"]  # one message
@@ -171,6 +172,36 @@ def test_the_mixed_scenario_has_the_round_shapes_the_other_loops_lack():
     added = codex.take([cli.codex_call(call) for call in custom.calls], custom)
     assert [item["type"] for item in added] == ["custom_tool_call", "custom_tool_call_output"]
     assert added[0]["name"] == "exec" and own_call_ids(added) == set()  # an exec that is not one of Contexto's
+    assert isinstance(added[1]["output"], str)
+    # Code mode's other output form (tests/test_own_tool_echo.py): the text as a list of input_text parts.
+    added = codex.take([cli.codex_call(call) for call in parts.calls], parts)
+    assert added[1]["type"] == "custom_tool_call_output"
+    assert added[1]["output"] == [{"type": "input_text", "text": parts.calls[0].result}]
+    assert claude.take([cli.claude_tool_use(call) for call in parts.calls], parts)[1]["content"][0]["content"] == (
+        parts.calls[0].result)  # Claude Code: a Bash result, a string
+
+
+def test_claude_code_marks_both_system_blocks_and_the_newest_message_whatever_its_role():
+    """Where Claude Code puts ``cache_control`` (cli.py's docstring gives the captures): a role
+    ``system`` message that is the newest one carries it, as the session start and the task notice do."""
+    main, _ = scripts.build("subagent", tiny=True).conversations
+    client = cli.ClaudeCode(main)
+    client.prompt(main.turns[0])
+    request = client.request()
+    assert [("cache_control" in block) for block in request["system"]] == [True, True]
+    assert "cache_control" not in str(request["tools"])
+    assert [m["role"] for m in request["messages"]] == ["user", "system"]
+    assert "cache_control" in request["messages"][-1]["content"][-1]
+    assert "cache_control" not in str(request["messages"][0])
+    assert "cache_control" not in str(client.history)  # the CLI's own history keeps none
+    step = next(s for s in main.turns[0].steps if s.notice)
+    client.take([cli.claude_tool_use(call) for call in step.calls], step)
+    messages = client.request()["messages"]
+    assert messages[-1]["role"] == "system" and "cache_control" in messages[-1]["content"][-1]
+    assert sum(str(m).count("cache_control") for m in messages) == 1
+    codex = cli.Codex(main)
+    codex.prompt(main.turns[0])
+    assert "cache_control" not in str(codex.request())
 
 
 def test_the_engine_reads_the_requests_as_claude_codes_and_codexs():
@@ -281,7 +312,8 @@ def test_the_subagents_requests_publish_side_rooms_and_mains_the_turn_room():
 @pytest.mark.parametrize(("name", "dialect"), CASES)
 def test_two_runs_give_identical_numbers(name, dialect):
     """On a tiny build of each scenario, which also serializes every forwarded request to prove the
-    byte count."""
+    byte count. (No probe reaches a page here; ``test_inturn_engines.py`` runs the toy pager twice for
+    that.)"""
     scenario = scripts.build(name, tiny=True)
     first = harness.run(scenario, dialect, check_wire=True).metrics()
     assert first == harness.run(scenario, dialect).metrics()
@@ -327,6 +359,15 @@ def test_the_command_prints_the_tables_and_writes_the_same_numbers(tmp_path):
     assert json.loads(out.read_text()) == {"runs": [expected]}
     assert done.stdout.rstrip("\n") == replay.tables([expected])
     assert done.stdout.count("| large | codex |") == 4
+
+
+def test_the_command_holds_the_toy_pager_to_the_targets(tmp_path):
+    """``--engine toy`` is how the note's toy table is made, at the target tests' sizes; ``large`` is the
+    quickest of them."""
+    done = subprocess.run([sys.executable, str(REPLAY), "--engine", "toy", "--scenario", "large", "--dialect", "claude"],
+                          capture_output=True, text=True, timeout=120, check=False)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.rstrip("\n").endswith("| large | claude | none |")
 
 
 def test_the_command_refuses_an_unknown_scenario(capsys):

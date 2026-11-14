@@ -3,8 +3,14 @@ unmodified, on every request. Nothing the engine forwards is ever fed back into 
 
 Shapes follow the ones measured in this repository: Claude Code 2.1.318 (``contexto.rewrite``,
 ``spikes/m2/subagents``) and codex-cli 0.166.0 (``contexto.codex``, ``docs/research/M2-codex-adapter.md``).
-The heads are sized like measured ones (15,101 tokens for Claude Code's main conversation, 13,537 for
+The heads are sized like measured ones (15,101 tokens for Claude Code's main conversation, 13,538 for
 Codex, by the fake upstream's tokenizer); their text is filler.
+
+Claude Code's cache breakpoints are where it puts them: ``cache_control`` on both ``system`` blocks
+(``docs/research/M0-interception.md``: "two system blocks and one message block") and on the last
+block of the newest message, whatever its role: a role ``system`` message included
+(``tests/fixtures/subagent_shapes_2_1_31x.json``; ``docs/research/M0-proxy-measurements.md``, the
+breakpoint on ``messages[1]`` on the first turn). Codex sends none: its cache is automatic.
 """
 
 from __future__ import annotations
@@ -61,7 +67,8 @@ def claude_tools(agent: bool) -> list[dict]:
 
 def claude_system(agent: bool) -> list[dict]:
     body = prose("system/agent" if agent else "system/main", 9_000 if agent else 15_500)
-    return [{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
+    return [{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+             "cache_control": EPHEMERAL},
             {"type": "text", "text": body, "cache_control": EPHEMERAL}]
 
 
@@ -153,8 +160,7 @@ class ClaudeCode:
 
     def request(self) -> dict:
         messages = list(self.history)
-        last = next(i for i in range(len(messages) - 1, -1, -1) if messages[i]["role"] == "user")  # not a notice
-        messages[last] = _with_breakpoint(messages[last])
+        messages[-1] = _with_breakpoint(messages[-1])  # the newest message, a notice included
         return {"model": CLAUDE_MODEL, "max_tokens": 32_000, "stream": True, "thinking": {"type": "adaptive"},
                 "metadata": self.metadata, "system": self.system, "tools": self.tools, "messages": messages}
 
@@ -241,6 +247,8 @@ def codex_output(call: Call) -> dict:
     output: Any = "\n".join(call.texts) if call.texts else call.result
     if call.images:
         output = [{"type": "input_text", "text": call.result}, *(codex_image(i) for i in call.images)]
+    elif call.parts:  # code mode's other form: the text as input_text parts (tests/test_own_tool_echo.py)
+        output = [{"type": "input_text", "text": call.result}]
     custom = call.tool == "exec" or call.tool.startswith("contexto_")
     return {"type": "custom_tool_call_output" if custom else "function_call_output",
             "call_id": codex_call_id(call.key), "output": output}

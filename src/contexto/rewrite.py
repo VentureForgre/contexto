@@ -1758,6 +1758,8 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
              "upstream_messages": len(upstream[field_name]), "estimate": estimate, "sent_bytes": sent}
     if rotated or paged is not None:
         event["sent_estimate"] = sent_estimate
+    if in_tool_loop and state.inturn.strips:
+        event["in_turn_thinking"] = inturn.thinking_shape(messages, state, _dialect())  # D63, content-free
     if state.degraded:
         event["degraded"] = True
     if over:

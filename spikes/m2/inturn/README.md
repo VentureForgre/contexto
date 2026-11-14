@@ -8,10 +8,13 @@ turn grows past the bound, and it holds the tests D63 (in-turn paging) has to pa
 Results at v0.5.24: `docs/research/M2-in-turn-paging-baseline.md`.
 
 ```sh
-uv run python spikes/m2/inturn/replay.py --scenario all --json out.json   # about 30 s of CPU
-uv run python spikes/m2/inturn/replay.py --scenario small --full          # 1,500 rounds, about 3 minutes of CPU
-uv run --with pytest pytest -q spikes/m2/inturn                           # about 45 s of CPU
+uv run python spikes/m2/inturn/replay.py --scenario all --json out.json   # every scenario, small at 260 rounds
+uv run python spikes/m2/inturn/replay.py --scenario small --full          # small at 1,500 rounds
+uv run python spikes/m2/inturn/replay.py --engine toy                     # the toy pager, held to the targets
+uv run --with pytest pytest -q spikes/m2/inturn
 ```
+
+The research note gives the measured run times and the load they were measured at.
 
 ## Files
 
@@ -21,11 +24,13 @@ uv run --with pytest pytest -q spikes/m2/inturn                           # abou
   platform. Late in each long loop two steps are a probe: a search for a line of an early result, then
   a recall of the page the search named.
 - `cli.py`: the two CLIs. `ClaudeCode` sends Messages requests (`/v1/messages`) in Claude Code
-  2.1.318's shapes, `Codex` sends Responses requests (`/v1/responses`) in codex-cli 0.166.0's. Each
-  keeps its own history and resends all of it; what the engine forwards is never fed back.
+  2.1.318's shapes, with its breakpoints on both system blocks and the newest message; `Codex` sends
+  Responses requests (`/v1/responses`) in codex-cli 0.166.0's. Each keeps its own history and resends
+  all of it; what the engine forwards is never fed back.
 - `upstream.py`: `FakeUpstream`. It checks each forwarded request against the API's rules and counts
-  violations by kind, prices it with `tokenizer.py`, models the prompt cache, and answers with the
-  script's next step. A thinking block's signature is a keyed hash of the request it answered and of
+  violations by kind, prices it with `tokenizer.py`, models the prompt cache (Messages by its
+  `cache_control` breakpoints with the 20-block lookback, Responses by automatic prefix), and answers
+  with the script's next step. A thinking block's signature is a keyed hash of the request it answered and of
   the blocks ahead of it in its message, so a later request that changed anything before that block is
   caught (`thinking_binding`).
 - `tokenizer.py`: the upstream's tokenizer: tool output at 2.2 bytes a token, other text at 3.1,
@@ -35,11 +40,15 @@ uv run --with pytest pytest -q spikes/m2/inturn                           # abou
   record per request and `Run.metrics()` the numbers. It calls the engine in `contexto.proxy`'s order
   (`prime`, the transform, the upstream, then `observe_usage` with the CLI's own request), runs the
   probes through the real MCP handlers (`contexto.mcp.Server`) on a second handle of the store, and
-  sends a `count_tokens` request after some loop requests.
+  sends a `count_tokens` request after some loop requests. With `check_wire` (the target tests run
+  with it) it also proves each request's byte count and digests the CLI's own history right after the
+  engine's call.
 - `targets.py`: the D63 rules, one function each, and `unmet(run)`.
 - `stubs.py`: `find_stubs(dialect, request)`, the hook the engine pull request fills in.
-- `toy.py`: a small in-turn pager for the harness's own tests. It is not the D63 design.
-- `replay.py`: the command. It prints four Markdown tables and can write the numbers as JSON.
+- `toy.py`: a small in-turn pager for the harness's own tests, and its defects (the wrong engines). It
+  is not the D63 design.
+- `replay.py`: the command. It prints four Markdown tables and can write the numbers as JSON; with
+  `--engine toy` it runs the toy pager, prints the targets each run misses, and exits 1 on any.
 
 ## The tests
 
@@ -47,8 +56,9 @@ uv run --with pytest pytest -q spikes/m2/inturn                           # abou
   conversation, the cache model, the rewrite numbers, the tokenizer and the PNG builder.
 - `tests/test_inturn_scenarios.py`: the scripts' sizes and shapes, the CLI history staying
   append-only, no tool result lost, two runs giving the same numbers, and the command.
-- `tests/test_inturn_engines.py`: `toy.ToyPager` meets every target on every scenario; each of six
-  wrong engines fails the rule written for it; each rule's line, on a run edited by hand.
+- `tests/test_inturn_engines.py`: `toy.ToyPager` meets every target on every scenario (quick builds;
+  `replay.py --engine toy` runs the target tests' sizes); each wrong engine fails the rule written for
+  it; each rule's line, on a run edited by hand.
 - `tests/test_inturn_targets.py`: one test per scenario and dialect (13), marked
   `xfail(strict=True, raises=AssertionError, reason="D63: in-turn paging not built")`. They fail at
   v0.5.24.
@@ -56,16 +66,22 @@ uv run --with pytest pytest -q spikes/m2/inturn                           # abou
 ## For the engine pull request (D63)
 
 1. Replace the body of `stubs.find_stubs(dialect, request)`. It returns a `StubRef(page_id, call_ids)`
-   for each stub in `request`:
+   for each stub and each fold note in `request`:
    - `call_ids`: the tool calls whose results the stub stands for (Messages `tool_use` ids, Responses
-     `call_id`s). Never empty.
+     `call_id`s); for a fold note, every call of the rounds it folded. Never empty.
+   - On every request, each result the CLI has delivered so far in that conversation that is not
+     whole in the request has to be named by one of these, in that request: a stubbed result, a
+     folded round, and the turns a turn-start rotation paged (the index message) alike.
    - `page_id`: the store page that holds them. `None` only when every call is one of Contexto's own
      search, recall or state calls (`contexto.store.render.own_call_ids`), which may be stubbed
      without a stored copy.
    - `request` is a forwarded request, or `{"messages": page["messages"]}` (`codex`:
      `{"input": page["messages"]}`) for a store page, when the harness follows a stub it found inside
      a page. Read only that one field.
-2. Remove the `xfail` marks in `tests/test_inturn_targets.py` (the `NOT_BUILT` mark). They are strict:
+2. Publish, in the engine's `request` event, `estimate`: its pre-send estimate of the request without
+   that request's rewrite (the previous forwarded request and the items added since), and
+   `sent_estimate`: of what it forwarded. The second-rewrite-in-a-row exception reads `estimate`.
+3. Remove the `xfail` marks in `tests/test_inturn_targets.py` (the `NOT_BUILT` mark). They are strict:
    a scenario that meets its targets while still marked fails as XPASS.
 
 No passing test depends on the hook being empty, so nothing else needs to change.

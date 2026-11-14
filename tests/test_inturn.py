@@ -1067,9 +1067,8 @@ def test_stub_and_note_wording_is_true_without_contextos_tools():
     long_note = inturn.fold_note(inturn.MESSAGES, many, "pg_0000000000000001")
     calls_part = long_note[:long_note.index("\ncall ids: ")] + long_note[long_note.index("\nwas: "):]
     assert len(calls_part) < 2_600 and " more calls" in long_note
-    # The ids are capped too: the note stays bounded, and the page holds every call.
-    assert len(inturn.note_calls(long_note)) == inturn.NOTE_IDS
-    assert f"; {600 - inturn.NOTE_IDS} more in the page" in long_note
+    # The ids are not capped: a reader of the request alone can name every folded call.
+    assert len(inturn.note_calls(long_note)) == 600
 
 
 def test_codex_has_no_in_turn_paging_yet():
@@ -1110,7 +1109,12 @@ def test_one_fold_note_per_turn_stays_bounded_and_is_not_rebuilt_per_fold(monkey
     assert len(edits.folds) > 40 and edits.lists  # past the cap, a folds page lists the earlier folds
     (start, covered, listing), = edits.lists
     notes = [b["text"] for b in cli.sent[-1].messages[0]["content"][1:]]
-    assert len(notes) == 1 and len(notes[0].encode()) <= inturn.NOTE_BYTES
+    assert len(notes) == 1 and inturn.note_size(notes[0]) <= inturn.NOTE_BYTES  # the cap leaves out the ids
+    # Every folded call is named in the request, with the page that leads to its result.
+    named = {i for _, ids in inturn.note_refs(notes[0]) for i in ids}
+    folded = {b["id"] for _, ranges, _ in edits.folds for a, b_ in ranges for i in range(a, b_)
+              for b in cli.history[i]["content"] if b.get("type") == "tool_use"}
+    assert named == folded
     assert f"pages listed in page {listing}" in notes[0] and inturn.note_page(notes[0]) == edits.folds[-1][2]
     # The folds page holds each earlier fold's own note, byte for byte, each naming its rounds page.
     page = cli.store.get_page(listing)
@@ -1211,3 +1215,18 @@ def test_sessions_show_lists_result_pages_by_their_call_and_in_order():
     for word in ("file_path", "was", "page"):
         assert f" {word}," not in line and f"[ids: {word}" not in line
     assert "seq" not in inturn.MESSAGES.result_page(None, {"type": "tool_result", "tool_use_id": "t", "content": ""})[0]
+
+
+def test_each_loop_request_logs_the_shape_of_its_thinking_without_content():
+    # For D63's live check: thinking kept before the edit point, stripped in its range, kept after it.
+    cli = Cli(memory(), SMALL, head_bytes=8_000)
+    cli.prompt("Read every module.")
+    cli.loop(30, lambda r: output(f"m-{r}", RESULT))
+    shaped = [s.events[-1]["in_turn_thinking"] for s in cli.sent if "in_turn_thinking" in s.events[-1]]
+    assert shaped and all(set(x) == {"kept_before", "stripped", "kept_between", "kept_after"} for x in shaped)
+    last = shaped[-1]
+    assert last["stripped"] > 0 and last["kept_after"] > 0
+    # The forwarded request agrees: as many thinking blocks as kept.
+    assert cli.sent[-1].thinking == last["kept_before"] + last["kept_between"] + last["kept_after"]
+    first_batch = next(s for s in cli.sent if "in_turn_batch" in s.names)
+    assert "in_turn_thinking" in first_batch.events[-1]

@@ -108,10 +108,11 @@ ROTATION_REASON = "in_turn"
 # has no searchable block; ``transform_messages`` and ``strip_carried`` leave it out by identity.
 FOLDED: dict[str, Any] = {"role": "assistant", "content": []}
 _NOTE_CACHE_SIZE = 256
-# A turn's one fold note is at most this many bytes (about 2,000 tokens, a byte rule): the newest fold in
-# detail, the earlier ones as page ids and round numbers, and past the cap a page that lists them.
+# A turn's one fold note is at most this many bytes (about 2,000 tokens, a byte rule) besides its call ids:
+# the newest fold in detail, the earlier ones as page ids and round numbers, and past the cap a page that
+# lists them. The ids of every folded call are named too (about 31 bytes a call), so that a reader of the
+# request alone can tell which page holds each call's result; they are the one part that grows.
 NOTE_BYTES = 6_000
-NOTE_IDS = 60  # call ids the newest fold's part of the note lists; the rest are counted
 FOLDS_PAGE = "folds"  # a page holding the detailed notes of a turn's earlier folds
 
 
@@ -369,7 +370,7 @@ class MessagesInTurn:
                 tools.append(name)
                 calls.append(f"{name} {locator}")
                 if isinstance(b.get("id"), str) and b["id"]:
-                    ids.append(_CONTROL.sub(" ", b["id"]).replace(" ", ""))
+                    ids.append(_safe_id(b["id"]))
         return rounds, tools, calls, ids
 
 
@@ -500,9 +501,34 @@ def _calls(calls: list[str]) -> str:
     return text
 
 
+def _safe_id(call_id: str) -> str:
+    """A call id as a note writes it: only the characters ids are made of, so it cannot end a list."""
+    return re.sub(r"[^A-Za-z0-9_\-]", "", call_id)
+
+
 def _ids(ids: list[str]) -> str:
-    shown = " ".join(ids[:NOTE_IDS]) or "none"
-    return shown + (f"; {len(ids) - NOTE_IDS:,} more in the page" if len(ids) > NOTE_IDS else "")
+    return " ".join(ids) or "none"
+
+
+_ITEM = re.compile(r"(?:in|listed in page) (pg_[0-9a-f]{16}) \(ids: ([^)]*)\)")
+_ID_TEXT = re.compile(r" \(ids: [^)]*\)|\ncall ids: [^\n]*")
+
+
+def note_refs(text: Any) -> list[tuple[str, tuple[str, ...]]]:
+    """(page id, call ids) for each page a fold note names: the newest fold's rounds page, then each
+    earlier fold's (or the folds page that lists several). [] when ``text`` is not a fold note."""
+    page = note_page(text)
+    if page is None:
+        return []
+    refs = [(page, note_calls(text))]
+    for found in _ITEM.finditer(text):
+        refs.append((found.group(1), tuple(i for i in found.group(2).split(" ") if i)))
+    return refs
+
+
+def note_size(text: str) -> int:
+    """A note's bytes without its call ids: what NOTE_BYTES caps."""
+    return len(utf8(_ID_TEXT.sub("", text)))
 
 
 _NOTE_TAIL = ('If you have the contexto_recall tool, call it with a page_id named here to read them (pass the '
@@ -574,12 +600,17 @@ def turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
         first, end = numbers[rs[0][0] - start], numbers[rs[-1][1] - 1 - start]
         return f"round {first}" if first == end else f"rounds {first} to {end}"
 
+    def ids(group_: list) -> str:
+        return " ".join(_safe_id(b["id"]) for rs, _ in group_ for a, b_ in rs for i in range(a, b_)
+                        for b in _blocks(messages[i]) if isinstance(b, dict) and b.get("type") == "tool_use"
+                        and isinstance(b.get("id"), str) and b["id"] and dialect.is_assistant(messages[i]))
+
     parts = []
     covered = listed[0] if listed is not None else 0
     if covered:
         whole = ((earlier[0][0][0][0], earlier[covered - 1][0][-1][1]),)
-        parts.append(f"{span(whole)} in {covered} pages listed in page {listed[1]}")
-    parts += [f"{span(rs)} in {pid}" for rs, pid in earlier[covered:]]
+        parts.append(f"{span(whole)} in {covered} pages listed in page {listed[1]} (ids: {ids(earlier[:covered])})")
+    parts += [f"{span(rs)} in {pid} (ids: {ids([(rs, pid)])})" for rs, pid in earlier[covered:]]
     head, tail = note[:-len(_NOTE_TAIL)], _NOTE_TAIL
     return f"{head}earlier folds of this turn: {'; '.join(parts)}\n{tail}"
 
@@ -645,6 +676,33 @@ def view(messages: list[dict], state: Any, dialect: Any) -> list[dict]:
 def strips_thinking(edits: InTurn, i: int) -> bool:
     """Whether message ``i`` lost its thinking to an in-turn edit (the thinking rule)."""
     return any(a <= i < b for a, b in edits.strips)
+
+
+def thinking_shape(messages: list[dict], state: Any, dialect: Any) -> dict[str, int]:
+    """Content-free counts of the thinking blocks of the CLI's retained messages as a request sends them
+    (the thinking rule, for the live check D63 gives): ``kept_before`` the first strip range, ``stripped``
+    (in a strip range, or before rule 2's ``strip_upto``), ``kept_after`` the last range ends, and
+    ``kept_between`` the ranges. Folded messages are not counted."""
+    edits: InTurn = state.inturn
+    sent = view(messages, state, dialect)
+    first = edits.strips[0][0] if edits.strips else len(messages)
+    last = edits.strips[-1][1] if edits.strips else len(messages)
+    shape = {"kept_before": 0, "stripped": 0, "kept_between": 0, "kept_after": 0}
+    for i in range(state.k, len(messages)):
+        if sent[i] is FOLDED:
+            continue
+        count = sum(1 for b in _blocks(messages[i]) if isinstance(b, dict) and b.get("type") in _rw().THINKING_TYPES)
+        if not count:
+            continue
+        if i < state.strip_upto or strips_thinking(edits, i):
+            shape["stripped"] += count
+        elif i < first:
+            shape["kept_before"] += count
+        elif i >= last:
+            shape["kept_after"] += count
+        else:
+            shape["kept_between"] += count
+    return shape
 
 
 def extent(edits: InTurn) -> int:
@@ -1114,7 +1172,7 @@ def _listed(messages: list[dict], state: Any, store: Any, start: int, hooks: Any
     if len(group) < 2:
         return state
     sent = view(messages, state, dialect)
-    if len(utf8(_note_text(sent[start]))) <= NOTE_BYTES:
+    if note_size(_note_text(sent[start])) <= NOTE_BYTES:
         return state
     unfolded = view(messages, replace(state, inturn=edits._replace(folds=(), lists=())), dialect)
     page_id = store.page_parts([folds_page(hooks, unfolded, group[:-1])], _turn_of(messages, state, dialect, start),

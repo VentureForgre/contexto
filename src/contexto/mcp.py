@@ -92,6 +92,10 @@ IN_TURN_LABELS = {"result": "this turn, paged result", "rounds": "this turn, fol
                   "folds": "this turn, list of folds"}
 
 
+def _in_turn_label(page: dict) -> str | None:
+    return IN_TURN_LABELS.get(page.get("kind")) if isinstance(page.get("kind"), str) else None
+
+
 def _turn_label(page: dict) -> str:
     """``turn N``, and for a page written inside a running turn what it holds, after the parenthesis so
     that ``<page id> (turn N)`` reads as before (D63)."""
@@ -778,7 +782,10 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str) -> list[Row]:
     the content-free log that acceptance 3 reads (contract PR #95). A query from a tool input is
     matched in its JSON-escaped form too, as ``render_page`` prints it (B18).
     """
-    rows: list[Row] = [(f"{page_id} ({_turn_label(page)}", None)]  # no stub: the lines carry the content (B17)
+    rows: list[Row] = [(f"{page_id} (turn {page.get('turn')})", None)]  # no stub: the lines carry the content (B17)
+    label = _in_turn_label(page)
+    if label:  # D63: on its own line, so the header reads as before
+        rows.append((f"  [{label}]", None))
     # Search, recall, and state calls are blanked at their offsets, so no line of an earlier reply is shown (D51).
     text = render_page(page, searchable=True) if page.get("messages") is not None else ""
     q = Query.parse(query)

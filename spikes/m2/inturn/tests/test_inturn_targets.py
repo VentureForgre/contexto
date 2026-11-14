@@ -6,7 +6,7 @@ paging is not built (``contexto.codex.ResponsesDialect.in_turn`` is None). ``tar
 ``targets.py`` states each rule, and ``test_inturn_engines.py`` shows, for each rule, an engine that
 breaks it and fails.
 
-The Codex marks are strict, so a scenario that starts to pass shows up as a failure until its mark is
+The marks are strict, so a scenario that starts to pass shows up as a failure until its mark is
 removed, and they expect an AssertionError, so a crash in the harness is an error and not an expected
 failure.
 """

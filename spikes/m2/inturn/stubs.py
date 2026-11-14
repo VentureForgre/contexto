@@ -2,7 +2,7 @@
 
 In-turn paging takes a tool result out of the request and leaves a stub that names where the original
 is stored. ``find_stubs`` is the one place the harness needs the stub's format (D63:
-``contexto.inturn.stub_text``); the harness checks every stub it finds (``harness.Stubs``).
+``contexto.inturn.stub_text`` and ``fold_note``); the harness checks every stub it finds (``harness.Stubs``).
 
 What the harness holds a stub to:
 
@@ -44,9 +44,11 @@ def find_stubs(dialect: str, request: dict) -> list[StubRef]:
     D63, Messages: a ``tool_result`` whose content is ``contexto.inturn.stub_text``'s string names the
     result page that holds its call and result. A stub of one of Contexto's own search, recall or state
     results names no page (``page_id`` None): the result was a copy of stored pages, and the stub gives
-    the call's arguments. A fold note in a user message (``contexto.inturn.fold_note``) names the
-    rounds page and every call it folded (its ``call ids:`` line); a result that was already a stub
-    when its round was folded is a stub in that page too, which the harness follows. Codex has no
+    the call's arguments. A turn's fold note in a user message (``contexto.inturn.turn_note``) names
+    the newest fold's rounds page with every call it folded (its ``call ids:`` line), and each earlier
+    fold's page with its calls (``(ids: ...)``), or a folds page that lists several, whose own notes
+    name their rounds pages in turn; a result that was already a stub when its round was folded is a
+    stub in that page too. The harness follows each chain. Codex has no
     in-turn paging yet, so no stubs."""
     if dialect != "claude":
         return []
@@ -56,7 +58,7 @@ def find_stubs(dialect: str, request: dict) -> list[StubRef]:
         for block in content if isinstance(content, list) else []:
             if (isinstance(block, dict) and block.get("type") == "text" and message.get("role") == "user"
                     and inturn.note_page(block.get("text")) is not None):
-                found.append(StubRef(inturn.note_page(block["text"]), inturn.note_calls(block["text"])))
+                found += [StubRef(page, ids) for page, ids in inturn.note_refs(block["text"]) if ids]
                 continue
             if not (isinstance(block, dict) and block.get("type") == "tool_result"
                     and isinstance(block.get("tool_use_id"), str)):
