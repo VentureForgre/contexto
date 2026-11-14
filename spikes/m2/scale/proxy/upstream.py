@@ -8,6 +8,13 @@ tokens per reply kind. The reply kind comes from the ``x-scale-reply`` request h
 Per request it records sizes and monotonic timestamps under the ``x-scale-id`` header; nothing else.
 ``t_recv`` is taken when the request's headers are read and ``t_done`` when its last event is written, so
 ``t_done - t_recv`` is the time this upstream spent on the request.
+
+Every reply carries ``Connection: close`` and the upstream closes the connection after it (added
+2026-11-13). The side that closes a TCP connection first holds it in TIME_WAIT, 30 s on macOS. The
+proxy opens a new upstream connection per request (``contexto.proxy``, by design), so if it closed
+first, each request would hold one of the machine's local ports; closed from here, the TIME_WAIT is
+on this server's listening port and takes no local port from anyone. The proxy reads every reply to
+its last chunk either way. ``connections`` counts the connections accepted.
 """
 
 from __future__ import annotations
@@ -56,6 +63,7 @@ class FakeUpstream:
     def __init__(self) -> None:
         self.records: dict[str, dict[str, Any]] = {}
         self.lock = threading.Lock()
+        self.connections = 0
         self._server: ThreadingHTTPServer | None = None
 
     def start(self) -> int:
@@ -64,8 +72,17 @@ class FakeUpstream:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
+            def setup(self) -> None:
+                with owner.lock:
+                    owner.connections += 1
+                super().setup()
+
             def log_message(self, *args: Any) -> None:
                 pass
+
+            def end_headers(self) -> None:
+                self.send_header("Connection", "close")  # also sets close_connection: closed from this side
+                super().end_headers()
 
             def do_HEAD(self) -> None:  # noqa: N802
                 self.send_response(200)

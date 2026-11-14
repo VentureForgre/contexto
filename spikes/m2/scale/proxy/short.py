@@ -105,19 +105,26 @@ def start(args: argparse.Namespace, home: Path, upstream: FakeUpstream, err) -> 
 
 
 def burst(worker: run.Worker, upstream: FakeUpstream, body: bytes, clients: int, per_client: int) -> dict[str, Any]:
-    """``clients`` threads, released together, each sending ``body`` ``per_client`` times."""
+    """``clients`` threads, released together, each sending ``body`` ``per_client`` times on its own
+    kept-open connection."""
     statuses: list[list[int]] = [[] for _ in range(clients)]
+    connections = [0] * clients
     barrier = threading.Barrier(clients + 1)
 
     def client(i: int) -> None:
+        conn = run.Client(worker.port, SEND_TIMEOUT_S)
         barrier.wait()
-        for j in range(per_client):
-            request_id = f"c{i}r{j}"
-            try:
-                statuses[i].append(run.send(worker.port, body, request_id, "end_turn", SEND_TIMEOUT_S)["status"])
-            except OSError:
-                statuses[i].append(-2)
-            upstream.take(request_id)
+        try:
+            for j in range(per_client):
+                request_id = f"c{i}r{j}"
+                try:
+                    statuses[i].append(conn.send(body, request_id, "end_turn")["status"])
+                except OSError:
+                    statuses[i].append(-2)
+                upstream.take(request_id)
+        finally:
+            conn.close()
+            connections[i] = conn.connections
 
     threads = [threading.Thread(target=client, args=(i,), daemon=True) for i in range(clients)]
     for t in threads:
@@ -130,20 +137,26 @@ def burst(worker: run.Worker, upstream: FakeUpstream, body: bytes, clients: int,
     flat = [s for per in statuses for s in per]
     worker.call({"cmd": "stats"})
     return {"clients": clients, "requests": len(flat), "not_200": sum(1 for s in flat if s != 200),
-            "seconds": round(seconds, 3), "rps": round(len(flat) / seconds, 1) if seconds else 0.0}
+            "seconds": round(seconds, 3), "rps": round(len(flat) / seconds, 1) if seconds else 0.0,
+            "connections": sum(connections)}
 
 
-def added_ms(port: int, upstream: FakeUpstream, body: bytes, name: str, sends: int) -> list[float]:
-    """``body`` sent ``sends`` times, one after another, to ``port``: each send's time less the fake
-    upstream's own, in milliseconds."""
+def added_ms(port: int, upstream: FakeUpstream, body: bytes, name: str, sends: int) -> tuple[list[float], int]:
+    """``body`` sent ``sends`` times, one after another, on one kept-open connection to ``port``: each
+    send's time less the fake upstream's own, in milliseconds, and the connections opened (the fake
+    upstream closes each, so straight to it that is one per send, each opened before the clock starts)."""
     out = []
-    for i in range(sends):
-        request_id = f"{name}{i}"
-        result = run.send(port, body, request_id, "end_turn", SEND_TIMEOUT_S)
-        seen = upstream.take(request_id) or {}
-        if result["status"] == 200 and "t_done" in seen:
-            out.append((result["e2e_s"] - (seen["t_done"] - seen["t_recv"])) * 1e3)
-    return out
+    client = run.Client(port, SEND_TIMEOUT_S)
+    try:
+        for i in range(sends):
+            request_id = f"{name}{i}"
+            result = client.send(body, request_id, "end_turn")
+            seen = upstream.take(request_id) or {}
+            if result["status"] == 200 and "t_done" in seen:
+                out.append((result["e2e_s"] - (seen["t_done"] - seen["t_recv"])) * 1e3)
+    finally:
+        client.close()
+    return out, client.connections
 
 
 def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = STARTUPS, clients: int = CLIENTS,
@@ -169,6 +182,7 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
             small: list[float] = []
             direct: list[float] = []
             concurrent: dict[str, Any] = {}
+            connections = {"small": 0, "direct": 0, "burst": 0, "session": 0}
             try:
                 for i in range(startups):
                     if probe is not None:
@@ -176,12 +190,14 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
                     probe, seconds = start(args, home / f"startup-{i}", upstream, err)
                     startup_s.append(seconds)
                 if probe is not None:
-                    small = added_ms(probe.port, upstream, first_body, "small", SMALL_SENDS)
-                    direct = added_ms(upstream.upstream_port, upstream, first_body, "direct", SMALL_SENDS)
+                    small, connections["small"] = added_ms(probe.port, upstream, first_body, "small", SMALL_SENDS)
+                    direct, connections["direct"] = added_ms(upstream.upstream_port, upstream, first_body, "direct",
+                                                             SMALL_SENDS)
                     if clients:
                         concurrent = burst(probe, upstream, TINY_BODY if burst_body == "tiny" else first_body,
                                            clients, per_client)
                         concurrent["body"] = burst_body
+                        connections["burst"] = concurrent["connections"]
             finally:
                 if probe is not None:
                     probe.kill()
@@ -200,11 +216,13 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
                         samples.append({"turn": t + 1, "body_mb": turn_rows[-1]["body_mb"], "rss_mb": seen["rss_mb"],
                                         "maxrss_mb": round(seen["maxrss_mb"], 1), "objects": seen["objects"]})
             finally:
+                connections["session"] = worker.client.connections
                 peak = worker.close(save=False)
         session_dir = home / "run" / "sessions" / "scale"
         counts, max_logged = run.log_events(session_dir / "log.jsonl")
         pages = len(list((session_dir / "pages").glob("pg_*.json")))
         store_mb = run.dir_mb(session_dir)
+        connections["upstream_accepted"] = upstream.connections
     finally:
         upstream.stop()
         if made_home:
@@ -247,6 +265,9 @@ def measure(turns: int = TURNS, *, reminders: str = REMINDERS, startups: int = S
         if rss_known and body_growth > 0 else None,
         "objects_per_turn": round((last_sample["objects"] - first_sample["objects"]) / turn_span, 2)
         if turn_span > 0 else None,
+        "connections": connections,
+        "driver_connections": connections["session"] + connections["small"] + connections["burst"],
+        "upstream_connections": connections["upstream_accepted"],
         "samples": samples, "throughput": concurrent, "throughput_rps": concurrent.get("rps"),
         "rows": rows,
     }
@@ -291,6 +312,7 @@ def report(result: dict[str, Any]) -> str:
                  f"{result['first_request_over_direct_ms']} ms more")
     lines.append(f"  largest added time {result['added_max_ms']} ms; startups {result['startup_all_ms']} ms; "
                  f"burst {json.dumps(result['throughput'])}")
+    lines.append(f"  connections opened: {json.dumps(result['connections'])}")
     lines.append(f"  memory samples: {json.dumps(result['samples'])}")
     return "\n".join(lines)
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import http.client
 import json
 import os
@@ -51,7 +52,7 @@ COUNTED_EVENTS = ("rotation", "rotation_noop", "page_out", "window_minimal", "bo
                   "page_unreadable", "proxy_stop_incomplete", "session_start_unrecognised",
                   "unclassified_system_message", "cli_version_untested", "mcp_tools_missing", "toolcheck_error",
                   "cli_version_error", "cli_version", "epoch_not_resumed", "epoch_resumed")
-CONNECT_TRIES = 4
+CONNECT_PATIENCE_S = 30.0  # macOS keeps a closed connection's local port for 2 x net.inet.tcp.msl (15 s)
 REQUEST_FIELDS = ("label", "checkpoint_m", "phase", "round", "turn", "kind", "req_in_turn", "history_tokens",
                   "body_mb", "upstream_bytes", "upstream_tokens", "upstream_messages", "status", "e2e_s", "ttfb_s",
                   "pre_forward_s", "read_body_s", "proxy_transform_s", "engine_s", "observe_s", "index_text_s",
@@ -132,6 +133,7 @@ class Worker:
                                      env={**os.environ, "CONTEXTO_HOME": str(home)})
         ready = self._read()
         self.port, self.pid = ready["port"], ready["pid"]
+        self.client = Client(self.port)  # the CLI's connection to the proxy, opened at its first request
 
     def _read(self) -> dict[str, Any]:
         line = self.proc.stdout.readline()
@@ -154,6 +156,7 @@ class Worker:
 
     def kill(self) -> None:
         """End the process at once, keeping nothing (a clean stop waits out the proxy's server loop)."""
+        self.client.close()
         self.proc.kill()
         self.proc.wait(timeout=120)
         for pipe in (self.proc.stdin, self.proc.stdout):
@@ -161,6 +164,7 @@ class Worker:
 
     def close(self, save: bool = True) -> float:
         """Stop the proxy and return its peak RSS in MB; ``save`` pickles the engine for the next phase."""
+        self.client.close()
         out = self.call({"cmd": "exit", "engine_out": str(self.engine_pkl) if save else None})
         self.proc.wait(timeout=120)
         return out.get("maxrss_mb", 0.0)
@@ -212,33 +216,69 @@ class Session:
         self.pending = None
 
 
-def send(port: int, body: bytes, request_id: str, reply: str, timeout: float = 900) -> dict[str, Any]:
-    headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01",
-               "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14",
-               "x-api-key": "sk-ant-scale-harness-not-a-key", "User-Agent": synth.USER_AGENT,
-               "X-Claude-Code-Session-Id": synth.CLAUDE_CODE_SESSION,
-               "x-scale-id": request_id, "x-scale-reply": reply}
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    for attempt in range(CONNECT_TRIES):
+class Client:
+    """One client of a proxy (or of the fake upstream) on one HTTP/1.1 connection kept open between
+    requests, as Claude Code keeps its connection to the proxy open.
+
+    Until 2026-11-13 the driver opened a connection per request. Each short run then left about 850 of
+    this machine's local ports in TIME_WAIT (30 s on macOS) on top of the proxy's own, and a few runs
+    at once failed with EADDRNOTAVAIL (README.md, "Connections"). A connection the server has closed is
+    opened again before the next request's clock starts, so the clock never includes a connect."""
+
+    def __init__(self, port: int, timeout: float = 900) -> None:
+        self.port, self.timeout = port, timeout
+        self.conn: http.client.HTTPConnection | None = None
+        self.connections = 0  # connections opened
+
+    def connect(self) -> None:
+        """Open a new connection. EADDRNOTAVAIL (no free local port) is retried with a growing pause for
+        up to ``CONNECT_PATIENCE_S``, the time macOS holds a closed connection's port; any other error is
+        raised at once."""
+        self.close()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
+        pause, deadline = 0.05, time.monotonic() + CONNECT_PATIENCE_S
+        while True:
+            try:
+                conn.connect()
+                break
+            except OSError as exc:
+                if exc.errno != errno.EADDRNOTAVAIL or time.monotonic() >= deadline:
+                    conn.close()
+                    raise
+                time.sleep(pause)
+                pause = min(pause * 2, 2.0)
+        self.conn = conn
+        self.connections += 1
+
+    def send(self, body: bytes, request_id: str, reply: str, timeout: float | None = None) -> dict[str, Any]:
+        if self.conn is None or self.conn.sock is None:  # http.client drops the socket after "Connection: close"
+            self.connect()  # before the clock starts
+        conn = self.conn
+        conn.sock.settimeout(self.timeout if timeout is None else timeout)
+        headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01",
+                   "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14",
+                   "x-api-key": "sk-ant-scale-harness-not-a-key", "User-Agent": synth.USER_AGENT,
+                   "X-Claude-Code-Session-Id": synth.CLAUDE_CODE_SESSION,
+                   "x-scale-id": request_id, "x-scale-reply": reply}
+        t0 = time.monotonic()
         try:
-            conn.connect()  # before the clock starts: the CLI keeps its connection open between requests
-            break
-        except OSError:  # a busy machine can run out of local ports for a moment (EADDRNOTAVAIL)
-            if attempt == CONNECT_TRIES - 1:
-                raise
-            time.sleep(0.25)
-    t0 = time.monotonic()
-    try:
-        conn.request("POST", "/v1/messages", body=body, headers=headers)
-        response = conn.getresponse()
-        t_headers = time.monotonic()
-        data = response.read()
-        t_end = time.monotonic()
+            conn.request("POST", "/v1/messages", body=body, headers=headers)
+            response = conn.getresponse()
+            t_headers = time.monotonic()
+            data = response.read()
+            t_end = time.monotonic()
+        except BaseException:
+            self.close()  # a request cut off leaves the connection in an unknown state
+            raise
         status = response.status
-    finally:
-        conn.close()
-    ok = status == 200 and b"message_stop" in data
-    return {"t0": t0, "status": status if ok or status != 200 else -1, "ttfb_s": t_headers - t0, "e2e_s": t_end - t0}
+        ok = status == 200 and b"message_stop" in data
+        return {"t0": t0, "status": status if ok or status != 200 else -1, "ttfb_s": t_headers - t0,
+                "e2e_s": t_end - t0}
+
+    def close(self) -> None:
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
 
 
 def run_turn(session: Session, worker: Worker, upstream: FakeUpstream, rows: list[dict[str, Any]],
@@ -251,7 +291,7 @@ def run_turn(session: Session, worker: Worker, upstream: FakeUpstream, rows: lis
     for j, (end, reply) in enumerate(synth.request_points(session.shape, session.turn, messages)):
         body = session.wire.body(messages[:end])
         request_id = f"t{session.turn}r{j}"
-        result = send(worker.port, body, request_id, reply, timeout)
+        result = worker.client.send(body, request_id, reply, timeout)
         up = upstream.take(request_id) or {}
         upstream_s = up["t_done"] - up["t_recv"] if "t_done" in up else None
         rows.append({**base, "turn": session.turn, "kind": "turn_start" if j == 0 else "tool_loop", "req_in_turn": j,
