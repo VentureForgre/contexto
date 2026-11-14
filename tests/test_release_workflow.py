@@ -4,6 +4,7 @@ The suite has no YAML dependency, so the workflow is read as text: jobs are spli
 two-space keys. A last test parses it for real when PyYAML happens to be installed.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -476,6 +477,139 @@ def test_recovery_is_refused_from_anywhere_but_main(action, ref):
 def test_an_unknown_action_is_refused():
     assert _request("delete", "", MAIN).returncode == 1
     assert _request("", "", MAIN).returncode == 1
+
+
+# --- the tag check of the reattach and pypi jobs -------------------------------------------------------
+
+VERIFY = ROOT / ".github" / "scripts" / "reattach-verify.sh"
+
+
+def _git_env(home):
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    }
+
+
+def _git(cwd, *args):
+    result = subprocess.run(["git", *args], cwd=cwd, env=_git_env(cwd), capture_output=True, text=True)
+    assert result.returncode == 0, (args, result.stderr)
+    return result.stdout.strip()
+
+
+@pytest.fixture
+def history(tmp_path):
+    """A bare origin whose main has a squash-style commit, a merge commit and a side branch's commit.
+
+        main (first parent):  A - B ------- M - C
+                                \\         /
+        side:                    S1 ---- S2           X: on a branch that never reached main
+    """
+    if shutil.which("git") is None or shutil.which("bash") is None:
+        pytest.skip("git or bash is not on PATH")
+    origin, work = tmp_path / "origin.git", tmp_path / "work"
+    _git(tmp_path, "-c", "init.defaultBranch=main", "init", "-q", "--bare", str(origin))
+    _git(tmp_path, "-c", "init.defaultBranch=main", "init", "-q", str(work))
+    _git(work, "remote", "add", "origin", str(origin))
+    commits = {}
+
+    def commit(name):
+        (work / "file").write_text(name, encoding="utf-8")
+        _git(work, "add", "file")
+        _git(work, "commit", "-q", "-m", name)
+        commits[name] = _git(work, "rev-parse", "HEAD")
+
+    commit("A")
+    _git(work, "switch", "-q", "-c", "side")
+    commit("S1")
+    commit("S2")
+    _git(work, "switch", "-q", "main")
+    commit("B")
+    _git(work, "merge", "-q", "--no-ff", "-X", "theirs", "-m", "M", "side")
+    commits["M"] = _git(work, "rev-parse", "HEAD")
+    commit("C")
+    _git(work, "switch", "-q", "-c", "unmerged", commits["B"])
+    commit("X")
+    tags = {"v1.0.0": "B", "v1.1.0": "S1", "v1.2.0": "M", "v1.3.0": "C", "v1.4.0": "S2", "v2.0.0": "X", "v0.1.0": "A"}
+    for tag, name in tags.items():
+        _git(work, "tag", "-a", "-m", tag, tag, commits[name])
+    _git(work, "push", "-q", "origin", "main", "side", "unmerged", "--tags")
+    checkout = tmp_path / "checkout"
+    _git(tmp_path, "clone", "-q", "--branch", "main", str(origin), str(checkout))
+    return {"origin": origin, "work": work, "checkout": checkout, "commits": commits}
+
+
+def _verify(checkout, tag):
+    return subprocess.run(
+        ["bash", str(VERIFY), tag], cwd=checkout, env=_git_env(checkout), capture_output=True, text=True
+    )
+
+
+@pytest.mark.parametrize("tag", ["v0.1.0", "v1.0.0", "v1.2.0", "v1.3.0"])
+def test_a_tag_on_mains_first_parent_chain_passes(history, tag):
+    result = _verify(history["checkout"], tag)
+    assert result.returncode == 0, result.stderr
+    assert f"{tag} -> " in result.stdout and "first-parent chain" in result.stdout
+
+
+@pytest.mark.parametrize("tag", ["v1.1.0", "v1.4.0"])
+def test_a_tag_on_a_commit_that_reached_main_through_a_merge_commit_is_refused(history, tag):
+    checkout = history["checkout"]
+    # It is an ancestor of main: the older check let it through.
+    assert subprocess.run(
+        ["git", "merge-base", "--is-ancestor", f"refs/tags/{tag}", "refs/remotes/origin/main"], cwd=checkout,
+        env=_git_env(checkout),
+    ).returncode == 0
+    result = _verify(checkout, tag)
+    assert result.returncode == 1
+    assert "first-parent chain" in result.stderr and "refusing" in result.stderr
+
+
+def test_a_tag_off_main_or_missing_is_refused(history):
+    result = _verify(history["checkout"], "v2.0.0")
+    assert result.returncode == 1 and "not on main" in result.stderr
+    result = _verify(history["checkout"], "v9.9.9")
+    assert result.returncode == 1 and "does not exist" in result.stderr
+    result = _verify(history["checkout"], "main")
+    assert result.returncode == 1 and "Not a release tag" in result.stderr
+
+
+def test_a_tag_named_like_the_remote_branch_does_not_stand_in_for_main(history):
+    # git resolves the short name origin/main to refs/tags/origin/main before the remote branch.
+    work = history["work"]
+    _git(work, "tag", "origin/main", history["commits"]["S2"])
+    _git(work, "push", "-q", "origin", "refs/tags/origin/main")
+    assert _verify(history["checkout"], "v1.4.0").returncode == 1
+    assert _verify(history["checkout"], "v2.0.0").returncode == 1
+    assert _verify(history["checkout"], "v1.3.0").returncode == 0
+
+
+def test_main_is_read_from_the_remote_after_a_fetch(history):
+    # The job's checkout may be older than main: the script fetches main before it checks.
+    work, checkout = history["work"], history["checkout"]
+    _git(work, "switch", "-q", "main")
+    (work / "file").write_text("D", encoding="utf-8")
+    _git(work, "commit", "-q", "-am", "D")
+    _git(work, "tag", "-a", "-m", "v1.5.0", "v1.5.0")
+    _git(work, "push", "-q", "origin", "main", "v1.5.0")
+    result = _verify(checkout, "v1.5.0")
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_tag_check_runs_under_strict_bash():
+    script = VERIFY.read_text(encoding="utf-8")
+    assert "set -euo pipefail" in script
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    assert 'MAIN="refs/remotes/origin/main"' in code
+    assert "origin/main" not in code.replace("refs/remotes/origin/main", "")
+    assert 'git rev-list --first-parent "$MAIN" | grep -cx -- "$commit" || true' in code
+    assert 'if [ "$on_chain" != 1 ]; then' in code
 
 
 # --- with a YAML parser, when there is one -----------------------------------------------------------
