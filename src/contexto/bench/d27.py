@@ -353,8 +353,9 @@ def build_script(seed: int, turns: int, turn_bytes: int, bound: int) -> tuple[Sc
 
 
 # Scoring: exact match after normalization, as spikes/m0/fidelity/scoring.py, except that an answer
-# line may be written in markdown, and that lines in a blockquote or a fenced code block are not read
-# (contexto.bench.script.score names both differences).
+# line may be written in markdown, that a line in a blockquote is never read, and that a line in a
+# fenced code block yields to an answer for the same id outside any fence (contexto.bench.script.score
+# names the differences).
 
 _TRIM = " \t\r\n\"'`*_.,;:!"  # the spike's, plus "*" and "_": markdown emphasis; no generated answer has either
 # After the leading "-", "*" and spaces are dropped (as the spike does): a list marker ("-", "*", "+", or a
@@ -391,15 +392,17 @@ def parse_answers(text: str) -> dict[str, str]:
     around it (``**q_a_01:** x`` gives ``** x``, and ``- `q_a_01: x``` gives ``x` ``; both normalize to
     ``x``).
 
-    Two kinds of line are never answers, because markdown marks their text as quoted rather than the
-    reply's own: a line in a blockquote (starting with ``>``, also after a list marker), and a line in
-    a fenced code block (from a line of three or more backticks or tildes to a line of at least as many
-    of the same character and nothing else; a fence may open after a list marker; a fence never closed
-    runs to the end of the text). So a
-    note or file the reply quotes after its answers cannot override them. The spike read only
-    ``q_<id>: x`` after leading ``-``, ``*`` and spaces, and also inside a code fence; every other line
-    it read is read the same."""
+    A line in a blockquote (starting with ``>``, also after a list marker) is never an answer:
+    markdown marks it as quoted text, not the reply's own. A line in a fenced code block (from a line
+    of three or more backticks or tildes to a line of at least as many of the same character and
+    nothing else; a fence may open after a list marker; a fence never closed runs to the end of the
+    text) is read, but an answer for the same id on a line outside any fence wins over it, wherever
+    the two stand. So a reply that writes all its answers in a code fence is scored, and a note or
+    file the reply quotes in a fence after its answers cannot override them. The spike read only
+    ``q_<id>: x`` after leading ``-``, ``*`` and spaces, inside a code fence as well as outside, with
+    the last line winning; every other line it read is read the same."""
     answers: dict[str, str] = {}
+    fenced: dict[str, str] = {}  # answers read inside a code fence; an answer outside any fence wins
     fence: tuple[str, int] | None = None
     for raw in text.splitlines():
         stripped = raw.strip()
@@ -407,6 +410,10 @@ def parse_answers(text: str) -> dict[str, str]:
             mark = _fence(stripped)
             if mark is not None and mark[0] == fence[0] and mark[1] >= fence[1] and not stripped.strip(mark[0]):
                 fence = None
+                continue
+            line = stripped.lstrip("-* ")
+            if not line.startswith(">") and (match := _ANSWER_LINE.match(line)):
+                fenced[match.group(1)] = match.group(2)
             continue
         line = stripped.lstrip("-* ")
         if (mark := _fence(line)) is not None:  # also a fence opened in a list item ("- ```")
@@ -417,4 +424,4 @@ def parse_answers(text: str) -> dict[str, str]:
         match = _ANSWER_LINE.match(line)
         if match:
             answers[match.group(1)] = match.group(2)
-    return answers
+    return {**fenced, **answers}

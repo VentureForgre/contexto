@@ -936,12 +936,23 @@ FENCED = [
 
 
 @pytest.mark.parametrize(("after", "given"), FENCED)
-def test_answer_lines_in_a_fenced_code_block_are_not_read(after, given):
+def test_an_answer_in_a_fenced_code_block_does_not_override_one_outside(after, given):
     """The third deliberate difference from the spike's scoring (``script.score``): a fenced code block
-    holds code or a quoted file, not the reply's answers."""
+    may hold a quoted file, so an answer outside any fence wins over one inside it."""
     from contexto.bench import d27
 
     assert d27.parse_answers(f"q_a_01: nickel\n{after}\nclosing words") == {"q_a_01": given}
+
+
+def test_answers_written_only_inside_a_code_fence_are_read():
+    """A reply that formats its whole answer list as a code block is scored, as the spike scored it."""
+    from contexto.bench import d27
+
+    assert d27.parse_answers("```\nq_a_01: nickel\nq_a_02: copper\n```") == {"q_a_01": "nickel", "q_a_02": "copper"}
+    assert d27.parse_answers("Answers:\n~~~text\n- q_a_01: nickel\n~~~") == {"q_a_01": "nickel"}
+    assert d27.parse_answers("```\nq_a_01: nickel\n```\nq_a_01: copper") == {"q_a_01": "copper"}
+    assert d27.parse_answers("q_a_01: copper\n```\nq_a_01: nickel\n```") == {"q_a_01": "copper"}
+    assert d27.parse_answers("```\n> q_a_01: POISON\n```") == {}
 
 
 def test_a_quoted_line_after_the_answer_does_not_override_it():

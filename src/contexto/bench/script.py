@@ -590,11 +590,11 @@ def score(probes: Sequence[Probe], answers_text: str) -> dict[str, Any]:
     numbered item, with ``**``, ``__`` or backticks around the id, the separator or the answer, as in
     ``**q_a_01**: x``, ``1. q_a_01: x`` or ``- `q_a_01: x```; the spike dropped those lines, so an
     answer Claude Code wrote in markdown (its system prompt asks for it) counted as no answer. Third,
-    a line in a blockquote (``> q_a_01: x``) or in a fenced code block is not an answer, since
-    markdown marks it as quoted text, so a note or file the reply quotes after its answers cannot
-    override them (the spike read a line in a code fence, and never a ``>`` line). A reply that puts
-    all its answers in a code fence therefore scores none of them. Every other line the spike read is
-    read the same, and ``normalize`` also trims ``*`` and ``_``, which no generated answer contains.
+    a line in a blockquote (``> q_a_01: x``) is never an answer, and a line in a fenced code block
+    yields to an answer for the same id outside any fence, so a note or file the reply quotes after
+    its answers cannot override them (the spike read a line in a code fence like any other, and
+    never a ``>`` line). A reply that puts all its answers in a code fence is still scored. Every
+    other line the spike read is read the same, and ``normalize`` also trims ``*`` and ``_``, which no generated answer contains.
     Table rows (``| q_a_01 | x |``) and headings are not read. Otherwise unchanged: a ``value``
     answer is right when it equals the expected answer after normalization, a ``set`` answer when
     its ids are the expected ids in any order, and a wrong ``value`` answer that equals one of the
