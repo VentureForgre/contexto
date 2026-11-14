@@ -136,19 +136,22 @@ case), `--context-window TOKENS` (for the full arm's fit check), `--work DIR` an
 and never inside a git work tree).
 
 `--out` is refused inside a git work tree unless `--allow-git-out` is given, so results are not
-committed by accident; from a checkout, give an `--out` path outside it. One run at a time holds a lock on the output directory. A run is resumable:
-the same command with the same `--out` keeps the units the manifest records `complete` and runs the
-rest again; a different model, bound, protocol, turn size or first seed for that directory is
-refused. Every attempt's requests stay in the records, because they were billed. A run killed in
-the middle of writing a record leaves a last line with no newline; on resume that line is set aside
+committed by accident; from a checkout, give an `--out` path outside it. One run at a time holds a
+lock on the output directory. A run is resumable: the same command with the same `--out` keeps the
+units the manifest records `complete` and runs the rest again; a different model, bound, protocol,
+turn size or first seed for that directory is refused. Every attempt's requests stay in the
+records, because they were billed. A run killed in the middle of writing a record can leave a last
+line with no newline. On resume, a whole record only gets its newline back; a torn one is set aside
 in `<file>.torn-<n>` and cut from the file, so the next record starts a line of its own, and the
-manifest's `torn_lines` says so. A request whose record was torn is not counted in the spend.
+manifest's `torn_lines` says what was done. A request whose record was torn is not counted in the
+spend, since its usage cannot be read.
 
 A unit ends `complete`, `not_run` (the full arm's request does not fit the model's window) or
-`stopped` with the reason: among them `desync` (Claude Code printed a `result` that answers no
-turn), `runaway` (a cap below was passed), `api_error` (the upstream kept failing), `unmetered` (a
-turn sent no request through the meter), `timeout`, `budget` and `auth`. A stopped unit writes no
-probe lines; the same command with the same `--out` runs it again.
+`stopped` with the reason, among them: `desync` (Claude Code printed a `result` that answers no
+turn), `runaway` (a cap under [Spend guards](#spend-guards) was passed), `api_error` (the upstream
+answered none of a turn's requests, or failed more often than `--max-turn-failures` allows),
+`unmetered` (a turn sent no request through the meter), `timeout`, `budget` and `auth`. A stopped
+unit writes no probe lines; the same command with the same `--out` runs it again.
 
 ### `--report`
 
@@ -489,11 +492,20 @@ model does, or what the proxy does with what only Claude Code sends (its session
 
 ## Request size against history length
 
-> **Placeholder.** The chart of request size against history length from the pinned replay goes
-> here: Contexto's requests flat under the bound, full context growing with the history, and plain
-> Claude Code's modelled compaction sawtooth. It is labelled synthetic and its modelled lines are
-> labelled modelled. It will be generated with `contexto bench --replay --out <dir>` and
-> `contexto bench --chart <dir>/results.json` once the replay and the report are both on `main`.
+<img src="bench/request-size-synthetic.svg" width="800" alt="Line chart of request size against history length for the pinned replay, a synthetic session with no model. The x axis is the history so far, 0 to about 956,000 estimated tokens; the y axis is the request's input, 0 to 1 million tokens, with a dotted line at the bound of 150,000. The Contexto line (estimated) rises and drops 14 times and peaks at 116,306. The plain Claude Code line (modelled) rises and drops 8 times and peaks at 140,441. The full-context line (modelled) grows straight to 977,410.">
+
+Synthetic session, no model: the pinned replay (seed 20261016, protocol `v2`, bound 150,000) sent
+through the real proxy to a fake upstream on 127.0.0.1. The Contexto line is estimated from the
+bytes of each request the proxy sent, not counted by a tokenizer. The full-context and plain Claude
+Code lines are modelled from the script, not run. Contexto's drops are its 14 rotations: old turns
+moved to the store, word for word and still recallable through search. Plain Claude Code's drops
+are its 8 modelled compactions: old turns replaced by a summary. Peaks: Contexto 116,306 estimated
+tokens, plain Claude Code 140,441 and full context 977,410. The full-context line sets the y axis
+near 1M tokens, so the other two lines look flatter than they are; the bound is the dotted line.
+Each request of a turn, tool-loop rounds included, is plotted at that turn's history length.
+
+Made with `contexto bench --replay --out D` and `contexto bench --chart D/results.json` from
+`main` at c476834f; the notes under the chart are the ones `--chart` writes.
 
 ## The plain arm's compaction
 

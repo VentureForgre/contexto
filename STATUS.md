@@ -1,9 +1,9 @@
 # Contexto status
 
 Updated 2026-11-14 by claude (D66: the benchmark `contexto bench`, PRs #255, #262, #264, #269 and
-#273, recorded in the docs PR #282; before that v0.5.24: the 2026-11-05 QA run and the fix round, PRs
-#232 to #250, D48 to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0 releases, D62, and the
-README rewrite, D68). Decisions taken and still open, with reasons:
+#273, recorded in the docs PR #282; before that v0.5.24: the 2026-11-05 QA run and the fix round,
+PRs #232 to #250, D48 to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0 releases, D62,
+and the README rewrite, D68). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
