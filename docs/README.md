@@ -25,6 +25,9 @@ install it and how to start it.
   when no turn holds every word, and its limits.
 - [faq.md](faq.md): subscription logins, API keys, cost, what is sent where, and continuing a
   session later.
+- [results.md](results.md): what the acceptance runs measured (recall against full context, tokens
+  and cost), with the limits of each number.
+- [limitations.md](limitations.md): the full list of known limitations.
 - [doctor.md](doctor.md): `contexto doctor`, a check of what `contexto run` needs: the CLIs, the
   upstream, a key, the store home, the MCP server, and the cloud-provider switches that make
   `contexto run claude` refuse to launch.
@@ -126,5 +129,7 @@ Scale and cost proposals:
 - [research/M2-tool-rounds-lever.md](research/M2-tool-rounds-lever.md): a proposal on limiting
   the search rounds in a turn, from an analysis of live run #3.
 - [research/M2-seat-bound.md](research/M2-seat-bound.md): a modeled choice of bound for Claude Code
-  with Opus 5.5 when the fixed part of every request is large (82,000 to 92,000 tokens).
+  with Opus 5.5 when the fixed part of every request is large (82,000 or 92,000 tokens).
+- [research/D70-serve-probes.md](research/D70-serve-probes.md): what Claude Code 2.1.322 sends a
+  gateway and an MCP server, measured against loopback stubs at zero spend.
 - `research/data/`: the CSV files behind the usage and seat-bound notes.
