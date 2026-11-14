@@ -160,6 +160,8 @@ HOP_BY_HOP = frozenset({
 })
 USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 AFFINITY_HEADER = "X-Session-Affinity"
+# The one answer to a request the proxy refuses to serve (D53), whatever the reason: the body never says why.
+REFUSED_MESSAGE = "contexto proxy: request refused (not from the local CLI)"
 # Host names (and their subdomains) that serve the vendor APIs directly, including Azure OpenAI
 # and Azure AI Foundry: each has one identity per key, so the affinity header is not sent to them
 # (D36). Matching is by host name only; an IP literal upstream gets the header.
@@ -450,6 +452,11 @@ class UsageReader:
             return
         for raw in self._events.feed(chunk):
             self.feed_event(raw)
+
+    @property
+    def overflowed(self) -> bool:
+        """A JSON body went past ``MAX_JSON_RESPONSE_BYTES``: nothing will be read from it."""
+        return self._overflow
 
     def finish(self) -> None:
         if self.sse:
@@ -924,6 +931,7 @@ class ContextoProxy:
     def __init__(self, upstream: str, log: SessionLog, transform: Transform = identity_transform, *,
                  observe_usage: ObserveUsage | None = None, observe_thinking: bool = False,
                  upstream_source: str | None = None, affinity_key: str | None = None,
+                 on_tool_calls: Callable[[tuple[str, ...]], None] | None = None,
                  strip_hint_headers: bool = False) -> None:
         parts = urlsplit(upstream)
         if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -938,6 +946,9 @@ class ContextoProxy:
         self.session_log = log
         self.transform = transform
         self.observe_usage = observe_usage
+        # Called with the ids of a response's client tool calls as they are read, before the bytes that
+        # carry them are written to the client (``_Handler._relay``); None for no hook.
+        self.on_tool_calls = on_tool_calls
         self.observe_thinking = observe_thinking
         self.upstream_source = upstream_source
         # D70: leave Claude Code's gated hint headers out of what is sent upstream (module docstring).
@@ -1137,8 +1148,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._read_body()  # closing on unread bytes sends a reset, which can discard the 403
             except (ValueError, OSError):
                 pass
-            self._send_local_error(403, "contexto proxy: request refused (not from the local CLI)",
-                                   "permission_error")
+            self._send_local_error(403, REFUSED_MESSAGE, "permission_error")
             self.close_connection = True
             return
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
@@ -1192,7 +1202,7 @@ class _Handler(BaseHTTPRequestHandler):
                    endpoint: str) -> tuple[bytes, Headers, dict[str, Any] | None]:
         owner = self.owner
         try:
-            request = loads_bounded(body)
+            request = self._parse(body)
         except JSONTooDeepError:
             # Rule 18: past MAX_JSON_DEPTH not every Python can serialize or walk the request, so it
             # is forwarded untransformed (decoded, if it arrived compressed: rule 15) and logged.
@@ -1262,6 +1272,12 @@ class _Handler(BaseHTTPRequestHandler):
             entry["message_count"] = entry["original_message_count"]
             return body, headers, original
         return (body if after == before else after), new_headers, original
+
+    def _parse(self, body: bytes) -> Any:
+        """The request body as JSON (ValueError when it is not, JSONTooDeepError past the depth limit).
+        Its own method so that ``contexto serve``, which reads the body to route the request, parses
+        it once (``contexto.serve``)."""
+        return loads_bounded(body)
 
     def _forward(self, body: bytes, headers: Headers, entry: dict[str, Any], started: float,
                  original: dict[str, Any] | None) -> None:
@@ -1349,8 +1365,12 @@ class _Handler(BaseHTTPRequestHandler):
         # The client must not see the response complete before the engine has its usage and the
         # session log has the entry: Claude Code sends its next request right away, and the engine
         # sizes it from the last real usage (rule 4). So the chunk terminator, or the last chunk of
-        # a Content-Length response, is written only after usage feedback and logging.
+        # a Content-Length response, is written only after usage feedback and logging. A JSON body is
+        # read only once it has ended (``UsageReader.finish``), so in either framing what completes it
+        # is held too (``hold_json``) and written after its tool-call ids are handed on (``announce``).
         held = b""
+        json_body = not reader.sse
+        identity = decoder.encoding in ("", "identity")
         relay_ok = True
         observed = False
         # D59: the client has the stream's last event, so a close after it (before the terminator) is
@@ -1380,12 +1400,47 @@ class _Handler(BaseHTTPRequestHandler):
             owner.log({"event": "hold_skipped", "path": entry["path"], "encoding": decoder.encoding or "identity",
                        "chunked": chunked})
         splitter = SSEEventSplitter()  # the hold path splits once, for both the reader and the hold
+        announced = 0
+
+        def announce() -> None:
+            """Hand the owner's ``on_tool_calls`` hook the client tool-call ids read since the last
+            call. It runs after each read of the side copy and before the write that follows, so the
+            hook has an id before the client has the bytes that carry it, whether the response is held,
+            relayed chunk by chunk or a JSON body, and whether or not it has usage."""
+            nonlocal announced
+            hook = owner.on_tool_calls
+            if hook is None or len(reader.call_ids) == announced:
+                return
+            new, announced = tuple(reader.call_ids[announced:]), len(reader.call_ids)
+            try:
+                hook(new)
+            except Exception as exc:
+                owner.log({"event": "tool_calls_hook_error", "error": type(exc).__name__})
 
         def read_upstream() -> bytes:
             try:
                 return response.read1(65536)
             except (OSError, http.client.HTTPException) as exc:  # IncompleteRead is not an OSError
                 raise _UpstreamReadError from exc
+
+        json_started = False  # an identity JSON body has sent a byte that is not JSON whitespace
+
+        def hold_json(held: bytes, chunk: bytes) -> tuple[bytes, bytes]:
+            """(bytes to write now, bytes to hold) for one more chunk of a JSON body. The last chunk is
+            held; for an identity body, so is every chunk after the last one with a byte that is not
+            JSON whitespace, so the client never has the body's closing bracket before the end. A body
+            past the reader's limit registers nothing, and is relayed as a Content-Length body is.
+            Whitespace before an identity body's first value completes nothing and goes at once: a
+            gateway that keeps a slow request alive with it reaches the client as before the hold."""
+            nonlocal json_started
+            blank = not chunk.strip(b" \t\r\n")
+            if identity and not json_started:
+                if blank:
+                    return held + chunk, b""
+                json_started = True
+            if identity and held and blank and not reader.overflowed:
+                return b"", held + chunk
+            return held, chunk
 
         def write_events(events: list[bytes]) -> None:
             nonlocal delivered_end
@@ -1413,10 +1468,16 @@ class _Handler(BaseHTTPRequestHandler):
                 if hold is not None:
                     for raw in splitter.feed(chunk):
                         reader.feed_event(raw)  # usage is read before the hold can trigger on it
+                        announce()
                         write_events(hold.feed(raw))
                     continue
                 reader.feed(decoder.decode(chunk))
-                if chunked:
+                announce()
+                if json_body:
+                    pending, held = hold_json(held, chunk)
+                    if pending:
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(pending), pending) if chunked else pending)
+                elif chunked:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 else:
                     if held:
@@ -1427,6 +1488,7 @@ class _Handler(BaseHTTPRequestHandler):
             if hold is not None:
                 if tail := splitter.flush():  # a final event without its blank line (see SSEEventSplitter)
                     reader.feed_event(tail)
+                    announce()
                     write_events(hold.feed(tail))
                 write_events(hold.eof())
             elif expected is not None and response_bytes < expected:
@@ -1462,6 +1524,7 @@ class _Handler(BaseHTTPRequestHandler):
         if hold is not None:
             entry["stream_hold"] = {"held_events": hold.held_events, "triggered": hold.triggered}
         reader.finish()
+        announce()  # a JSON body's ids are known only now, and what completes it is still held (hold_json)
         if entry.get("api") == "responses":
             usage = reader.usage or None  # Responses usage kept as given (see UsageReader)
         else:
@@ -1484,6 +1547,8 @@ class _Handler(BaseHTTPRequestHandler):
         if relay_ok:
             try:
                 if chunked:
+                    if held:
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(held), held))
                     self.wfile.write(b"0\r\n\r\n")
                 elif held:
                     self.wfile.write(held)

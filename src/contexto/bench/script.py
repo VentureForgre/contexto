@@ -71,7 +71,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from contexto.bench import d27
-from contexto.bench.d27 import REPLY_TOKENS, normalize, parse_answers, turn_tokens
+from contexto.bench.d27 import REPLY_TOKENS, answer_lines, normalize, turn_tokens
 from contexto.bench.model import (
     D27_CLASSES,
     DEFAULT_SEED,
@@ -175,7 +175,8 @@ DECISION_ASK = ("Reply with exactly one line and nothing else, in this form:", "
 _TOKEN = re.compile(r"[a-z0-9]+")
 _CFG_LINE = re.compile(r"^cfg ([^=\s]+)=\S*$")
 CFG_CLASSES = ("paraphrase", "toolloop")  # the new classes planted as cfg lines
-_HYPHENS = str.maketrans({c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2212\ufe63\uff0d"})
+# Unicode hyphens read as "-", and a typographic apostrophe as "'", so "don\u2019t" is a negation too.
+_HYPHENS = str.maketrans({**{c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2212\ufe63\uff0d"}, "\u2019": "'"})
 
 
 def build(seed: int = DEFAULT_SEED, protocol: str = "v2", bound: int = 150_000, turn_bytes: int = 40_000,
@@ -582,7 +583,7 @@ def _norm_set(text: str | None) -> str:
 def score(probes: Sequence[Probe], answers_text: str) -> dict[str, Any]:
     """Score an answers text (``q_id: answer`` lines) against the probes. No model judge.
 
-    The rules are the acceptance runs' (``spikes/m0/fidelity/l2f.py::score``) with three deliberate
+    The rules are the acceptance runs' (``spikes/m0/fidelity/l2f.py::score``) with four deliberate
     differences. First, a probe with no answer line, or an
     empty answer, is never correct. The spike reads a missing answer to a ``set`` probe as the empty
     set, so a ``set`` probe whose expected answer is ``none`` scored correct when the arm said nothing
@@ -591,23 +592,31 @@ def score(probes: Sequence[Probe], answers_text: str) -> dict[str, Any]:
     ``**q_a_01**: x``, ``1. q_a_01: x`` or ``- `q_a_01: x```; the spike dropped those lines, so an
     answer Claude Code wrote in markdown (its system prompt asks for it) counted as no answer. Third,
     a line in a blockquote (``> q_a_01: x``) is never an answer, and a line in a fenced code block
-    yields to an answer for the same id outside any fence, so a note or file the reply quotes after
-    its answers cannot override them (the spike read a line in a code fence like any other, and
-    never a ``>`` line). A reply that puts all its answers in a code fence is still scored. Every
-    other line the spike read is read the same, and ``normalize`` also trims ``*`` and ``_``, which
-    no generated answer contains.
+    yields to an answer for the same id outside any fence, so a note or file the reply quotes in a
+    fence cannot override answers written outside any fence (the spike read a line in a code fence
+    like any other, and never a ``>`` line). A reply that puts all its answers in a code fence is
+    still scored, but among fenced lines the last still wins, so a later fence can override answers
+    written in a fence. Fourth, a line whose answer normalizes to the probe's own question is the
+    reply restating the question (``q_a_016: What was ...?``), not answering it, and the next line for
+    that id is read instead (``d27.answer_lines``); with none left the probe has no answer. The probe
+    turns are the only text a reply can quote that holds ``q_`` lines, so this covers the quoted
+    lines the fence rule does not: a reply that answers in a fence and restates the questions in
+    plain text, or restates them after plain answers (the spike's "last line wins" scored the
+    question text). Every other line the spike read is read the same, and ``normalize`` also trims
+    ``*`` and ``_``, which no generated answer contains.
     Table rows (``| q_a_01 | x |``) and headings are not read. Otherwise unchanged: a ``value``
     answer is right when it equals the expected answer after normalization, a ``set`` answer when
     its ids are the expected ids in any order, and a wrong ``value`` answer that equals one of the
     probe's older values is also counted stale. Returns the totals, the Wilson 95% interval, the
     cells by type and by type and tier, and one row per probe in the order given.
     """
-    answers = parse_answers(answers_text)
+    answers = answer_lines(answers_text)
     cells: dict[str, dict[str, int]] = {}
     rows: list[dict[str, Any]] = []
     correct = 0
     for p in probes:
-        given = answers.get(p.id)
+        question = normalize(p.question)
+        given = next((a for a in answers.get(p.id, ()) if normalize(a) != question), None)
         if not normalize(given):
             ok = False  # no answer is never right, also where the expected set is "none"
         elif p.kind == "set":

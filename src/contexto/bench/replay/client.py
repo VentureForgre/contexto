@@ -13,9 +13,13 @@ head is as large as a real one: about 64,000 bytes, which the fake upstream pric
 tokens. The fixed overhead measured for Claude Code 2.1.314 with tool search on was 18,641 to 27,925
 tokens (docs/DECISIONS.md, D55; ``contexto.launcher.ASSUMED_OVERHEAD_DEFAULT``).
 
-Contexto's own five MCP tools are in the tool list with their real names, descriptions and schemas
-(``contexto.mcp.TOOLS``), named as Claude Code names an MCP tool, because the proxy checks that the
-main conversation has them.
+Contexto's own five MCP tools are in the tool list under their real names, named as Claude Code names
+an MCP tool, because the proxy checks that the main conversation has them; it reads their names only
+(``contexto.toolcheck``), and the head's bytes only as a size and a hash. Their descriptions and
+schemas are fixed synthetic text defined here (``CONTEXTO_TOOLS``), not the shipped ones in
+``contexto.mcp.TOOLS``, so a change to a tool's wording does not move the pinned trace. What the proxy
+itself injects (the preamble, the page index, the pinned state) and what Contexto's MCP server answers
+to a search stay measured: a change there moves the trace, which is what the trace is for.
 
 Tools the client runs:
 
@@ -116,13 +120,47 @@ def synthetic_tools() -> list[dict[str, Any]]:
     return tools
 
 
-def contexto_tools() -> list[dict[str, Any]]:
-    """Contexto's MCP tools as Claude Code lists them: ``mcp__contexto__<name>``, the server's own
-    description and schema."""
-    from contexto.mcp import TOOLS
+def _parameter(kind: str, name: str, **more: Any) -> dict[str, Any]:
+    return {"type": kind, "description": f"Synthetic parameter {name}.", **more}
 
-    return [{"name": MCP_PREFIX + tool["name"], "description": tool["description"],
-             "input_schema": tool["inputSchema"]} for tool in TOOLS]
+
+# Contexto's five MCP tools by their real names (the proxy checks the names, contexto.toolcheck), each
+# with the bytes of filler in its description and a schema with the parameters of the real tool (the
+# scripted model calls contexto_search with {"query": ...}). Descriptions and schemas are fixed here,
+# about as large as the real ones: 3,290 bytes of JSON for the five, as against 3,291 for the tools of D69.
+CONTEXTO_TOOLS: tuple[tuple[str, int, dict[str, Any]], ...] = (
+    ("contexto_recall", 230, {"type": "object", "properties": {
+        "page_id": _parameter("string", "page_id"),
+        "offset": _parameter("integer", "offset", minimum=0, default=0)},
+        "required": ["page_id"], "additionalProperties": False}),
+    ("contexto_pin", 200, {"type": "object", "properties": {
+        "kind": _parameter("string", "kind", enum=["alpha", "beta", "gamma", "delta", "epsilon"]),
+        "text": _parameter("string", "text", minLength=1),
+        "supersedes": _parameter("array", "supersedes", items={"type": "string"}),
+        "epistemic": _parameter("string", "epistemic", enum=["first", "second", "third", "fourth"], default="first"),
+        "provenance": _parameter("array", "provenance", items={"type": "object", "properties": {
+            "type": {"type": "string"}, "locator": {"type": "string"}, "sha256": {"type": ["string", "null"]},
+            "span": {"type": ["string", "null"]}}, "required": ["type", "locator"]})},
+        "required": ["kind", "text"], "additionalProperties": False}),
+    ("contexto_close", 20, {"type": "object", "properties": {
+        "obligation_id": _parameter("string", "obligation_id"), "note": _parameter("string", "note")},
+        "required": ["obligation_id"], "additionalProperties": False}),
+    ("contexto_state", 10, {"type": "object", "properties": {}, "additionalProperties": False}),
+    ("contexto_search", 520, {"type": "object", "properties": {"query": _parameter("string", "query", minLength=1)},
+                              "required": ["query"], "additionalProperties": False}),
+)
+
+
+def contexto_tools() -> list[dict[str, Any]]:
+    """Contexto's MCP tools as Claude Code lists them, ``mcp__contexto__<name>``, under their real names
+    (``CONTEXTO_TOOLS``) with fixed synthetic descriptions and schemas, so the wording in
+    ``contexto.mcp.TOOLS`` moves nothing the trace pins."""
+    tools = []
+    for name, nbytes, schema in CONTEXTO_TOOLS:
+        description = (f"Synthetic stand-in for Contexto's {name} tool; generated filler follows.\n"
+                       + filler(f"contexto/{name}", nbytes))
+        tools.append({"name": MCP_PREFIX + name, "description": description, "input_schema": schema})
+    return tools
 
 
 def context_block() -> dict[str, Any]:
@@ -133,11 +171,10 @@ def context_block() -> dict[str, Any]:
 
 
 def synthetic_digest() -> str:
-    """SHA-256 of everything the client generates itself (system prompt, context block, its own tool
-    definitions), which the trace pins. Contexto's MCP tool definitions are not in it: they come from
-    the installed ``contexto.mcp``, as a real client would get them."""
-    text = json.dumps({"system": system_blocks(), "context": context_block(), "tools": synthetic_tools()},
-                      sort_keys=True)
+    """SHA-256 of everything the client generates itself (system prompt, context block, every tool
+    definition, Contexto's five included), which the trace pins."""
+    text = json.dumps({"system": system_blocks(), "context": context_block(),
+                       "tools": [*synthetic_tools(), *contexto_tools()]}, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -242,7 +279,9 @@ class Client:
             response = connection.getresponse()
             raw = response.read()
         except (OSError, http.client.HTTPException) as exc:
-            raise ReplayError(f"the request to the proxy failed: {type(exc).__name__}") from exc
+            # The errno names the cause (no free local port, under load) and no path or host.
+            detail = f" [Errno {exc.errno}] {exc.strerror}" if isinstance(exc, OSError) and exc.errno else ""
+            raise ReplayError(f"the request to the proxy failed: {type(exc).__name__}{detail}") from exc
         finally:
             connection.close()
         if response.status != 200:

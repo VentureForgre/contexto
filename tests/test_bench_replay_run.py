@@ -19,6 +19,7 @@ import dataclasses
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -29,13 +30,13 @@ from pathlib import Path
 
 import pytest
 
-from contexto import __version__, cli, mcp
+from contexto import __version__, cli
 from contexto.bench import script as bench_script
 from contexto.bench.model import NEW_CLASSES, Script
 from contexto.bench.modes import replay as replay_mode
 from contexto.bench.replay import client, lines, output, reach, scripted, session, trace
 from contexto.commands import bench as bench_command
-from contexto.store import SessionStore
+from contexto.store import SessionStore, recall
 
 SHORT = ["--protocol", "d27", "--replay-turns", "8"]  # 14 turns, about 3 seconds
 
@@ -384,6 +385,20 @@ def check_results_json(run):
     assert all(len(sizes) == 1 for sizes in by_turn.values())  # what the note says: one x per turn
     assert max(sum(r["turn"] == turn for r in contexto) for turn in by_turn) > 1  # and some turns have several
     assert all(isinstance(note, str) for note in data["notes"])
+    # #269 Reviewer B lows 1 and 2 at 9a04985c: under the chart, why each line drops, and the three peaks
+    # (the full-context line sets the y axis at about 1M, so the other two are hard to tell apart by eye).
+    modelled = data["replay"]["modelled"]
+    assert data["notes"][1] == (
+        f"The Contexto line drops at each of its {run['expected']['rotations']} rotations: the proxy moves the oldest "
+        "turns out of the request to its store, where they stay searchable, and summarises nothing. The plain Claude "
+        f"Code line drops at each of its {modelled['plain_compactions']} modelled compactions, where Claude Code "
+        "replaces the old turns with a summary. Largest request: Contexto "
+        f"{run['expected']['max_input_estimated']:,} tokens (estimated), plain Claude Code {modelled['plain_max']:,} "
+        f"and full context {modelled['full_max']:,} (modelled).")
+    assert data["notes"][1] == output.drops_note(
+        data["replay"]["rotations"], data["replay"]["modelled"]["plain_compactions"],
+        {arm: max(y for _, y in series[arm]["points"]) for arm in series})
+    assert max(y for _, y in series["contexto"]["points"]) == run["expected"]["max_input_estimated"]
     full = [r for r in rows if r["arm"] == "full"]
     plain = [r for r in rows if r["arm"] == "plain"]
     assert data["replay"]["modelled"] == {"full_max": full[-1]["uncached"],
@@ -488,16 +503,19 @@ def check_the_chart_of_a_replay_names_each_basis_once(run):
         assert "estimated" not in words or "modelled" not in words, words
     notes = " ".join("".join(t.itertext()) for t in root.iter(f"{svg}text") if t.get("font-size") == "11")
     assert "vertical run of points" in notes
+    assert f"{run['expected']['rotations']} rotations" in notes and "replaces the old turns with a summary" in notes
+    assert f"full context {run['results']['replay']['modelled']['full_max']:,}" in notes
     # Reviewer B nit 2: the full-context line crosses the bound at the left, so the label is at the right end.
     (label,) = [t for t in root.iter(f"{svg}text") if t.get("data-bound-label")]
     assert (label.text, label.get("text-anchor")) == ("bound: 150,000 tokens", "end")
 
 
-PINNED_CHECKS =[check_equals_the_trace, check_the_bound_held, check_the_engine_ran_as_in_a_launch,
-                 check_the_terminal_text, check_results_md, check_manifest, check_requests_jsonl, check_reach_jsonl,
-                 check_results_json, check_the_store_is_kept_without_its_private_files,
-                 check_no_path_of_this_machine_is_in_any_output_file, check_output_helpers_agree_with_what_was_written,
-                 check_the_pinned_fallback_sentence_holds_in_the_run, check_the_chart_of_a_replay_names_each_basis_once]
+PINNED_CHECKS = [check_equals_the_trace, check_the_bound_held, check_the_engine_ran_as_in_a_launch,
+                  check_the_terminal_text, check_results_md, check_manifest, check_requests_jsonl, check_reach_jsonl,
+                  check_results_json, check_the_store_is_kept_without_its_private_files,
+                  check_no_path_of_this_machine_is_in_any_output_file,
+                  check_output_helpers_agree_with_what_was_written, check_the_pinned_fallback_sentence_holds_in_the_run,
+                  check_the_chart_of_a_replay_names_each_basis_once]
 
 
 # The pinned replay
@@ -530,20 +548,25 @@ def test_the_replay_connects_to_loopback_only(pinned_run, short_run):
 
 
 def test_a_proxy_change_needs_only_the_trace_recorded_again(monkeypatch, tmp_path):
-    """Reviewer A's repro of finding 2: one word of an MCP tool description made longer grows every
-    request. Against the shipped trace the replay fails, saying what differed, the command that records
-    the trace again and what to check in its diff; recorded again into a file the tests are pointed at,
-    every check of a pinned run passes."""
-    tools = copy.deepcopy(mcp.TOOLS)
-    tool = next(t for t in tools if "a short note on" in t["description"])
-    tool["description"] = tool["description"].replace("a short note on", "a short note saying")
-    monkeypatch.setattr(mcp, "TOOLS", tools)
+    """Reviewer A's repro of finding 2, on what the proxy injects: one word of the preamble's pin rule
+    made longer grows every request from the first rotation, the first to carry the preamble. (A tool's
+    wording no longer reaches the replay's head: test_the_head_does_not_move_with_tool_wording.) Against
+    the shipped trace the replay fails, saying what differed, the command that records the trace again
+    and what to check in its diff; recorded again into a file the tests are pointed at, every check of a
+    pinned run passes."""
+    rule = next(line for line in recall.DEFAULT_LINES if "in their own messages" in line)
+    longer = rule.replace("in their own messages", "in their very own messages")
+    opening = tuple(longer if line == rule else line for line in recall.DEFAULT_LINES)
+    monkeypatch.setattr(recall, "DEFAULT_LINES", opening)
     shipped = trace.load_packaged()
     code, text, err = _run(["--replay"])
     assert code == 1 and "Pinned expectations: " in text and "Result: FAIL" in text
     requests = shipped["expected"]["requests"]
-    assert f"request_tokens: {requests} of {requests} differ; the first is number 1" in err
-    assert f"All {requests} differ, by +" in err and "(the head, the tool definitions)" in err
+    # The requests before the first rotation carry no preamble, so they are equal.
+    first = int(re.search(r"Requests 1 to (\d+) are equal", err).group(1))
+    assert 0 < first < requests
+    assert f"request_tokens: {requests - first} of {requests} differ; the first is number {first + 1}" in err
+    assert f"Requests 1 to {first} are equal and the difference starts at number {first + 1}" in err
     assert err.startswith("The measurements differ from the pinned trace in ")
     for said in ("record the trace again, from the repository's root:",
                  "contexto bench --replay --record-trace src/contexto/bench/data/trace-20261016.json --force",
@@ -566,7 +589,8 @@ def test_a_proxy_change_needs_only_the_trace_recorded_again(monkeypatch, tmp_pat
     # re-record that this test could not see. It reads the trace now; run it against the recorded one.
     parts = _test_module("test_bench_replay")
     parts.test_the_head_is_synthetic_text_of_a_realistic_size()
-    assert recorded["expected"]["head_tokens"] != shipped["expected"]["head_tokens"]  # the head did grow
+    assert recorded["expected"]["head_tokens"] == shipped["expected"]["head_tokens"]  # the head did not move
+    assert recorded["expected"]["request_tokens"][:first] == shipped["expected"]["request_tokens"][:first]
 
 
 # A session that is not the pinned one
@@ -933,8 +957,6 @@ def test_options_a_replay_cannot_use_are_usage_errors(monkeypatch, capsys, tmp_p
     assert list(tmp_path.iterdir()) == []  # nothing dumped, nothing recorded
 
 
-
-
 @pytest.mark.parametrize("argv", [["--dump-trace", "DIR"], ["--record-trace", "trace.json"], ["--replay-turns", "8"],
                                   ["--force"]])
 def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path, argv):
@@ -947,7 +969,8 @@ def test_a_replay_option_without_replay_is_refused(monkeypatch, capsys, tmp_path
     assert argv[0] in replay_mode.OWN_OPTIONS
     # The live run is installed (contexto.bench.modes.live, the default mode), so with no mode flag this
     # would be a live run: the replay's option is refused before any mode runs.
-    assert any(getattr(m, "FLAG", 0) is None for m in bench_command.discover()), modes.__path__
+    default = [m.__name__ for m in bench_command.discover() if getattr(m, "FLAG", 0) is None]
+    assert default == ["contexto.bench.modes.live"], (default, modes.__path__)
     assert cli.main(["bench", *argv]) == 2
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err.strip() == said
@@ -991,7 +1014,7 @@ def test_the_help_names_the_mode_and_its_options(capsys):
 # Every name a replay or a live run writes into --out, written out from the shared output schema
 # (schemas.md): not read from the package, so a name dropped from replay_mode.OUTPUT_NAMES fails here.
 RESULT_NAMES = ("manifest.json", "requests.jsonl", "probes.jsonl", "reach.jsonl", "results.json", "results.md",
-                "scripts", "charts", "store")
+                "scripts", "charts", "store", "reservations.jsonl")
 
 
 def test_the_refused_names_are_the_output_schemas():

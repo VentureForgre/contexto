@@ -10,7 +10,8 @@ the session's text. It pins:
 - the scripted model behaviour: the rule per turn kind, the rounds per turn and the SHA-256 of every
   scripted reply (``contexto.bench.replay.scripted``);
 - the SHA-256 of what the synthetic client generates (its system prompt, context block and tool
-  definitions) and the byte rates the fake upstream prices requests at;
+  definitions, Contexto's five tools included, which carry fixed synthetic descriptions under their
+  real names) and the byte rates the fake upstream prices requests at;
 - the measurements a replay of this session gives (``expected``): the size of every request, the
   rotations, the requests over the bound, the failure events, the reach totals, and a digest of the
   reach rows.
@@ -21,8 +22,8 @@ changed generator is never replayed silently under the old expectations.
 
 The trace is written by ``record`` (``contexto bench --replay --record-trace FILE``) and never edited
 by hand. The expectations are a record of what the proxy does to this session: a change to what the
-proxy sends upstream (the rewrite engine, the page index, the wording of Contexto's MCP tool
-descriptions, the search ranking) changes them, and the trace is then recorded again and the
+proxy sends upstream (the rewrite engine, the preamble and page index it injects, the reply of
+Contexto's search tool, the search ranking) changes them, and the trace is then recorded again and the
 difference reviewed.
 """
 

@@ -24,6 +24,14 @@ moving the oldest turns to disk, word for word, and giving the model tools to se
   66% more if plain Claude Code read its prompt cache on every request, and less given the two cache
   misses the measured plain requests had ([results](docs/results.md#tokens-and-cost)).
 
+Plain Claude Code compacting on its own was not run in these sessions. `contexto bench` runs
+Contexto, full context and plain Claude Code set to compact at the same bound (at its defaults,
+Claude Code on a 1M-token window would compact near 967,000 tokens, so not at all in this session)
+on the same generated session for seeds you choose, with your own key; its replay needs no key
+([benchmark](docs/bench.md)). It is on `main` and not yet in a release (releases are cut by hand and
+batched under D67): from a checkout, run `uv run contexto bench --replay`. No live run of
+`contexto bench` has been made yet.
+
 ## Install
 
 On macOS or Linux, Contexto needs Python 3.12 or later, pipx, `claude` (Claude Code) or `codex` on
@@ -198,17 +206,19 @@ without.
   `over_bound` until the store is healthy again at a later turn start.
 - No Contexto tools in the model's tool list: a `warning:` line says so. The model then cannot get
   paged-out turns back.
-- The proxy runs inside `contexto run` and stops only when it does. SIGTERM, SIGHUP and SIGQUIT go
-  on to Claude Code; after a SIGKILL a watchdog ends Claude Code (within 2 s when measured). The
+- Under `contexto run`, the proxy runs inside it and stops only when it does. SIGTERM, SIGHUP and
+  SIGQUIT go on to Claude Code; after a SIGKILL a watchdog ends Claude Code (within 2 s when measured). The
   store stays, and `contexto run claude --resume <id>` continues the conversation.
 
 ## Privacy
 
-- The proxy listens on `127.0.0.1` only and answers only the local CLI. It forwards requests to the
-  upstream you configured. No telemetry, no update check, no model calls of its own, and no runtime
-  dependencies.
+- The proxy listens on `127.0.0.1` only: under `contexto run` on a free port for the CLI it starts,
+  and under `contexto serve` on a fixed port (7837 by default), where every request must carry the
+  token kept in `~/.contexto/serve.token` (mode 0600) ([The token](docs/serve.md#the-token)). It
+  forwards requests to the upstream you configured. No telemetry, no update check, no model calls of
+  its own, and no runtime dependencies.
 - The store under `~/.contexto` holds raw conversation text, including any secrets that passed
-  through the conversation. Directories are mode 0700 and files 0600. Auth headers and keys are
+  through the conversation. Directories are mode 0700 and files 0600. Upstream auth headers and keys are
   never stored. Contexto deletes nothing on its own ([What is stored](docs/sessions.md#what-is-stored-and-where)).
 - Besides paging the prompt, the one thing Contexto adds to requests by default is an `X-Session-Affinity`
   header, and only for upstreams that are not a vendor API ([FAQ](docs/faq.md)).
@@ -243,10 +253,12 @@ requests come from that process ([docs/maintainer-process.md](docs/maintainer-pr
 
 [docs/README.md](docs/README.md) indexes everything under `docs/`. Setup: [Install](docs/install.md),
 [Claude Code](docs/claude-code.md), [Codex](docs/codex.md), [CLIProxyAPI](docs/cliproxyapi.md),
-[`contexto run`](docs/run-reference.md). Use: [Sessions](docs/sessions.md), [MCP tools](docs/mcp-tools.md),
-[Search](docs/search.md), [Rules you give once](docs/standing-rules.md), [Project memory](docs/project-memory.md),
+[`contexto run`](docs/run-reference.md), [`contexto serve`](docs/serve.md) (IDE extensions, the Agent
+SDK, CI). Use: [Sessions](docs/sessions.md), [MCP tools](docs/mcp-tools.md), [Search](docs/search.md),
+[Rules you give once](docs/standing-rules.md), [Project memory](docs/project-memory.md),
 [FAQ](docs/faq.md), [Exit codes](docs/exit-codes.md).
-Evidence: [Results](docs/results.md), [Limitations](docs/limitations.md), [CLI updates](docs/cli-updates.md),
+Evidence: [Results](docs/results.md), [Benchmark](docs/bench.md), [Limitations](docs/limitations.md),
+[CLI updates](docs/cli-updates.md),
 [changelog](CHANGELOG.md).
 
 ## Troubleshooting

@@ -9,6 +9,8 @@ session files and are never inside the output directory.
 What is written, and when:
 
 - ``scripts/seed-<n>.json`` for every seed, before the first unit;
+- ``reservations.jsonl``: one line before each billed request is forwarded, and one more for a request
+  that got no response (the reservation journal, ``contexto.bench.meter``);
 - ``requests.jsonl``: one record as each billed request's response ends;
 - ``probes.jsonl``: the lines of a unit, together, only when the unit is ``complete``;
 - ``manifest.json``: rewritten atomically before every unit (the unit as ``running``) and after it.
@@ -50,10 +52,14 @@ a local upstream), ``budget_tokens``, ``spent_tokens``, ``credential_source``, `
 ``toolloop_requests``, ``toolloop_max_input``, ``toolloop_tool_calls``, ``requests_unanswered`` and
 ``unanswered_tokens`` (also in each entry of ``attempts``: billed requests that got no response, and
 the reservations of those that were sent, counted as spent; see ``metering``), and ``torn_lines``
-when a resumed run found a last line with no newline in ``requests.jsonl`` or ``probes.jsonl``
-(``repair_torn``). A unit's ``status`` may also
-be ``running`` while it runs. ``requests.jsonl``: ``attempt``, and ``usage_unreadable`` with
-``reserved_tokens`` on a response whose usage could not be read (``contexto.bench.meter``).
+when a resumed run found a last line with no newline in ``requests.jsonl``, ``probes.jsonl`` or
+``reservations.jsonl`` (``repair_torn``; a request record it moved aside carries ``counted_from``,
+``counted_tokens`` unless the journal counts it, and, when the fragment names them, ``arm``, ``seed``,
+``repeat`` and ``attempt``), and ``in_flight``, ``requests_in_flight`` and ``in_flight_tokens``: the
+requests the reservation journal has with no record (``apply_journal``). A unit's ``status`` may
+also be ``running`` while it runs. ``requests.jsonl``: ``attempt`` and ``reserved_tokens`` (the spend
+guard's reservation for the request, written near the start of each line), and ``usage_unreadable``
+on a response whose usage could not be read (``contexto.bench.meter``).
 ``probes.jsonl``: ``given_truncated`` (the answer was longer than 200 characters; it was scored whole).
 """
 
@@ -64,6 +70,7 @@ import fcntl
 import functools
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -93,7 +100,7 @@ TURN_FAILURE_CAP = 200
 UNIT_TOKEN_CAP_FACTOR = 2
 LOCK_NAME = ".lock"
 STUB_LABEL = ("Stub run: the upstream was a server on this machine (127.0.0.1), not a model API, so the answers, "
-              "tokens and costs in it were made up by that stub.")
+              "tokens and costs in it were made up by that stub")  # no full stop: the report adds one
 PINNED = ("model", "bound", "protocol", "turn_kbytes", "seed")  # what an existing output directory fixes
 PINNED_NAMES = {"model": "--model", "bound": "--bound", "protocol": "--protocol", "turn_kbytes": "--turn-kbytes",
                 "seed": "--seed"}
@@ -172,6 +179,15 @@ METERING = (
     "(request bytes / 1.5 + max_tokens) is not released but counted as spent, in unanswered_tokens and in "
     "spent_tokens, and a resumed run counts it too; a request whose connection was never made counts 0 tokens. "
     "A unit's tokens are its records' own.",
+    "Every request record carries its reservation (reserved_tokens) near the start of its line. A request record "
+    "that a killed run left cut short is moved aside by the next run (torn_lines).",
+    "Before it forwards a billed request, the pass-through appends the request's unit, attempt, n and reservation "
+    "to reservations.jsonl and hands the line to the operating system; a request that gets no response gets a "
+    "second line with what was kept for it. A resumed run counts every entry that has neither a record nor that "
+    "second line (a request in flight when the run was killed, or whose record was cut short) in spent_tokens at "
+    "its reservation, and lists them in in_flight (requests_in_flight, in_flight_tokens). A torn record from a "
+    "run without the journal counts at the reservation its fragment holds, else at the largest reservation of "
+    "the file's whole records, else at nothing (counted_tokens null: the cost is then a lower bound).",
 )
 
 
@@ -267,7 +283,7 @@ def write_scripts(out: Path, scripts: dict[int, Script]) -> None:
             script.write(path)
 
 
-TORN_FILES = ("requests.jsonl", "probes.jsonl")
+TORN_FILES = ("requests.jsonl", "probes.jsonl", bench_meter.JOURNAL_NAME)
 
 
 def repair_torn(out: Path) -> list[dict[str, Any]]:
@@ -276,8 +292,13 @@ def repair_torn(out: Path) -> list[dict[str, Any]]:
     killed in the middle of a write leaves. When it is a whole JSON object (only the newline was lost),
     the newline is added and the record counts as any other. Otherwise the fragment is copied to
     ``<file>.torn-<n>`` (the first free ``n``) and then cut from the file, so the bytes are kept and
-    the next record starts a line of its own; a request whose record was torn is not counted in the
-    spend, since its usage cannot be read."""
+    the next record starts a line of its own. A request whose record was torn got a response, so the
+    provider may have billed it, but its usage cannot be read. When the reservation journal has an
+    entry in flight that the fragment can be the start of, the journal counts the request
+    (``counted_from: "journal"``, no ``counted_tokens``); otherwise (a directory a run from before the
+    journal wrote) its entry gets ``counted_tokens``, what ``recorded_spend`` counts for it
+    (``torn_cost``). A torn journal line costs nothing: the meter forwards a request only after its
+    journal line is written."""
     done: list[dict[str, Any]] = []
     for name in TORN_FILES:
         path = out / name
@@ -305,8 +326,72 @@ def repair_torn(out: Path) -> list[dict[str, Any]]:
         aside = out / f"{name}.torn-{n}"
         aside.write_bytes(last)  # first the copy, then the cut: a kill between them loses nothing
         os.truncate(path, start)
-        done.append({**entry, "action": "moved", "moved_to": aside.name})
+        moved = {**entry, "action": "moved", "moved_to": aside.name}
+        if name == "requests.jsonl":
+            moved.update(torn_cost(last, data[:start], journalled(out, last, data[:start])))
+        done.append(moved)
     return done
+
+
+def journalled(out: Path, fragment: bytes, whole: bytes) -> bool:
+    """Whether the reservation journal has an entry with no record whose record could begin with
+    ``fragment``: then the journal counts the torn request, at its own reservation."""
+    try:
+        journal = (out / bench_meter.JOURNAL_NAME).read_bytes()
+    except FileNotFoundError:
+        return False
+    for entry in bench_meter.read_journal(journal, whole).in_flight:
+        head = bench_meter.record_head(entry)
+        if head[: len(fragment)] == fragment[: len(head)]:
+            return True
+    return False
+
+
+# The start of a request record as the meter writes it (json.dumps, default separators): the unit,
+# the attempt and the reservation, each matched only when the comma after it shows it is whole.
+_TORN_UNIT = re.compile(rb'^\{"arm": "([a-z]+)", "seed": (\d+), "repeat": (\d+), "attempt": (\d+), ')
+_TORN_RESERVED = re.compile(rb'"reserved_tokens": (\d+), ')
+
+
+def torn_cost(fragment: bytes, whole: bytes, journal: bool = False) -> dict[str, Any]:
+    """What a resumed run counts for a request record cut short, and the unit it names. With
+    ``journal``, nothing here (``counted_from: "journal"``): the reservation journal counts it.
+    Otherwise the fragment's own reservation when it holds one (``counted_from: "reservation"``), or
+    the largest that the file's whole records count (``"largest_in_file"``), a stand-in that may be
+    lower than the lost request's own, since a session's requests grow. With no whole record to stand
+    in, nothing bounds it: ``counted_tokens`` is null (``"nothing_in_file"``), and the report calls the
+    cost a lower bound."""
+    out: dict[str, Any] = {}
+    if (unit := _TORN_UNIT.match(fragment)) is not None:
+        out = {"arm": unit.group(1).decode(), "seed": int(unit.group(2)), "repeat": int(unit.group(3)),
+               "attempt": int(unit.group(4))}
+    if journal:
+        return {"counted_from": "journal", **out}
+    if (reserved := _TORN_RESERVED.search(fragment)) is not None:
+        return {"counted_tokens": int(reserved.group(1)), "counted_from": "reservation", **out}
+    largest = 0
+    for line in whole.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            reserved_tokens = record.get("reserved_tokens")
+            own = reserved_tokens if isinstance(reserved_tokens, int) and not isinstance(reserved_tokens, bool) else 0
+            largest = max(largest, own, bench_meter.record_tokens(record))
+    if not largest:
+        return {"counted_tokens": None, "counted_from": "nothing_in_file", **out}
+    return {"counted_tokens": largest, "counted_from": "largest_in_file", **out}
+
+
+def torn_spend(manifest: dict[str, Any]) -> int:
+    """The tokens counted for request records a killed run tore (``torn_lines``)."""
+    total = 0
+    for entry in manifest.get("torn_lines") or []:
+        counted = entry.get("counted_tokens") if isinstance(entry, dict) else None
+        if isinstance(counted, int) and not isinstance(counted, bool) and counted > 0:
+            total += counted
+    return total
 
 
 def drop_unrecorded_probes(out: Path, manifest: dict[str, Any]) -> int:
@@ -490,21 +575,57 @@ def note_unanswered(manifest: dict[str, Any], key: tuple[str, int, int], attempt
                     entry.update({name: summary[name] for name in UNANSWERED})
 
 
-def unanswered_spend(manifest: dict[str, Any]) -> int:
+def _attempt_entries(unit: dict[str, Any]) -> list[dict[str, Any]]:
+    """A unit's entries of ``attempts``, or the unit itself as its one attempt when it has none."""
+    attempts = [a for a in unit.get("attempts") or [] if isinstance(a, dict)]
+    return attempts or [{**unit, "attempt": int(unit.get("attempt") or 0)}]
+
+
+def unanswered_spend(manifest: dict[str, Any], journalled: set[bench_meter.Attempt] = frozenset()) -> int:
     """The tokens the manifest counts as spent with no record: the reservations of requests that were
-    sent and got no response, over every attempt of every unit."""
+    sent and got no response, over every attempt of every unit, except the ``journalled`` attempts,
+    which the reservation journal counts."""
     total = 0
     for unit in manifest.get("units") or []:
-        attempts = [a for a in unit.get("attempts") or [] if isinstance(a, dict)]
-        values = [a.get("unanswered_tokens") for a in attempts] if attempts else [unit.get("unanswered_tokens")]
-        total += sum(v for v in values if isinstance(v, int) and not isinstance(v, bool) and v > 0)
+        key = unit_key(unit)
+        for entry in _attempt_entries(unit):
+            value = entry.get("unanswered_tokens")
+            if (*key, entry.get("attempt")) in journalled:
+                continue
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                total += value
     return total
 
 
 def recorded_spend(out: Path, manifest: dict[str, Any]) -> int:
     """What an output directory has spent: its request records, plus the reservations of requests that
-    got no response, which only the manifest counts."""
-    return bench_meter.read_spent(out / "requests.jsonl") + unanswered_spend(manifest)
+    have none. For an attempt the reservation journal covers, the journal says which those are: every
+    entry in flight at its reservation and every request that got no response at what was kept for it.
+    For an attempt it does not cover (a run from before the journal), the manifest's
+    ``unanswered_tokens``. And the request records a kill tore that the journal does not count."""
+    journal = bench_meter.load_journal(out)
+    return (bench_meter.read_spent(out / "requests.jsonl") + unanswered_spend(manifest, journal.attempts)
+            + journal.unanswered_tokens + journal.in_flight_tokens + torn_spend(manifest))
+
+
+def apply_journal(manifest: dict[str, Any], journal: bench_meter.Journal) -> None:
+    """Write what the reservation journal says into the manifest, which a resumed run then keeps: for
+    each attempt the journal covers, ``requests_unanswered`` and ``unanswered_tokens`` from its lines
+    (they replace what the killed run had written, which may be one request behind); and
+    ``in_flight`` (each request with a journal entry and no record, the run's own figure each time,
+    not added to), ``requests_in_flight`` and ``in_flight_tokens``."""
+    for unit in manifest["units"]:
+        key = unit_key(unit)
+        current = int(unit.get("attempt") or 0)
+        for entry in [*(a for a in unit.get("attempts") or [] if isinstance(a, dict)), unit]:
+            attempt = current if entry is unit else entry.get("attempt")
+            if (*key, attempt) not in journal.attempts:
+                continue
+            kept = journal.unanswered.get((*key, attempt), [])
+            entry.update({"requests_unanswered": len(kept), "unanswered_tokens": sum(kept)})
+    manifest["in_flight"] = journal.in_flight
+    manifest["requests_in_flight"] = len(journal.in_flight)
+    manifest["in_flight_tokens"] = journal.in_flight_tokens
 
 
 def settle_killed(manifest: dict[str, Any], recorded: dict[tuple[str, int, int], dict[int, dict[str, int]]]) -> int:
@@ -624,6 +745,7 @@ def prepare(config: Config, scripts: dict[int, Script] | None = None) -> dict[st
     manifest = merge_manifest(old, config, version) if old else new_manifest(config, version)
     recorded = bench_meter.read_recorded(config.out / "requests.jsonl")
     killed = settle_killed(manifest, recorded)
+    apply_journal(manifest, bench_meter.load_journal(config.out))
     done = {unit_key(u) for u in manifest["units"] if u.get("status") == "complete"}
     todo = [u for u in bench_plan.units(config.seeds, config.repeats, config.arms) if u not in done]
     spent = recorded_spend(config.out, manifest)
@@ -654,6 +776,10 @@ def run(config: Config, scripts: dict[int, Script] | None = None, *, stdout: Tex
             if (old := read_manifest(config.out)) is not None and (torn := repair_torn(config.out)):
                 old["torn_lines"] = [*(old.get("torn_lines") or []), *torn]
                 write_json_atomic(config.out / "manifest.json", old)
+                if unbounded := sum(1 for t in torn if t.get("counted_from") == "nothing_in_file"):
+                    print(f"contexto bench: warning: a killed run cut short {unbounded} request record(s) before "
+                          "its reservation, and no other record can stand in for it; the spend counts it at 0 "
+                          "tokens and the report's cost is a lower bound", file=err_stream)
             ready = prepare(config, scripts)
             if config.budget is None:
                 raise Refused("a live run needs --budget-tokens; 'contexto bench --dry-run' with the same --model, "
@@ -684,7 +810,8 @@ def _run_units(config: Config, ready: dict[str, Any], out_stream: TextIO, err_st
 
     manifest, todo, all_scripts = ready["manifest"], ready["todo"], ready["scripts"]
     recorded: dict[tuple[str, int, int], dict[int, dict[str, int]]] = ready["recorded"]
-    ledger = bench_meter.Ledger(config.out / "requests.jsonl", config.budget, ready["spent"])
+    ledger = bench_meter.Ledger(config.out / "requests.jsonl", config.budget, ready["spent"],
+                                journal=config.out / bench_meter.JOURNAL_NAME)
     manifest["spent_tokens"] = ledger.spent
     drop_unrecorded_probes(config.out, manifest)
     writing = threading.Lock()  # a meter's thread also writes the manifest (note_unanswered)

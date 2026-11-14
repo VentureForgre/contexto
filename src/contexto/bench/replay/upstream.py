@@ -296,7 +296,13 @@ def _check_messages(body: dict[str, Any]) -> str | None:
             problem = _check_system_message(messages, i)
         if problem:
             return problem
+    # The first turn is checked on the turns, system messages set aside: an effort-only message, which
+    # no placement rule holds, may come first, and must not let the conversation start with no user turn.
     turns = _turns(messages)
+    if not turns:
+        return "messages: at least one user or assistant message is required"
+    if turns[0][1] != "user":
+        return f"messages.{turns[0][0]}.role: the first message must use the user role"
     uses_tools = False
     for k, (i, role, content) in enumerate(turns):
         where = f"messages.{i}"

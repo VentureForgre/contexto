@@ -11,6 +11,29 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
 
 ## Unreleased
 
+- New: `contexto bench`, a benchmark you can run yourself. It runs one generated session through
+  Contexto, as full context sent straight to the model, and as plain Claude Code set to compact at
+  the same bound (its auto-compact window is moved so that compaction fires near the bound; at its
+  defaults it would compact near 967,000 tokens and not at all in this session), scores every
+  answer by exact match, and reports accuracy with 95% intervals, paired tests, tokens and cost at
+  published prices ([docs/bench.md](docs/bench.md)). `contexto bench --replay` needs no key, no
+  `claude` and no network: it replays a pinned synthetic session through the real proxy and checks
+  that every request stayed under the bound, by sizes estimated from bytes. `contexto bench
+  --dry-run` prints what a live run would spend; a live run uses your own key and refuses to start
+  without a `--budget-tokens` ceiling. The output directory holds no key, hostname or home path, so
+  it can be published.
+- `contexto serve` runs the engine as a standing service on `127.0.0.1:7837` for clients Contexto
+  does not launch (the IDE extensions, the desktop app, the Agent SDK, `claude -p` in CI): each
+  Claude Code session gets its own store. It requires a token, the first path segment of the base
+  URL `--print-settings` prints. The printed settings turn on Claude Code's gateway hint headers,
+  which the engine reads and the service removes before forwarding (`--forward-hint-headers`
+  passes them on). See [docs/serve.md](docs/serve.md).
+- `contexto mcp --serve` gives those clients Contexto's tools: one MCP server for every
+  conversation, which asks the service which session each tool call belongs to.
+  `--print-mcp-config` prints its config.
+- `contexto run claude` and `contexto proxy` refuse an upstream that is this home's `contexto
+  serve` (as it is once the service's URL is in your Claude Code settings) and say to pass
+  `--upstream URL`.
 - Search finds more. When no paged-out turn holds every word of a query, `contexto_search` and
   `contexto search` now give approximate matches and say so: question words are dropped,
   `refresh_token` finds `refreshToken`, a turn holding enough of the query (rarer words count more)
