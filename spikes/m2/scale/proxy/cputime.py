@@ -1,8 +1,8 @@
 """MEASUREMENT (zero spend): the proxy's CPU time per request, on one or more source trees.
 
     .venv/bin/python spikes/m2/scale/proxy/cputime.py                        # this checkout's src
-    mkdir /tmp/v029 && git archive 62b02a16 src | tar -x -C /tmp/v029        # another commit's package
-    .venv/bin/python spikes/m2/scale/proxy/cputime.py --src /tmp/v029/src --src src
+    mkdir /tmp/r1018 && git archive 62b02a16 src | tar -x -C /tmp/r1018        # another commit's package
+    .venv/bin/python spikes/m2/scale/proxy/cputime.py --src /tmp/r1018/src --src src
 
 For each tree and each history size, a child process reaches a turn the way fast-forward does (turn starts
 only, no HTTP), then handles every request of the next ``--measure`` turns. Each request goes through the
