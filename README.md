@@ -197,17 +197,19 @@ without.
   `over_bound` until the store is healthy again at a later turn start.
 - No Contexto tools in the model's tool list: a `warning:` line says so. The model then cannot get
   paged-out turns back.
-- The proxy runs inside `contexto run` and stops only when it does. SIGTERM, SIGHUP and SIGQUIT go
-  on to Claude Code; after a SIGKILL a watchdog ends Claude Code (within 2 s when measured). The
+- Under `contexto run`, the proxy runs inside it and stops only when it does. SIGTERM, SIGHUP and
+  SIGQUIT go on to Claude Code; after a SIGKILL a watchdog ends Claude Code (within 2 s when measured). The
   store stays, and `contexto run claude --resume <id>` continues the conversation.
 
 ## Privacy
 
-- The proxy listens on `127.0.0.1` only and answers only the local CLI. It forwards requests to the
-  upstream you configured. No telemetry, no update check, no model calls of its own, and no runtime
-  dependencies.
+- The proxy listens on `127.0.0.1` only: under `contexto run` on a free port for the CLI it starts,
+  and under `contexto serve` on a fixed port (7837 by default), where every request must carry the
+  token kept in `~/.contexto/serve.token` (mode 0600) ([The token](docs/serve.md#the-token)). It
+  forwards requests to the upstream you configured. No telemetry, no update check, no model calls of
+  its own, and no runtime dependencies.
 - The store under `~/.contexto` holds raw conversation text, including any secrets that passed
-  through the conversation. Directories are mode 0700 and files 0600. Auth headers and keys are
+  through the conversation. Directories are mode 0700 and files 0600. Upstream auth headers and keys are
   never stored. Contexto deletes nothing on its own ([What is stored](docs/sessions.md#what-is-stored-and-where)).
 - Besides paging the prompt, the one thing Contexto adds to requests by default is an `X-Session-Affinity`
   header, and only for upstreams that are not a vendor API ([FAQ](docs/faq.md)).

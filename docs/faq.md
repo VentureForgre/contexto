@@ -27,7 +27,8 @@ the two cache misses the full-context baseline had ([Results](results.md#tokens-
 
 **Does it send anything anywhere?** No. The proxy listens on `127.0.0.1` only and forwards your
 CLI's own requests to the upstream you configured. There is no telemetry and no update check. The
-MCP server opens no network socket. Besides paging the prompt, the one thing Contexto adds to
+MCP server opens no network socket under `contexto run`; under `contexto serve` it connects only
+to the service on `127.0.0.1`. Besides paging the prompt, the one thing Contexto adds to
 requests is an `X-Session-Affinity` header, a salted hash of the session id, and only for upstreams
 that are not a vendor API ([Troubleshooting](troubleshooting.md)). The version check runs `claude --version` or
 `codex --version` locally.
