@@ -92,7 +92,8 @@ def test_turn_kbytes_below_the_floor_is_refused(tmp_path, capsys):
 def test_contexto_does_not_import_the_generator_or_statistics_at_start():
     code = ("import sys\nfrom contexto import cli\ncli.build_parser()\n"
             "print(sorted(m for m in sys.modules if m.startswith('contexto.bench.') and m not in "
-            "('contexto.bench.model', 'contexto.bench.modes', 'contexto.bench.modes.script_only')))")
+            "('contexto.bench.model', 'contexto.bench.modes') and not m.startswith('contexto.bench.modes.')))")
+    # Every mode module is imported at start (other builders add modes); none may import the generator.
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]"
 

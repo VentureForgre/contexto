@@ -113,8 +113,11 @@ def test_the_new_classes_search_the_questions_content_words(small):
 
 
 def test_content_words_are_in_order_once_each():
-    assert reach.content_words("Which build label is the billing core service running? The billing one.") == [
-        "build", "label", "billing", "core", "service", "running"]
+    text = "Which build label is the billing core service running? The billing one."
+    found = reach.content_words(text)
+    tokens = text.casefold().replace("?", " ").replace(".", " ").split()
+    assert found == [w for k, w in enumerate(tokens) if w in words(text) and w not in tokens[:k]]
+    assert set(found) == words(text) and "billing" in found and "the" not in found
     assert reach.content_words("What is it?") == []
 
 
@@ -249,7 +252,8 @@ def test_instruction_words_come_from_the_generators_tables(small, pinned):
             dropped = reach.instruction_words(probe)
             own = reach._table_part(probe.question)
             assert own is not None, probe.question  # every new question holds the text of its table row
-            assert dropped and dropped <= words(probe.question) and not dropped & words(own)
+            # Empty when the generator's own words already cover the wrapper (``words`` drops them).
+            assert dropped <= words(probe.question) and not dropped & words(own)
             assert not dropped & words(" ".join(probe.statements))  # none is a word of the plant
             by_class.setdefault(probe.cls, set()).add(dropped)
         # The wrapper is fixed per class, so every question of a class drops the same words.

@@ -396,7 +396,7 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
         "probes for which the store's search returned a page holding every statement the answer needs; \"in the top "
         "3\" those whose page is among the three the search tool shows in detail; \"by search or in view\" adds the "
         "statements still in the request. \"Best query from the question's words\" tries each single content word "
-        "of the question and each pair of adjacent words, every pair with a space and with a hyphen, and counts the "
+        "of the question and each pair of adjacent content words, every pair with a space and with a hyphen, and counts the "
         "probe when the best of them puts the page in the top 3; for the first five classes the rule's query is "
         "already taken from the question, so there it repeats \"in the top 3\". Which query a model makes is for "
         "the live run.",

@@ -18,8 +18,8 @@ Queries (``needs`` returns them with the statement each must find):
   is where its name comes from.
 - ``paraphrase``, ``toolloop`` and ``concluded``: the question does not contain the key, so the
   query is the question's content words (``contexto.bench.model.words``: runs of letters and digits
-  of four or more characters, without the function words), in the order they appear, without its
-  instruction words (``instruction_words``: the words of the fixed phrases the generator wraps every
+  of three or more characters, without the function words and the words of the generator's fixed
+  texts), in the order they appear, without its instruction words (``instruction_words``: the words of the fixed phrases the generator wraps every
   such question in, such as "earlier in this conversation" and "Answer with the value only"). They
   are found from the generator's own tables (``ATTRIBUTES``, ``SCENARIOS``): what of the question is
   not the table's text is the wrapper. Contexto's search returns a page only when it holds every word
@@ -30,7 +30,7 @@ Queries (``needs`` returns them with the statement each must find):
 The rule is one mechanical query per fact, so its figure is a floor, not what a model can reach. Beside
 it, never in place of it, one more mechanical figure is measured for those three classes: the best
 query from the question's words (``question_queries``). Each single content word of the question and
-each pair of adjacent words, every pair tried with a space and with a hyphen (``relay mesh``,
+each pair of adjacent content words, every pair tried with a space and with a hyphen (``relay mesh``,
 ``relay-mesh``), is searched; ``best_rank`` is the best rank a page holding the needed statement gets
 over all of them, and ``best_query`` the query that gives it. A probe counts when that rank is within
 the ``SHOWN_IN_DETAIL`` pages the search tool shows in detail. For the first five classes the rule's
@@ -54,7 +54,7 @@ import re
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from contexto.bench.model import NEW_CLASSES, STOP_WORDS, Probe, words
+from contexto.bench.model import NEW_CLASSES, Probe, words
 
 SHOWN_IN_DETAIL = 3  # the pages contexto_search shows with their matching lines (contexto.mcp.SEARCH_LIMIT)
 _IDENT = re.compile(r"(?<![\w.\-])[A-Za-z][A-Za-z0-9]*(?:[.\-_][A-Za-z0-9]+)+")
@@ -108,15 +108,16 @@ def rule_words(probe: Probe) -> list[str]:
 
 def question_queries(probe: Probe) -> list[str]:
     """Every query the best-query column tries, each once, in order: the question's single content
-    words, then each pair of adjacent words with a space and with a hyphen. A pair's words may be of any
-    length (``relay mesh``, ``cache svc``) but are neither function words nor instruction words."""
-    drop = instruction_words(probe)
+    words (``rule_words``), then each pair of words adjacent in the question, both of them such
+    content words, with a space and with a hyphen (``relay mesh``, ``relay-mesh``)."""
+    single = rule_words(probe)
+    allowed = set(single)
     tokens = _TOKEN.findall(probe.question.casefold())
     pairs = []
     for a, b in zip(tokens, tokens[1:]):
-        if not ({a, b} & (STOP_WORDS | drop)):
+        if a in allowed and b in allowed:
             pairs += [f"{a} {b}", f"{a}-{b}"]
-    return list(dict.fromkeys([*rule_words(probe), *pairs]))
+    return list(dict.fromkeys([*single, *pairs]))
 
 
 def needed_statements(probe: Probe) -> list[str]:
