@@ -22,6 +22,18 @@ https://github.com/VentureForgre/contexto/releases. How releases are cut is in
   --dry-run` prints what a live run would spend; a live run uses your own key and refuses to start
   without a `--budget-tokens` ceiling. The output directory holds no key, hostname or home path, so
   it can be published.
+- `contexto serve` runs the engine as a standing service on `127.0.0.1:7837` for clients Contexto
+  does not launch (the IDE extensions, the desktop app, the Agent SDK, `claude -p` in CI): each
+  Claude Code session gets its own store. It requires a token, the first path segment of the base
+  URL `--print-settings` prints. The printed settings turn on Claude Code's gateway hint headers,
+  which the engine reads and the service removes before forwarding (`--forward-hint-headers`
+  passes them on). See [docs/serve.md](docs/serve.md).
+- `contexto mcp --serve` gives those clients Contexto's tools: one MCP server for every
+  conversation, which asks the service which session each tool call belongs to.
+  `--print-mcp-config` prints its config.
+- `contexto run claude` and `contexto proxy` refuse an upstream that is this home's `contexto
+  serve` (as it is once the service's URL is in your Claude Code settings) and say to pass
+  `--upstream URL`.
 - Search finds more. When no paged-out turn holds every word of a query, `contexto_search` and
   `contexto search` now give approximate matches and say so: question words are dropped,
   `refresh_token` finds `refreshToken`, a turn holding enough of the query (rarer words count more)

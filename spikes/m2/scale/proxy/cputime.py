@@ -66,6 +66,8 @@ def child(src: str, turns: int, measure: int) -> int:
         proxy = proxy_mod.ContextoProxy("http://127.0.0.1:9", launcher.NoticeLog(store, io.StringIO()), engine,
                                         observe_usage=observe)  # never started: nothing is sent anywhere
         handler = types.SimpleNamespace(owner=proxy, _log_transform_error=lambda *args, **kwargs: None)
+        if hasattr(proxy_mod._Handler, "_parse"):  # a tree whose _transform parses through its own method (D70)
+            handler._parse = lambda raw: proxy_mod._Handler._parse(handler, raw)
         headers = dict(synth.CLI_HEADERS)
         # The keywords this tree's observe_usage takes of the two the proxy passes since D40 (older trees: none).
         takes = sorted({"tool_calls", "tool_call_ids"} & set(inspect.signature(engine.observe_usage).parameters))
