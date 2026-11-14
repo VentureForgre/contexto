@@ -50,7 +50,8 @@ proxy removes them. The explicit off above is the way out: Contexto then sets no
 
 Cloud providers (D70): with ``CLAUDE_CODE_USE_BEDROCK``, ``CLAUDE_CODE_USE_VERTEX``,
 ``CLAUDE_CODE_USE_FOUNDRY``, ``CLAUDE_CODE_USE_MANTLE`` or ``CLAUDE_CODE_USE_ANTHROPIC_AWS`` on, Claude
-Code sends every request to that provider and none to ``ANTHROPIC_BASE_URL`` (measured on 2.1.322),
+Code sends every request to that provider and none to ``ANTHROPIC_BASE_URL`` (measured on 2.1.322;
+``CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`` too, measured on 2.1.318: ``upstream.CLOUD_PROVIDER_KEYS``),
 so the session would run with no bound and nothing would say so. The launch is refused before a
 session is opened when a switch is on in the process environment or in any settings file Contexto
 can find, whichever of them Claude Code would apply (``check_cloud_provider``).
