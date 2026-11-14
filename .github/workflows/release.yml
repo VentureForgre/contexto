@@ -114,6 +114,20 @@ jobs:
           python-version: "3.12"
           # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
           ignore-nothing-to-cache: true
+      # release-build.sh repacks the sdist with the python3 first on PATH, and the sdist's bytes can
+      # depend on that Python's version: tags up to v0.5.24 use gzip's default level, which Python
+      # 3.15 changed. The release and reattach jobs both put the same uv-managed Python 3.12 first
+      # on PATH; the pinned uv always installs the same build of it.
+      # Here the script runs under semantic-release, in its uvx environment, whose python3 is that
+      # same interpreter: setup-uv asks for 3.12, and uv prefers a managed Python it has installed.
+      - name: Put the pinned Python first on PATH for the build
+        run: |
+          uv python install --no-bin 3.12
+          python=$(uv python find --managed-python 3.12)
+          mkdir "$RUNNER_TEMP/build-python"
+          ln -s "$python" "$RUNNER_TEMP/build-python/python3"
+          echo "$RUNNER_TEMP/build-python" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/build-python/python3" --version
 
       - name: Compute the next version from Conventional Commits
         id: plan
@@ -211,6 +225,18 @@ jobs:
           python-version: "3.12"
           # A job that never runs uv (no Ruff config, no tests) leaves no cache to save.
           ignore-nothing-to-cache: true
+      # release-build.sh repacks the sdist with the python3 first on PATH, and the sdist's bytes can
+      # depend on that Python's version: tags up to v0.5.24 use gzip's default level, which Python
+      # 3.15 changed. The release and reattach jobs both put the same uv-managed Python 3.12 first
+      # on PATH; the pinned uv always installs the same build of it.
+      - name: Put the pinned Python first on PATH for the build
+        run: |
+          uv python install --no-bin 3.12
+          python=$(uv python find --managed-python 3.12)
+          mkdir "$RUNNER_TEMP/build-python"
+          ln -s "$python" "$RUNNER_TEMP/build-python/python3"
+          echo "$RUNNER_TEMP/build-python" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/build-python/python3" --version
       - name: Check that gh is available (hosted runners ship it; the script installs it only if missing)
         run: bash .github/scripts/ensure-gh.sh
       - name: Refuse anything but an existing release tag on main
@@ -329,11 +355,13 @@ jobs:
           enable-cache: false
 
       - name: Check that gh, uv, python3 and sha256sum are on the runner
+        # No pipes: a run block is `bash -e` without pipefail, so `gh --version | head -1` would
+        # pass without gh.
         run: |
-          gh --version | head -1
+          gh --version
           uv --version
           python3 --version
-          sha256sum --version | head -1
+          sha256sum --version
 
       - name: Refuse anything but an existing release tag on main
         run: bash .github/scripts/reattach-verify.sh "$TAG"
@@ -359,7 +387,7 @@ jobs:
           sha256sum --check --strict SHA256SUMS
 
       # Release assets can be replaced by anyone with write access. This check ties the bytes to
-      # reviewed code: an attestation for this repository, signed by release.yml as it was on main
+      # code on main: an attestation for this repository, signed by release.yml as it was on main
       # (--source-ref; --signer-workflow alone matches a run from any ref), on a hosted runner.
       # The source commit is not pinned: a reattach run's commit is main's head at that time.
       - name: Check that release.yml on main built both files (build provenance attestation)
