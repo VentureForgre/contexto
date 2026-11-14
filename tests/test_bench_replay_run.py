@@ -307,10 +307,23 @@ def check_requests_jsonl(run):
     assert all(r["history_tokens"] == history[r["turn"]] and r["main"] and not r["compaction"] for r in replayed)
     assert replayed[-1]["history_tokens"] == bench_script.estimate(script)["tokens"]
     assert sum(r["rotation"] for r in replayed) == expected["rotations"]
-    assert all(r["round"] == 0 for r in replayed if r["rotation"])
-    # The proxy's own estimate is beside the fake upstream's count; once usage is known the two are close.
+    # A rotation runs at a turn start, or inside a tool loop as step 2 of an in-turn batch (D63), which the
+    # proxy logs with reason "in_turn".
+    log = run["out"] / "store" / "sessions" / "bench-replay-20261016" / "log.jsonl"
+    logged = [json.loads(line)["transform_events"] for line in log.read_text(encoding="utf-8").splitlines()
+              if json.loads(line)["event"] == "request"]
+    assert len(logged) == len(replayed)
+    in_turn = sum(1 for events in logged for t in events if t["event"] == "rotation" and t.get("reason") == "in_turn")
+    assert sum(1 for r in replayed if r["rotation"] and r["round"] != 0) == in_turn
+    # The proxy's own estimate is beside the fake upstream's count; once usage is known the two are close. On a
+    # request where an in-turn batch ran (D63) it is the anchored estimate less what the batch freed by the
+    # estimator, which errs high when the paged content was estimated low: never under the count there, and
+    # close again on the next request.
+    batch = {n for n, events in enumerate(logged) if any(t["event"] == "in_turn_batch" for t in events)}
     assert all(type(r["proxy_estimate"]) is int for r in replayed)
-    assert all(abs(r["proxy_estimate"] - r["uncached"]) < 0.15 * r["uncached"] for r in replayed[1:])
+    assert all(abs(r["proxy_estimate"] - r["uncached"]) < 0.15 * r["uncached"]
+               for n, r in enumerate(replayed) if n and n not in batch)
+    assert all(replayed[n]["proxy_estimate"] >= replayed[n]["uncached"] for n in batch)
     # The modelled arms: the same rows the model gives for the measured head.
     assert by_arm["full"] == lines.full_rows(script, expected["head_tokens"])
     assert by_arm["plain"] == lines.plain_rows(script, expected["head_tokens"], 150_000)
@@ -403,8 +416,12 @@ def check_the_store_is_kept_without_its_private_files(run):
     store = SessionStore.open_existing(out / "store", "bench-replay-20261016")
     assert len(store.page_ids()) >= run["expected"]["pages"]  # the pages at the first probe turn, and any after
     probe = next(p for p in script.probes if p.cls == "paged_only")
-    (page_id,) = store.search(probe.subjects[0])  # still readable and searchable without its key
-    assert probe.statements[0] in json.dumps(store.get_page(page_id)["messages"])
+    # Still readable and searchable without its key. Since D63 a probe turn's tool loop pages the probe turns
+    # before it, which quote the fact, so the plant's own page (the earliest) need not be the only hit.
+    hits = store.search(probe.subjects[0])
+    plant = min(hits, key=lambda page: store.get_page(page)["turn"])
+    assert probe.statements[0] in json.dumps(store.get_page(plant)["messages"])
+    assert all(store.get_page(page)["turn"] >= script.n_content for page in hits if page != plant)
     assert "store/ (session bench-replay-20261016)" in run["stdout"]
     assert _private_files(out / "store") == []  # reading it with open_existing wrote no key
     # Reviewer B's nit, said in results.md: opening the kept store as a session writes a new page.key.
@@ -452,8 +469,16 @@ def check_the_pinned_fallback_sentence_holds_in_the_run(run):
     said = "update output.pinned_fallback, the sentence that states this"
     assert len(empty) == output.FALLBACK_EMPTY, said
     assert len(approximate) == output.FALLBACK_ANSWERED, said
-    probe, call = approximate[0]
-    assert (probe.id, probe.cls) == (output.FALLBACK_PROBE, output.FALLBACK_CLASS), said
+    (probe, call), = [(p, c) for p, c in approximate if p.id == output.FALLBACK_PROBE]
+    assert probe.cls == output.FALLBACK_CLASS, said
+    for other, other_call in approximate:  # D63: the others show only a page of an earlier probe turn
+        if other is probe:
+            continue
+        shown = list(dict.fromkeys(hit["page_id"] for hit in other_call["returned"]))
+        pages_of = [SessionStore.open_existing(out / "store", "bench-replay-20261016").get_page(p) for p in shown]
+        assert other.cls == output.FALLBACK_OTHER_CLASS and other.id in {r["id"] for r in empty}, said
+        assert all(p["turn"] >= script.n_content and other.statements[0] not in json.dumps(p["messages"])
+                   for p in pages_of), said
     assert probe.id in {r["id"] for r in empty}, said
     pages = list(dict.fromkeys(hit["page_id"] for hit in call["returned"]))
     store = SessionStore.open_existing(out / "store", "bench-replay-20261016")
@@ -463,9 +488,10 @@ def check_the_pinned_fallback_sentence_holds_in_the_run(run):
     assert [hit["page_id"] for hit in call["returned"]].count(pages[1]) == 3, said  # its line and two others
     assert sum(old in texts[1] for old in probe.older) == 2, said  # the two decoys beside it
     assert output.pinned_fallback() == (
-        "On the pinned session the tool's fallback answers 1 of the 18 queries the strict search finds nothing for: "
+        "On the pinned session the tool's fallback answers 3 of the 18 queries the strict search finds nothing for: "
         "for q_r_02 (paraphrase) its reply shows the plant's line on the second of the three pages it shows in "
-        "detail, beside two of the service's decoy lines.")
+        "detail, beside two of the service's decoy lines; for the other 2 (toolloop probes) it shows only a page "
+        "of an earlier probe turn, which holds no plant.")
 
 
 def check_the_chart_of_a_replay_names_each_basis_once(run):
