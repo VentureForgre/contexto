@@ -54,9 +54,10 @@ Usage that cannot be read. When a 2xx response to a billed request ends without 
 can read in full (an encoded body, a stream cut short before its final ``message_delta`` usage, a
 body that is not JSON), the vendor may still have billed up to the request's ``max_tokens``. The
 record then carries ``usage_unreadable: true`` beside ``reserved_tokens``, the request's reservation
-(which every record carries, near the start of its line), and the request counts as that reservation (or what was read, if more) everywhere: in the guard, in
-the unit's tokens and when a resumed run reads ``requests.jsonl`` (``record_tokens``). The guard
-never counts less than a request could have cost.
+(which every record carries, near the start of its line), and the request counts as that
+reservation (or what was read, if more) everywhere: in the guard, in the unit's tokens and when a
+resumed run reads ``requests.jsonl`` (``record_tokens``). The guard never counts less than a
+request could have cost.
 
 ``Ledger`` is the spend guard of the whole run. Before a billed request is forwarded the meter
 reserves its worst case: the request's bytes at 1.5 bytes per token, a rate that overstates every
