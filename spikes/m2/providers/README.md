@@ -104,9 +104,46 @@ What it adds:
 - With `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` set, `-p` mode drops a project file's
   `CLAUDE_CODE_USE_BEDROCK`, as D52 measured for a project file's `env` block in general.
 
+## Settings files Claude Code reads or skips whole (Claude Code 2.1.322)
+
+Measured by the two reviewers of PR #258 (rounds 2 to 4), with this probe's sandbox and stubs:
+plain `claude -p` and `contexto run claude -p` from a `mktemp -d` directory, `env -i`, a temp
+`HOME` and `CLAUDE_CONFIG_DIR`, a fake key, `sandbox-exec` denying everything but localhost, and
+loopback stubs that answer 401. Stub A is the environment's `ANTHROPIC_BASE_URL`, stub B the
+settings file's; "proxy requests" are `request` events in a `contexto run claude -p` session log.
+Nothing was spent. These are the
+measurements behind two of the rules `contexto.upstream.read_settings_file` follows; the third,
+`NaN` and `Infinity`, is also in [D70-serve-probes.md](../../../docs/research/D70-serve-probes.md) §3.
+
+| Settings file | What Claude Code did |
+|---|---|
+| An integer of 400 or of 5,000 digits (past Python's 4,300-digit limit), at the top level or inside `env`, beside `env.ANTHROPIC_BASE_URL` = B | read the file: 6 requests at B each, 0 at A |
+| A 5,000-digit integer beside `"CLAUDE_CODE_USE_BEDROCK": "1"` | read the file: 0 requests at Contexto's upstream, 6 at the provider stub |
+| `NaN`, `Infinity` or `-Infinity` beside a base URL B | "Invalid or malformed JSON", the file not loaded: 6 requests at A |
+| `NaN` beside `CLAUDE_CODE_USE_BEDROCK` | the file not loaded: no bypass, 6 requests through the proxy |
+| `{"env": null, "apiKeyHelper": <helper>}`, no key in the environment (project file, and the user file) | the file not loaded: "These settings files did not load, so nothing in them is in effect … `(env): Expected record, but received null`"; the helper did not run, and plain `claude -p` and `contexto run claude -p` both ended `Not logged in · Please run /login`, exit 1 |
+| The same with `"env": []` or `"env": "x"` | the same |
+| `{"env": null}` with `ANTHROPIC_API_KEY` in the environment | the environment's key was used: 12 proxy requests |
+| `{"env": {}, "apiKeyHelper": <helper>}` (control) | the file loaded: the helper ran, 12 proxy requests |
+| `{"env": {"FOO": {"a": 1}}, "apiKeyHelper": <helper>}`, and `{"env": {"FOO": null}, …}` | the file loaded: the helper ran, 12 proxy requests |
+| `{"permissions": "bad", "env": {"CLAUDE_CODE_USE_BEDROCK": "1", …}}` | the file not loaded: 6 of 6 requests through the proxy, 0 at the provider stub |
+
+What it shows:
+
+- Claude Code parses a settings file as JavaScript's `JSON.parse` does: an integer longer than
+  Python's 4,300-digit limit is a number (Infinity past the largest double), so the file is read,
+  and `NaN` or `Infinity`, which `JSON.parse` rejects, make the file unreadable. Contexto's reader
+  follows both (`_json_int`, `_json_constant`).
+- Claude Code checks the type of each settings key it knows. An `env` that is not an object makes
+  it load nothing from the file, `apiKeyHelper` included; a value of any type inside an `env`
+  object does not. Contexto's reader treats a file whose `env` is not an object as setting
+  nothing. Other wrongly typed keys (`"permissions": "bad"`) also make Claude Code skip the file;
+  Contexto does not check those, which docs/doctor.md lists as a limit.
+
 Not measured: interactive mode (only `-p`), so not what interactive Claude Code does with a project
 file's provider variable once its trust dialog is accepted; a settings file other than the
-project's `.claude/settings.json`; two variables on at once; organization-managed settings; the
+project's `.claude/settings.json`, except the `env`-not-an-object case above, which was also run on
+the user file; two variables on at once; organization-managed settings; the
 other 18 cases of the first table on 2.1.322; and any Claude Code version but 2.1.318 and 2.1.322.
 The variable list, its order and the on/off rule were also read from the 2.1.318 and 2.1.322
 programs, which hold the same code for them.

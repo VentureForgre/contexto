@@ -19,7 +19,7 @@ import os
 
 from contexto.commands._common import EXIT_OK, add_session_option, fail, safe_text, say_session
 from contexto.paths import contexto_home
-from contexto.stats import session_faults
+from contexto.stats import session_faults, session_stats
 from contexto.store import SessionNotFoundError, SessionStore
 from contexto.store.ledger import LedgerError
 from contexto.store.pinned import GROUPS, READABLE_CARRIED_HEADING, pinned_items, render_state
@@ -33,10 +33,12 @@ def register(subparsers) -> None:
                     "session, with no budget cap, and how many turns are paged out. With --json, one "
                     "object: session, pinned (open_obligations, active_decisions and verified_facts, each a "
                     "list of records, newest first, with id, kind, body, created_at, owner, topic, stale and "
-                    "conflict), conflicts (topic and record_ids), staleness_checked, and pages (the number "
+                    "conflict), conflicts (topic and record_ids), staleness_checked, pages (the number "
                     "of turns paged out; null, with the error on stderr and exit 1, when they cannot be "
-                    "listed), and faults (the store faults of the latest run, the object `contexto stats --json` "
-                    "gives under that key, docs/stats.md). stale is null when staleness_checked is false. "
+                    "listed), faults (the store faults of the latest run, the object `contexto stats --last-run "
+                    "--json` gives under that key, docs/stats.md), and log (missing: true when the session has "
+                    "no readable log, so a faults total of 0 says nothing). stale is null when "
+                    "staleness_checked is false. "
                     "carried lists the records carried from earlier sessions of the project (D69), in the order "
                     "they are carried, with id, kind, body, created_at, owner, topic, conflict, session (its full "
                     "id), label and date.")
@@ -110,9 +112,10 @@ def run_json(store: SessionStore, home) -> int:
     """``state --json`` (D64): the records the text view lists, in its groups and order, with each record's
     text as it was pinned, and the page count. A ledger that cannot be read prints nothing on stdout; a
     pages directory that cannot be listed gives ``"pages": null``, the error line and exit 1, as
-    ``sessions show --json`` reports its page list. ``faults`` is the object ``contexto stats --json`` gives
-    under the same key (``contexto.stats.session_faults``): what made the store stop paging in the latest run,
-    whether it still is, and what to do."""
+    ``sessions show --json`` reports its page list. ``faults`` is the object ``contexto stats --last-run
+    --json`` gives under the same key: what made the store stop paging in the latest run, whether it still
+    is, and what to do. ``log`` carries that output's ``log.missing``, so a script can tell no faults from
+    no log to read them from (PR #263 review A)."""
     session_id = store.session_id
     try:
         root = store.workdir()
@@ -135,7 +138,8 @@ def run_json(store: SessionStore, home) -> int:
                     "created_at": c.record.created_at, "owner": c.record.owner, "topic": c.record.topic,
                     "conflict": c.conflict, "session": c.session, "label": c.label, "date": c.date}
                    for c in carried]
+    latest = session_stats(home, session_id, last_run=True, store=False)  # what session_faults reads
     print(json.dumps({"session": session_id, "pinned": pinned, "conflicts": conflicts, "carried": carried_out,
-                      "staleness_checked": root is not None, "pages": pages,
-                      "faults": session_faults(home, session_id)}, indent=2, sort_keys=True))
+                      "staleness_checked": root is not None, "pages": pages, "faults": latest["faults"],
+                      "log": {"missing": latest["log"]["missing"]}}, indent=2, sort_keys=True))
     return fail(unreadable) if unreadable else EXIT_OK

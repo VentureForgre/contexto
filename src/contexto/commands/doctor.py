@@ -86,6 +86,7 @@ from contexto.cliversions import CLI_NAMES, REPORT_URL, TESTED_VERSIONS, install
 from contexto.cliversions import _kill_group as kill_group
 from contexto.cliversions import start_failure as cannot_start
 from contexto.launcher import (
+    CLI_INSTALL,
     LaunchError,
     Terminated,
     check_cloud_provider,
@@ -311,6 +312,8 @@ def iter_checks(context: Context | None = None) -> Iterator[Check]:
     for cli in ("claude", "codex"):
         check = guarded(cli, CLI_NAMES[cli], lambda cli=cli: check_cli(cli, ctx.env))
         usable[cli] = bool(check.details.pop("usable", False))
+        if cli == "codex" and usable[cli] and not codex_support():
+            check, usable[cli] = without_codex_support(check), False
         on_path[cli] = check.details.get("path") is not None
         clis.append(check)
         if any(usable.values()):  # one CLI is enough, so no line changes from here on
@@ -327,13 +330,20 @@ def iter_checks(context: Context | None = None) -> Iterator[Check]:
         ("codex-key", "codex", "Codex key helper", lambda: check_codex_key(ctx)),
     ]
     for check_id, cli, label, check in per_cli:
-        yield guarded(check_id, label, check) if usable[cli] else skipped(check_id, label, cli)
+        if usable[cli]:
+            yield guarded(check_id, label, check)
+        elif cli == "codex" and on_path[cli] and not codex_support():
+            yield skipped(check_id, label, CODEX_SUPPORT_MISSING)
+        else:
+            yield skipped(check_id, label, f"{cli} is not on PATH or cannot be run")
     yield guarded("store", "Store home", lambda: check_store(ctx.env, claude=usable["claude"]))
     yield guarded("mcp", "MCP server", lambda: check_mcp(ctx.env, ctx.cwd))
-    # The launcher stops before this check only when `claude` is not on PATH; one that is there but cannot
-    # start still meets the refusal (reviewer A, PR #258 round 5), so only a missing one skips it.
+    # The launcher stops before this check only when `shutil.which` finds no `claude` (missing, not
+    # executable, a broken symlink or a directory); one that is there but cannot start still meets the
+    # refusal (reviewer A, PR #258 round 5), so only the first kind skips it, in words that agree with the
+    # `claude` line above (PR #258 round 6).
     yield (guarded("provider", "Cloud provider", lambda: check_provider(ctx)) if on_path["claude"]
-           else skipped("provider", "Cloud provider", "claude", "is not on PATH"))
+           else skipped("provider", "Cloud provider", "claude is not on PATH or not executable"))
 
 
 def guarded(check_id: str, label: str, check: Callable[[], Check]) -> Check:
@@ -348,8 +358,30 @@ def guarded(check_id: str, label: str, check: Callable[[], Check]) -> Check:
                      f"Report it at {REPORT_URL}", {"error": type(exc).__name__})
 
 
-def skipped(check_id: str, label: str, cli: str, why: str = "is not on PATH or cannot be run") -> Check:
-    return Check(check_id, SKIP, f"{label}: not checked, {cli} {why}")
+def skipped(check_id: str, label: str, why: str) -> Check:
+    return Check(check_id, SKIP, f"{label}: not checked, {why}")
+
+
+# What `contexto run codex` says, and exits 2 on, when contexto.codex cannot be imported (commands/run.py).
+CODEX_SUPPORT_MISSING = "codex support is not installed in this build"
+
+
+def codex_support() -> bool:
+    """Whether ``contexto.codex`` imports. Without it `contexto run codex` exits 2, so doctor says so in
+    those words rather than failing its Codex checks as a bug to report (PR #283's review)."""
+    try:
+        import contexto.codex  # noqa: F401
+    except Exception:  # missing, or broken on import (PR #290 review A): doctor must not die of it either way
+        return False
+    return True
+
+
+def without_codex_support(check: Check) -> Check:
+    """The ``codex`` line for a CLI that starts while Contexto's Codex support is missing: a warning, as a
+    missing CLI is, which ``require_one_cli`` makes a failure when ``claude`` is unusable too."""
+    return Check("codex", WARN, f"{check.summary}, but {CODEX_SUPPORT_MISSING}",
+                 "Reinstall Contexto to use `contexto run codex`; until then it exits 2",
+                 {**check.details, "error": "codex_support_missing"})
 
 
 def report(checks: list[Check]) -> dict[str, Any]:
@@ -417,7 +449,11 @@ def check_cli(cli: str, env: Mapping[str, str]) -> Check:
     path = shutil.which(cli, path=env.get("PATH"))
     if path is None:
         details["error"] = "not_found"
-        return Check(cli, WARN, f"{name}: {cli_not_found(cli, env.get('PATH'))}", install, details)
+        why = cli_not_found(cli, env.get("PATH"))
+        # Since #257 a CLI not on PATH at all gets its install command in the line itself; the next step
+        # then only says what needs it, so the install step is given once (PR #258 review, both).
+        action = f"Only `contexto run {cli}` needs it" if CLI_INSTALL[cli][1] in why else install
+        return Check(cli, WARN, f"{name}: {why}", action, details)
     details["path"] = path
     version, error = read_version(path, env)
     if cannot_start(error):  # on PATH and executable, but it does not start: a missing #! interpreter, say
@@ -438,10 +474,15 @@ def check_cli(cli: str, env: Mapping[str, str]) -> Check:
 
 def require_one_cli(clis: list[Check]) -> None:
     """Contexto needs one of the two CLIs: called with neither usable, it makes both checks fail."""
+    codex_missing = any(check.details.get("error") == "codex_support_missing" for check in clis)
     for check in clis:
         if check.status == WARN:
             check.status = FAIL
-            check.action = "Install Claude Code or Codex and put it on PATH: Contexto needs at least one of them"
+            if check.details.get("error") == "codex_support_missing":  # installed: its own step stands
+                continue
+            check.action = ("Install Claude Code and put it on PATH: Contexto needs at least one of the two CLIs, "
+                            "and this build has no Codex support" if codex_missing else
+                            "Install Claude Code or Codex and put it on PATH: Contexto needs at least one of them")
 
 
 # Settings files ---------------------------------------------------------------------------------------

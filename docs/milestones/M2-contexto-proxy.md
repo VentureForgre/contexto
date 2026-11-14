@@ -307,13 +307,15 @@ other four switches with `1`, `true` and `0` (D70).
 
 Settings files are read once per launch, through one reader with a bound: a regular file only, at
 most 4 MiB, with a UTF-8 byte order mark accepted as Claude Code accepts one. It parses as Claude
-Code 2.1.322 does (measured for D64): an integer past Python's 4,300-digit limit is read (as
+Code 2.1.322 does (measured for D64, `spikes/m2/providers/README.md`): an integer past Python's
+4,300-digit limit is read (as
 JavaScript's Infinity), and a file holding `NaN` or `Infinity` is not valid JSON. A file that does
 not exist, or that this user cannot open, counts as absent: Claude Code cannot read it either. A
 file that is there and that Contexto could not read (not a regular file, larger than the bound, not
 valid JSON) is not evidence that a switch is off, so the launch is refused with a message naming
 that file, unless it was read whole and its text cannot name a switch. A file whose `env` is not an
-object sets nothing (Claude Code loads nothing from it, `apiKeyHelper` included) and refuses nothing.
+object sets nothing (Claude Code loads nothing from it, `apiKeyHelper` included, measured in the same
+place) and refuses nothing.
 
 `claude --version` and `--help` alone are not checked. Not covered: managed settings that are not
 in that file, and `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` (not measured).

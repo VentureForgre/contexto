@@ -41,19 +41,22 @@ def run(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     home = contexto_home()
     try:
-        session_id, how = select_session(home, args.session_id if args.session_id is not None else args.session)
+        if args.session_id is not None:
+            session_id, how = select_session(home, args.session_id, "SESSION")
+        else:
+            session_id, how = select_session(home, args.session)
         out = session_stats(home, session_id, last_run=args.last_run)
     except SessionNotFoundError as e:
         return fail(str(e))
     if args.json:
         print(json.dumps(out, indent=2, sort_keys=True))
         return EXIT_OK
-    say_session(session_id, "SESSION" if args.session_id is not None and how == "--session" else how)
+    say_session(session_id, how)
     runs = f"{out['runs']:,} run{'' if out['runs'] == 1 else 's'}"
     scope = f"the latest of {runs}" if args.last_run else f"the whole session ({runs}"
     span, in_runs = out["span_seconds"], out["run_seconds"]
-    if span is None:
-        span = "no log"
+    if span is None:  # no time to measure: no log, or no `ts` the log can be dated by (PR #263 review B)
+        span = "no log" if out["log"]["missing"] or not out["log"]["lines"] else "no usable times"
     elif args.last_run or in_runs is None or in_runs == span:
         span = f"{duration_text(span)} of log"
     else:  # runs days apart: the time in runs, and the span of the log, which is not time spent working
