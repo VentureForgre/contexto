@@ -24,7 +24,8 @@ existing FILE unless ``--force`` is given, and writes nothing when the run it wo
 
 Ctrl+C, SIGTERM, SIGHUP and the launcher's other terminating signals stop the replay with one line
 on stderr and exit 128 + the signal's number (130 for Ctrl+C); the proxy and the fake upstream are
-stopped and a temporary store is removed on the way.
+stopped and a temporary store is removed on the way. A store kept with ``--out`` loses its
+``page.key`` and ``affinity.salt`` however the replay ends.
 """
 
 from __future__ import annotations
@@ -114,7 +115,7 @@ def _mismatch(differences: list[str], seed: int) -> str:
         + ("place:" if len(differences) == 1 else "places:"),
         *[f"  {line}" for line in shown],
         *([f"  and {more} more (all of them are in results.json, replay.differences, with --out)"] if more else []),
-        "If the proxy's behaviour was changed on purpose, record the trace again, from a checkout:",
+        "If the proxy's behaviour was changed on purpose, record the trace again, from the repository's root:",
         "  " + RECORD_COMMAND.format(name=trace.file_name(seed)),
         "and check three things in the trace's diff before committing it:",
         "  1. request sizes grew or shrank only where the change was meant to act (expected.request_tokens);",
@@ -170,8 +171,13 @@ def run(args: argparse.Namespace) -> int:
         with launcher.LaunchSignals() as signals:  # SIGTERM, SIGHUP and the rest unwind like Ctrl+C
             try:
                 if args.out is not None:
-                    measured = session.replay(script, args.out / "store")
-                    measured.private_files_removed = session.remove_private_files(args.out / "store")
+                    # The store is kept to be published: its private files go on every way out of the
+                    # replay, a signal or a failed request as well as a finished run.
+                    try:
+                        measured = session.replay(script, args.out / "store")
+                    finally:
+                        removed = session.remove_private_files(args.out / "store")
+                    measured.private_files_removed = removed
                 else:
                     with tempfile.TemporaryDirectory(prefix="contexto-bench-replay-") as scratch:
                         measured = session.replay(script, Path(scratch))
@@ -180,8 +186,8 @@ def run(args: argparse.Namespace) -> int:
     except (KeyboardInterrupt, launcher.Terminated) as exc:
         signum = exc.signum if isinstance(exc, launcher.Terminated) else signal.SIGINT
         name = "Ctrl+C" if signum == signal.SIGINT else signal.Signals(signum).name
-        kept = f"; what was replayed so far is in {args.out / 'store'}" if args.out is not None else \
-            "; its temporary store was removed"
+        kept = (f"; what was replayed so far is in {args.out / 'store'}, without its page.key and affinity.salt"
+                if args.out is not None else "; its temporary store was removed")
         print(f"contexto bench: the replay was stopped by {name}{kept}.", file=sys.stderr)
         return 128 + int(signum)
     except launcher.LaunchError as exc:  # check_options: refused before anything started

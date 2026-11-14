@@ -762,7 +762,7 @@ def test_the_head_is_synthetic_text_of_a_realistic_size():
     fields = client.head("bench-replay-20261016")
     tokens = session.head_tokens(fields)
     assert 18_641 <= tokens <= 27_925  # the range measured for Claude Code 2.1.314 (launcher.MEASURED_OVERHEADS)
-    assert tokens == 21_277
+    assert tokens == trace.load_packaged()["expected"]["head_tokens"]  # the measurement is the trace's, never a literal
     text = json.dumps({"system": client.system_blocks(), "context": client.context_block(),
                        "tools": client.synthetic_tools()})
     for name in ("Claude", "Anthropic", "claude"):

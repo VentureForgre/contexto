@@ -239,6 +239,11 @@ def _replay(script: Script, home: Path) -> Measured:
                 messages.append({"role": "user", "content": [client.tool_result(call) for call in calls]})
             if turn >= script.n_content:
                 completed += 1
+    except ReplayError as exc:
+        if upstream.unexpected:  # the fake upstream refused what the proxy sent, and recorded why
+            raise ReplayError("the fake upstream refused the request the proxy sent: "
+                              + upstream.unexpected[-1]) from exc
+        raise
     finally:
         if proxy is not None:  # as the launcher ends a run
             proxy.stop()
@@ -294,7 +299,7 @@ def remove_private_files(home: Path) -> list[str]:
     removed = []
     for pattern in PRIVATE_FILES:
         for path in sorted(home.glob(pattern)):
-            path.unlink()
+            path.unlink(missing_ok=True)
             removed.append(path.relative_to(home).as_posix())
     return removed
 

@@ -434,7 +434,10 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
                  "`store/` is the session's own store, kept so that its pages can be read. Two files were removed "
                  "from it: " + ", ".join(f"`{p}`" for p in block["private_files_removed"]) + ". They were random, "
                  "made for this store alone (the key of its page ids and the salt of its upstream affinity key), "
-                 "and are of no use outside it.", ""]
+                 "and are of no use outside it. Reading the store with `contexto.store.SessionStore.open_existing` "
+                 "writes nothing into it; opening it as a session (`SessionStore(home, session)`, as the proxy and "
+                 "Contexto's MCP server do) writes a new random `page.key`, so remove that again before publishing "
+                 "the store.", ""]
     if block["notices"]:
         text += ["## The proxy's warnings during the session", "", *[f"- {line}" for line in block["notices"]], ""]
     text += ["## Result", ""]

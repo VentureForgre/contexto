@@ -19,6 +19,7 @@ import dataclasses
 import io
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -73,6 +74,16 @@ def _watched(argv):
     finally:
         patch.undo()
     return kept
+
+
+def _test_module(name: str):
+    """Another test file of this directory, imported by path (the tests are not a package)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(f"_bench_{name}", Path(__file__).with_name(f"{name}.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load(out: Path) -> dict:
@@ -243,7 +254,8 @@ def check_manifest(run):
         assert (unit["arm"], unit["status"], unit["compactions"]) == (arm, "not_run", None)
         assert "modelled" in unit["reason"] and "not run" in unit["reason"]
     added = manifest["replay"]
-    assert added["pinned"] is True and added["trace"] == "trace-20261016.json" and added["turns"] == 40
+    assert added["pinned"] is True and added["trace"] == "trace-20261016.json"
+    assert added["turns"] == trace.PINNED["turns"]
     assert added["script_sha256"] == run["script"].digest()
     assert added["rates"] == trace.RATES == {"log_bytes_per_token": 1.8, "other_bytes_per_token": 3.0,
                                              "log_text_min_bytes": 5_000, "tool_result_text_is_log_text": True}
@@ -365,6 +377,13 @@ def check_the_store_is_kept_without_its_private_files(run):
     (page_id,) = store.search(probe.subjects[0])  # still readable and searchable without its key
     assert probe.statements[0] in json.dumps(store.get_page(page_id)["messages"])
     assert "store/ (session bench-replay-20261016)" in run["stdout"]
+    assert _private_files(out / "store") == []  # reading it with open_existing wrote no key
+    # Reviewer B's nit, said in results.md: opening the kept store as a session writes a new page.key.
+    copy_of = out.parent / "store-opened-as-a-session"
+    shutil.copytree(out / "store", copy_of)
+    SessionStore(copy_of, "bench-replay-20261016")
+    assert [p.name for p in _private_files(copy_of)] == ["page.key"]
+    assert "writes a new random `page.key`, so remove that again before publishing the store" in run["markdown"]
 
 
 def check_no_path_of_this_machine_is_in_any_output_file(run):
@@ -439,7 +458,8 @@ def test_a_proxy_change_needs_only_the_trace_recorded_again(monkeypatch, tmp_pat
     assert f"request_tokens: {requests} of {requests} differ; the first is number 1" in err
     assert f"All {requests} differ, by +" in err and "(the head, the tool definitions)" in err
     assert err.startswith("The measurements differ from the pinned trace in ")
-    for said in ("contexto bench --replay --record-trace src/contexto/bench/data/trace-20261016.json --force",
+    for said in ("record the trace again, from the repository's root:",
+                 "contexto bench --replay --record-trace src/contexto/bench/data/trace-20261016.json --force",
                  "1. request sizes grew or shrank only where the change was meant to act",
                  "2. the bound still holds", "3. reach did not fall"):
         assert said in err, said
@@ -455,6 +475,11 @@ def test_a_proxy_change_needs_only_the_trace_recorded_again(monkeypatch, tmp_pat
     run = _pinned(tmp_path / "out")
     for check in PINNED_CHECKS:
         check(run)
+    # Reviewer A low 3: the other test file's head-size test read 21,277 as a literal and failed after a
+    # re-record that this test could not see. It reads the trace now; run it against the recorded one.
+    parts = _test_module("test_bench_replay")
+    parts.test_the_head_is_synthetic_text_of_a_realistic_size()
+    assert recorded["expected"]["head_tokens"] != shipped["expected"]["head_tokens"]  # the head did grow
 
 
 # A session that is not the pinned one
@@ -695,9 +720,12 @@ def test_a_proxy_that_breaks_the_tool_loop_stops_the_replay_with_the_rule_named(
     for argv in (SHORT, ["--seed", "20261017", "--protocol", "d27", "--replay-turns", "8"]):
         assert cli.main(["bench", "--replay", *argv]) == 1
         err = capsys.readouterr().err
-        assert err.startswith("contexto bench: error: the replay stopped: the proxy answered 400 "
-                              "(invalid_request_error: messages."), err
+        # Reviewer A's nit: the fake upstream refused the request the proxy sent; the proxy refused nothing.
+        assert err.startswith("contexto bench: error: the replay stopped: the fake upstream refused the request "
+                              "the proxy sent: request "), err
+        assert "breaks a rule of the Messages API, which would refuse it with a 400: messages." in err, err
         assert "unexpected `tool_use_id` found in `tool_result` blocks" in err, err
+        assert "the proxy answered" not in err and err.count("\n") == 1, err
 
 
 def test_a_session_that_stops_is_an_error(monkeypatch, capsys):
@@ -728,33 +756,73 @@ def test_ctrl_c_prints_one_line_and_exits_130(monkeypatch, capsys, tmp_path):
     assert made and not made[0].exists()
 
 
+def _private_files(store: Path) -> list[Path]:
+    return [p for pattern in session.PRIVATE_FILES for p in store.glob(pattern)]
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt(), session.ReplayError("the proxy answered 400"), OSError("full")])
+def test_a_replay_with_out_that_stops_keeps_its_store_without_the_private_files(monkeypatch, capsys, tmp_path, stop):
+    """Reviewer B low 1: ``page.key`` and ``affinity.salt`` were removed only after a replay that
+    finished, so a stopped one left them in the store it points the user to."""
+    out = tmp_path / "out"
+
+    def stopped(script, home):
+        (home / "sessions" / "s").mkdir(parents=True)
+        (home / "affinity.salt").write_bytes(b"salt")
+        (home / "sessions" / "s" / "page.key").write_bytes(b"key")
+        (home / "sessions" / "s" / "log.jsonl").write_text("{}\n", "utf-8")
+        assert len(_private_files(home)) == 2
+        raise stop
+
+    monkeypatch.setattr(session, "replay", stopped)
+    code = cli.main(["bench", "--replay", *SHORT, "--out", str(out)])
+    assert code == (130 if isinstance(stop, KeyboardInterrupt) else 1)
+    assert _private_files(out / "store") == [] and (out / "store" / "sessions" / "s" / "log.jsonl").exists()
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and "Traceback" not in err
+    if isinstance(stop, KeyboardInterrupt):
+        assert err == (f"contexto bench: the replay was stopped by Ctrl+C; what was replayed so far is in "
+                       f"{out / 'store'}, without its page.key and affinity.salt.\n")
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@pytest.mark.parametrize("with_out", [False, True], ids=["temporary", "out"])
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
-def test_a_signal_stops_the_replay_cleanly(tmp_path, signum):
+def test_a_signal_stops_the_replay_cleanly(tmp_path, signum, with_out):
     """A real signal to a real replay: one line, exit 128 + N, no traceback, and the temporary store and
-    the ports are gone. Only the process this test starts is signalled."""
+    the ports are gone; with ``--out`` the kept store has no ``page.key`` or ``affinity.salt``. Only the
+    process this test starts is signalled."""
     scratch = tmp_path / "tmp"
     scratch.mkdir()
+    out = tmp_path / "out"
     env = {**os.environ, "TMPDIR": str(scratch), "PYTHONUNBUFFERED": "1"}
-    process = subprocess.Popen([sys.executable, "-m", "contexto", "bench", "--replay"], env=env,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    argv = [sys.executable, "-m", "contexto", "bench", "--replay", *(["--out", str(out)] if with_out else [])]
+    process = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    store = out / "store" if with_out else None
     try:
         deadline = time.monotonic() + 60
-        while not list(scratch.glob("contexto-bench-replay-*/sessions/*/log.jsonl")):
+        while not (list(store.glob("sessions/*/log.jsonl")) if store else
+                   list(scratch.glob("contexto-bench-replay-*/sessions/*/log.jsonl"))):
             assert process.poll() is None and time.monotonic() < deadline, "the replay did not start"
             time.sleep(0.05)
         time.sleep(0.3)  # inside the session, with the proxy and the fake upstream serving
+        if store:
+            assert len(_private_files(store)) == 2  # both are there while the replay runs
         process.send_signal(signum)
-        out, err = process.communicate(timeout=60)
+        out_text, err = process.communicate(timeout=60)
     finally:
         if process.poll() is None:
             process.kill()
             process.communicate()
     name = "Ctrl+C" if signum == signal.SIGINT else signal.Signals(signum).name
-    assert process.returncode == 128 + signum, (out, err)
-    assert err == f"contexto bench: the replay was stopped by {name}; its temporary store was removed.\n"
-    assert "Traceback" not in out + err
+    assert process.returncode == 128 + signum, (out_text, err)
+    kept = (f"what was replayed so far is in {store}, without its page.key and affinity.salt" if store else
+            "its temporary store was removed")
+    assert err == f"contexto bench: the replay was stopped by {name}; {kept}.\n"
+    assert "Traceback" not in out_text + err
     assert list(scratch.iterdir()) == []
+    if store:
+        assert _private_files(store) == [] and list(store.glob("sessions/*/log.jsonl"))
 
 
 # Options
@@ -836,7 +904,18 @@ def test_the_help_names_the_mode_and_its_options(capsys):
         assert said in text, said
 
 
-@pytest.mark.parametrize("name", replay_mode.OUTPUT_NAMES)
+# Every name a replay or a live run writes into --out, written out from the shared output schema
+# (schemas.md): not read from the package, so a name dropped from replay_mode.OUTPUT_NAMES fails here.
+RESULT_NAMES = ("manifest.json", "requests.jsonl", "probes.jsonl", "reach.jsonl", "results.json", "results.md",
+                "scripts", "charts", "store")
+
+
+def test_the_refused_names_are_the_output_schemas():
+    assert set(replay_mode.OUTPUT_NAMES) == set(RESULT_NAMES)
+    assert len(replay_mode.OUTPUT_NAMES) == len(set(replay_mode.OUTPUT_NAMES))
+
+
+@pytest.mark.parametrize("name", RESULT_NAMES)
 def test_an_output_directory_that_holds_results_is_refused(monkeypatch, capsys, tmp_path, name):
     """Reviewer B: a replay into the --out of a paid live run replaced its results without a word."""
     _no_replay(monkeypatch)
