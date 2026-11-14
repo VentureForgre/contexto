@@ -22,6 +22,8 @@ What the plain model takes from this repository, and what it assumes:
   Claude Code re-attaches after compacting a session of pasted logs: the same finding's requests
   after a compaction (75,873 and 38,887 tokens) include files the model read again, and
   docs/research/M0-cost-model.md marks its own 15,000 tokens of re-attached context as inferred.
+  The assumption errs toward plain Claude Code: anything re-attached after a compaction would make
+  its requests larger and its compactions more frequent than the line shows.
 - The trigger: a request above the bound. Claude Code's real trigger is its auto-compact window less
   a margin (docs/research/M0-interception.md, section 3), and whether it can be set to a given bound
   is for the live run to report; a replay only draws where a compaction at the bound would fall.
@@ -32,14 +34,17 @@ from __future__ import annotations
 from typing import Any
 
 from contexto.bench import script as bench_script
-from contexto.bench.d27 import BYTES_PER_TOKEN_TEXT, REPLY_TOKENS, turn_tokens
+from contexto.bench.d27 import BYTES_PER_TOKEN_LOG, BYTES_PER_TOKEN_TEXT, REPLY_TOKENS, turn_tokens
 from contexto.bench.model import Script
 
 SUMMARY_TOKENS = 7_920
 SUMMARY_SOURCE = ("docs/research/M0-proxy-measurements.md, finding 6: the mean output of three measured compaction "
                   "summary calls (5,510, 8,908 and 9,342 tokens)")
 SURVIVES = ("assumed, not measured: the head, the summary and the turn being served; nothing else is kept or "
-            "re-attached")
+            "re-attached. This errs toward plain Claude Code: anything re-attached would make its requests larger "
+            "and its compactions more frequent")
+RATES_TEXT = (f"log text at {BYTES_PER_TOKEN_LOG} bytes per token plus {REPLY_TOKENS} tokens per reply, probe turns "
+              f"at {BYTES_PER_TOKEN_TEXT} bytes per token")
 
 
 def turn_estimates(script: Script) -> list[int]:

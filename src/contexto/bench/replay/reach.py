@@ -18,16 +18,24 @@ Queries (``needs`` returns them with the statement each must find):
   is where its name comes from.
 - ``paraphrase``, ``toolloop`` and ``concluded``: the question does not contain the key, so the
   query is the question's content words (``contexto.bench.model.words``: runs of letters and digits
-  of four or more characters, without the function words), in the order they appear. Contexto's
-  search returns a page only when it holds every word of the query, so a question whose words are
-  not all on the plant's page finds nothing, and that is what the rule reports. For ``concluded``
-  the statement to find is the assistant's ``DECISION`` reply.
+  of four or more characters, without the function words), in the order they appear, without its
+  instruction words (``instruction_words``: the words of the fixed phrases the generator wraps every
+  such question in, such as "earlier in this conversation" and "Answer with the value only"). They
+  are found from the generator's own tables (``ATTRIBUTES``, ``SCENARIOS``): what of the question is
+  not the table's text is the wrapper. Contexto's search returns a page only when it holds every word
+  of the query, so a question whose words are not all on the plant's page finds nothing, and that is
+  what the rule reports. For ``concluded`` the statement to find is the assistant's ``DECISION``
+  reply.
 
-For those three classes one more figure is measured and reported beside the rule's, never in place
-of it: ``word_rank``, the best rank a page holding the needed statement gets when one content word
-that the question shares with that statement is searched alone, or null when they share no word or
-no such search returns the page. It tells a question whose words are on the plant's line but lost
-among the query's other words from a question that shares no word with its plant at all.
+The rule is one mechanical query per fact, so its figure is a floor, not what a model can reach. Beside
+it, never in place of it, one more mechanical figure is measured for those three classes: the best
+query from the question's words (``question_queries``). Each single content word of the question and
+each pair of adjacent words, every pair tried with a space and with a hyphen (``relay mesh``,
+``relay-mesh``), is searched; ``best_rank`` is the best rank a page holding the needed statement gets
+over all of them, and ``best_query`` the query that gives it. A probe counts when that rank is within
+the ``SHOWN_IN_DETAIL`` pages the search tool shows in detail. For the first five classes the rule's
+query already comes from the question (the key it names), so there the column repeats the rule's
+figure. Which query a model makes is for the live run.
 
 Results. ``reachable`` means the store's search (``SessionStore.search``, the function the
 ``contexto_search`` MCP tool calls) returned a page that holds the needed statement, for every
@@ -46,7 +54,7 @@ import re
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from contexto.bench.model import NEW_CLASSES, Probe, words
+from contexto.bench.model import NEW_CLASSES, STOP_WORDS, Probe, words
 
 SHOWN_IN_DETAIL = 3  # the pages contexto_search shows with their matching lines (contexto.mcp.SEARCH_LIMIT)
 _IDENT = re.compile(r"(?<![\w.\-])[A-Za-z][A-Za-z0-9]*(?:[.\-_][A-Za-z0-9]+)+")
@@ -67,6 +75,50 @@ def content_words(question: str) -> list[str]:
     return list(dict.fromkeys(w for w in _TOKEN.findall(question.casefold()) if w in counted))
 
 
+def _table_part(question: str) -> str | None:
+    """The part of a new-class question the generator took from its tables: an ``ATTRIBUTES`` clause
+    (with the service filled in) or a ``SCENARIOS`` question. None when no table text is in it."""
+    from contexto.bench import script as bench_script
+
+    for _, clause in bench_script.ATTRIBUTES:
+        found = re.search(re.escape(clause).replace(re.escape("{svc}"), ".+?"), question)
+        if found:
+            return found.group(0)
+    return next((scenario[3] for scenario in bench_script.SCENARIOS if scenario[3] in question), None)
+
+
+def instruction_words(probe: Probe) -> frozenset[str]:
+    """The content words of the fixed phrases a new-class question is wrapped in: the words of what is
+    left of the question once its table text (``_table_part``) is taken out, less any word the table
+    text also has. Empty for the other classes, and for a question with no table text in it."""
+    if probe.cls not in NEW_CLASSES:
+        return frozenset()
+    own = _table_part(probe.question)
+    if own is None:
+        return frozenset()
+    return words(probe.question.replace(own, " ", 1)) - words(own)
+
+
+def rule_words(probe: Probe) -> list[str]:
+    """The rule's query for a new-class probe, as words: the question's content words without its
+    instruction words."""
+    drop = instruction_words(probe)
+    return [w for w in content_words(probe.question) if w not in drop]
+
+
+def question_queries(probe: Probe) -> list[str]:
+    """Every query the best-query column tries, each once, in order: the question's single content
+    words, then each pair of adjacent words with a space and with a hyphen. A pair's words may be of any
+    length (``relay mesh``, ``cache svc``) but are neither function words nor instruction words."""
+    drop = instruction_words(probe)
+    tokens = _TOKEN.findall(probe.question.casefold())
+    pairs = []
+    for a, b in zip(tokens, tokens[1:]):
+        if not ({a, b} & (STOP_WORDS | drop)):
+            pairs += [f"{a} {b}", f"{a}-{b}"]
+    return list(dict.fromkeys([*rule_words(probe), *pairs]))
+
+
 def needed_statements(probe: Probe) -> list[str]:
     """The statements a correct answer needs, for a probe that is neither multi-hop nor a set: the
     assistant's reply for ``concluded``, else the statements that hold the answer, or the last one
@@ -85,7 +137,7 @@ def needs(probe: Probe) -> list[tuple[str, str]]:
     """``(query, statement)`` pairs in the order they are searched: the statement must be on a page
     the query returns."""
     if probe.cls in NEW_CLASSES:
-        query = " ".join(content_words(probe.question))
+        query = " ".join(rule_words(probe))
         return [(query, statement) for statement in needed_statements(probe)]
     terms = key_terms(probe)
     if follows_hops(probe):
@@ -153,15 +205,18 @@ def measure(probes: Iterable[Probe], pages: dict[str, str], search: Callable[[st
                 break  # the next hop's name comes from this statement, which the model cannot get
         complete = bool(pairs) and len(ranks) == len(pairs)
         reachable = complete and all(r is not None for r in ranks)
-        word_rank = None
+        best_rank, best_query = None, None
         if probe.cls in NEW_CLASSES and pairs:
-            best = []
+            per_statement = []
             for _, statement in pairs:
                 on = holders(statement)
-                shared = [w for w in content_words(probe.question) if w in words(statement)]
-                places = [p for p in (_rank(run(w), on) for w in shared) if p is not None]
-                best.append(min(places) if places else None)
-            word_rank = max(best) if all(b is not None for b in best) else None
+                tried = [(rank, query) for query in question_queries(probe)
+                         if (rank := _rank(run(query), on)) is not None]
+                per_statement.append(min(tried) if tried else None)
+            if all(per_statement):
+                best_rank, best_query = max(per_statement)
+        elif reachable:
+            best_rank, best_query = max(r for r in ranks if r is not None), queries[0]
         rows.append({
             "seed": seed, "id": probe.id, "cls": probe.cls, "overlap": probe.overlap,
             "plant_turns": plant_turns(probe),
@@ -174,9 +229,14 @@ def measure(probes: Iterable[Probe], pages: dict[str, str], search: Callable[[st
             "needed": len(pairs),
             "in_view": bool(pairs) and all(_quoted(statement) in view for _, statement in pairs),
             "covered": complete and all(r is not None or s for r, s in zip(ranks, seen)),
-            "word_rank": word_rank,
+            "returned": len(run(queries[0])) if queries else 0,  # pages the first query returned
+            "best_rank": best_rank, "best_query": best_query,
         })
     return rows
+
+
+def _best(row: dict[str, Any]) -> bool:
+    return row["best_rank"] is not None and row["best_rank"] <= SHOWN_IN_DETAIL
 
 
 def totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -185,8 +245,10 @@ def totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ``shown`` counts the reachable probes whose rank is within the ``SHOWN_IN_DETAIL`` pages the
     search tool shows with their matching lines. ``covered`` counts the probes whose every needed
     statement was either returned by search or still in the request, and ``neither`` the rest.
-    ``one_word`` (the three new classes only) counts the probes whose ``word_rank`` is within
-    ``SHOWN_IN_DETAIL``.
+    ``best_query`` counts the probes whose ``best_rank`` (the best query from the question's words,
+    which for the first five classes is the rule's query) is within ``SHOWN_IN_DETAIL``, and
+    ``neither_by_any_query`` those that are neither covered nor found that way, and
+    ``rule_returned_nothing`` the probes whose first query returned no page at all.
     """
 
     def count(part: list[dict[str, Any]]) -> dict[str, int]:
@@ -197,7 +259,9 @@ def totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "shown": sum(1 for r in part if r["reachable"] and r["rank"] <= SHOWN_IN_DETAIL),
             "covered": sum(r["covered"] for r in part),
             "neither": sum(not r["covered"] for r in part),
-            "one_word": sum(1 for r in part if r["word_rank"] is not None and r["word_rank"] <= SHOWN_IN_DETAIL),
+            "best_query": sum(_best(r) for r in part),
+            "rule_returned_nothing": sum(r["returned"] == 0 for r in part),
+            "neither_by_any_query": sum(not r["covered"] and not _best(r) for r in part),
         }
 
     by_class: dict[str, list[dict[str, Any]]] = {}

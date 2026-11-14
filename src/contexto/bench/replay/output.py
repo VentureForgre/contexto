@@ -17,12 +17,24 @@ from pathlib import Path
 from typing import Any
 
 from contexto.bench import script as bench_script
-from contexto.bench.model import Script
+from contexto.bench.model import NEW_CLASSES, Script
 from contexto.bench.replay import lines, reach, trace, upstream
 
 FORMAT = 1
+SHOWN_DIFFERENCES = 5  # differences listed in the result before the rest are counted
 CANNOT_SHOW = ["answer accuracy", "cache reads", "real token counts", "what a real CLI does",
-               "what a real model does"]
+               "what a real model does", "what the proxy does with what only Claude Code sends (its session start, "
+               "its version, the role system messages of 5.x model ids, thinking blocks, side requests)"]
+# Events the proxy logs for the synthetic client that are not failures: the first request is sized before
+# any usage is known (estimate_error, which the acceptance harness reports only), and the client is not a
+# CLI whose session start the proxy knows (session_start_unrecognised, in neither failure list).
+CLIENT_DIAGNOSTICS = ("session_start_unrecognised", "estimate_error")
+NOT_EXERCISED = (
+    "the client sends no Claude Code User-Agent, so the proxy logged no CLI version",
+    "it sends no role system message inside messages, where Claude Code on 5.x model ids puts its environment "
+    "text, countdowns and settings, so the proxy's handling of those (D33) is not exercised",
+    "it sends no thinking blocks and no side requests",
+)
 LABELS = {"contexto": "Contexto (replay, estimated)", "full": "Full context (modelled)",
           "plain": "Plain Claude Code compacting at the bound (modelled)"}
 RATES_TEXT = (f"{upstream.LOG_BYTES_PER_TOKEN} bytes per token for pasted log text and "
@@ -76,10 +88,14 @@ def notes(script: Script, pinned: bool) -> list[str]:
         "No model was called.",
         f"Request sizes are estimates, not token counts: {RATES_TEXT}, with no tokenizer.",
         "The full-context and plain Claude Code lines are modelled from the script, not run: one request per turn "
-        "on the script's own estimate (log text at 1.8 bytes per token, probe turns at 3.5).",
+        f"on the script's own estimate ({lines.RATES_TEXT}).",
         f"The plain line compacts when a request would pass {script.bound:,} tokens and continues from the head, a "
         f"summary of {lines.SUMMARY_TOKENS:,} tokens ({lines.SUMMARY_SOURCE}) and the turn being served; that "
-        "nothing else survives is an assumption.",
+        "nothing else survives is an assumption, and it errs toward plain Claude Code: anything re-attached would "
+        "make its requests larger and its compactions more frequent.",
+        "Search reach is a floor under mechanical queries, not what a model can reach: one fixed query per fact, "
+        "and beside it the best query made from the question's own words. Which query a model makes is for the "
+        "live run.",
         "A replay cannot show " + ", ".join(CANNOT_SHOW) + ".",
     ]
     if not pinned:
@@ -115,9 +131,28 @@ def results(script: Script, manifest_data: dict[str, Any], rows: list[dict[str, 
             "notices": list(measured.notices), "passed": not failed, "failures": list(failed),
             "modelled": {"full_max": max((r["uncached"] for r in rows if r["arm"] == "full"), default=0),
                          "plain_max": max((r["uncached"] for r in plain if r["main"]), default=0),
-                         "plain_compactions": lines.compactions(plain)},
+                         "plain_compactions": lines.compactions(plain), "rates": lines.RATES_TEXT},
+            "fit": fit(script, measured),
+            "synthetic_client": {"diagnostics": {name: measured.events.get(name, 0) for name in CLIENT_DIAGNOSTICS},
+                                 "not_exercised": list(NOT_EXERCISED)},
+            "private_files_removed": list(measured.private_files_removed),
         },
     }
+
+
+def fit(script: Script, measured: Any) -> dict[str, Any]:
+    """Whether a request holding the head and the largest turn can be under the bound at all."""
+    largest = max(lines.turn_estimates(script), default=0)
+    return {"head_tokens": measured.head_tokens, "largest_turn_tokens": largest,
+            "fits": measured.head_tokens + largest <= script.bound}
+
+
+def _fit_text(script: Script, cell: dict[str, Any]) -> str | None:
+    if cell["fits"]:
+        return None
+    return (f"the bound of {script.bound:,} is too small for this session: the synthetic head is "
+            f"{cell['head_tokens']:,} estimated tokens and the largest turn about {cell['largest_turn_tokens']:,}, so "
+            "a request that holds that turn cannot be under the bound")
 
 
 def failures(script: Script, measured: Any, differences: list[str]) -> list[str]:
@@ -131,24 +166,79 @@ def failures(script: Script, measured: Any, differences: list[str]) -> list[str]
     if measured.failure_events:
         named = ", ".join(f"{name} ({count})" for name, count in measured.failure_events.items())
         out.append(f"failure events in the session log: {named}")
+    if measured.events.get("bound_too_small"):
+        out.append(f"the engine logged bound_too_small {measured.events['bound_too_small']} times: a new turn alone "
+                   "did not fit its window")
+    too_small = _fit_text(script, fit(script, measured))
+    if too_small:
+        out.append(too_small)
     if measured.compaction_markers:
         out.append(f"{measured.compaction_markers} compaction markers in the requests")
     out += [f"the session did not go as scripted: {problem}" for problem in measured.problems]
-    out += [f"differs from the pinned trace: {difference}" for difference in differences]
+    shown = differences[:SHOWN_DIFFERENCES]
+    out += [f"differs from the pinned trace: {difference}" for difference in shown]
+    if len(differences) > len(shown):
+        out.append(f"differs from the pinned trace in {len(differences) - len(shown)} more places "
+                   "(results.json, replay.differences)")
     return out
 
 
+BEST_QUERY_COLUMN = "best query from the question's words"
+
+
 def _reach_table(totals: dict[str, Any]) -> list[tuple[str, ...]]:
-    rows = [("class", "probes", "paged", "by search", "in the top 3", "by search or in view", "one shared word")]
+    rows = [("class", "probes", "paged", "by search", "in the top 3", "by search or in view", BEST_QUERY_COLUMN)]
     for cls, cell in [*totals["by_class"].items(), ("all", totals)]:
-        one_word = str(cell["one_word"]) if cls in ("paraphrase", "concluded", "toolloop") else "-"
         rows.append((cls, str(cell["probes"]), str(cell["paged"]), str(cell["reachable"]), str(cell["shown"]),
-                     str(cell["covered"]), one_word))
+                     str(cell["covered"]), str(cell["best_query"])))
     return rows
 
 
 def _unreached(totals: dict[str, Any]) -> list[str]:
-    return [cls for cls, cell in totals["by_class"].items() if cell["reachable"] == 0]
+    """The new classes the rule's query reaches none of."""
+    return [cls for cls, cell in totals["by_class"].items() if cls in NEW_CLASSES and cell["reachable"] == 0]
+
+
+def _search_headline(totals: dict[str, Any]) -> str:
+    return (f"under one fixed query per fact, the store's search returns {totals['reachable']} of {totals['probes']} "
+            f"planted facts and {totals['covered'] - totals['reachable']} more are still in view. This is a floor "
+            "under one mechanical rule, not what a model can reach. The best query made from each question's own "
+            f"words puts {totals['best_query']} in the top 3.")
+
+
+def _unreached_text(totals: dict[str, Any], code: Any = str) -> str | None:
+    """Why the rule's figure is 0 for the classes it reaches none of, and what the next column is."""
+    unreached = _unreached(totals)
+    if not unreached:
+        return None
+    cells = [totals["by_class"][cls] for cls in unreached]
+    nothing = all(cell["rule_returned_nothing"] == cell["probes"] for cell in cells)
+    named = ", ".join(code(c) for c in unreached[:-1]) + (" and " if len(unreached) > 1 else "") + code(unreached[-1])
+    return (f"The rule's query finds none of {named}. For these classes the query is every content word of the "
+            "question but its instruction words, and "
+            + ("no stored page holds all of them" if nothing else "no page it returns holds the plant")
+            + ", so this 0 says nothing about the plants. The next column shows what a query made from the question's "
+            "own words finds. Which query a model makes is for the live run.")
+
+
+def _client_text(block: dict[str, Any]) -> str:
+    named = ", ".join(f"{name} ({count})" for name, count in block["synthetic_client"]["diagnostics"].items())
+    return (f"The proxy logged {named} for the synthetic client; a replay expects these and does not count them as "
+            "failures. Not exercised: " + "; ".join(block["synthetic_client"]["not_exercised"]) + ".")
+
+
+def _compaction(script: Script, block: dict[str, Any], held: bool) -> str:
+    if held and not block["compaction_markers"]:
+        shown = (f"no request was over the bound of {script.bound:,} by the estimate, and none carried a compaction "
+                 "summary or marker.")
+    else:
+        shown = (f"{block['over_bound']} requests over the bound by the estimate, and {block['compaction_markers']} "
+                 "compaction markers in the requests.")
+    return "Compaction: a replay has no CLI, so it cannot show this. What it shows: " + shown
+
+
+def _plural(count: int, word: str) -> str:
+    return f"{count} {word}" + ("" if count == 1 else "s")
 
 
 def summary(script: Script, data: dict[str, Any]) -> list[str]:
@@ -156,14 +246,6 @@ def summary(script: Script, data: dict[str, Any]) -> list[str]:
     block, sizes = data["replay"], bench_script.estimate(script)
     totals = block["reach"]
     held = block["over_bound"] == 0 and block["over_bound_proxy"] == 0
-    if held and not block["compaction_markers"]:
-        compaction = ("  Compaction: none. No request reached the size at which a CLI compacts and none carried a "
-                      "compaction summary or marker. There is no CLI in a replay, so this is what zero compaction "
-                      "means here.")
-    else:
-        compaction = (f"  Compaction: {block['compaction_markers']} compaction markers in the requests, and "
-                      f"{block['over_bound']} requests at the size at which a CLI compacts. There is no CLI in a "
-                      "replay.")
     out = [
         f"contexto bench --replay: seed {script.seed}, protocol {script.protocol}, bound {script.bound:,} tokens"
         + (" (the pinned trace)" if block["pinned"] else " (recording a trace)" if block["recording"]
@@ -186,41 +268,47 @@ def summary(script: Script, data: dict[str, Any]) -> list[str]:
         f"{block['max_input_estimated']:,} estimated tokens against the bound of {script.bound:,}; "
         f"{block['over_bound']} over the bound by the fake upstream's count, {block['over_bound_proxy']} by the "
         "proxy's own log.",
-        compaction,
+    ]
+    too_small = _fit_text(script, block["fit"])
+    if too_small:
+        out.append(f"  Why: {too_small}.")
+    out += [
+        "  " + _compaction(script, block, held),
         "  Request size per turn: in requests.jsonl and results.json when --out is given.",
-        f"  Search: the store's search returns {totals['reachable']} of {totals['probes']} planted facts by the "
-        f"fixed query rule; {totals['covered']} are returned or still in view.",
+        "  Search: " + _search_headline(totals),
         "What it cannot show:",
-        "  Answer accuracy, cache reads, real token counts, and what a real CLI or a real model does.",
+        "  Answer accuracy, cache reads, real token counts, what a real CLI or a real model does, and what the proxy "
+        "does with what only Claude Code sends.",
         "",
         f"Session: {sizes['turns']} turns ({sizes['content_turns']} content, {sizes['probe_turns']} probe). The "
         f"content turns are {sizes['history_tokens']:,} estimated tokens of history, "
         f"{sizes['history_tokens'] / script.bound:.2f} times the bound ({sizes['tokens']:,} with the probe turns); "
-        f"the synthetic head is {block['head_tokens']:,}.",
+        f"the synthetic head is {block['head_tokens']:,} estimated tokens.",
         f"Proxy: {block['rotations']} rotations, {block['pages']} pages stored, failure events: "
         + (", ".join(f"{k} ({v})" for k, v in block["failure_events"].items()) or "none") + ".",
+        "Client: " + _client_text(block),
         "",
         "Search reachability, measured when the probe turns start (probes per class):",
         *_table(_reach_table(totals)),
     ]
-    unreached = _unreached(totals)
+    unreached = _unreached_text(totals)
     if unreached:
-        out.append(f"  Not reachable by the rule's query: {', '.join(unreached)}. The search returns a page only "
-                   "when it holds every word of the query, and these questions do not name their subject.")
+        out.append("  " + unreached)
     modelled = block["modelled"]
     out += [
         "",
-        "Modelled from the script, not run:",
-        f"  Full context: the last request would be {modelled['full_max']:,} tokens.",
-        f"  Plain Claude Code compacting at the bound: {modelled['plain_compactions']} compactions, largest request "
-        f"{modelled['plain_max']:,}.",
+        f"Modelled from the script, not run ({modelled['rates']}):",
+        f"  Full context: the last request would be {modelled['full_max']:,} estimated tokens.",
+        "  Plain Claude Code compacting at the bound: "
+        f"{_plural(modelled['plain_compactions'], 'modelled compaction')}, "
+        f"largest request {modelled['plain_max']:,} estimated tokens.",
         "",
     ]
     if block["notices"]:
         out += ["The proxy's warnings during the session:", *[f"  {line}" for line in block["notices"]], ""]
     if block["pinned"]:
         out.append("Pinned expectations: " + ("every measurement equals the trace." if not block["differences"]
-                                              else f"{len(block['differences'])} differences."))
+                                              else _plural(len(block["differences"]), "difference") + "."))
     if block["failures"]:
         out += ["Result: FAIL", *[f"  {line}" for line in block["failures"]]]
     else:
@@ -242,6 +330,7 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
     totals, modelled = block["reach"], block["modelled"]
     held = block["over_bound"] == 0 and block["over_bound_proxy"] == 0
     table = _reach_table(totals)
+    too_small = _fit_text(script, block["fit"])
     text = [
         "# contexto bench --replay",
         "",
@@ -260,14 +349,11 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
         "",
         f"- **The bound {'held' if held else 'did not hold'}.** {block['requests']} requests; the largest was "
         f"{block['max_input_estimated']:,} estimated tokens against the bound of {script.bound:,}. Over the bound: "
-        f"{block['over_bound']} by the fake upstream's count, {block['over_bound_proxy']} by the proxy's own log.",
-        f"- **Compaction markers: {block['compaction_markers']}.** "
-        + ("No request reached the size at which a CLI compacts, and none carried a compaction summary or marker. "
-           if held and not block["compaction_markers"] else "")
-        + "There is no CLI in a replay, so this is all that zero compaction can mean here.",
+        f"{block['over_bound']} by the fake upstream's count, {block['over_bound_proxy']} by the proxy's own log."
+        + (f" Why: {too_small}." if too_small else ""),
+        f"- **{_compaction(script, block, held).replace('Compaction:', 'Compaction:**', 1)}",
         "- **Request size per turn**: `requests.jsonl`, and `request_series` in `results.json`.",
-        f"- **Search reachability**: the store's search returns {totals['reachable']} of {totals['probes']} planted "
-        f"facts by the fixed query rule; {totals['covered']} are returned or still in view.",
+        "- **Search reachability**: " + _search_headline(totals),
         "",
         "## What it cannot show",
         "",
@@ -275,6 +361,11 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
         "- Cache reads: the fake upstream reports none.",
         "- Real token counts: sizes are estimates at stated byte rates.",
         "- What a real CLI or a real model does.",
+        "- What the proxy does with what only Claude Code sends: see the next section.",
+        "",
+        "## How the proxy saw the synthetic client",
+        "",
+        _client_text(block),
         "",
         "## Measurements",
         "",
@@ -298,37 +389,47 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
         "## Search reachability",
         "",
         "Measured once, when the probe turns start: after the proxy forwarded the first request of the first probe "
-        "turn. The query is fixed per class: the key term the question names for the first five classes (a "
-        "multi-hop probe follows its hops), and the question's content words for `paraphrase`, `concluded` and "
-        "`toolloop`, whose questions do not name their subject. \"By search\" counts the probes for which the store's "
-        "search returned a page holding every statement the answer needs; \"in the top 3\" those whose page is among "
-        "the three the search tool shows in detail; \"by search or in view\" adds the statements still in the "
-        "request; \"one shared word\" counts the probes for which a single word the question shares with the "
-        "statement, searched alone, puts the page in the top 3.",
+        "turn. The figures are a floor under mechanical queries, not what a model can reach. The rule's query is "
+        "fixed per class: the key term the question names for the first five classes (a multi-hop probe follows its "
+        "hops), and for `paraphrase`, `concluded` and `toolloop` the question's content words without its "
+        "instruction words (the fixed phrases the generator wraps every such question in). \"By search\" counts the "
+        "probes for which the store's search returned a page holding every statement the answer needs; \"in the top "
+        "3\" those whose page is among the three the search tool shows in detail; \"by search or in view\" adds the "
+        "statements still in the request. \"Best query from the question's words\" tries each single content word "
+        "of the question and each pair of adjacent words, every pair with a space and with a hyphen, and counts the "
+        "probe when the best of them puts the page in the top 3; for the first five classes the rule's query is "
+        "already taken from the question, so there it repeats \"in the top 3\". Which query a model makes is for "
+        "the live run.",
         "",
         "| " + " | ".join(table[0]) + " |", "|" + "---|" * len(table[0]),
         *["| " + " | ".join(row) + " |" for row in table[1:]],
         "",
     ]
-    unreached = _unreached(totals)
+    unreached = _unreached_text(totals, lambda cls: f"`{cls}`")
     if unreached:
-        text += [f"Not reachable by the rule's query: {', '.join(f'`{c}`' for c in unreached)}. Contexto's search "
-                 "returns a page only when it holds every word of the query, and has no fuzzy matching; these "
-                 "questions do not name their subject. Whether a model finds its own words for them is a question "
-                 "for the live run.", ""]
+        text += [unreached, ""]
     text += [
         "## Modelled lines (not run)",
         "",
+        f"Both are one request per turn on the script's own estimate: {modelled['rates']}.",
+        "",
         f"- Full context: the head plus the whole history; the last request would be {modelled['full_max']:,} "
-        "tokens.",
-        f"- Plain Claude Code compacting at the bound: {modelled['plain_compactions']} compactions; largest request "
-        f"{modelled['plain_max']:,} tokens. Summary size {lines.SUMMARY_TOKENS:,} tokens, from "
-        f"{lines.SUMMARY_SOURCE}. What survives a compaction is {lines.SURVIVES}.",
+        "estimated tokens.",
+        "- Plain Claude Code compacting at the bound: "
+        f"{_plural(modelled['plain_compactions'], 'modelled compaction')}; "
+        f"largest request {modelled['plain_max']:,} estimated tokens. Summary size {lines.SUMMARY_TOKENS:,} tokens, "
+        f"from {lines.SUMMARY_SOURCE}. What survives a compaction is {lines.SURVIVES}.",
         "",
         "These two lines are a model of what the clients would send, on the script's own estimate. They are not a "
         "run of Claude Code or of the API.",
         "",
     ]
+    if block["private_files_removed"]:
+        text += ["## The store", "",
+                 "`store/` is the session's own store, kept so that its pages can be read. Two files were removed "
+                 "from it: " + ", ".join(f"`{p}`" for p in block["private_files_removed"]) + ". They were random, "
+                 "made for this store alone (the key of its page ids and the salt of its upstream affinity key), "
+                 "and are of no use outside it.", ""]
     if block["notices"]:
         text += ["## The proxy's warnings during the session", "", *[f"- {line}" for line in block["notices"]], ""]
     text += ["## Result", ""]
