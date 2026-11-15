@@ -401,6 +401,14 @@ find_contexto() {
     fi
 }
 
+# After find_contexto: says how to put the bin directory on PATH when the shell cannot find contexto.
+path_hint() {
+    if [ "$on_path" = 0 ]; then
+        say "$bin_dir is not on PATH, so your shell will not find contexto yet. Add it:"
+        say "  export PATH=\"$bin_dir:\$PATH\""
+    fi
+}
+
 # Runs the checked wheel once, with the tool that will install it, without installing it. An
 # earlier install is removed only after this has printed the release's version, so a wheel or a
 # Python that does not work is found while the earlier install is still there. Measured with
@@ -696,6 +704,7 @@ main() {
     done
     if [ "$force" = 0 ] && [ "$reported" = "contexto $version" ] && [ -z "$others" ] && [ "$extra" -le 1 ]; then
         say "contexto $version is already installed ($contexto_cmd). Nothing to do; --force reinstalls it."
+        path_hint
         exit 0
     fi
     # The release that is installed now, when the command names one.
@@ -782,10 +791,7 @@ main() {
             "script again with --force. See https://github.com/$repo/blob/main/docs/install.md#troubleshooting"
     fi
     say "Installed with $installer. Session data in $data_home was not touched."
-    if [ "$on_path" = 0 ]; then
-        say "$bin_dir is not on PATH, so your shell will not find contexto yet. Add it:"
-        say "  export PATH=\"$bin_dir:\$PATH\""
-    fi
+    path_hint
     say "$reported"
 }
 

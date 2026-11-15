@@ -996,6 +996,22 @@ def test_already_up_to_date_is_seen_when_the_command_is_not_on_path(box):
     box.assert_untouched()
 
 
+@pytest.mark.parametrize("tool", ["uv", "pipx"])
+def test_a_rerun_with_nothing_to_do_still_prints_the_path_hint(make_box, tool):
+    box = make_box(tools=(tool,))
+    box.preinstall(tool, "contexto", "1.2.3")
+    box.hub.add("1.2.3")
+    path = os.pathsep.join(map(str, (box.stubs, box.system)))
+    result = ok(box.run(PATH=path))
+    assert "contexto 1.2.3 is already installed" in result.stdout
+    assert f"{box.bin} is not on PATH" in result.stdout
+    assert f'export PATH="{box.bin}:$PATH"' in result.stdout
+    on_path = ok(box.run())
+    assert "contexto 1.2.3 is already installed" in on_path.stdout
+    assert "not on PATH" not in on_path.stdout and "export PATH" not in on_path.stdout
+    box.assert_untouched()
+
+
 # --- The base URL ---
 
 
