@@ -1,0 +1,48 @@
+{
+ "format": 1,
+ "currency": "USD",
+ "unit": "per million tokens",
+ "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+ "accessed": "2026-11-12",
+ "note": "Published prices from the \"Model pricing\" table of the source page, read on the access date. Not included: the batch discount, the US-only inference multiplier and fast mode, none of which applies to a default Claude Code run.",
+ "models": {
+  "claude-haiku-5-5": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-12",
+   "rows": [
+    {"over_input_tokens": 0, "input": 0.10, "cache_write_5m": 0.125, "cache_write_1h": 0.20, "cache_read": 0.01, "output": 0.50},
+    {"over_input_tokens": 100000, "input": 0.50, "cache_write_5m": 0.625, "cache_write_1h": 1.00, "cache_read": 0.05, "output": 2.50}
+   ],
+   "size_rule": {
+    "counts": ["uncached", "cache_write", "cache_read"],
+    "applies_to": "whole_request",
+    "output": "request_row"
+   },
+   "note": "Priced by prompt length. The page says a request whose prompt is over 100,000 tokens pays higher prices, that the prompt length counts all input tokens including cache reads and cache writes, and that each request is priced on its own. A prompt of exactly 100,000 tokens pays the lower row. That the higher row applies to the whole request, output included, is a reading of the page, which gives two complete price rows and has no wording about an excess; the page does not use the words \"whole request\". If that reading is wrong, change size_rule: \"applies_to\" to \"excess\" prices only the input above the threshold at the higher row, and \"output\" to \"first_row\" keeps output at the lower row."
+  },
+  "claude-sonnet-5-5": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-12",
+   "rows": [
+    {"over_input_tokens": 0, "input": 2.00, "cache_write_5m": 2.50, "cache_write_1h": 4.00, "cache_read": 0.10, "output": 10.00}
+   ],
+   "note": "One row at every prompt size."
+  },
+  "claude-opus-5-5": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-12",
+   "rows": [
+    {"over_input_tokens": 0, "input": 4.00, "cache_write_5m": 5.00, "cache_write_1h": 8.00, "cache_read": 0.20, "output": 20.00}
+   ],
+   "note": "One row at every prompt size."
+  },
+  "claude-fable-5-2": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-12",
+   "rows": [
+    {"over_input_tokens": 0, "input": 8.00, "cache_write_5m": 10.00, "cache_write_1h": 16.00, "cache_read": 0.20, "output": 40.00}
+   ],
+   "note": "One row at every prompt size."
+  }
+ }
+}

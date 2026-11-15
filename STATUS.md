@@ -1,7 +1,15 @@
 # Contexto status
 
-Updated 2026-11-06 by claude (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250,
-D48 to D61, live acceptance run #4, and deleting the v0.1.0 to v0.4.0 releases, D62). Decisions taken and still open, with reasons:
+Updated 2026-11-14 by claude (D64: let the user see Contexto working, PRs #257, #258, #263, #276,
+#261, #283 and #290, and the D64 entry in `docs/DECISIONS.md`), and earlier the same day (D63:
+in-turn paging, the replay harness PR #268 and the engine PR #274, merged and not released,
+recorded in the docs PR #295), (D70: `contexto serve` for clients Contexto does not launch, PRs
+#271, #272, #275, #277, #293 and #294, merged and not released), and (D66: the benchmark
+`contexto bench`, PRs #255, #262, #264, #269, #273, #289 and #286, recorded in the docs PR #282).
+Before that, 2026-11-13 (D69, project memory: PR #279,
+the first of its two pull requests, unreleased), and 2026-11-12 (v0.5.24: the 2026-11-05 QA run and
+the fix round, PRs #232 to #250, D48 to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0
+releases, D62, and the README rewrite, D68). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
@@ -26,11 +34,26 @@ compaction never fires, and accuracy equals full context.
   `contexto run codex` with no trust check, and no Host or Origin check on the proxy). The fix round
   (PRs #232 to #250, D48 to D61, v0.5.9 to v0.5.24) fixed all of them, each PR with two reviewer
   agents; details under "QA run and fix round" below.
+- Project memory (D69, PR #279, unreleased, the first of two pull requests): a new session starts
+  with the open obligations and active decisions the main conversation pinned in earlier sessions of
+  the same project (the git repository it started in, a linked worktree or submodule being its own,
+  else the directory). A record counts as the main conversation's when the proxy sees Contexto's pin
+  call and the server's success reply in that conversation's own history. The model sees the
+  records as escaped literals under a heading that calls them records from an earlier session, not
+  instructions, inside the 6,000-token pin budget. Closures and replacements made in the main
+  conversation of any session of the project apply to all of them, running ones included.
+  `contexto run` prints how many were carried, `contexto state` and `contexto project show` list
+  them, `contexto project forget` removes them, and `--no-project-memory` or
+  `CONTEXTO_PROJECT_MEMORY=0` turns it off. The pin guidance changed for every user (only the user's
+  own words are pinned). Contract rule 19. Three review rounds; tested at zero spend only, no live
+  model call. Guide: `docs/project-memory.md`.
 - Latest release: v0.5.24 (main d38e87d, 2026-11-06). Releases from v0.5.13 on carry `SHA256SUMS`
   and a build provenance attestation (PR #233).
 - Tests: 3185 passed, 1 skipped, 1 xfailed on macOS, Python 3.13 (local run on PR #250's head before
   its review fixes, 2026-11-06; main d38e87d collects the same 3,187 tests). PR #250's final head
-  passed CI on Linux and macOS, Python 3.12 to 3.15.
+  passed CI on Linux and macOS, Python 3.12 to 3.15. D69 adds the `tests/test_project*.py` files;
+  they are not in that count. The full suite on PR #274's merge of main (151a72ea, with D66 and D69):
+  6,443 passed, 2 skipped, 7 xfailed (local run, recorded in the PR).
 - Tested CLI versions (`TESTED_VERSIONS`): Claude Code 2.1.302, 2.1.310, 2.1.314 and 2.1.318;
   codex-cli 0.154.0, 0.163.0 and 0.166.0 (D56). 2.1.318 has the full live acceptance; 2.1.314 and
   0.166.0 the zero-spend routine only.
@@ -50,6 +73,187 @@ compaction never fires, and accuracy equals full context.
   to, is on.
 - CLIProxyAPI compatibility (D35, PR #210) and upstream affinity (D36, PR #212, deployed on the
   owner's proxy and verified for cache reuse). Guide: `docs/cliproxyapi.md`.
+- README and docs (2026-11-12, D68): the README was 772 lines and is 263. Its reference sections are
+  in `docs/*.md` (index `docs/README.md`), the Results table in `docs/results.md` and the full
+  limitations list in `docs/limitations.md`. `tests/test_docs_links.py` checks every relative link
+  and heading anchor in the tracked Markdown files. The README states recall as no worse than full
+  context on a scripted test, and cost as depending on the model and on cache hits.
+  The repository's About box (description and twelve topics) matches it since 2026-11-14; the old
+  values are in D68.
+- Search falls back to approximate matches when no paged-out turn holds every word (D65, PRs #266
+  and #267): identifier styles fold, question words drop, a turn holding enough of the query's
+  weight counts, and one typo is tolerated. A strict hit's result is unchanged. On 192 probes at
+  6,000 pages, recall at 3 on each class that used to miss rose from 0 to between 73 percent
+  (typos) and 92 percent (one extra word), and exact queries stayed at 15 of 15. False hits stayed
+  at 0 of 16. A miss now takes 0.6 to 1.4 s instead of an empty answer at 0.3 to 0.6 s; strict
+  hits are unchanged (D65 gives the latency in full). Guide: `docs/search.md`.
+- In-turn paging (D63, PRs #268 and #274, merged as f7c0f67c and ea2e1dc8, not released: releases
+  are cut by hand and batched since D67, and D63's CHANGELOG entry is under `## Unreleased`): inside
+  a Claude Code tool loop the proxy now pages in place, in batches, so a long loop or a subagent
+  stays under the bound. It supersedes D17's "never page inside a turn" (contract rule 5). In the
+  replay harness the largest request of the 120-round loop fell from 812,479 to 108,417 tokens at
+  bound 150,000, with 0 `over_bound` in every scenario. Codex is not covered. Tested at zero spend
+  only: whether an enforcing account accepts the in-loop thinking strip is under "Needs the owner".
+  Guide: `docs/in-turn-paging.md`; numbers under "In-turn paging (D63)" below.
+- `contexto serve` (D70, PRs #271, #272, #275, #277, #293, #294, unreleased): the engine as a standing service on
+  `127.0.0.1:7837` for Claude Code clients Contexto does not launch (the IDE extensions, the desktop
+  app, the Agent SDK, `claude -p` in CI). It requires a token in the base URL path, routes each
+  Claude Code session to its own store, gives those clients Contexto's tools through
+  `contexto mcp --serve`, and keeps its sessions out of project memory. Claude Code's gateway hint
+  headers are read in preference to text signatures, under `contexto run` too, and stripped before
+  forwarding. `contexto run claude` refuses a launch Claude Code would send to a cloud provider. The
+  recipes for the Python Agent SDK and headless `claude -p` ran with the real binary against a fake
+  upstream; the VS Code recipe was not run in an IDE. Claude Code settings files are decoded as
+  Claude Code 2.1.322 decodes them (malformed UTF-16LE, bad UTF-8), a refused upstream is never
+  echoed, and a base path that is not ASCII is percent-encoded as Claude Code sends it (#294).
+  Guides: `docs/serve.md`, `docs/dialect.md`.
+- Seeing Contexto work (D64, PRs #257, #258, #263, #276, #261, #283, #290, unreleased):
+  `contexto stats` (the peak prompt against the bound, pages, recalls and searches, store faults;
+  `--last-run`, `--json`) and a short summary of the run when the CLI exits (`--quiet` or
+  `CONTEXTO_QUIET=1` drops it); degraded mode and other store faults shown at exit and in
+  `contexto state`; `contexto doctor`, eleven checks with no network request, whose `provider` check
+  fails with the launcher's own cloud-provider refusal (D70); a Claude Code status line,
+  `contexto statusline`, added by `contexto run claude` only when no settings file has one
+  (`ctx 112k/150k · 41 paged · 3 recalls · 5 searches`; on a 2.9 MB log, 68 ms median and 91 ms at
+  worst per call at load average 32, 165 ms median and 663 ms at worst at load average 50, from
+  `docs/statusline.md`); `docs/events.md`, every `log.jsonl` event, held to the source by
+  `tests/test_events_doc.py`; and `--json` on `state`, `search` and `recall`, `contexto version`,
+  and clearer launch errors. `main`'s CI at 2401cf56 (#290), 2026-11-14, the latest finished run when this was written:
+  6,950 to 6,952 passed, 36 to 38 skipped and 7 xfailed in each of the six test jobs (Python 3.12
+  to 3.15 on Ubuntu, 3.12 and 3.15 on macOS). Guides: `docs/stats.md`,
+  `docs/doctor.md`, `docs/statusline.md`, `docs/events.md`.
+
+## Benchmark (D66)
+
+`contexto bench` runs one generated session three ways and scores each the same, by exact match
+with no model judge: through Contexto, as full context sent straight to the model, and as plain
+Claude Code with its auto-compact window set so that compaction fires near the bound (bound +
+33,000). At its defaults Claude Code on these models (1,000,000-token windows) would compact near
+967,000 tokens and would not compact at all in this session (467,012 estimated tokens); the
+benchmark does not show plain Claude Code at its default compaction threshold. The session is
+generated log text with planted facts, not real coding work. Guide: `docs/bench.md`; decision:
+D66. Why: run #4's 52 of 54 against 47 is inside noise (exact McNemar p = 0.18), all runs used one
+seed, plain Claude Code was never run, and nobody outside could rerun the scoring. No model was
+called to build it; every test runs against stub CLIs and fake upstreams on 127.0.0.1.
+
+- Merged into `main`: #255 (script generator, statistics, `--script-only`) as f826c464, #262 (scale
+  harness) as c46de5b4, #264 (`--report`, `--chart`, cost at published prices) as 6e4e6b12, #273
+  (the live runner, `--dry-run`) as 66336669, #269 (`--replay`) as c476834f, #289 (the replay
+  after D69) as 93b40c1d and #286 (the reviewers' follow-ups) as f5c8f29a; docs in #282. The
+  benchmark is not in a release yet: releases are cut by hand and batched (D67, RELEASING.md). From
+  a checkout: `uv run contexto bench ...`, with a live run's `--out` outside the work tree.
+- Protocols: `d27`, the 54 probes of runs #3 and #4, byte-identical to the spike's script; `v2`
+  (default), 72 probes, adding 18 whose questions name no key (`paraphrase`, `concluded`,
+  `toolloop`). Seed 20261016 at bound 150,000: `v2` is 34 turns and 467,012 estimated tokens, 3.09
+  times the bound.
+- Verdict rule: a direction is named only when the pooled difference is significant (Tango interval
+  excludes 0 and exact McNemar p < 0.05) and the seed-level sign-flip p < 0.05, both the same way.
+  Fewer than 6 seeds cannot reach 0.05 (2 / 2^5 = 0.0625).
+- Scoring: exact match, four deliberate differences from the spike's: an unanswered probe is never
+  correct; more answer lines in markdown are read (bold or backticked ids, numbered and `+` items);
+  a fenced line yields to an answer for the same id outside any fence; a line whose answer is the
+  probe's own question, word for word, is no answer (#286). A blockquote line stays unread, as in
+  the spike.
+- Replay, keyless (`contexto bench --replay`), pinned session of 952,971 estimated tokens (6.35
+  times the bound; head 21,377): 138 requests, the first 44,373 estimated tokens and the largest
+  116,067, 0 over the bound, 14 rotations, 46 pages, no failure event, no compaction marker.
+  Search reach under mechanical queries, by the store's strict search: 43 of 72 by the fixed rule,
+  all 43 in the top 3 (54 with facts still in view; 59 paged), 55 by the best query from the
+  question's words; the search tool's D65 fallback also answers 1 of the 18 the strict rule misses
+  (`q_r_02`). Modelled, not run: full context's last request 977,481; plain Claude Code 8
+  compactions, largest request 140,512. It cannot show accuracy or cache reads. Chart:
+  `docs/bench/request-size-synthetic.svg`, whose note says the Contexto drops are rotations and the
+  plain drops modelled compactions.
+- The replay's head carries Contexto's five tools under their real names with fixed synthetic
+  descriptions (#289), because the proxy reads only their names, hash and size; the preamble stays
+  measured. D69 (#279) had lengthened a tool description and the preamble's pin rule, which moved
+  every rotation from turn 33 on one turn earlier and failed the pinned replay on `main` (8 tests)
+  until #289 re-recorded the trace. Both pull requests had passed alone: the ruleset does not
+  require branches to be up to date, so CI never ran them together. Requiring it, or a merge queue,
+  would catch this; that is the owner's call.
+- A live run's reservation journal (`reservations.jsonl`, #286) notes every billed request before
+  it is forwarded, and a request it cannot note is not sent. On resume, requests in flight at a
+  kill (manifest `in_flight`, `requests_in_flight`, `in_flight_tokens`) and torn request records
+  count in the spend at their reservations; every request record carries `reserved_tokens`. The
+  report's upper cost bound counts unanswered, torn and in-flight requests (`no_record` in
+  `results.json`).
+- Plain arm: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` = bound + 33,000 (183,000 at 150,000); the 33,000
+  was read in the Claude Code 2.1.322 bundle, not documented, not confirmed live. Stub runs with
+  the real 2.1.322 compacted at `pre_tokens` 147,140 to 168,178.
+- Scale harness: repaired, with a 200-turn run (634 requests, 913,084 tokens of history) in the
+  required `ci` check with latency and memory budgets; they catch a slowdown from about 7 to 10
+  times on a typical CI runner. Measured on the M5 Pro (median of 15 runs, smallest to largest):
+  added time 3.2 ms (2.5 to 4.7) for the first request, throughput 318 req/s (248 to 417) at 100
+  concurrent, startup 57.2 ms (49.6 to 73.1) (`spikes/m2/scale/proxy/README.md`).
+- The minimum run that makes the claim testable, for the owner to start (dry-run figures, tokens,
+  with estimated USD):
+
+  ```sh
+  contexto bench --model claude-haiku-5-5 --seeds 10 --repeats 3 --budget-tokens 598290000 --out <dir>
+  contexto bench --model claude-opus-5-5 --seeds 5 --budget-tokens 250500000 --out <dir>
+  ```
+
+  Haiku: 36 units, 180,251,043 expected (about $14), 598,285,396 worst case (about $456; $602 with
+  a 1-hour cache), 720 pooled paired probes per pair of arms. Opus: 15 units, 97,122,711 expected
+  (about $90), 250,490,244 worst case (about $2,025; $2,622); with 5 seeds it alone can name no
+  direction. Dollars: every request the plan simulates (`contexto.bench.plan`), split into its token
+  classes and priced on its own with `contexto.bench.prices.request_cost`, so Haiku's size step
+  applies per request; the token totals equal the dry run's. Estimates only: the run is paid by
+  whoever runs it, at their account's prices, and `--budget-tokens` is the ceiling. Not run: no
+  live model spend under D66.
+
+## In-turn paging (D63)
+
+Before D63 the engine paged only at a turn start, so one long tool loop went over the bound and a
+subagent, which has one turn start, never paged. Now, inside a tool loop, when the pre-send estimate
+passes `bound - headroom_floor - min_turn_room - min_turn_room / 4` (110,000 by default), one batch
+pages down to a quarter of the way from what cannot be paged up to that line. It stubs older tool
+results (originals to result pages), then pages the window's earlier turns, then folds the oldest
+tool rounds of the running turn into a rounds page, and stubs a result before the model reads it
+only when it could not fit. A batch strips the thinking from its first changed message to the end
+of the request, on that request and every later one of the turn; thinking before that point and in
+later messages passes byte for byte. Off switch: `contexto run --no-in-turn-paging`,
+`CONTEXTO_IN_TURN_PAGING=0` or `contexto serve --no-in-turn-paging`. Reviewed by two reviewer agents
+on every head (Reviewer A posted verdicts at seven commits of #274, Reviewer B at six); no model was
+called.
+
+- Before, at v0.5.24 (main b0e2dbc, the replay harness of PR #268, bound 150,000): one prompt and
+  120 tool rounds of 6,400 tokens (`loop120`) sent a largest request of 812,301 tokens, with 104
+  `over_bound` from the estimate and 104 from usage and 0 pages; main's engine with paging off sends
+  812,475 at main ea2e1dc8 (reviewer B's run on PR #295; D63's "before" records 812,479 at an earlier head; the 174 to 178 tokens
+  a request more come from the tool and preamble text D63 added, since f7c0f67c, which already has
+  D65 and D69, still gives 812,301). The
+  recall room was 0 on 108 of the loop's 125 responses, and both late searches were refused. The
+  subagent's side room was 0 on 132 of 154 publishes. The 2026-11-12 audit, on a script that is not
+  in the repository, saw an estimate of 775,851 and 96 `over_bound`.
+- After, through the same harness (`spikes/m2/inturn/d63_measure.py --replay`, `small` at 1,500
+  rounds): 0 `over_bound` in every scenario (before: 9 to 1,274). The largest request is 107,357 to
+  109,720 in the six loop scenarios and 86,909 in `large`.
+- Cache: in-loop prefix rewrites stay under the harness's allowance (`loop120` 11 of 34.1,
+  `subagent` 11 of 33.6, `small` 10 of 37.8, `multiturn` 7 of 23.2, `images` 5 of 17.6, `mixed` 3
+  of 11.9, `large` 0). The re-sent share of all input is 0% (`large`, no rewrite) to 2.9%, and a loop's re-sent tokens
+  under the breakpoint model are 0.12 to 0.48 of its cost ceiling (max of the loop's own tokens and
+  the bound; the harness allows 1.0).
+- Thinking: once a turn's first batch has run, every later request of the turn has some of its
+  thinking missing: 110 of 125 requests in `loop120`, 136 of 214 in `subagent`, 1,343 of 1,505 in
+  `small`. The newest response's thinking is missing only on the batch requests themselves (11, 11
+  and 10).
+- Room: the smallest request-time room is 15,093 (`loop120`) and the smallest response-time room
+  15,132 (`small`), both over `min_turn_room` (12,000). Late in every loop the search for a line of
+  an early result named a page and the recall returned the line (2 of 2 each; `large` answered 1 of
+  1 from the request in view).
+- The two cases the harness cannot script (`d63_measure.py --cases`): a 92,184-token head at bound
+  150,000 with 20 KB results for 400 rounds: 0 `over_bound`, largest 116,247, 133 rewrites against
+  an allowance of 286, 0.38 of the cost ceiling, smallest room 8,763 (a tight bound, `turn_room_low`
+  logged once). A 10-page PDF in every result for 1,000 rounds: 0 `over_bound`, largest 112,572, 997
+  rewrites (allowance 1,834), **1.30 of the cost ceiling**, a stated departure: two whole rounds and
+  the head come to 111,782, over the line of 110,000, so every request has to stub the PDF before
+  it and rewrite the prefix. The guide advises asking for such a PDF once.
+- With paging off, every forwarded message list and event of four scenarios hashes the same as on
+  the v0.5.24 code (`d63_measure.py --digest`).
+- Codex is not done: the engine reaches the in-turn primitives through `Dialect.in_turn`, which is
+  None for the Responses dialect, so a Codex tool loop is sent as before and the harness's Codex
+  targets stay `xfail`.
 
 ## QA run and fix round (2026-11-05 to 2026-11-06, v0.5.9 to v0.5.24)
 
@@ -341,8 +545,11 @@ tool loops. B27 (`docs/research/M2-haiku-100k-tier.md`): replaying run #3 at bou
 model's behavior held fixed kept every request under the tier, for a modeled 45.7 percent lower
 cost, with 9 rotations instead of 6; accuracy at that bound is unmeasured and long tool loops can
 still cross it. Decision: no default change and no live run (the owner's seats run Opus 5.5,
-which has no price step); the README gives `--bound 125000` as a Haiku tip with those caveats. Limits: one synthetic session, one
-run, one model.
+which has no price step); `docs/run-reference.md` gives `--bound 125000` as a Haiku tip with those caveats. Limits: one synthetic session, one
+run, one model. The saving in money is Haiku 5.5's price step: the same token counts at flat rates
+cost more through Contexto (modeled: 34 percent more at Haiku 5.5 base rates, 66 percent more at
+Opus 5.5 rates) when every plain request hits the cache; with the baseline arm's two measured
+misses plain costs more in both (section added to the record 2026-11-12, D68).
 
 ## Usage against plain Codex (Codex acceptance run, zero-spend analysis)
 
@@ -551,6 +758,38 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   overheads in the start warning, `pdf_uncertain` only when the PDF is the cause).
 - D62: the v0.1.0 to v0.4.0 releases and tags are deleted, because their source archives held the
   owner's proxy hostname; their commits stay on `main`.
+- D63 (supersedes D17): Contexto pages inside a running turn on Claude Code. In a tool loop past
+  the line, a batch stubs older results, pages the window's earlier turns and folds the oldest
+  rounds of the turn, and strips thinking from its first changed message on, so no thinking block
+  has a changed prefix; Codex is off behind `Dialect.in_turn`. The rule follows the vendor's
+  enforced rule and gives up its unenforced "pass thinking back within a tool-use turn", which has
+  not been checked live.
+- D64: let the user see Contexto working: `contexto stats` and an exit summary that take the store
+  as the truth for pages, store faults shown, `contexto doctor` following D70's refusal with one
+  settings reader, a status line added only when it replaces none of the user's, and an event
+  reference checked against the source. Codex's mid-run notices are now held until it exits,
+  reversing part of D55. A merge policy for a `main` that moves faster than a review round.
+- D65: when strict search finds nothing, search returns approximate matches, labelled as such with
+  the words each page matched; deterministic, no embeddings or model call. Its one-letter typo
+  step is the one exception to the owner's ruling against fuzzy matching that D34 records.
+- D66: `contexto bench`, a benchmark anyone can run: Contexto, full context and plain Claude Code
+  set to compact near the bound on the same generated script, exact-match scoring, paired
+  statistics with a seed-level test, cost at published prices, a keyless replay, and the scale
+  harness repaired into CI.
+- D68: the README is rewritten for a first-time reader (what it does, three numbers with their
+  limits, install and start on the first screen; who it is not for; a comparison with compaction, a
+  1M window and Claude Code's memory), with recall stated as no worse than full context and cost as
+  model-dependent; the reference, results and limitations moved under `docs/`.
+- D69: project memory. A new session carries the open obligations and active decisions the main
+  conversation pinned in its project's earlier sessions, as records and not instructions, with a
+  start line, `contexto project show|forget` and an off switch shipped in the same pull request.
+  Main-conversation records are confirmed from the main conversation's own history; removals are
+  project-wide; forgetting never reopens a record, pruning does.
+- D70: `contexto serve`, a token-gated loopback service for clients Contexto does not launch, with
+  per-session stores and locks and an MCP server that resolves each tool call's session from the
+  service; the documented gateway hint headers preferred over text signatures and stripped
+  upstream; a refusal for cloud-provider launches; the `Dialect` contract documented for another
+  client.
 
 ## Open follow-ups
 
@@ -571,6 +810,24 @@ PR #250 (D61, v0.5.24) fixed the low findings the fix round's reviews left:
 
 Still open:
 
+- Found by D66's scale harness, not fixed
+  ([#284](https://github.com/VentureForgre/contexto/issues/284)): on Linux each proxy response on a
+  kept-open connection waits about 41 ms for a delayed ACK, because the proxy leaves Nagle on and
+  writes headers and chunks separately (CI: 41.3 to 41.5 ms for a 104-byte request; 0.6 to 1.5 ms
+  with Nagle off in a harness-only experiment; macOS has no wait). Whether a real streamed response
+  waits per chunk was not tested [inferred: Claude Code users on Linux see it on each request].
+- Found by D66's scale harness, not fixed
+  ([#285](https://github.com/VentureForgre/contexto/issues/285)): the proxy opens a new upstream
+  connection for every request (914 in one short run); on an HTTPS upstream each also pays a TCP
+  connect, a TLS handshake and about 2.5 ms to build the SSL context (the handshake cost not
+  measured).
+- D66 follow-ups: the reviewers' lows were fixed in #286; what they left on purpose is in
+  [#291](https://github.com/VentureForgre/contexto/issues/291) (a restated question that is not
+  word for word still overrides an answer; the replay's signal window after it ends; refusals for
+  hand-damaged scripts; the journal line not synced to disk; a zoomed chart panel; the search-reach
+  note under a chart that plots no search; a reach column on the `contexto_search` tool's own
+  reply, not built). Also the owner's minimum live run (above, under
+  "Benchmark (D66)"), which would also confirm the plain arm's 33,000-token reserve live.
 - A head denser than the 3.5 text seed is estimated low until the first usage, on Codex and Claude
   alike, so tool-loop requests can still go over the bound unflagged when no response carries an
   input count (12 of 32 synthetic Codex sessions in D61's measurement, 445 requests in reviewer A's).
@@ -580,11 +837,40 @@ Still open:
 - Not started: a byte budget per search on the pages `contexto_search` reads (D41 follow-up): it
   reads and renders up to 53 pages per search with no cap on their size (18.5 MB of page JSON for
   one multi-word query at 3,000 pages sized like real turns).
+- D70, `contexto serve`: not confirmed in an IDE, the desktop app, the TypeScript SDK, the GitHub
+  Action, a claude.ai (OAuth) login or on Linux with a real client (steps in `docs/serve.md`).
+  `contexto stats` on a session the service made shows its requests and faults but no bound, CLI
+  or run count. `contexto run codex` does not apply the serve-upstream refusal that
+  `contexto run claude` and `contexto doctor` do. A base path is not yet encoded exactly as Claude
+  Code sends it in three small cases: `|`, `[` and `]` are percent-encoded where Claude Code sends
+  them as they are, a backslash goes out as `%5C` where Claude Code turns it into `/`, and a `..`
+  segment is sent as written where Claude Code removes it. Out of scope: listening beyond loopback,
+  several users, Chat Completions, Bedrock and Vertex request paths, other agents.
+- D64, left open (each checked on `main` at 26663b16): `commands/run.py`'s `register()` imports
+  `contexto.codex` catching only `ImportError`, so a codex module that is broken, not missing, makes
+  every command fail; the resume command printed at exit keeps `--no-project-memory` but drops
+  `--no-statusline` and `--quiet`; the status line's own settings reader is not D70's
+  `read_settings_file` (they disagree only in the safe direction: it may leave its line off); a
+  clock stepped back by more than the gap between a launch's `proxy_start` and a conversation's
+  first request hides a user script's line for that run; the cloud-provider refusal says "in any of
+  these places" with no list of them (#271's text, D70's to change); a settings file that holds
+  `NaN` and names a switch, even at `"0"`, refuses a launch Claude Code would allow (accepted: it
+  only adds refusals). Not built: a status line for Codex, which has no such setting. Unconfirmed:
+  interactive Claude Code for the provider switches, `/statusline` writing the user's settings,
+  managed settings, whether a custom status line hides Claude Code's footer hints, Claude Code
+  other than 2.1.318 and 2.1.322, Linux except CI.
+- D63 follow-ups, not started: in-turn paging for Codex (implementing `contexto.inturn.MessagesInTurn`'s
+  methods for Responses items, so `ResponsesDialect.in_turn` is no longer None); a stable engine
+  `cache_control` breakpoint after the paged prefix (the API allows 4 and Claude Code uses 3), which
+  would let a rewrite read more than the head back and lower the PDF loop's 1.30 of the cost
+  ceiling; and the `lru_cache` of `tokens._sized_digest`, keyed on the whole base64 string, which
+  holds up to 256 payloads after their requests are gone (80 MB held with 20 PDFs of 3 MB, reviewer A
+  at 5a84eda4; `inturn._document`, the PDF page count, is keyed the same way, also 256).
 - Open from D49: a head too large for `min_turn_room` (bound 60,000, a 28,000-token head) leaves the
   minimum-room rotation (A12) nothing to restore, so later turn starts keep their window (about 34,200 real, room 806,
   `turn_room_low` logged once); PR #232 review B's finding 1.
 
-## What is left (as of 2026-11-06)
+## What is left (as of 2026-11-14)
 
 Definition of done for this project: M2 acceptance passed on both CLIs (done), every release
 from v0.5.0 on published with its wheel and sdist, and STATUS, README, and the contract accurate to `main`.
@@ -600,17 +886,56 @@ D53 (#239, v0.5.16), D57 (#241, v0.5.17), D58 (#235, v0.5.19), D54 (#236, v0.5.2
 the replay fix (#247) in v0.5.21, D59 (#246, v0.5.22), D60 (#248, v0.5.23), the docs pass (#249) and
 D61 (#250, v0.5.24). Live acceptance run #4 passed on v0.5.20. Left: the open follow-ups above.
 
+D64 (seeing Contexto work): merged in PRs #257, #258, #263, #276, #261, #283 and #290, unreleased;
+recorded in `docs/DECISIONS.md`. Left: the open items listed under "Open follow-ups", and a release,
+which is the maintainer's call.
+
+D69 (project memory): the first pull request, #279 (carry-over, rule 19, the off switch, the start
+line, `contexto project show|forget`), is merged, unreleased. The second, search and recall
+across a project's earlier sessions (`scope: "project"`, `session`, `--project`, `--from`) with the
+zero-spend measurements, is pull request #287 (branch `claude/d69-search-pr2`, on main at 65f33e4f):
+both reviewers approved, and B2's round-2 notes are fixed on the branch (an earlier session's stub
+row escapes `\n`, a search lets go of each session's page records once their rows are made, an
+earlier page's recall opens with a block that says whose page it is, and the docs state what
+"created before" rests on). After the rebase onto D63 (#274) the tool-list golden is main's at
+65f33e4f, the replies fixture is re-recorded with the pages-held path, and the measurement's first
+session runs 70 turns so it still rotates three times; D69's measured numbers are re-run. Not merged.
+
+D63 (in-turn paging): merged (#268, #274), unreleased. Left: its live check (under "Needs the
+owner") and its follow-ups above.
+
 Measured candidates deliberately not pursued (each would need a live run or new evidence):
 - Keeping less of the recent conversation in view (`window_fraction` 0.25): 3 to 13 percent
   cheaper in replays, but it shows the model less, so it needs an accuracy run first (A28).
-- A Haiku default bound of 125,000 (B27): only a README tip; accuracy at that bound unmeasured.
+- A Haiku default bound of 125,000 (B27): only a tip in `docs/run-reference.md`; accuracy at that bound unmeasured.
 - A search "follow" option for multihop chains (B26): the hops come from synthetic probes.
 - A live check of 150,000 on an OpenRig seat (D31 says revisit only if a seat shows a recall
   cost).
 - Answering Claude Code's `HEAD /api/hello` locally while the upstream comes from an untrusted
-  project file (D52): for now the README says to pin `--upstream` in such a repository.
+  project file (D52): for now `docs/troubleshooting.md` says to pin `--upstream` in such a repository.
 
 Needs the owner:
+- D63's live check: no model call was made for in-turn paging. Open: whether a request inside a
+  tool loop, with thinking on, whose earlier tool result was stubbed and whose in-loop thinking was
+  stripped from the middle (kept before the edit point, removed in its range, kept after it) returns
+  200 on an enforcing account (created on or after 2026-08-31), and whether later responses of that
+  turn still carry thinking. The check is the driver script in D63 ("Not confirmed live"), run from
+  the repository root as `python3 - "$SEAT_SETTINGS" "$UPSTREAM" <<'EOF' ... EOF` with a seat
+  settings file for such an account and its upstream URL: Claude Code reads 16 files of about
+  5,000 tokens one at a time at bound 80,000 with `--observe-thinking`. It costs 17 requests of at
+  most 40,000 input tokens, about 600,000 tokens on claude-haiku-5-5, most of them cache reads, and
+  the driver stops it before 1,000,000. D63 lists its five pass conditions. Not run; until it is, a
+  400 "bound to a different conversation" in a tool loop means turning in-turn paging off.
+- D69's live check: no live model call was made, so whether a model follows, questions or closes
+  carried records as their heading asks is unmeasured, and so is project memory on real Claude Code
+  and Codex binaries. The check is two `contexto run claude` sessions in one real project directory
+  (in the first, state a standing rule, let the model pin it and send one more message so the pin's
+  reply reaches a main request; in the second, check the start line, `contexto state`, and that the
+  first reply honours the rule; then `contexto project forget`). A run from an empty temporary
+  directory with a stub home is not a live check. It costs live tokens and needs the owner's
+  approval. The same run would be the first live look at
+  the new pin guidance (only the user's own words are pinned) and at the main-conversation evidence
+  on a real CLI; a Codex session would check the structured reply Codex is believed to pass back.
 - Live checks the fix round could not run at zero spend: D51's "keep it open until the user
   withdraws it" wording (added after the live run, not measured live), standing-rule pinning on
   claude-opus-5-5 and on Codex, and the full acceptance on Claude Code 2.1.314 (run #4 covered
@@ -709,6 +1034,26 @@ Needs the owner:
   pre-send check is then the only bound check, and a head denser than the 3.5 text seed is estimated
   low, so tool-loop requests can go over the bound unflagged (D61: 12 of 32 synthetic Codex sessions;
   445 requests in reviewer A's 1,440).
+- Project memory (D69, PR #279, unreleased): only records the proxy saw the main conversation make
+  are carried. A pin whose reply never reaches a later main request (the session ends right after
+  it), a Codex code-mode pin, and every pin of v0.5.24 and earlier are not, so project memory starts
+  empty. Codex sessions give nothing: on codex-cli 0.163.0 the model calls Contexto's tools through
+  code mode's `exec`, which the confirmation does not read, so a Codex session's pins are never
+  carried and its closures of carried records count only in it (not checked on 0.166.0 or live). A
+  conversation that took main by `more_turn_starts` (a subagent without `X-Claude-Code-Agent-Id`, a
+  Codex child) is not trusted. `main_records` is a user-editable list in `meta.json`, a record of
+  what the proxy saw, not an integrity guarantee. Text injected into the main
+  conversation (a web page, a file, a tool result) that persuades the model to pin something is
+  carried like any other main pin; the pin guidance and the heading that calls them records, not
+  instructions, are the defence there, and no live model has been measured against either. Pruning
+  the session that closed a record brings the record back. Each git worktree and submodule is its
+  own project, and a symlinked directory is its target's. A session never carries from one started
+  after it. Verified facts are not carried. A session of the project whose ledger does not verify,
+  cannot be read or is over 64 MB gives nothing until it is repaired or pruned. The carried records
+  share the 6,000-token pin budget, the session's own first. Reading the project lists every session
+  in the home: with 200 sessions, about 4 to 6 ms warm per rotation's `pinned_text` call and per turn
+  start of a session that carries records before its first rotation, 15.8 ms cold; 0.14 ms with
+  memory off.
 - Standing rules (D51): the model is told to pin a rule as an obligation when it is stated and keep
   it open. Measured on one model (claude-haiku-5-5) with 8 rules stated in their own turn; the
   "keep it open" words were added after that run and are unmeasured. A rule the model does not pin
@@ -721,6 +1066,10 @@ Needs the owner:
   without the word `tools` (`eval`, `globalThis[...]`, Codex's `load()`) beside such a call is not
   seen, so a shell call made that way is hidden from search (recall keeps it); strings holding `//`,
   `/*` or `tools` leave the echo searchable.
+- Search has no synonyms, and no stemming beyond D65's one-letter typo step (D34, D65): `database`
+  does not find `DB`. The fallback runs only when no turn holds every word, so when another turn
+  holds every word of the query, search returns those turns and never looks further: 8 of 192 probes
+  at 6,000 pages, 6 paraphrases and 2 with an extra word. Limits are listed in `docs/search.md`.
 - Main conversation (D50, D59): main follows Claude Code's session id, measured on 2.1.302 to
   2.1.318. Without a session id (another client) only the turn-start rule applies. A headless
   `/clear` right after an SDK `interrupt()`, or after a late end of an older request that may hold a
@@ -789,9 +1138,39 @@ Needs the owner:
   budget is under 25,000, assuming a fixed overhead of 28,000 for Claude Code (measured 18,641 to
   27,925 on 2.1.314 with tool search on) and 19,000 for Codex. Use a larger bound for OpenRig
   seat-sized heads (O3).
-- Very large single turns can still exceed the bound inside a tool loop. Every forwarded request is
-  checked before it is sent (D49): `over_bound` with `in_tool_loop: true` is that expected overrun;
-  at a turn start it goes with `bound_too_small` or means the sizing did not hold.
+- In-turn paging (D63, on `main`, unreleased) keeps a Claude Code tool loop under the bound in every
+  replay scenario. Every forwarded request is still checked before it is sent (D49): `over_bound`
+  with `in_tool_loop: true` means, for example, that in-turn paging had nothing left to page
+  (`in_turn_exhausted`), is off, is not available (Codex), was outrun by output denser than its
+  count at a tight bound, or that the engine is degraded (rule 14); at a turn start it goes with
+  `bound_too_small` or means the sizing did not hold. Its limits:
+  - Codex is unchanged: a Codex tool loop is sent whole, as at v0.5.24, and can pass the bound.
+  - v0.5.24, the latest release, does not have in-turn paging: a Claude Code tool loop there is sent
+    whole and can pass the bound, as the README says.
+  - At a tight bound (bound 60,000 with a 20,000-token head, or a 92,000-token head at 150,000) a
+    new result is read once only if the request fits with it counted at 1.5 bytes a token; a denser
+    result can go over: 50 KB results at 1.2 bytes a token reached 64,184 of 60,000, logged
+    `over_bound` from usage.
+  - At a tight bound the request that shows a new result gives up the headroom floor and the recall
+    room: the room may be 0, `turn_room_low` (`in_turn_small_bound`) is logged once per turn, and
+    `contexto_recall` is refused there. With the 92,184-token head the smallest room was 8,763.
+  - A PDF by URL or file id sent beside an inline PDF gets a share of their measured cost by its
+    reference's size, so it can be counted low: one worth 60,046 tokens was counted at 94, and read
+    again alone at bound 200,000 it went out at 215,102 (estimate 155,163), over the bound by usage
+    only. Claude Code's Read sends PDFs inline, so its sessions do not reach this.
+  - Usage that never arrives (a gateway that strips it): new results stay counted at 1.8 bytes a
+    token and the prefix is rewritten again only when a request is over the bound, so the published
+    room is an estimate nothing corrects; with a 92,000-token head at 150,000 it was under 12,000 on
+    107 of 151 requests (`turn_room_low`, `usage_missing`).
+  - Restarting with the switch off in the middle of a loop that was paging fails rule 16's check
+    (`settings_changed`) and forwards that turn's raw history until the next turn start: over the
+    bound, with thinking produced under stubs that are now gone, which an enforcing account may
+    refuse.
+  - Downgrading to v0.5.24 in the middle of a paged loop is refused: v0.5.24 reads the epoch record
+    as no record and sends the raw history, and an enforcing upstream refused its first request
+    ("bound to a different conversation") on a paged loop of 300 rounds. Downgrade between turns.
+  - Not confirmed live: whether an enforcing account accepts the in-loop thinking strip and the
+    model keeps thinking afterwards (see "Needs the owner").
 - Search (D34, D39, D41) holds page text in the MCP server up to `CONTEXTO_SEARCH_CACHE_MB` (default
   64 MB). The first search of each MCP process reads every page once (1.6 s at 6,000 synthetic
   pages). Single common words can still bury a fact at 6,000 pages (5 of 86 probe queries). A reply

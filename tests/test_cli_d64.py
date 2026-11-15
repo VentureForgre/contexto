@@ -64,7 +64,9 @@ def test_state_json_groups_the_pins_and_counts_the_pages(home, capsys):
     assert code == 0 and err == "session s1 (most recent)\n"  # the session line stays on stderr
     data = json.loads(out)
     assert out == json.dumps(data, indent=2, sort_keys=True) + "\n"
-    assert sorted(data) == ["conflicts", "pages", "pinned", "session", "staleness_checked"]
+    assert sorted(data) == ["carried", "conflicts", "faults", "log", "pages", "pinned", "session",
+                            "staleness_checked"]
+    assert data["carried"] == []  # no project: nothing carried (D69)
     assert data["session"] == "s1" and data["pages"] == 2
     assert data["staleness_checked"] is False  # no working directory recorded for this session
     pinned = data["pinned"]
@@ -84,8 +86,11 @@ def test_state_json_on_a_session_with_nothing_pinned_or_paged(home, capsys):
     make(home, "s1", prompts=())
     code, out, _ = run(capsys, "state", "--json")
     assert code == 0
-    assert json.loads(out) == {"session": "s1", "pages": 0, "conflicts": [], "staleness_checked": False,
-                               "pinned": {"open_obligations": [], "active_decisions": [], "verified_facts": []}}
+    data = json.loads(out)
+    assert data.pop("faults")["total"] == 0  # the store fault report (contexto stats --last-run --json's)
+    assert data.pop("log") == {"missing": True}  # and why it is empty: no log was written
+    assert data == {"session": "s1", "pages": 0, "conflicts": [], "carried": [], "staleness_checked": False,
+                    "pinned": {"open_obligations": [], "active_decisions": [], "verified_facts": []}}
 
 
 def test_state_json_reports_staleness_when_the_working_directory_is_recorded(home, capsys, tmp_path):
@@ -190,6 +195,74 @@ def test_search_json_counts_every_matching_line_of_a_long_page(home, capsys):
     assert text.startswith("line 0 mentions zebra")
 
 
+def test_search_json_strict_hits_carry_no_approximate_keys(home, capsys):
+    make(home, "s1", prompts=("set refreshToken to rotate", "unrelated"))
+    data = json.loads(run(capsys, "search", "--json", "refreshToken", "rotate")[1])
+    assert sorted(data) == ["hits", "query", "session", "total"] and data["total"] == 1  # as D64 made it
+
+
+def test_search_json_reports_approximate_hits_and_their_words(home, capsys):
+    """D65: when no page holds every word, --json says the hits are approximate, which words were
+    searched, and per hit the words it matched (how, and as the page writes them) and missed."""
+    _, pids = make(home, "s1", prompts=("set refreshToken to rotate hourly", "unrelated chatter"))
+    code, out, err = run(capsys, "search", "--json", "how", "do", "we", "rotate", "refresh_token", "zzqqxx")
+    assert code == 0 and err == "session s1 (most recent)\n"  # the notes are fields here
+    data = json.loads(out)
+    assert out == json.dumps(data, indent=2, sort_keys=True) + "\n"
+    assert sorted(data) == ["approximate", "hits", "query", "searched", "session", "total"]
+    assert data["approximate"] is True and data["searched"] == ["rotate", "refresh_token", "zzqqxx"]
+    assert data["total"] == 1 and [h["page_id"] for h in data["hits"]] == [pids[0]]
+    hit = data["hits"][0]
+    assert sorted(hit) == ["first_match_offset", "line", "matched", "matches", "matching_lines", "missing",
+                           "page_id", "turn"]
+    assert hit["matched"] == [{"word": "rotate", "how": "exact", "form": "rotate"},
+                              {"word": "refresh_token", "how": "folded", "form": "refreshToken"}]
+    assert hit["missing"] == ["zzqqxx"]
+    matching = [m for m in hit["matches"] if m["match"]]
+    assert len(matching) == hit["matching_lines"] == 1 and "refreshToken" in matching[0]["text"]
+    assert hit["first_match_offset"] == matching[0]["offset"]
+
+
+def test_search_json_approximate_matches_the_text_output(home, capsys):
+    make(home, "s1", prompts=("refreshToken rotates hourly", "the refresh_token cron", "unrelated"))
+    _, text, _ = run(capsys, "search", "refresh-token", "rotates", "zzqqxx")
+    data = json.loads(run(capsys, "search", "--json", "refresh-token", "rotates", "zzqqxx")[1])
+    assert data["approximate"] is True and data["hits"]
+    assert [h["line"] for h in data["hits"]] == [line for line in text.splitlines() if line.startswith("pg_")]
+    shown = [f"  {'>' if m['match'] else ' '} {m['offset']}: {m['text']}" for h in data["hits"] for m in h["matches"]]
+    assert shown == [line for line in text.splitlines() if line.startswith("  ") and not line.startswith("  [")]
+    labels = [line.strip() for line in text.splitlines() if line.startswith("  [matched: ")]
+    as_json = []
+    for h in data["hits"]:
+        label = "matched: " + ", ".join(m["word"] if m["how"] == "exact" else f"{m['word']} as {m['form']}"
+                                        for m in h["matched"])
+        as_json.append(f"[{label}; not matched: {', '.join(h['missing'])}]" if h["missing"] else f"[{label}]")
+    assert labels == as_json  # the words line and the JSON name the same words
+
+
+def test_search_json_approximate_limit_cuts_hits_and_total_counts_every_match(home, capsys):
+    make(home, "s1", prompts=[f"rotate the refreshToken, run {i}" for i in range(4)]
+         + [f"unrelated chatter {i}" for i in range(8)])
+    code, out, err = run(capsys, "search", "--json", "--limit", "2", "refresh_token", "zzqqxx")
+    data = json.loads(out)
+    assert code == 0 and data["approximate"] is True and len(data["hits"]) == 2 and data["total"] == 4
+    assert err == "session s1 (most recent)\n"  # the "more approximate matches" note is `total` here
+
+
+def test_search_json_typo_match_says_so(home, capsys):
+    make(home, "s1", prompts=("the keychain holds the token", "unrelated"))
+    hit = json.loads(run(capsys, "search", "--json", "kexchain", "token")[1])["hits"][0]
+    assert hit["matched"] == [{"word": "kexchain", "how": "typo", "form": "keychain"},
+                              {"word": "token", "how": "exact", "form": "token"}]
+    assert hit["missing"] == []
+
+
+def test_search_json_query_of_stop_words_only_is_strict_and_empty(home, capsys):
+    make(home, "s1", prompts=("hello there",))
+    data = json.loads(run(capsys, "search", "--json", "what", "is", "the")[1])
+    assert data == {"session": "s1", "query": "what is the", "total": 0, "hits": []}  # no fallback ran
+
+
 def test_recall_json_carries_the_text_and_where_to_read_on(home, capsys):
     store, pids = make(home, "s1", prompts=("x" * 30_000,))
     _, text, _ = run(capsys, "recall", pids[0])
@@ -272,7 +345,8 @@ def test_version_command_and_short_flag_print_what_the_version_flag_prints(capsy
 
 def test_all_three_print_the_git_revision_of_a_git_install(capsys, monkeypatch):
     """After #256 `--version` names the revision of an install made from a git URL; `-V` and `contexto
-    version` must print the same line, or the changelog's "as --version does" would be false."""
+    version` must print the same line, or the changelog's "print the same line as `--version`" would be
+    false."""
     line = f"contexto {contexto.__version__} (git main, commit d38e87d2)"
     monkeypatch.setattr(contexto, "_git_install", lambda: " (git main, commit d38e87d2)")
     printed = []
@@ -502,9 +576,18 @@ def test_the_example_typed_as_shown_launches_and_sends_the_key_only_to_openai(ho
     codex_stub(tmp_path, monkeypatch)
     if claude_base_url:
         monkeypatch.setenv("ANTHROPIC_BASE_URL", claude_base_url)
+    started = []
+    real_start = launcher.start_proxy
+
+    def recording_start(store, upstream_url, *rest, **kwargs):
+        started.append(upstream_url)
+        return real_start(store, upstream_url, *rest, **kwargs)
+
+    monkeypatch.setattr(launcher, "start_proxy", recording_start)
     code, _, err = run(capsys, *shlex.split(codex.KEY_HELPER_COMMAND)[1:])
     assert code == 0 and "no upstream" not in err and "no key helper" not in err
     assert "upstream codex-flag" in err  # the flag's URL, not Claude Code's upstream plus /v1
+    assert started == ["https://api.openai.com/v1"]  # the URL the proxy forwards to (PR #257 review B)
     [session] = sessions(home)
     log = (home / "sessions" / session / "log.jsonl").read_text()
     [launch] = [e for e in map(json.loads, log.splitlines()) if e.get("event") == "launch"]
@@ -560,7 +643,9 @@ def test_mcp_server_info_carries_the_package_version():
     assert mcp.SERVER_VERSION == contexto.__version__ != "0.1.0"
 
 
-def test_contexto_mcp_reports_the_version_contexto_version_prints(home):
+def test_contexto_mcp_reports_the_package_version_contexto_version_starts_with(home):
+    """serverInfo carries ``__version__``; `contexto version` prints that, followed by the git revision on an
+    install made from a git URL (PR #257 review B), so the line starts with it."""
     make(home, "s1")
     env = {**os.environ, "CONTEXTO_HOME": str(home)}
     request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -571,7 +656,9 @@ def test_contexto_mcp_reports_the_version_contexto_version_prints(home):
     printed = subprocess.run([sys.executable, "-m", "contexto", "version"], capture_output=True, text=True,
                              env=env, timeout=60)
     version = json.loads(served.stdout.splitlines()[0])["result"]["serverInfo"]["version"]
-    assert printed.returncode == 0 and printed.stdout == f"contexto {version}\n"
+    assert version == contexto.__version__
+    assert printed.returncode == 0 and printed.stdout.startswith(f"contexto {version}")
+    assert printed.stdout.endswith("\n") and printed.stdout.count("\n") == 1
 
 
 # 8. which commands take a session id prefix
@@ -687,3 +774,90 @@ def test_the_json_help_says_what_the_output_can_hold(capsys):
         cli.main(["state", "--help"])
     assert "null, with the error on stderr and exit 1, when they cannot be listed" in " ".join(
         capsys.readouterr().out.split())
+
+
+# Review follow-ups (D64 follow-up pull request)
+
+
+def test_contexto_version_falls_back_to_stderr_with_stdout_closed(capsys, monkeypatch):
+    """PR #257 review A: with stdout closed `--version` and `-V` print on stderr; `contexto version` printed
+    nothing and exited 0."""
+    from contexto.commands import version
+
+    monkeypatch.setattr(sys, "stdout", None)
+    assert version.run(None) == 0
+    assert capsys.readouterr().err == contexto.version_line() + "\n"
+
+
+@pytest.mark.parametrize("target", ["nowhere", "sessions"])  # dangling, and a link to itself
+def test_a_dangling_sessions_symlink_is_not_a_fresh_install(home, capsys, target):
+    """PR #257 reviews A and B: `Path.exists()` follows the link, so a `sessions` symlink to nothing got the
+    first-run hint, while `contexto run` fails there. Every reader names the link instead."""
+    home.mkdir()
+    (home / "sessions").symlink_to(home / target)
+    for argv in (["state"], ["search", "hello"], ["recall", "pg_0001"], ["sessions"], ["sessions", "list", "--json"],
+                 ["sessions", "show", "abc"], ["state", "--json"]):
+        code, out, err = run(capsys, *argv)
+        assert code == 1 and out == "", argv
+        assert err == f"contexto: error: {home / 'sessions'} is a broken symlink (check $CONTEXTO_HOME)\n", argv
+        assert FIRST_RUN not in err, argv
+
+
+def test_a_sessions_symlink_to_a_directory_still_works(home, capsys, tmp_path):
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    home.mkdir()
+    (home / "sessions").symlink_to(real)
+    code, out, err = run(capsys, "sessions", "list", "--json")
+    assert (code, out) == (0, "[]\n"), err
+
+
+def test_the_key_helper_variable_clause_says_to_keep_the_upstream(tmp_path):
+    """PR #257 review A: "or set CONTEXTO_CODEX_KEY_HELPER to such a command" read as a whole alternative to
+    the example, and without --codex-upstream the key goes to Claude Code's upstream plus /v1."""
+    empty = tmp_path / "empty-home"
+    empty.mkdir()
+    with pytest.raises(codex.CodexLaunchError) as exc:
+        codex.plan_codex([], "http://127.0.0.1:43210", "S", env={}, cwd=tmp_path, home=empty,
+                         claude_upstream="https://gateway.invalid")
+    message = str(exc.value)
+    assert f"or set {codex.KEY_HELPER_ENV} to such a command and still pass --codex-upstream, " in message
+    assert "not to the upstream you named" not in message  # nothing was named
+    # `contexto run codex` always passes the resolved upstream; one derived from Claude Code's is not named
+    # (PR #290 review A: ANTHROPIC_BASE_URL alone gave "not to the upstream you named").
+    with pytest.raises(codex.CodexLaunchError) as exc:
+        codex.plan_codex([], "http://127.0.0.1:43210", "S", env={}, cwd=tmp_path, home=empty,
+                         upstream="https://gateway.invalid/v1")
+    assert "not to the upstream you named" not in str(exc.value)
+
+
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_the_example_says_it_replaces_an_upstream_the_user_named(tmp_path, how):
+    """PR #257 review B: with an upstream given by --codex-upstream or CONTEXTO_CODEX_UPSTREAM, the example's
+    flag sends the requests to OpenAI instead, which the message did not say."""
+    empty = tmp_path / "empty-home"
+    empty.mkdir()
+    named = "http://127.0.0.1:18432/v1"
+    kwargs = ({"upstream": named, "named_upstream": named, "env": {}} if how == "flag"
+              else {"upstream": named, "env": {codex.UPSTREAM_ENV: named}})
+    with pytest.raises(codex.CodexLaunchError) as exc:
+        codex.plan_codex([], "http://127.0.0.1:43210", "S", cwd=tmp_path, home=empty, **kwargs)
+    message = str(exc.value)
+    assert f"`{codex.KEY_HELPER_COMMAND}` (it sends Codex's requests to https://api.openai.com/v1, not to the " \
+           "upstream you named)" in message
+    with pytest.raises(codex.CodexLaunchError) as exc:  # naming OpenAI's own address needs no note
+        codex.plan_codex([], "http://127.0.0.1:43210", "S", env={}, cwd=tmp_path, home=empty,
+                         upstream="https://api.openai.com/v1/")
+    assert "not to the upstream you named" not in str(exc.value)
+
+
+def test_the_session_line_quotes_an_id_that_does_not_print(home, capsys):
+    """PR #257 review B: `state`, `search` and `recall` print `session <id> (how)` on stderr; an id holding
+    a newline printed two lines there."""
+    forged = "zz\ncontexto: error: forged"
+    make(home, forged)
+    code, _, err = run(capsys, "state", "--session", "zz")
+    assert code == 0 and err == f"session {forged!r} (--session)\n"
+    make(home, "plain-id")
+    code, _, err = run(capsys, "state", "--session", "plain-id")
+    assert code == 0 and err == "session plain-id (--session)\n"  # an ordinary id prints as before

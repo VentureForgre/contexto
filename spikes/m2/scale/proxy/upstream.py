@@ -6,6 +6,15 @@ Usage it reports is computed from the body the proxy forwarded: ``ceil(bytes / 1
 tokens per reply kind. The reply kind comes from the ``x-scale-reply`` request header the driver sets
 (``tool_use`` or ``end_turn``), so tool_use replies exercise the proxy's stream hold (contract PR #74).
 Per request it records sizes and monotonic timestamps under the ``x-scale-id`` header; nothing else.
+``t_recv`` is taken when the request's headers are read and ``t_done`` when its last event is written, so
+``t_done - t_recv`` is the time this upstream spent on the request.
+
+Every reply carries ``Connection: close`` and the upstream closes the connection after it (added
+2026-11-13). The side that closes a TCP connection first holds it in TIME_WAIT, 30 s on macOS. The
+proxy opens a new upstream connection per request (``contexto.proxy``, by design), so if it closed
+first, each request would hold one of the machine's local ports; closed from here, the TIME_WAIT is
+on this server's listening port and takes no local port from anyone. The proxy reads every reply to
+its last chunk either way. ``connections`` counts the connections accepted.
 """
 
 from __future__ import annotations
@@ -19,6 +28,7 @@ from typing import Any
 from scale.proxy.synth import tokens_of
 
 OUTPUT_TOKENS = {"tool_use": 180, "end_turn": 420}
+LISTEN_BACKLOG = 256  # the short run opens 100 connections at once; the stdlib default of 5 would stall them
 
 
 def sse(event: str, payload: dict[str, Any]) -> bytes:
@@ -53,6 +63,7 @@ class FakeUpstream:
     def __init__(self) -> None:
         self.records: dict[str, dict[str, Any]] = {}
         self.lock = threading.Lock()
+        self.connections = 0
         self._server: ThreadingHTTPServer | None = None
 
     def start(self) -> int:
@@ -61,8 +72,17 @@ class FakeUpstream:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
+            def setup(self) -> None:
+                with owner.lock:
+                    owner.connections += 1
+                super().setup()
+
             def log_message(self, *args: Any) -> None:
                 pass
+
+            def end_headers(self) -> None:
+                self.send_header("Connection", "close")  # also sets close_connection: closed from this side
+                super().end_headers()
 
             def do_HEAD(self) -> None:  # noqa: N802
                 self.send_response(200)
@@ -98,10 +118,16 @@ class FakeUpstream:
                 self.end_headers()
                 for raw in reply_events(reply, tokens, request_id):
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(raw), raw))
+                with owner.lock:  # before the terminator, so the driver finds it when the response ends
+                    if request_id in owner.records:
+                        owner.records[request_id]["t_done"] = time.monotonic()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class Server(ThreadingHTTPServer):
+            request_queue_size = LISTEN_BACKLOG
+
+        self._server = Server(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
         threading.Thread(target=self._server.serve_forever, name="fake-upstream", daemon=True).start()
         return self._server.server_address[1]

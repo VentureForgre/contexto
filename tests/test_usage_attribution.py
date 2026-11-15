@@ -25,7 +25,8 @@ def respond(engine: RewriteEngine, req: dict, rate: int = 3) -> list[dict]:
 def test_a_request_without_usage_makes_the_next_turn_start_estimate_a_full_one():
     """R2's large tool result never got usage (a 529). Sized from R1's real input plus the messages
     added since R2, R3 would look small and not rotate; its true size passes ``bound - headroom``."""
-    engine = engine_with(Config(bound=40_000, headroom_floor=2_000))
+    # In-turn paging off (D63): with it on, R2's result is stubbed when it arrives and R3 is small.
+    engine = engine_with(Config(bound=40_000, headroom_floor=2_000, in_turn_paging=False))
     r1 = request(history(3) + [user("p")])
     engine(r1, {}, MESSAGES)
     respond(engine, r1)

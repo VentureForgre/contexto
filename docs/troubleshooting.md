@@ -3,7 +3,9 @@
 [Contexto](../README.md) / [Documentation](README.md)
 
 The warnings and errors you are most likely to see from `contexto`, each with its cause and what to
-do. Entries quote the message text, so search this page for the words you saw.
+do. An entry about a printed message quotes its text, so search this page for the words you saw.
+Before a first run, or when a launch fails, `contexto doctor` checks what `contexto run` needs from
+the directory you run it in and says what to fix ([Doctor](doctor.md)).
 
 **Which upstream does `contexto run` use?** The first of: `--upstream`; `env.ANTHROPIC_BASE_URL` from
 the first Claude Code settings file that sets it: the main checkout's `.claude/settings.local.json`
@@ -48,7 +50,9 @@ tool is. The `contexto state`, `search` and `sessions show` commands still work.
 
 **`over_bound` in the session log.** `over_bound` with `in_tool_loop: false` at a turn start is
 logged next to `bound_too_small` (the bound is too small for the head and the new prompt) or when the
-rotation's sizing did not hold; only `in_tool_loop: true` is the expected tool-loop overrun. A change to
+rotation's sizing did not hold. With `in_tool_loop: true` a tool loop grew past the bound and
+in-turn paging had nothing left to page (`in_turn_exhausted` is logged with it), is turned off, or
+is not available (Codex); see [In-turn paging](in-turn-paging.md). A change to
 the fixed overhead (tool search loading a tool, an MCP server connecting, a model switch) is sized
 like any other rotation.
 

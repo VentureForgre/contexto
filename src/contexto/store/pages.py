@@ -19,6 +19,14 @@ from contexto.store.search import Query, SearchEntry, rank, search_text, searcha
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
 STUB_TEXT_CHARS = 200
+# D63: the kinds of page in-turn paging writes (``contexto.inturn``). A page without ``kind`` is a whole
+# turn, as every page written before D63 is. A result page holds one tool call and its result verbatim;
+# a rounds page holds tool rounds folded out of a running turn. ``kind`` is not part of the page id.
+RESULT_PAGE = "result"
+ROUNDS_PAGE = "rounds"
+FOLDS_PAGE = "folds"  # the detailed fold notes of a turn's earlier folds, once its note reached its cap
+ROUNDS_STUB = "[earlier tool rounds]"
+RESULT_STUB = "[paged tool result]"
 STUB_MAX_PATHS = 20
 EMPTY_SYSTEM_STUB = "(empty system message)"
 EMPTY_REMINDER_STUB = "(empty reminder)"
@@ -219,8 +227,15 @@ def current_stub(page: dict[str, Any]) -> dict[str, Any]:
     return page if rebuilt == stub else {**page, "stub": rebuilt}
 
 
-def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int) -> dict[str, Any]:
-    """A page record for one turn, messages kept exactly as received (thinking included)."""
+def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int, kind: str | None = None,
+               seq: int | None = None, block: int | None = None) -> dict[str, Any]:
+    """A page record for one turn, messages kept exactly as received (thinking included). ``kind`` marks
+    an in-turn page (D63); a whole turn has none, and the id never depends on it. ``seq`` (D63, Reviewer B):
+    an in-turn page's position in its turn (the index of its first message in the CLI's history), so the
+    pages of one turn list in order; a result page also gets ``locator``, what its call ran or read, and
+    ``block``, its result's block index in that message, so parallel results list in their calls' order
+    (Reviewer A at 7575c76f). None is part of the id, and all are optional: a page without them sorts as
+    before."""
     text, tool = message_bytes(turn)
     page = {
         "turn": turn_number,
@@ -229,8 +244,36 @@ def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int) -> dict
         "tokens": estimate_message_tokens(turn),
         "stub": build_stub(turn),
     }
+    if kind is not None:
+        page["kind"] = kind
+    if seq is not None:
+        page["seq"] = seq
+    if block is not None:
+        page["block"] = block
+    if kind == RESULT_PAGE:
+        page["locator"] = _result_locator(turn)
     page["id"] = page_id(key, page)
     return page
+
+
+def _result_locator(turn: list[dict[str, Any]]) -> str:
+    """A result page's call as a stub names it: the tool and what it ran or read."""
+    from contexto import inturn  # inturn imports the store's render module: looked up when called
+
+    call = next((b for m in turn if isinstance(m, dict) and m.get("role") == "assistant"
+                 for b in (m.get("content") if isinstance(m.get("content"), list) else [])
+                 if isinstance(b, dict) and b.get("type") == "tool_use"), None)
+    name, locator, _ = inturn.MESSAGES.describe(call)
+    return f"{name} {locator}"
+
+
+def page_order(page: dict[str, Any]) -> tuple:
+    """The sort key of a page, oldest first: its turn, then an in-turn page by its position in the turn
+    (``seq``) and among the results of one message by ``block``, and a page without ``seq`` (a whole turn,
+    or an in-turn page written before it) after them."""
+    seq, block = page.get("seq"), page.get("block")
+    return (page["turn"], 0 if isinstance(seq, int) else 1, seq if isinstance(seq, int) else 0,
+            block if isinstance(block, int) else 0, page["id"])
 
 
 def _search_fields(page: dict[str, Any]) -> list[str]:
@@ -314,6 +357,11 @@ def index_line(page: dict[str, Any], salient: bool = False) -> str:
         text = "[earlier system message] " + stub["system_text"]
     if not text and stub.get("reminder_text"):
         text = "[earlier reminder] " + stub["reminder_text"]
+    if not text and page.get("kind") == ROUNDS_PAGE:
+        text = ROUNDS_STUB
+    if not text and page.get("kind") == RESULT_PAGE:
+        locator = page.get("locator")
+        text = RESULT_STUB + (f" {locator}" if isinstance(locator, str) and locator else "")
     line = f"{page['id']} turn {page['turn']}: {text}"
     if stub["tools"]:
         line += f" [tools: {', '.join(stub['tools'])}]"
@@ -321,7 +369,9 @@ def index_line(page: dict[str, Any], salient: bool = False) -> str:
         line += f" [files: {', '.join(stub['paths'])}]"
     if salient:
         shown = set(_TOKEN.findall(line))  # an identifier already on the line adds nothing
-        ids = [i for i in salient_identifiers(_texts(page["messages"])) if i not in shown]
+        # A stub's or fold note's own words (file_path, was, page) are not what the page is about.
+        texts = (t for t in _texts(page["messages"]) if not t.startswith("[Contexto "))
+        ids = [i for i in salient_identifiers(texts) if i not in shown]
         if ids:
             line += f" [ids: {', '.join(ids)}]"
     return line
@@ -331,11 +381,14 @@ def render_index(pages: list[dict[str, Any]], budget_tokens: int, salient: bool 
                  line_for: Callable[[dict[str, Any]], str] | None = None) -> str:
     """One line per page, newest first, within the budget, then a count of older pages omitted.
 
-    Only ``id``, ``turn``, and ``stub`` of each page are read, and ``messages`` for the ``salient``
-    identifiers. ``line_for(page)`` overrides ``index_line(page, salient)``; ``SessionStore`` passes
-    one that keeps each page's line, so a page is read for its identifiers once per process (D34).
+    Only ``id``, ``turn``, ``stub``, and ``kind`` of each page are read, and ``messages`` for the
+    ``salient`` identifiers. ``line_for(page)`` overrides ``index_line(page, salient)``; ``SessionStore``
+    passes one that keeps each page's line, so a page is read for its identifiers once per process (D34).
+    Result pages (D63) are not listed: one per stubbed tool result would flood the budget, and each is
+    named by its stub in the request; search and recall reach them.
     """
-    ordered = sorted(pages, key=lambda p: (p["turn"], p["id"]), reverse=True)
+    ordered = sorted((p for p in pages if p.get("kind") not in (RESULT_PAGE, FOLDS_PAGE)), key=page_order,
+                     reverse=True)
     lines: list[str] = []
     used = 0
     for i, page in enumerate(ordered):

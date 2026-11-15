@@ -67,6 +67,17 @@ has no stronger session signal; the CLI's own signals (Claude Code's ``X-Claude-
 ``affinity_key(session_id, salt)`` is an HMAC of the session id under a random per-install salt
 (``contexto.private.affinity_salt``), so the session id is not sent and cannot be recovered from the
 key by guessing names.
+
+Gateway hint headers (D70): with ``strip_hint_headers`` the six headers Claude Code sends only when
+``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` is on (``contexto.hints.GATED_HINT_HEADERS``) are left out of
+every request the proxy sends upstream: a transformed one, one forwarded unchanged, and the CLI's own
+request on each fail-open path. The transform still gets them, since it reads the request's class from
+them. ``contexto run claude`` turns the hints on for the engine and sets this, so the upstream gets
+the headers it got before; it leaves it off when the user turned the hints on themselves, or turned
+them off so that Contexto does not ask for them (``contexto.hints.hint_headers_state``). Off by
+default: ``contexto proxy`` and any other
+caller forward every header as received. ``X-Claude-Code-Session-Id``, ``x-claude-code-agent-id`` and
+``x-claude-code-parent-agent-id`` are never removed.
 """
 
 from __future__ import annotations
@@ -88,9 +99,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
-from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, loads_bounded
+from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, has_lone_surrogate, loads_bounded
+from contexto.hints import without_hint_headers
 
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
     from compression import zstd as _zstd
@@ -148,6 +160,8 @@ HOP_BY_HOP = frozenset({
 })
 USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 AFFINITY_HEADER = "X-Session-Affinity"
+# The one answer to a request the proxy refuses to serve (D53), whatever the reason: the body never says why.
+REFUSED_MESSAGE = "contexto proxy: request refused (not from the local CLI)"
 # Host names (and their subdomains) that serve the vendor APIs directly, including Azure OpenAI
 # and Azure AI Foundry: each has one identity per key, so the affinity header is not sent to them
 # (D36). Matching is by host name only; an IP literal upstream gets the header.
@@ -438,6 +452,11 @@ class UsageReader:
             return
         for raw in self._events.feed(chunk):
             self.feed_event(raw)
+
+    @property
+    def overflowed(self) -> bool:
+        """A JSON body went past ``MAX_JSON_RESPONSE_BYTES``: nothing will be read from it."""
+        return self._overflow
 
     def finish(self) -> None:
         if self.sse:
@@ -911,22 +930,34 @@ class _LoopbackServer(ThreadingHTTPServer):
 class ContextoProxy:
     def __init__(self, upstream: str, log: SessionLog, transform: Transform = identity_transform, *,
                  observe_usage: ObserveUsage | None = None, observe_thinking: bool = False,
-                 upstream_source: str | None = None, affinity_key: str | None = None) -> None:
+                 upstream_source: str | None = None, affinity_key: str | None = None,
+                 on_tool_calls: Callable[[tuple[str, ...]], None] | None = None,
+                 strip_hint_headers: bool = False) -> None:
         parts = urlsplit(upstream)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("upstream must be an http(s) base URL")
+        if has_lone_surrogate(upstream):  # no request line can carry it
+            raise ValueError("upstream holds a lone surrogate")
         self.scheme = parts.scheme
         self.upstream_host = parts.hostname
         # The X-Session-Affinity value added to each request, or None (D36): never for a vendor host.
         self.affinity_header = affinity_key if affinity_key and not is_vendor_host(parts.hostname) else None
         self.upstream_port = parts.port or (443 if parts.scheme == "https" else 80)
         self.upstream_netloc = parts.netloc.rsplit("@", 1)[-1]
-        self.base_path = parts.path.rstrip("/")
+        # A request line is ASCII. A path character that is not (``é``, or U+FFFD from a settings file
+        # read with a bad UTF-8 byte) goes out percent-encoded as UTF-8, as Claude Code sends it; an
+        # escape already in the URL, and the characters a path may hold, are kept as they are.
+        self.base_path = quote(parts.path.rstrip("/"), safe="/%!$&'()*+,;=:@-._~")
         self.session_log = log
         self.transform = transform
         self.observe_usage = observe_usage
+        # Called with the ids of a response's client tool calls as they are read, before the bytes that
+        # carry them are written to the client (``_Handler._relay``); None for no hook.
+        self.on_tool_calls = on_tool_calls
         self.observe_thinking = observe_thinking
         self.upstream_source = upstream_source
+        # D70: leave Claude Code's gated hint headers out of what is sent upstream (module docstring).
+        self.strip_hint_headers = strip_hint_headers
         self.transform_lock = threading.Lock()
         self.last_epoch: Any = None  # the engine's epoch from its last successful transform
         self._in_flight = 0  # requests being handled; idle keep-alive connections are not counted
@@ -956,8 +987,25 @@ class ContextoProxy:
         self._thread = threading.Thread(target=self._server.serve_forever, name="contexto-proxy", daemon=True)
         self._thread.start()
         self.log({"event": "proxy_start", "port": self.port, "upstream_source": self.upstream_source,
-                  "observe_thinking": self.observe_thinking})
+                  "observe_thinking": self.observe_thinking, **self._store_pages()})
         return self.port
+
+    def _store_pages(self) -> dict[str, int]:
+        """D64: ``{"pages": n}``, the page files the session's store holds now, for the start and stop
+        lines: ``contexto stats`` takes the pages a run added from the two, because the engine's
+        ``page_out`` counts a turn again each time a launch pages it again. On these lines, not the
+        launcher's ``launch`` and ``exit``, so ``contexto proxy`` and both launchers record it in one
+        place. Empty when the log is not a session store's or the pages cannot be listed. The files are
+        counted by name and never opened, and a failure here never stops the proxy."""
+        try:
+            from contexto.stats import count_pages  # here, so the proxy module loads no reader it may not need
+
+            store = getattr(self.session_log, "store", self.session_log)  # the launcher wraps the store
+            pages_dir = getattr(store, "pages_dir", None)
+            count = count_pages(pages_dir) if pages_dir is not None else None
+        except Exception:
+            count = None
+        return {} if count is None else {"pages": count}
 
     def stop(self) -> None:
         """Stop accepting connections, then wait up to STOP_DRAIN_S for in-flight requests to finish
@@ -976,7 +1024,7 @@ class ContextoProxy:
                 in_flight = self._in_flight
             if in_flight:
                 self.log({"event": "proxy_stop_incomplete", "in_flight": in_flight})
-            self.log({"event": "proxy_stop"})
+            self.log({"event": "proxy_stop", **self._store_pages()})
 
     def serve_forever(self, port: int = 0) -> None:
         """Block until interrupted, starting the server first if needed."""
@@ -1105,8 +1153,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._read_body()  # closing on unread bytes sends a reset, which can discard the 403
             except (ValueError, OSError):
                 pass
-            self._send_local_error(403, "contexto proxy: request refused (not from the local CLI)",
-                                   "permission_error")
+            self._send_local_error(403, REFUSED_MESSAGE, "permission_error")
             self.close_connection = True
             return
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
@@ -1160,7 +1207,7 @@ class _Handler(BaseHTTPRequestHandler):
                    endpoint: str) -> tuple[bytes, Headers, dict[str, Any] | None]:
         owner = self.owner
         try:
-            request = loads_bounded(body)
+            request = self._parse(body)
         except JSONTooDeepError:
             # Rule 18: past MAX_JSON_DEPTH not every Python can serialize or walk the request, so it
             # is forwarded untransformed (decoded, if it arrived compressed: rule 15) and logged.
@@ -1231,6 +1278,12 @@ class _Handler(BaseHTTPRequestHandler):
             return body, headers, original
         return (body if after == before else after), new_headers, original
 
+    def _parse(self, body: bytes) -> Any:
+        """The request body as JSON (ValueError when it is not, JSONTooDeepError past the depth limit).
+        Its own method so that ``contexto serve``, which reads the body to route the request, parses
+        it once (``contexto.serve``)."""
+        return loads_bounded(body)
+
     def _forward(self, body: bytes, headers: Headers, entry: dict[str, Any], started: float,
                  original: dict[str, Any] | None) -> None:
         watch = _ClientWatch(self.connection)
@@ -1259,7 +1312,9 @@ class _Handler(BaseHTTPRequestHandler):
                 conn.putrequest(self.command, owner.base_path + self.path, skip_host=True,
                                 skip_accept_encoding=True)
                 conn.putheader("Host", owner.upstream_netloc)
-                for name, value in headers.items():
+                # D70: the one place a request's headers are written upstream, so this also covers
+                # the CLI's own request on every fail-open path.
+                for name, value in (without_hint_headers(headers) if owner.strip_hint_headers else headers).items():
                     conn.putheader(name, value)
                 if body or self.command in ("POST", "PUT", "PATCH"):
                     conn.putheader("Content-Length", str(len(body)))
@@ -1315,8 +1370,12 @@ class _Handler(BaseHTTPRequestHandler):
         # The client must not see the response complete before the engine has its usage and the
         # session log has the entry: Claude Code sends its next request right away, and the engine
         # sizes it from the last real usage (rule 4). So the chunk terminator, or the last chunk of
-        # a Content-Length response, is written only after usage feedback and logging.
+        # a Content-Length response, is written only after usage feedback and logging. A JSON body is
+        # read only once it has ended (``UsageReader.finish``), so in either framing what completes it
+        # is held too (``hold_json``) and written after its tool-call ids are handed on (``announce``).
         held = b""
+        json_body = not reader.sse
+        identity = decoder.encoding in ("", "identity")
         relay_ok = True
         observed = False
         # D59: the client has the stream's last event, so a close after it (before the terminator) is
@@ -1346,12 +1405,47 @@ class _Handler(BaseHTTPRequestHandler):
             owner.log({"event": "hold_skipped", "path": entry["path"], "encoding": decoder.encoding or "identity",
                        "chunked": chunked})
         splitter = SSEEventSplitter()  # the hold path splits once, for both the reader and the hold
+        announced = 0
+
+        def announce() -> None:
+            """Hand the owner's ``on_tool_calls`` hook the client tool-call ids read since the last
+            call. It runs after each read of the side copy and before the write that follows, so the
+            hook has an id before the client has the bytes that carry it, whether the response is held,
+            relayed chunk by chunk or a JSON body, and whether or not it has usage."""
+            nonlocal announced
+            hook = owner.on_tool_calls
+            if hook is None or len(reader.call_ids) == announced:
+                return
+            new, announced = tuple(reader.call_ids[announced:]), len(reader.call_ids)
+            try:
+                hook(new)
+            except Exception as exc:
+                owner.log({"event": "tool_calls_hook_error", "error": type(exc).__name__})
 
         def read_upstream() -> bytes:
             try:
                 return response.read1(65536)
             except (OSError, http.client.HTTPException) as exc:  # IncompleteRead is not an OSError
                 raise _UpstreamReadError from exc
+
+        json_started = False  # an identity JSON body has sent a byte that is not JSON whitespace
+
+        def hold_json(held: bytes, chunk: bytes) -> tuple[bytes, bytes]:
+            """(bytes to write now, bytes to hold) for one more chunk of a JSON body. The last chunk is
+            held; for an identity body, so is every chunk after the last one with a byte that is not
+            JSON whitespace, so the client never has the body's closing bracket before the end. A body
+            past the reader's limit registers nothing, and is relayed as a Content-Length body is.
+            Whitespace before an identity body's first value completes nothing and goes at once: a
+            gateway that keeps a slow request alive with it reaches the client as before the hold."""
+            nonlocal json_started
+            blank = not chunk.strip(b" \t\r\n")
+            if identity and not json_started:
+                if blank:
+                    return held + chunk, b""
+                json_started = True
+            if identity and held and blank and not reader.overflowed:
+                return b"", held + chunk
+            return held, chunk
 
         def write_events(events: list[bytes]) -> None:
             nonlocal delivered_end
@@ -1379,10 +1473,16 @@ class _Handler(BaseHTTPRequestHandler):
                 if hold is not None:
                     for raw in splitter.feed(chunk):
                         reader.feed_event(raw)  # usage is read before the hold can trigger on it
+                        announce()
                         write_events(hold.feed(raw))
                     continue
                 reader.feed(decoder.decode(chunk))
-                if chunked:
+                announce()
+                if json_body:
+                    pending, held = hold_json(held, chunk)
+                    if pending:
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(pending), pending) if chunked else pending)
+                elif chunked:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 else:
                     if held:
@@ -1393,6 +1493,7 @@ class _Handler(BaseHTTPRequestHandler):
             if hold is not None:
                 if tail := splitter.flush():  # a final event without its blank line (see SSEEventSplitter)
                     reader.feed_event(tail)
+                    announce()
                     write_events(hold.feed(tail))
                 write_events(hold.eof())
             elif expected is not None and response_bytes < expected:
@@ -1428,6 +1529,7 @@ class _Handler(BaseHTTPRequestHandler):
         if hold is not None:
             entry["stream_hold"] = {"held_events": hold.held_events, "triggered": hold.triggered}
         reader.finish()
+        announce()  # a JSON body's ids are known only now, and what completes it is still held (hold_json)
         if entry.get("api") == "responses":
             usage = reader.usage or None  # Responses usage kept as given (see UsageReader)
         else:
@@ -1450,6 +1552,8 @@ class _Handler(BaseHTTPRequestHandler):
         if relay_ok:
             try:
                 if chunked:
+                    if held:
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(held), held))
                     self.wfile.write(b"0\r\n\r\n")
                 elif held:
                     self.wfile.write(held)

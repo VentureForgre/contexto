@@ -87,8 +87,24 @@ def test_parse_reply_reads_detailed_listed_and_not_shown_counts():
                       "[7 more matching pages not shown; use a longer or more specific query]"])
     reply = scale_bench.parse_reply(text)
     assert reply == {"detailed": ["pg_00000000000000aa", "pg_00000000000000bb"],
-                     "listed": ["pg_00000000000000cc", "pg_00000000000000dd"], "total": 11}
+                     "listed": ["pg_00000000000000cc", "pg_00000000000000dd"], "total": 11, "approximate": False}
     assert scale_bench.detailed_section(text, "pg_00000000000000bb") == "> 0: x"
+
+
+def test_parse_reply_reads_an_approximate_reply():
+    # D65: when no page holds every word, the header and the two list lines read differently.
+    text = "\n".join([scale_bench.mcp.SEARCH_APPROX_HEADER, "[searched for: deploy, finished, zzqqxx]",
+                      "pg_00000000000000aa (turn 9)", "  [matched: deploy, finished; not matched: zzqqxx]",
+                      "> 12: deploy 9 finished",
+                      "[more approximate matches, recall one at its offset:]",
+                      "pg_00000000000000cc (turn 2) @40 [matched: deploy, finished; not matched: zzqqxx]",
+                      "[27 more approximate matches not shown; use a more specific query]"])
+    reply = scale_bench.parse_reply(text)
+    assert reply == {"detailed": ["pg_00000000000000aa"], "listed": ["pg_00000000000000cc"], "total": 29,
+                     "approximate": True}
+    assert scale_bench.detailed_section(text, "pg_00000000000000aa") == (
+        "  [matched: deploy, finished; not matched: zzqqxx]\n> 12: deploy 9 finished")
+    assert "approximate" in scale_bench.QUALITY_FIELDS
 
 
 def test_store_built_through_page_out_has_one_page_per_turn(tmp_path: Path):

@@ -66,10 +66,10 @@ ROOM = 10**9  # a room that never runs out: the per-call limit binds, as in a tu
 SEARCH_CACHE_MB: str | None = None  # --search-cache-mb: the MCP server's search text budget (D39); None, its default
 DETAILED = re.compile(r"^(pg_[0-9a-f]{16}) \(turn (\d+)\)$")
 LISTED = re.compile(r"^(pg_[0-9a-f]{16}) \(turn (\d+)\) @")
-NOT_SHOWN = re.compile(r"^\[(\d+) more matching pages not shown")
+NOT_SHOWN = re.compile(r"^\[(\d+) more (?:matching pages|approximate matches) not shown")  # the second: D65
 QUALITY_FIELDS = ["n", "dialect", "fact", "kind", "query", "outcome", "rank_shown", "matching_pages",
                   "query_on_planted_page", "value_shown", "casefold_on_page", "all_words_on_page", "latest_first",
-                  "stale_only"]
+                  "stale_only", "approximate"]
 
 
 # Store building
@@ -269,14 +269,15 @@ def parse_reply(text: str) -> dict[str, Any]:
             listed.append(m.group(1))
         elif m := NOT_SHOWN.match(line):
             not_shown = int(m.group(1))
-    return {"detailed": detailed, "listed": listed, "total": len(detailed) + len(listed) + not_shown}
+    return {"detailed": detailed, "listed": listed, "total": len(detailed) + len(listed) + not_shown,
+            "approximate": mcp.SEARCH_APPROX_HEADER in text.split("\n")}  # no page held every word (D65)
 
 
 def detailed_section(text: str, page_id: str) -> str:
     """The lines a reply shows for one detailed hit (its header up to the next hit or the listed section)."""
     out, inside = [], False
     for line in text.split("\n"):
-        if DETAILED.match(line) or line.startswith("[more matching pages"):
+        if DETAILED.match(line) or line.startswith(("[more matching pages", "[more approximate matches")):
             inside = line.startswith(page_id)
             continue
         if inside:
@@ -317,7 +318,7 @@ def quality(home: Path, session: str, n: int, dialect: str, ids: list[str], writ
                  "rank_shown": rank, "matching_pages": reply["total"], "query_on_planted_page": on_page,
                  "value_shown": value_shown, "casefold_on_page": casefold, "all_words_on_page": all_words,
                  "latest_first": (first_plant == target) if fact.kind == "changing" else "",
-                 "stale_only": stale_only if fact.kind == "changing" else ""}
+                 "stale_only": stale_only if fact.kind == "changing" else "", "approximate": reply["approximate"]}
             writer.writerow(r)
             rows.append(r)
     return rows

@@ -34,13 +34,22 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 # ("# MCP Server Instructions"); when either changes, the head moves by its byte change at
 # OTHER_BYTES_PER_TOKEN. B19 and B21 (main 8571095, dry run #5) grew the definitions from 2,743 to 2,827
 # bytes: 47,600 + ceil(84 / 3.0) = 47,628. D51 grew them to 2,985 bytes and the instructions from 426 to
-# 741: 47,600 + ceil(242 / 3.0) + ceil(315 / 3.0) = 47,786. test_head_follows_contexto_tool_bytes fails
-# when either changes without this.
+# 741: 47,600 + ceil(242 / 3.0) + ceil(315 / 3.0) = 47,786. D65 (search falls back to approximate matches)
+# grew the contexto_search description by 85 bytes, to 3,070 in all, and the instructions by 6, to 747:
+# 47,600 + ceil(327 / 3.0) + ceil(321 / 3.0) = 47,816. D69 (only the user's own words are pinned; a pin
+# in the main conversation can be carried) grew them to 3,285 and 878: 47,600 + ceil(542 / 3.0) +
+# ceil(452 / 3.0) = 47,932. D63 (search and recall cover tool results paged out of the running turn) grew
+# the definitions to 3,439: 47,600 + ceil(696 / 3.0) + ceil(452 / 3.0) = 47,983; naming the turn a page
+# was written in instead of "this turn" took them to 3,435: 47,600 + ceil(692 / 3.0) + ceil(452 / 3.0) =
+# 47,982. D69's search of earlier sessions gives every launched session (it has a project view) the
+# project tool list and instructions, 3,872 and 926 bytes: 47,600 + ceil(1,129 / 3.0) + ceil(500 / 3.0) =
+# 48,144.
+# test_head_follows_contexto_tool_bytes fails when either changes without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
-CONTEXTO_TOOL_BYTES = 2_985  # D51
+CONTEXTO_TOOL_BYTES = 3_872  # D65 3,070; D69 3,285; D63 3,435; D69's project tool list (scope, session)
 CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE = 426  # main c8f0b08 (unchanged until D51)
-CONTEXTO_INSTRUCTIONS_BYTES = 741  # D51
+CONTEXTO_INSTRUCTIONS_BYTES = 926  # D65 747; D69 878; the project instructions (no pin from an earlier session)
 HEAD = (HEAD_MEASURED
         + math.ceil((CONTEXTO_TOOL_BYTES - CONTEXTO_TOOL_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN)
         + math.ceil((CONTEXTO_INSTRUCTIONS_BYTES - CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE) / OTHER_BYTES_PER_TOKEN))
@@ -48,7 +57,9 @@ HEAD = (HEAD_MEASURED
 
 def fixed_preamble_tokens() -> int:
     """The pinned text's fixed opening lines (``contexto.store.recall.DEFAULT_LINES``) by the engine's
-    estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it."""
+    estimator, so the preamble follows the text the engine sends: 301 before D51 (300 was used), 380 with it,
+    409 with D69's clause on whose words are pinned, 446 with D63's on hits paged out inside a turn, 460 with D69's on a search or recall of an earlier
+    session."""
     from contexto.store.recall import DEFAULT_LINES
     from contexto.tokens import estimate_tokens
 

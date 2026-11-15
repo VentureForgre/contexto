@@ -317,7 +317,7 @@ def test_the_default_is_the_newest_session_when_all_are_empty(home, capsys):
 def test_help_mentions_codex_and_no_internal_ids(capsys):
     with pytest.raises(SystemExit):
         cli.main(["--help"])
-    top = capsys.readouterr().out
+    top = " ".join(capsys.readouterr().out.split())  # argparse wraps a line when a command's name is long (D64)
     assert "run Claude Code or Codex" in top and "(the CLI spawns this)" in top
     for argv in (["run", "--help"], ["proxy", "--help"], ["mcp", "--help"], ["recall", "--help"],
                  ["search", "--help"], ["state", "--help"], ["sessions", "show", "--help"]):

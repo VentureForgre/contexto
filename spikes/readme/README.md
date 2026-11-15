@@ -117,7 +117,9 @@ received less than the stub sent (it reads that from the reply's usage), because
 point of the recording.
 
 `--no-version-check` is in the command because the stub is not a Claude Code version. The stub sends
-no `X-Claude-Code-Session-Id`, so `contexto run` prints no resume hint at exit.
+no `X-Claude-Code-Session-Id`, so `contexto run` prints no resume hint at exit. The session runs with
+`CONTEXTO_QUIET=1`, so it prints no run summary at exit either: the summary's run time differs at
+every recording, so a committed recording that held it could not match a fresh one.
 
 ### What is and is not deterministic
 
@@ -139,7 +141,7 @@ tool's own output is bright, and the planted fact is amber. In a turn line the t
 and `received`, are bright too. The top bar says "synthetic session" for the whole loop.
 
 The note line is there from the start of the loop, so a viewer that stops at time 0 shows it and not
-an empty terminal. The terminal is 33 rows and the recording is 37, so the last frame runs from the
+an empty terminal. The terminal is 35 rows and the recording is 39, so the last frame runs from the
 `contexto: session` line to the last reply. A viewer that does not animate, or one with reduced motion
 set, shows that last frame.
 

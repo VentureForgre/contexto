@@ -81,7 +81,8 @@ def test_real_claude_code_lists_all_five_contexto_tools(tmp_path):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("OPENRIG_", "CLAUDE_CODE_", "CLAUDECODE", "ANTHROPIC_"))}
         env.update({"CLAUDE_CONFIG_DIR": str(tmp_path / "config"), "ANTHROPIC_API_KEY": "sk-ant-fake-for-stub",
-                    "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{httpd.server_port}"})
+                    "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{httpd.server_port}",
+                    "DISABLE_TELEMETRY": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
         proc = subprocess.Popen(
             [CLAUDE, "-p", "--bare", "--settings", str(settings), "--mcp-config", str(mcp_config),
              "--strict-mcp-config", "--model", "claude-haiku-5-5", "--output-format", "json", "say hi"],
