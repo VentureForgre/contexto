@@ -1,16 +1,16 @@
 # Contexto status
 
-Updated 2026-11-15 by claude (D67: PyPI as `contexto-proxy`, releases cut by hand and
-`install.sh`, PRs #253, #256, #260, #270, #278 and #280). Before that, 2026-11-14 (D64: let the
-user see Contexto working, PRs #257, #258, #263, #276, #261, #283 and #290, and the D64 entry in
-`docs/DECISIONS.md`), and earlier the same day (D63: in-turn paging, the replay harness PR #268 and the engine PR #274, merged and not released,
-recorded in the docs PR #295), (D70: `contexto serve` for clients Contexto does not launch, PRs
-#271, #272, #275, #277, #293 and #294, merged and not released), and (D66: the benchmark
-`contexto bench`, PRs #255, #262, #264, #269, #273, #289 and #286, recorded in the docs PR #282).
-Before that, 2026-11-13 (D69, project memory: PR #279,
-the first of its two pull requests, unreleased), and 2026-11-12 (v0.5.24: the 2026-11-05 QA run and
-the fix round, PRs #232 to #250, D48 to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0
-releases, D62, and the README rewrite, D68). Decisions taken and still open, with reasons:
+Updated 2026-11-15 by claude (D67: PyPI as `contexto-proxy`, releases cut by hand and `install.sh`,
+PRs #253, #256, #260, #270, #278 and #280). Before that, 2026-11-14 (D64: let the user see Contexto
+working, PRs #257, #258, #263, #276, #261, #283 and #290, and the D64 entry in `docs/DECISIONS.md`),
+and earlier the same day (D63: in-turn paging, the replay harness PR #268 and the engine PR #274,
+merged and not released, recorded in the docs PR #295), (D70: `contexto serve` for clients Contexto
+does not launch, PRs #271, #272, #275, #277, #293 and #294, merged and not released), and (D66: the
+benchmark `contexto bench`, PRs #255, #262, #264, #269, #273, #289 and #286, recorded in the docs PR
+#282). Before that, 2026-11-13 (D69, project memory: PR #279, the first of its two pull requests,
+unreleased), and 2026-11-12 (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250, D48
+to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0 releases, D62, and the README rewrite,
+D68). Decisions taken and still open, with reasons:
 `docs/DECISIONS.md`. Every number below is measured unless marked otherwise.
 
 ## Where the project is
