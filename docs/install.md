@@ -366,7 +366,10 @@ store locks files with `fcntl`, the launcher forwards POSIX signals (`SIGHUP`), 
 on POSIX file modes (0700 directories, 0600 files).
 
 WSL is untested: nobody has run Contexto or its test suite there. Installers refuse the wheel on
-Python 3.11 and earlier.
+Python 3.11 and earlier. 3.12 is the floor because on 3.11 the `json` module's C recursion counts
+against Python's recursion limit, so a request nested less deeply than Contexto's 512-level limit
+can still raise `RecursionError` in a handler thread. On CPython 3.11.15 the test suite had 7
+failures and 3,178 passes, and five of the failures were this.
 
 ## Troubleshooting
 
