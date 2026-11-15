@@ -10,7 +10,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   to a finished project and asked that STATUS show decisions taken, why, and decisions still open.
   The owner's one limit: nothing is published outside this repository (no PyPI, npm, Homebrew,
   public repos, or public posts). (Superseded in part by D42: the repository itself goes public;
-  and by D67: releases go to PyPI as `contexto-proxy`. No npm, Homebrew tap or public post.) Intake added two limits of its own: user-level Claude and Codex
+  and by D67: releases go to PyPI as `contexto-proxy`. No npm, Homebrew tap or public post.)
+  Intake added two limits of its own: user-level Claude and Codex
   configuration on the owner's machine is not changed, and heavy spend on the team's Codex seats
   waits for the owner. Intake reads D0 as superseding the owner gates written into earlier briefs,
   including the M0 brief's Q5 gate (see D12).
@@ -1012,7 +1013,8 @@ the owner's delegation. Open decisions are listed at the end with the options an
   the owner's setup boundary, 2026-10-15. The owner had not chosen M1; an earlier intake occupant drafted it. Its PRs #2, #3,
   #4 stay open and untouched until decision O1.
 - **D42. The repository goes public; GitHub Releases stay the only distribution.** Owner,
-  2026-10-24. (The "only distribution" part is superseded by D67 for PyPI.) The owner decided to make VentureForgre/contexto public. GitHub Releases on this
+  2026-10-24. (The "only distribution" part is superseded by D67 for PyPI.) The owner decided to
+  make VentureForgre/contexto public. GitHub Releases on this
   repository remain the only way Contexto is distributed; nothing goes to a package registry (PyPI,
   npm, Homebrew) yet. This supersedes D0's "no public repos" limit for this repository and the
   private-only wording in D13, D14, D29 and `RELEASING.md`.
@@ -4932,7 +4934,7 @@ the owner's delegation. Open decisions are listed at the end with the options an
     before removing an earlier install, and installs with uv or pipx; run again, it upgrades, and
     it moves an install from the old distribution name. The README names the release version in
     one line (`uvx --from <release wheel URL> contexto --version`, the short line that works
-    today) instead of nine. Contexto still makes no network call of its own and never checks for
+    today). Contexto still makes no network call of its own and never checks for
     a new version.
   - **CI (#256).** An `install` job installs the built wheel and the sdist into empty
     environments on every Python and OS of the test matrix and runs `contexto --version`,

@@ -797,6 +797,10 @@ D32 and D33 (#203); what remains after them is under "Known limitations".
   set to compact near the bound on the same generated script, exact-match scoring, paired
   statistics with a seed-level test, cost at published prices, a keyless replay, and the scale
   harness repaired into CI.
+- D67: Contexto goes to PyPI as `contexto-proxy` (the command stays `contexto`) by trusted
+  publishing, off until the owner registers the publisher; releases are cut by hand, with a
+  hand-written `CHANGELOG.md`; `install.sh` installs and upgrades after checking `SHA256SUMS`; CI
+  installs the built wheel on every Python; the Python floor stays 3.12.
 - D68: the README is rewritten for a first-time reader (what it does, three numbers with their
   limits, install and start on the first screen; who it is not for; a comparison with compaction, a
   1M window and Claude Code's memory), with recall stated as no worse than full context and cost as
@@ -1313,8 +1317,8 @@ Needs the owner:
 From v0.5.0 on, each is a tag and a GitHub Release on this repository with the wheel and sdist
 attached; none is on PyPI, and none of these can be (their metadata says `Name: contexto`). From
 the next release on, what each release changes is in `CHANGELOG.md`, written by hand before the
-release is cut (D67); this table stops at v0.5.24. The v0.1.0 to v0.4.0 releases and tags were deleted
-on 2026-11-06 (D62); their rows stay as the record of what changed, and their commits are on `main`.
+release is cut (D67); this table stops at v0.5.24. The v0.1.0 to v0.4.0 releases and tags were
+deleted on 2026-11-06 (D62); their rows stay as the record of what changed, and their commits are on `main`.
 
 ## Process notes
 
