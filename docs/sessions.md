@@ -11,7 +11,9 @@ delete sessions.
   `contexto: session 7f3a... (bound 150,000, upstream default)` for Claude Code, or
   `contexto: session 7f3a... (bound 150,000, upstream codex-flag, codex auth apikey, engine rewrite)`
   for Codex. The upstream is named by where it came from (for Claude Code `flag`, `env`, `default`,
-  or a settings file; for Codex [the labels on the Codex page](codex.md)), never by its URL.
+  or a settings file; for Codex [the labels on the Codex page](codex.md)), never by its URL. When
+  the directory's project has earlier sessions, the next line says how many records the session
+  carries from them ([Project memory](project-memory.md#the-start-line)).
 - **In Claude Code**, `/mcp` lists the `contexto` server as connected.
 - **Nothing else is visible until the prompt nears the bound**, about 125,000 tokens with the
   defaults. Then the proxy rotates for the first time.
@@ -20,6 +22,10 @@ delete sessions.
   4xx errors) and lists the paged-out turns. Over-bound turns should stay at 0. The upstream 4xx
   count says how many were on model requests: Claude Code's keyless `HEAD /api/hello` probe gets a
   401 at every launch, and that one is expected.
+- **At exit**, `contexto run` prints a short summary of the run: the largest prompt against the
+  bound, the pages it added, recall and search calls, the share of input read from cache, and
+  whether Claude Code compacted. `contexto stats ID --last-run` prints the same numbers for any
+  session's latest run, and `contexto stats ID` the whole session's, with more ([Stats](stats.md)).
 - **From inside the session**, `contexto state` and `contexto search WORDS` read the running
   session: `contexto run` sets `CONTEXTO_SESSION` for the CLI and its shell commands.
 - **If something is wrong**, Contexto prints a `warning:` line, for example when the model has no
@@ -36,8 +42,12 @@ outputs, and any file contents or secrets that passed through the conversation. 
 are in `pages/`. The recent turns still in view are in `retained.json`, the page index and pinned
 state in `epoch.json`, and the pinned records in `ledger.jsonl`. For Codex sessions in API-key mode,
 `codex-home/` holds Codex's own transcripts. `meta.json` records the working directory the session
-started in and the Claude Code session ids it served. The session log, `log.jsonl`, holds event
-names, sizes and counts, never prompt or response text. Auth headers and keys are never stored.
+started in and the Claude Code session ids it served, and for [project memory](project-memory.md)
+the project's root directory (`project`, recorded once), whether the session is out of project
+memory (`project_memory`), the record ids its main conversation made (`main_records`), the keys of
+the conversations the proxy trusted as main (`trusted_conversations`, hashes of each conversation's
+first message, the newest 64) and the record ids forgotten from it (`forgotten`). The session log,
+`log.jsonl`, holds event names, sizes and counts, never prompt or response text. Auth headers and keys are never stored.
 
 `$CONTEXTO_HOME` must be a directory, and `contexto run` refuses one that contains `${`. An existing home keeps its
 permissions; Contexto creates `sessions/` as 0700. A session directory must be a real directory:
@@ -76,19 +86,31 @@ text. A mistyped `--session` is an error, never a new session.
 - `contexto search WORDS [--session ID] [--limit N]`: the paged-out turns holding every word, best
   match first (at most 10 unless `--limit`), with the same search the MCP `contexto_search` tool
   uses. Each hit shows its page id, turn and opening text, then its matching lines, each with the
-  offset to pass to `contexto recall PAGE_ID --offset N`. It searches paged-out turns only. No match
-  is a success (exit 0).
+  offset to pass to `contexto recall PAGE_ID --offset N`. It searches paged-out turns only. When no
+  turn holds every word it prints approximate matches with a note ([search.md](search.md)). No match
+  is a success (exit 0). `--project` also searches the earlier sessions of the session's project
+  ([Searching earlier sessions](project-memory.md#searching-earlier-sessions)).
 - `contexto recall PAGE_ID [--session ID] [--offset N]`: a paged-out turn as plain text, thinking
   omitted, exactly as the MCP `contexto_recall` tool renders it. Page ids (`pg_` and 16 hex digits,
   for example `pg_1cb04faa431985c5`) come from `contexto sessions show` or `contexto search`. Each chunk is at most
   32,000 characters and about a quarter of the session's window budget, or 12,000 characters until
   the proxy has recorded the window. When more remains, stderr says
-  `[N more characters: rerun with --offset M; <how the chunk size was chosen>]`.
+  `[N more characters: rerun with --offset M; <how the chunk size was chosen>]`. `--from LABEL`
+  reads the page from an earlier session of the session's project.
 - `contexto state [--session ID] [--raw]`: the decisions, open obligations, and verified facts the
-  model pinned, uncapped (or "No pinned records."), then how many turns are paged out. `--raw`
+  model pinned, uncapped, then the records the session carries from earlier sessions of its
+  project (or "No pinned records." when there are none of either), then how many turns are paged
+  out. `--raw`
   prints the exact text the MCP `contexto_state` tool gives the model, including its instructions to
-  the model. It hashes each file a record cites as provenance, inside the session's recorded working
+  the model, except that a character in a record that could move the cursor, end the line, or
+  reorder or hide text is shown as its backslash escape. It hashes each file a record cites as provenance, inside the session's recorded working
   directory, to mark changed files `STALE`. It never writes there.
+
+`contexto project show` lists the sessions of a project and the records a new session there would
+carry; `contexto project forget` takes records or sessions out of what later sessions carry by
+changing their `meta.json`, and deletes nothing. Both are described in [Project memory](project-memory.md).
+Pruning a session removes what it gave to project memory, and also its closures and replacements of
+other sessions' records, which are then open or active again.
 
 ### Removing old sessions
 

@@ -51,9 +51,17 @@ Some tests skip when something is missing, and pytest prints the reason:
 - `claude` not on `PATH`: the tests against the real Claude Code MCP client and the acceptance
   driver's launch tests.
 - `codex` not on `PATH`: the Codex acceptance and live tests.
+- `claude-agent-sdk` not installed: the Agent SDK recipe test of `docs/serve.md`. Run it with
+  `uv run --with pytest --with claude-agent-sdk pytest tests/test_serve_recipes.py`.
 - Python below 3.14: the zstd request-body test.
 - A shallow clone: one research test that reads git history.
 - Running as root: two file-permission tests.
+
+The tests assume the machine has no Claude Code managed settings file
+(`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
+`/etc/claude-code/managed-settings.json` on Linux). The tests against the real `claude` skip when
+one exists; the launcher tests that start `contexto run claude` read it and fail if it turns on a
+cloud-provider switch or the gateway hint headers.
 
 CI has neither `claude` nor `codex`, so a green CI run does not cover the tests against the real
 CLIs. If you change how Contexto talks to a CLI, install it and run the suite locally.

@@ -209,7 +209,8 @@ def scenarios(turns: int, restart_every: int, csv_rows: list[str] | None = None)
         out[f"head {head:,} plain"] = {"input_tokens": sum(p["tokens"] for p in plain),
                                        "peak_input": max(p["tokens"] for p in plain), "usd": round(usd(plain), 4)}
         for bound in BOUNDS:
-            config = Config(bound=bound)
+            # A32 was measured before D63, with a tool loop sent whole: in-turn paging off reproduces it.
+            config = Config(bound=bound, in_turn_paging=False)
             key = f"head {head:,} bound {bound:,}"
             rows = replay(base, config)
             out[key] = summarize(rows, config)

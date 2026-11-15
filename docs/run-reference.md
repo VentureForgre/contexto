@@ -25,25 +25,35 @@ contexto run [options] codex [codex arguments]
 | `--codex-key-helper CMD` | see [Codex](codex.md) | Command that prints the API key (Codex, API-key mode). |
 | `--codex-upstream URL` | see [Codex](codex.md) | Upstream for Codex requests, including its version path. |
 | `--no-version-check` | off | Skip the check of `claude --version` or `codex --version` against the versions Contexto was tested with. |
+| `--quiet` | off | Do not print the summary when the CLI exits; warnings are still printed. Also `CONTEXTO_QUIET=1`. See [Stats](stats.md). |
+| `--no-statusline` | off | Claude Code only: do not add Contexto's status line. It is added only when no settings file Claude Code reads has a `statusLine` of its own. Also `CONTEXTO_NO_STATUSLINE=1`. See [Status line](statusline.md). |
+| `--no-in-turn-paging` | off | Do not page inside a running turn: a tool loop that outgrows the bound is sent whole, as v0.5.24 sends it (see [In-turn paging](in-turn-paging.md)). |
+| `--no-project-memory` | off | Keep this session out of [project memory](project-memory.md): it carries nothing from the earlier sessions of its project (a resumed session stops sending what it carried: at once before its first rotation; after it, from its next rotation) and gives nothing to later ones. The session records it, so a resume stays off without the option. Put it before `claude` or `codex`: after `codex` it goes to Codex unchanged. |
 
 For Claude Code, the launcher:
 
 1. resolves the upstream Claude Code would otherwise use (see [Troubleshooting](troubleshooting.md));
 2. picks the session (`--session`, else the one a `--resume <id>` or `--continue` names, else a new
-   one), opens it under `$CONTEXTO_HOME/sessions/<id>/` and starts the proxy on
+   one), opens it under `$CONTEXTO_HOME/sessions/<id>/`, and starts the proxy on
    `127.0.0.1:<free port>`;
-3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets only
-   `env.ANTHROPIC_BASE_URL` to the proxy and allows Contexto's five MCP tools by name
-   (`permissions.allow`; see [Troubleshooting](troubleshooting.md)), and an `--mcp-config` file that
+3. writes two temporary files (mode 0600, deleted on exit): a `--settings` file that sets
+   `env.ANTHROPIC_BASE_URL` to the proxy and the hint-header variables below (only
+   `CONTEXTO_HINT_HEADERS` when you have turned hint headers off), allows Contexto's
+   five MCP tools by name (`permissions.allow`; see [Troubleshooting](troubleshooting.md)), and adds
+   Contexto's `statusLine` only when none of your settings files has one and it is not turned off (see
+   [Status line](statusline.md)), and an `--mcp-config` file that
    starts Contexto's MCP server (`python -P -m contexto mcp --session=<id>` with the same Python, and
    `CONTEXTO_HOME`, plus `CONTEXTO_SEARCH_CACHE_MB` when set, in its environment; `-P` keeps your
-   project directory off the import path);
+   project directory off the import path); then prints the session line on stderr
+   (`contexto: session …`) and, in a project with earlier sessions, the project memory line
+   (`contexto: project memory: …`; see [Project memory](project-memory.md#the-start-line));
 4. runs `claude --settings=<file> --mcp-config=<file> [your args]` in your terminal, with
    `CONTEXTO_SESSION=<id>` in its environment, and returns its exit code. Each flag and its file are
    one argument, so a prompt right after `claude` (`contexto run claude "fix the tests"`) stays a
    prompt.
 5. after Claude Code exits, prints any warnings raised while it ran (printing them mid-run would land
-   in Claude Code's input box), then the command that resumes the conversation through Contexto.
+   in Claude Code's input box), a short summary of the run (see [Stats](stats.md); `--quiet` drops
+   it), then the command that resumes the conversation through Contexto.
 
 `contexto run claude --version` (or `-v`, `--help`, `-h` alone) runs Claude Code without a session or
 proxy. SIGTERM, SIGHUP and SIGQUIT are forwarded to Claude Code; SIGUSR1, SIGUSR2 and SIGALRM end it
@@ -57,7 +67,10 @@ after the session opens, exits 127, and leaves that empty session behind.
 needs it to route requests through the proxy. Put those settings in your Claude settings files
 instead. Details are under [Troubleshooting](troubleshooting.md).
 
-At start, `contexto run` warns on stderr when the bound leaves a window budget under 25,000 tokens
+At start, `contexto run` prints the session line on stderr and, in a project with earlier sessions,
+a second line, `contexto: project memory: …`, which counts what it carries
+([Project memory](project-memory.md#the-start-line)). It also warns when the bound leaves a window
+budget under 25,000 tokens
 and suggests a larger `--bound`. It assumes a fixed overhead of 28,000 tokens for Claude Code
 (measured 18,641 to 27,925 on 2.1.314 with tool search on) and 19,000 for Codex. It warns again,
 once, if the measured overhead does the same.
@@ -65,7 +78,9 @@ once, if the measured overhead does the same.
 **Tip for Haiku 5.5:** on Haiku 5.5, `--bound 125000` keeps requests at turn start below the 100K price
 tier, above which every rate is 5 times higher. Replaying a recorded acceptance session at that bound,
 with the model's behavior held fixed, every request stayed under it, for a modeled 45.7% lower
-cost. Long tool loops can still cross it, and accuracy at that bound is not yet measured. See
+cost. Inside a tool loop Contexto pages the running turn too ([In-turn paging](in-turn-paging.md)),
+so a loop crosses it only when nothing is left to page or in-turn paging is off. Accuracy at that
+bound is not yet measured. See
 [docs/research/M2-haiku-100k-tier.md](research/M2-haiku-100k-tier.md).
 The [Quickstart](../README.md#quickstart)'s `--bound 120000` is also below the tier at turn start: with the default headroom floor
 (25,000) and minimum turn room (12,000), any bound up to 125000 is.
@@ -90,7 +105,9 @@ request is in flight (Esc), the proxy stops the upstream response at once and lo
 | Variable | Used by | Meaning |
 |---|---|---|
 | `CONTEXTO_HOME` | all commands | Data directory (default `~/.contexto`), resolved to an absolute path. `contexto run` passes it to the MCP server for both Claude Code and Codex. `contexto mcp --home` overrides it. |
-| `CONTEXTO_SESSION` | `recall`, `search`, `state` | Session to read when `--session` is not given. `contexto run` sets it for the CLI it runs. |
+| `CONTEXTO_SESSION` | `recall`, `search`, `state`, `stats`, `statusline` | Session to read when `--session` is not given. `contexto run` sets it for the CLI it runs. `statusline` uses it only under the rule in [Status line](statusline.md#calling-it-from-your-own-status-line). |
+| `CONTEXTO_QUIET` | `run` | Any value but empty, `0`, `false` or `no` drops the summary at exit, like `--quiet`. |
+| `CONTEXTO_NO_STATUSLINE` | `run claude` | Any value but empty, `0`, `false` or `no` leaves Claude Code's status line alone, like `--no-statusline`. |
 | `CONTEXTO_CODEX_KEY_HELPER` | `run codex` | Key helper command when `--codex-key-helper` is not given. |
 | `CONTEXTO_CODEX_UPSTREAM` | `run codex` | Codex upstream when `--codex-upstream` is not given. |
 | `CONTEXTO_SEARCH_CACHE_MB` | `mcp` | Page text the MCP server holds in memory for `contexto_search`, in MB (default 64; `0` holds none). See [MCP tools](mcp-tools.md). |
@@ -98,6 +115,11 @@ request is in flight (Esc), the proxy stops the upstream response at once and lo
 | `ANTHROPIC_BASE_URL` | `run`, `proxy` | Upstream, when no settings file sets one (see [Troubleshooting](troubleshooting.md)). |
 | `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` | `run`, `proxy` | Read, never set, by Contexto: when truthy, no project `.claude/` settings file is used, as Claude Code does in `-p` mode (see [Troubleshooting](troubleshooting.md)). |
 | `CONTEXTO_NO_VERSION_CHECK` | `run` | `1` skips the CLI version check, like `--no-version-check`. |
+| `CONTEXTO_IN_TURN_PAGING` | `run` | `0`, `false`, `off` or `no` turns in-turn paging off, like `--no-in-turn-paging`. |
+| `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` | `run claude` | Read, never set: when one is on in the environment or in a Claude Code settings file (including the managed settings file), Claude Code sends nothing to Contexto, so `contexto run claude` refuses to start (exit 2). It also refuses when a settings file it cannot read (not a regular file, over 4 MiB, or not JSON) could set one. |
+| `CLAUDE_CODE_GATEWAY_HINT_HEADERS` | `run claude` | `contexto run claude` sets it to `1` for Claude Code so the engine can read Claude Code's request-class headers, and removes those headers before forwarding unless you had turned them on yourself. Set it to `0`, `false`, `no` or `off` in your environment or user settings to keep them off; the engine then uses its older text signatures. |
+| `CONTEXTO_HINT_HEADERS` | `run claude` | Set by `contexto run claude` for the CLI it runs (`stripped`, `forwarded` or `off`), and printed by `contexto serve --print-settings` (`stripped`), so a `contexto run claude` started inside that session can tell Contexto's `1` from yours. A settings file that sets the hint variable on beside `stripped` is not counted as yours either. Not meant to be set by hand. |
+| `CONTEXTO_PROJECT_MEMORY` | `run` | `0`, `false`, `off` or `no` (any case) turns [project memory](project-memory.md) off for the launch, like `--no-project-memory`. `1`, `true`, `on`, `yes` or unset leaves it on; any other value leaves it on and prints a warning. |
 
 ## Upstreams and CLIProxyAPI
 

@@ -189,3 +189,47 @@ It is the plain-run shape's probe phase, used above. It is not a Contexto figure
 - **What plain would do differently.** Without Contexto, the model would have no search tool and
   would answer probes from the full history (the baseline arm scored 48/54, against Contexto's 51/54
   in run #3). Cost and fidelity are separate results.
+
+## The same token counts at other prices (added 2026-11-12, modeled)
+
+The 49.7% cost saving above depends on Haiku 5.5's price step: every rate is ×5 on a prompt over
+100,000 tokens. Every plain request from content turn 4 on is over that line; 7 of Contexto's 44
+are. This section prices the same cache-class counts (the table under "By cache class": plain-run
+shape, best-case cache for plain) at flat rates, with no step.
+
+`cost = (uncached × input + cache read × read + cache write × write + output × output) / 1,000,000`
+
+Rates are USD per million tokens from [M0-cost-model.md](M0-cost-model.md), "Prices and cache
+rules" (retrieved 2026-10-15), with cache writes at the 5 minute TTL.
+
+| Rates | Input | Output | Cache read | Cache write | Contexto (USD) | Plain (USD) | Contexto against plain |
+|---|---|---|---|---|---|---|---|
+| Haiku 5.5 with its ×5 step (the headline) | 0.1 | 0.5 | 0.01 | 0.125 | 0.29 | 0.58 | 49.7% less |
+| Haiku 5.5 base rates, no step | 0.1 | 0.5 | 0.01 | 0.125 | 0.169 | 0.127 | 34% more |
+| Opus 5.5 (no long-prompt step) | 4 | 20 | 0.2 | 5 | 6.23 | 3.76 | 66% more |
+
+The parts, in USD (uncached input, cache read, cache write, output):
+
+- Haiku 5.5 base, Contexto: 0.0000 + 0.0268 + 0.1310 + 0.0113 = 0.1691. Plain: 0.0000 + 0.0653 +
+  0.0548 + 0.0064 = 0.1266.
+- Opus 5.5, Contexto: 0.0004 + 0.5355 + 5.2398 + 0.4539 = 6.2295. Plain: 0.0002 + 1.3068 + 2.1918 +
+  0.2567 = 3.7555.
+
+At flat rates Contexto costs more although it sends 46.6% fewer input tokens. Each of its 6
+rotations rewrites the prompt cache, so it wrote 1,047,954 cache tokens against 438,358 for plain,
+and a cache write costs 12.5 times a cache read at Haiku 5.5's rates and 25 times at Opus 5.5's.
+Plain re-reads a long history, but reads are the cheap class.
+
+Limits:
+
+- **Repriced, not measured.** These are run #3's Haiku 5.5 counts at other prices. A real Opus 5.5
+  session would make different requests (other tool calls, other output), so the Opus row is not a
+  measurement of Opus.
+- **Best-case cache for plain**, as above, while Contexto's side has its measured cache behavior.
+  The baseline arm missed the cache on 2 of 6 requests. Two full misses of about 436,000 tokens
+  each move about 872,000 tokens from cache read to cache write: about 0.10 USD more at Haiku 5.5
+  base rates and 4.19 USD more at Opus 5.5 rates, which puts plain above Contexto in both rows
+  (0.23 against 0.17, and 7.94 against 6.23). So the sign of the cost difference depends on the
+  model's prices and on how often the route hits the cache.
+- **One session**, with about 40 KB pasted per turn. Fewer rotations per token of history mean fewer
+  cache writes.

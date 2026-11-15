@@ -2,9 +2,9 @@
 
 [Contexto](../README.md) / [Documentation](README.md)
 
-The [README](../README.md#install) has the requirements and the one command that installs Contexto
-from the release URL. This page has the other ways to install, how to check the download, and how
-to uninstall.
+The [README](../README.md#install) has the requirements and the command that installs Contexto from
+the release URL. This page repeats that command with a version check, then gives the other ways to
+install, how to check the download, and how to uninstall.
 
 ## Other ways to install
 

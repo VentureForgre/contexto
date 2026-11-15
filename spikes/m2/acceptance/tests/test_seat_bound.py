@@ -1,4 +1,7 @@
-"""M2 A32: seat_bound on short synthetic seat sessions (zero spend; the real engine, a temporary store)."""
+"""M2 A32: seat_bound on short synthetic seat sessions (zero spend; the real engine, a temporary store).
+
+A32 was measured before D63, with a tool loop sent whole, so every engine here runs with in-turn paging
+off; with it on, the large read is stubbed when it arrives."""
 
 from __future__ import annotations
 
@@ -30,7 +33,7 @@ def test_a_large_read_turn_carries_the_measured_growth():
 
 
 def test_the_engine_rotates_for_room_and_keeps_every_turn_start_above_min_turn_room():
-    config = Config(bound=150_000)
+    config = Config(bound=150_000, in_turn_paging=False)
     reqs = sb.session(84_000, 14)
     rows = sb.replay(reqs, config)
     s = sb.summarize(rows, config)
@@ -48,7 +51,7 @@ def test_the_engine_rotates_for_room_and_keeps_every_turn_start_above_min_turn_r
 
 
 def test_rule_16_resume_matches_no_restart_and_no_resume_rotates_again():
-    config = Config(bound=150_000)
+    config = Config(bound=150_000, in_turn_paging=False)
     reqs = sb.session(84_000, 21)
     starts = [i for i, r in enumerate(reqs) if r["start"]]
     restarts = {starts[10]}
@@ -61,7 +64,7 @@ def test_rule_16_resume_matches_no_restart_and_no_resume_rotates_again():
 
 def test_one_large_read_keeps_the_window_budget_negative_afterwards():
     # A32's finding, under the headroom rule before rule 17 (no cap, no decay); rule 17 fixes it.
-    config = Config(bound=150_000, headroom_cap=1_000_000.0, headroom_decay=1.0)
+    config = Config(bound=150_000, in_turn_paging=False, headroom_cap=1_000_000.0, headroom_decay=1.0)
     s = sb.summarize(sb.replay(sb.session(84_000, 8, big_read_at=3), config), config)
     assert s["window_budget"][0] < 0 and s["window_minimal"] >= 3 and s["bound_too_small"] >= 3
     assert s["margin_to_idle_compaction"] < 0

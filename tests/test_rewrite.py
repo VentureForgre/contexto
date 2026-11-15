@@ -5,6 +5,7 @@ loops, signed and redacted thinking, settings-only system messages, and the CLI'
 single text block to a plain string. All content is synthetic."""
 
 import copy
+import dataclasses
 import json
 
 import pytest
@@ -185,10 +186,24 @@ def test_second_rotation_never_unpages():
     assert "rotation" in names(ev2) and st2.k >= st.k and st2.turns_paged > st.turns_paged
 
 
-def test_no_rotation_inside_a_tool_loop_marks_over_bound():
+def test_a_tool_loop_over_the_bound_is_paged_in_place():
+    # Rule 5 (D63, which supersedes D17's "never rotate inside a tool loop"): the result the model has not
+    # read yet is stubbed and, the request being still over the bound, the earlier turns are paged.
     msgs = history(8) + [user("go"), tool_use(1), tool_result(1, FILL * 3)]
     up, st, ev, store = run(msgs)
-    assert "rotation" not in names(ev) and not store.pages
+    batch = next(e for e in ev if e["event"] == "in_turn_batch")
+    assert batch["unseen_results_stubbed"] == 1 and batch["turns_paged"] == 8 and st.k == len(msgs) - 3
+    assert "over_bound" not in ev[-1] and ev[-1]["sent_estimate"] == batch["estimate_after"] <= CONFIG.bound
+    stub = up["messages"][-1]["content"][0]
+    assert stub["tool_use_id"] == "toolu_1" and stub["content"].startswith("[Contexto paged out this tool result")
+    assert [m["role"] for m in up["messages"] if m["role"] != "system"] == ["user", "assistant", "user"]
+
+
+def test_with_in_turn_paging_off_a_tool_loop_over_the_bound_is_sent_as_is():
+    # The behaviour before D63, kept behind the switch: nothing is paged and the request is flagged.
+    msgs = history(8) + [user("go"), tool_use(1), tool_result(1, FILL * 3)]
+    up, st, ev, store = run(msgs, config=dataclasses.replace(CONFIG, in_turn_paging=False))
+    assert "rotation" not in names(ev) and "in_turn_batch" not in names(ev) and not store.pages
     assert ev[-1]["over_bound"] is True and up["messages"] == msgs
 
 
@@ -825,11 +840,12 @@ def test_estimate_after_a_rotation_is_of_the_transformed_request():
 
 def test_pre_send_and_real_over_bound_records_are_distinct():
     store = MemoryStore(key=b"k" * 32)
-    engine = RewriteEngine(store, config=CONFIG)
+    # In-turn paging off (D63), so that the loop's request goes out over the bound and is flagged.
+    engine = RewriteEngine(store, config=dataclasses.replace(CONFIG, in_turn_paging=False))
     loop = request(history(8) + [user("go"), tool_use(1), tool_result(1, FILL * 3)])
     _, _, ev = engine(loop, {}, MESSAGES)
     pre = [e for e in ev if e["event"] == "over_bound"]
-    assert [e["source"] for e in pre] == ["estimate"] and ev[-1]["over_bound"] is True  # rule 5, allowed
+    assert [e["source"] for e in pre] == ["estimate"] and ev[-1]["over_bound"] is True
     assert pre[0]["in_tool_loop"] is True
     out = engine.observe_usage(MESSAGES, {"input_tokens": CONFIG.bound + 1}, loop)
     assert [e["source"] for e in out if e["event"] == "over_bound"] == ["real"]  # acceptance 1 failure

@@ -27,6 +27,23 @@ def sigint_default():
         signal.signal(signal.SIGINT, previous)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def no_managed_settings(tmp_path_factory):
+    """Keep the tests that read settings in this process off this machine's Claude Code managed
+    settings file. ``contexto run claude`` reads it from a fixed system path (D70) that no variable
+    moves, so the table of paths is pointed at a temporary directory where no file exists. A launcher a
+    test starts as a subprocess reads the real path; the tests that do so with the real ``claude``
+    skip when that file exists. A test that needs a managed file passes its own path."""
+    from contexto import upstream
+
+    saved = dict(upstream.MANAGED_SETTINGS_FILES)
+    empty = str(tmp_path_factory.mktemp("managed") / "managed-settings.json")
+    upstream.MANAGED_SETTINGS_FILES.update({platform: empty for platform in saved})
+    yield
+    upstream.MANAGED_SETTINGS_FILES.clear()
+    upstream.MANAGED_SETTINGS_FILES.update(saved)
+
+
 # The stub upstream and proxy factory of test_proxy_server, shared with test_upstream_affinity.
 
 
@@ -55,3 +72,28 @@ def make_proxy(upstream):
     yield make
     for proxy in started:
         proxy.stop()
+
+
+@pytest.fixture
+def within():
+    """``within(seconds, call)``: ``call()``'s result, run in a daemon thread. A call that blocks (a reader
+    that opens a named pipe and waits for a writer, say) fails the test after ``seconds`` instead of
+    hanging the run until CI's own timeout (PR #258 review A, round 4)."""
+    def run(seconds, call):
+        box = {}
+
+        def target():
+            try:
+                box["value"] = call()
+            except BaseException as error:  # handed to the test's thread below
+                box["error"] = error
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(seconds)
+        assert not thread.is_alive(), f"still blocked after {seconds} s"
+        if "error" in box:
+            raise box["error"]
+        return box["value"]
+
+    return run

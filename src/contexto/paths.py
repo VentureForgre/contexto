@@ -37,6 +37,25 @@ def mcp_env(home: Path, env: Mapping[str, str] | None = None) -> dict[str, str]:
     return out
 
 
+# D69: ``contexto run`` turns project memory off for the launch when this is one of the off values.
+PROJECT_MEMORY_ENV = "CONTEXTO_PROJECT_MEMORY"
+PROJECT_MEMORY_OFF = ("0", "false", "off", "no")
+PROJECT_MEMORY_ON = ("1", "true", "on", "yes")
+
+
+def project_memory_env(env: Mapping[str, str] | None = None) -> tuple[bool, str | None]:
+    """What ``CONTEXTO_PROJECT_MEMORY`` (from ``env``, default the process environment) asks of a launch:
+    ``(on, unrecognised)``. Off only for ``0``, ``false``, ``off`` or ``no``, in any case and with the
+    space around it ignored. Unset, empty, or ``1``, ``true``, ``on``, ``yes`` is on. Any other value is
+    on as well, so a typing error never turns memory off unasked, and is returned (stripped) as
+    ``unrecognised`` for the launcher to name."""
+    value = ((os.environ if env is None else env).get(PROJECT_MEMORY_ENV) or "").strip()
+    word = value.lower()
+    if word in PROJECT_MEMORY_OFF:
+        return False, None
+    return True, None if not word or word in PROJECT_MEMORY_ON else value
+
+
 SESSION_ID_MAX_BYTES = 255  # NAME_MAX: a longer directory name fails in the filesystem, not here
 
 
