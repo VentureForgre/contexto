@@ -4948,11 +4948,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
     sdist repack pins gzip level 9 (Python 3.15 changed the default to 6), and the `release` and
     `reattach` jobs both use uv's managed Python 3.12, so a reattach rebuilds the same bytes.
     That was shown on macOS only; the first reattach on a hosted Linux runner is the real check.
-  - **Branches and `main`.** #270 and #278 each merged `main` in before their last two reviews. When
-    `main` moved again after those reviews, in files the PR does not touch, the PR merged without
-    another round: the ruleset requires `ci` but not an up-to-date branch, and squash merging puts
-    the PR's diff on the newest `main`. #278 merged that way over #275 (docs) and
-    #266 (search probes).
+  - **Branches and `main`.** Each PR merged `main` in before its last two reviews, and merged
+    only with both approving its head and `ci` green. #278 merged as 319b50db over two later
+    `main` commits, #275 (docs) and #266 (search probes), which touch none of its files, without
+    another round: the ruleset requires `ci` but not an up-to-date branch, and a squash merge puts
+    the PR's diff on the newest `main`. #270 merged `main` (a41d2c5b) in, ran the full suite on
+    the result, and merged as a4f6db0e with `main` unchanged since.
   - **Python floor stays 3.12.** The suite on CPython 3.11.15 (macOS, `requires-python` lowered
     in a scratch clone): 7 failed, 3,178 passed. Five failures are the 512-level JSON nesting
     limit (D45): on 3.11 a document inside the limit raises `RecursionError` in a handler thread.
