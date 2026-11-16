@@ -12,9 +12,9 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "VentureForgre" }]
 maintainers = [{ name = "VentureForgre" }]
-# 3.12 is the floor. On 3.11 the json module's C recursion counts against the Python recursion limit,
-# so a document inside the 512-level nesting limit raises RecursionError in a handler thread; 3.12
-# changed that accounting.
+# 3.12 is the floor. On 3.11 a list comprehension runs in its own frame, so the recursive walkers of
+# request JSON (store/recall.py `_json_keys`) use two frames per level and a document inside the
+# 512-level nesting limit raises RecursionError in a handler thread; 3.12 inlines comprehensions.
 requires-python = ">=3.12"
 dependencies = []
 keywords = [

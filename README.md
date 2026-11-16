@@ -36,20 +36,56 @@ batched under D67): from a checkout, run `uv run contexto bench --replay`. No li
 
 ## Install
 
-On macOS or Linux, Contexto needs Python 3.12 or later, pipx, `claude` (Claude Code) or `codex` on
-`PATH`, and either an Anthropic API key or a [CLIProxyAPI](docs/cliproxyapi.md) upstream (a
-separate local or hosted proxy in front of the vendor APIs). A claude.ai Pro or Max login is not a
-supported setup, Contexto does not detect one, and the risk to the account is yours
+On macOS or Linux, Contexto needs Python 3.12 or later, uv or pipx, `claude` (Claude Code) or
+`codex` on `PATH`, and either an Anthropic API key or a [CLIProxyAPI](docs/cliproxyapi.md) upstream
+(a separate local or hosted proxy in front of the vendor APIs). A claude.ai Pro or Max login is not
+a supported setup, Contexto does not detect one, and the risk to the account is yours
 ([who it is not for](#who-it-is-for)).
 
 ```sh
-pipx install \
-  https://github.com/VentureForgre/contexto/releases/download/v0.5.24/contexto-0.5.24-py3-none-any.whl
+curl -fsSL https://raw.githubusercontent.com/VentureForgre/contexto/main/install.sh | sh
 ```
 
-Contexto is not on PyPI yet: `pip install contexto` installs an unrelated project, and the name
-it will be published under, `contexto-proxy`, has no release there. Checking the
-download before you install, other ways to install, and uninstalling: [docs/install.md](docs/install.md).
+The script finds the latest release, checks its wheel against the release's checksums, and installs
+it with `uv tool install` or `pipx install`, whichever you have. You can
+[read it first](install.sh).
+
+To run Contexto without installing it, give `uvx` the wheel of a release:
+
+```sh
+uvx --from https://github.com/VentureForgre/contexto/releases/download/v0.5.24/contexto-0.5.24-py3-none-any.whl contexto --version
+```
+
+That line names one release. The [Releases page](https://github.com/VentureForgre/contexto/releases)
+has the newest.
+
+On PyPI the package is `contexto-proxy`, and the command is still `contexto`. Install from PyPI only
+if the project page, [pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/),
+has a link whose address is `https://github.com/VentureForgre/contexto` in the "Project links" group
+labeled "Data verified by PyPI on" a date. The page shows link names, which the uploader chooses, so
+point at the link (long-press on a phone) and read its address, letter by letter. PyPI verifies a
+GitHub link only for files uploaded by trusted publishing from that repository. If the page does not
+exist, or no verified link has that address, use the script. When it checks out, install with `uv
+tool install contexto-proxy`, `pipx install contexto-proxy`, or `uvx --from contexto-proxy
+contexto`. The PyPI package named `contexto` is an unrelated project, so `pip install contexto` and
+`uvx contexto` fetch the wrong thing.
+
+### Upgrade
+
+Run the install script again. It does nothing when you already have the latest release. For an
+install from PyPI, use `uv tool upgrade contexto-proxy` or `pipx upgrade contexto-proxy`. Your
+session data in `~/.contexto` is kept.
+
+Earlier releases were distributed as `contexto`, later ones as `contexto-proxy`, and both provide
+the `contexto` command. The script replaces one with the other. By hand, uninstall `contexto`
+first.
+
+Contexto makes no network calls of its own and never checks for a new version, so nothing tells
+you when one is out. The [changelog](CHANGELOG.md) lists what changed.
+
+The script's options, checking the download before you install, other ways to install, upgrading
+each of them, installing from a checkout, uninstalling, and the supported platforms:
+[docs/install.md](docs/install.md).
 
 ## Quickstart
 
@@ -93,7 +129,7 @@ Your upstream must be the vendor's API with an API key, or a CLIProxyAPI instanc
   account is yours.
 - **Claude Code set to a cloud provider** (Amazon Bedrock, Google Vertex AI, Microsoft Foundry or
   Claude Platform on AWS). Claude Code then sends its requests to that provider, not through
-  Contexto, so nothing is bounded. The v0.5.24 release installed above does not check for this and
+  Contexto, so nothing is bounded. v0.5.24 does not check for this and
   starts a session anyway; a build from the unreleased code on `main` refuses to
   start the session.
 - **Sessions that end before the compaction point, when a large request is fine for you.** They do
