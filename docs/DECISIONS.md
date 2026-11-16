@@ -4956,9 +4956,12 @@ the owner's delegation. Open decisions are listed at the end with the options an
   - **Python floor stays 3.12.** The suite on CPython 3.11.15 (macOS, `requires-python` lowered
     in a scratch clone): 7 failed, 3,178 passed. Five failures are the 512-level JSON nesting
     limit (D45): on 3.11 a document inside the limit raises `RecursionError` in a handler thread.
-    Two are `test_launch_check_is_silenced_by_flag_or_env[0-False]` and `[false-False]` in
-    `tests/test_cliversions.py`; their cause was not looked into. Supporting 3.11 would need a
-    lower nesting limit or an iterative parser, which is a contract change.
+    The cause, found by #270's Reviewer B and reproduced: on 3.11 a list comprehension has a frame
+    of its own, so the recursive JSON walkers (`_json_keys` in `store/recall.py`) use two frames
+    per level; 3.12 inlines comprehensions (PEP 709). It is not the `json` module. Two failures
+    are `test_launch_check_is_silenced_by_flag_or_env[0-False]` and `[false-False]` in
+    `tests/test_cliversions.py`; their cause was not looked into. Supporting 3.11 would need
+    walkers without comprehensions or a lower nesting limit, which is a contract change.
   - **WSL** is not claimed: nobody has run it there. `docs/install.md` says "untested".
   - **Checksums.** `RELEASING.md` said releases "up to v0.5.8" lack `SHA256SUMS` and an
     attestation; it is v0.5.0 to v0.5.12 (v0.5.13 is the first with both). Corrected in #260.
