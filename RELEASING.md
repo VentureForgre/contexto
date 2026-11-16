@@ -86,7 +86,10 @@ again, even after it is deleted, so every release is permanent.
    git grep -n -F '0.5.24' -- README.md docs/install.md
    ```
 
-   It must print only lines that state history, such as "up to 0.5.24".
+   It must print only lines that state history, such as "up to 0.5.24". A formula's `sha256` line
+   has no version in it, so the check does not show it: take the new sdist's digest from the
+   release's `SHA256SUMS`
+   (`gh release download vX.Y.Z --repo VentureForgre/contexto --pattern SHA256SUMS`).
 
 ## The changelog
 
