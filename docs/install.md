@@ -97,6 +97,8 @@ see [Python](#python).
 It needs `curl`, and `sha256sum` or `shasum`. Downloads are https only. Each one gives up when the
 server cannot be reached within 15 seconds, or sends less than 1024 bytes a second for 30 seconds,
 or the download takes more than 10 minutes, or it is larger than the script allows for that file.
+The size limit holds when the server sends the file's size, as GitHub does; curl older than 8.4
+does not enforce it otherwise, so then only the time limits apply.
 
 ### Options
 
@@ -118,7 +120,7 @@ curl -fsSL https://raw.githubusercontent.com/VentureForgre/contexto/main/install
 | Environment variable | What it does |
 |---|---|
 | `CONTEXTO_VERSION` | Same as `--version`. The option wins. |
-| `CONTEXTO_INSTALL_BASE_URL` | Where the releases are, for a mirror or a test. Default `https://github.com/VentureForgre/contexto`. It must be https; plain http is accepted only for `127.0.0.1` and `localhost`. The script says so in its output when this is set. A mirror must have GitHub's layout: `<base>/releases/latest` answers a HEAD request with a redirect to `<base>/releases/tag/vX.Y.Z` on the same base (not needed when `--version` is given), and `<base>/releases/download/vX.Y.Z/` holds `SHA256SUMS` and the wheel. `--attest` still checks against `VentureForgre/contexto`, and without `--attest` the script tells you to run it again with `--attest`, because that checks the file that came from this URL. |
+| `CONTEXTO_INSTALL_BASE_URL` | Where the releases are, for a mirror or a test. Default `https://github.com/VentureForgre/contexto`. It must be https; plain http is accepted only for `127.0.0.1` and `localhost`, and redirects from such a base may also be plain http. The script says so in its output when this is set. A mirror must have GitHub's layout: `<base>/releases/latest` answers a HEAD request with a redirect to `<base>/releases/tag/vX.Y.Z` on the same base (not needed when `--version` is given), and `<base>/releases/download/vX.Y.Z/` holds `SHA256SUMS` and the wheel. `--attest` still checks against `VentureForgre/contexto`, and without `--attest` the script tells you to run it again with `--attest`, because that checks the file that came from this URL. |
 
 ### Python
 
@@ -173,18 +175,19 @@ uv keeps the wheel in its cache and builds a throwaway environment for it.
 
 ### From PyPI
 
-```sh
-uv tool install contexto-proxy          # or: pipx install contexto-proxy
-uvx --from contexto-proxy contexto --version
-```
-
 Before you install from PyPI, open
 [pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/). In the sidebar (on a
 phone, the Metadata tab), under "Project links", PyPI puts the links it verified in a group labeled
 "Data verified by PyPI on", followed by the upload date. Install from PyPI only if a link in that
 group has the address `https://github.com/VentureForgre/contexto`. The page shows each link's name,
 which the uploader chooses, so point at a link, or long-press it, to see its address. The address,
-not the name, must match, letter by letter: an owner name one letter off is someone else.
+not the name, must match, letter by letter: an owner name one letter off is someone else. Check
+the page of the version you install. Once it checks out:
+
+```sh
+uv tool install contexto-proxy          # or: pipx install contexto-proxy
+uvx --from contexto-proxy contexto --version
+```
 
 Anyone can upload a package whose metadata names this repository, but PyPI marks a GitHub link
 verified only when the files were uploaded by trusted publishing from that repository's workflow.
@@ -280,12 +283,13 @@ The script handles the change. After the new wheel has passed its checks and has
 your tool, it removes the `contexto` install and then installs `contexto-proxy`. It prints the
 uninstall command it runs.
 
-By hand, uninstall first, then install. Where PyPI has no release yet, give the wheel's URL in
-place of `contexto-proxy`:
+By hand, uninstall first, then install the release wheel (`$url` as in
+[Other ways to install](#other-ways-to-install)), or `contexto-proxy` once the
+[From PyPI](#from-pypi) check passes:
 
 ```sh
-uv tool uninstall contexto && uv tool install contexto-proxy
-pipx uninstall contexto && pipx install contexto-proxy
+uv tool uninstall contexto && uv tool install "$url"
+pipx uninstall contexto && pipx install "$url"
 ```
 
 The order matters, because both distributions provide the `contexto` command. This is what uv 0.13.5
@@ -366,10 +370,10 @@ store locks files with `fcntl`, the launcher forwards POSIX signals (`SIGHUP`), 
 on POSIX file modes (0700 directories, 0600 files).
 
 WSL is untested: nobody has run Contexto or its test suite there. Installers refuse the wheel on
-Python 3.11 and earlier. 3.12 is the floor because on 3.11 the `json` module's C recursion counts
-against Python's recursion limit, so a request nested less deeply than Contexto's 512-level limit
-can still raise `RecursionError` in a handler thread. On CPython 3.11.15 the test suite had 7
-failures and 3,178 passes, and five of the failures were this.
+Python 3.11 and earlier. 3.12 is the floor because on 3.11 a list comprehension runs in a frame of
+its own, so Contexto's recursive walkers of request JSON (for example `_json_keys` in
+`store/recall.py`) use two frames per level, and a request nested within Contexto's 512-level limit
+can raise `RecursionError` in a handler thread. Python 3.12 inlines comprehensions (PEP 709).
 
 ## Troubleshooting
 

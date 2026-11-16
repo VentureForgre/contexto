@@ -59,16 +59,16 @@ uvx --from https://github.com/VentureForgre/contexto/releases/download/v0.5.24/c
 That line names one release. The [Releases page](https://github.com/VentureForgre/contexto/releases)
 has the newest.
 
-On PyPI the package is `contexto-proxy`, and the command is still `contexto`:
-`uv tool install contexto-proxy`, `pipx install contexto-proxy`, or
-`uvx --from contexto-proxy contexto`. Install from PyPI only if the project page,
-[pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/), has a link whose
-address is `https://github.com/VentureForgre/contexto` in the "Project links" group labeled "Data
-verified by PyPI". The page shows link names, which the uploader chooses, so point at the link
-(long-press on a phone) and read its address, letter by letter. PyPI verifies a GitHub link only
-for files uploaded by trusted publishing from that repository. If the page does not exist, or no
-verified link has that address, use the script. The PyPI package named `contexto` is an unrelated
-project, so `pip install contexto` and `uvx contexto` fetch the wrong thing.
+On PyPI the package is `contexto-proxy`, and the command is still `contexto`. Install from PyPI only
+if the project page, [pypi.org/project/contexto-proxy](https://pypi.org/project/contexto-proxy/),
+has a link whose address is `https://github.com/VentureForgre/contexto` in the "Project links" group
+labeled "Data verified by PyPI on" a date. The page shows link names, which the uploader chooses, so
+point at the link (long-press on a phone) and read its address, letter by letter. PyPI verifies a
+GitHub link only for files uploaded by trusted publishing from that repository. If the page does not
+exist, or no verified link has that address, use the script. When it checks out, install with `uv
+tool install contexto-proxy`, `pipx install contexto-proxy`, or `uvx --from contexto-proxy
+contexto`. The PyPI package named `contexto` is an unrelated project, so `pip install contexto` and
+`uvx contexto` fetch the wrong thing.
 
 ### Upgrade
 
@@ -129,7 +129,7 @@ Your upstream must be the vendor's API with an API key, or a CLIProxyAPI instanc
   account is yours.
 - **Claude Code set to a cloud provider** (Amazon Bedrock, Google Vertex AI, Microsoft Foundry or
   Claude Platform on AWS). Claude Code then sends its requests to that provider, not through
-  Contexto, so nothing is bounded. The v0.5.24 release installed above does not check for this and
+  Contexto, so nothing is bounded. v0.5.24 does not check for this and
   starts a session anyway; a build from the unreleased code on `main` refuses to
   start the session.
 - **Sessions that end before the compaction point, when a large request is fine for you.** They do
