@@ -4983,6 +4983,49 @@ the owner's delegation. Open decisions are listed at the end with the options an
     and rebase today; after a rebase merge every commit of the PR is on the first-parent chain,
     so a hand-pushed tag on one of them would pass the reattach check), and the Homebrew tap.
 
+- **D71. Forked/twin subagent isolation, thinking-block prefix safety, and active prompt-cache optimization.**
+  2026-11-22.
+  - **Subagent and side-request key isolation (`rewrite.py`, `proxy.py`).** `keyed()` and
+    `RewriteEngine._resolve_key()` now incorporate `X-Claude-Code-Agent-Id`, `parent_session_id`,
+    `x-claude-code-request-class` (for side classes on `/v1/messages`, never on `count_tokens`, which
+    Claude Code marks `auxiliary` for main), and colliding `X-Claude-Code-Session-Id` values into the
+    engine's conversation key. A forked subagent sharing main's first message never collides with
+    `states[main]`, `retained.json`, `turn_room`, `window`, or `epoch.json`, and parallel twin
+    subagents with identical prompts keep isolated `EpochState`s. `proxy.py` forwards request headers
+    to `observe_usage` (with a bounded fallback map for callers that omit `headers`). Idle and
+    finished non-main entries are evicted from `RewriteEngine.states` and its auxiliary dicts after
+    `SIDE_STATE_TTL_S` (900 s) or above `MAX_SIDE_STATES` (64), preventing unbounded memory growth.
+  - **Thinking-block prefix-binding safety (`rewrite.py`, `inturn.py`).** Every remaining path that
+    mutates content ahead of surviving thinking blocks now strips thinking for enforcing 5.x models:
+    `_refresh_start_text()` and `carried_reclassified` on resume advance `strip_upto` to `len(messages)`;
+    mid-loop `paged_changed` resyncs pass `strip_upto=n` (`inflight_thinking_kept: false`); and
+    `inturn.clipped()` / `_listed()` add `(start, n)` to `strips` whenever a turn's fold note changes.
+  - **In-turn PDF & note cache fixes (`inturn.py`, `tokens.py`).** `inturn._document()` delegates PDF
+    page counting to `tokens.pdf_page_count()` (respecting `PDF_MAX_BASE64`, `_PDF_PAGES`, and
+    `_PDF_PARSING`) and computes base64 decoded size without decoding synchronously under
+    `transform_lock`. `_TURN_NOTES` keys include dialect, computed round spans, and uncovered call ids
+    so cross-session or post-resync histories never read stale round numbers. Unmeasured uncertain PDFs
+    carry a conservative byte floor (`UNCERTAIN_PDF_FLOOR_BYTES_PER_TOKEN = 20`, full
+    `UNCERTAIN_DOCUMENT_TOKENS` above `PDF_MAX_BASE64`) so small scans stay readable once while massive
+    uncounted PDFs cannot silently blow past `config.bound`.
+  - **Prompt-cache economics (`rewrite.py`, `inturn.py`, `store/__init__.py`).**
+    - Active Anthropic `cache_control` breakpoint management respects Anthropic's 4-breakpoint ceiling:
+      places a breakpoint after immutable session-start carried blocks and after the stable epoch
+      prefix when `k > 0`, migrates any `cache_control` removed by folding to the last surviving
+      message before the fold, and places a breakpoint at `p - 1` before in-turn stubbing at index `p`
+      (persisted as optional `in_turn.stub_bp`).
+    - `Config.stable_prefix = True` places immutable session-start carried blocks (`# Environment`,
+      `CLAUDE.md`, `skills`, `agent_types`, `mcp_instructions`, `model`, `attribution`,
+      `deferred_tools`) before the mutable rotating preamble with a breakpoint between them, while
+      keeping the preamble ahead of volatile carried blocks for recall salience.
+    - `Config.window_fraction` default moves from `0.5` to `0.25` (matching A28's offline replay
+      results in `docs/research/M2-cache-aware-rotation.md` and `inturn.BATCH_FRACTION`).
+    - TTL-aware cold-cache rotation (`Config.cache_ttl_seconds = 300.0`,
+      `Config.cold_cache_fraction = 0.6`, respecting Anthropic's `1h` TTL marker) tracks
+      `last_response_monotonic` per conversation and rotates opportunistically (`reason: "cache_cold"`)
+      at lower occupancy when the Anthropic prompt cache is already expired. Pre-D71 epoch records
+      still resume by defaulting the new optional `Config` fields in `resume_state()`.
+
 ## Open decisions
 
 All open decisions are intake's to make under D0 unless marked otherwise.
