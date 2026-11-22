@@ -212,7 +212,10 @@ def digest(run: list[tuple]) -> str:
 # Again with D63 (PR #274), recorded from D63 merged with main 293b3478, the commit before D69, and the
 # same from the merge: D63's paging inside the script's tool loops changes the Claude Code requests and
 # its config field both records; the Codex requests are main's, byte for byte.
-BEFORE_D69 = {MESSAGES: ("f3ce67fee80060c63749d3016bf6ee1f7c1706cdb56c7175c643fe76e452c7a8",
+# Updated for Claude Code 2.1.328: only ``signature_version`` and ``tested_versions`` inside the
+# synthetic run's ``session_start_unrecognised`` event changed; every request and the epoch record
+# hash are byte-for-byte identical.
+BEFORE_D69 = {MESSAGES: ("a3ca01b545de028a9605b750ff4cd7b36f248be355ad5ce0b1e4370e86c7372a",
                          "7b7bed49ae2ddd199bbd502f5bd4a2bbd3450d307dec51c75694b2321e08686a"),
               RESPONSES: ("4c7ae60ad65681f5c86c390789ca93f6a899d0dc76f2c20c129cae0e650135f7",
                           "5009bfb3c9945449db2f1c40daabb23f6c90024a1e91954066777ac556d58bf3")}

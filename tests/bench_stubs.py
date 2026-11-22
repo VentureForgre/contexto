@@ -221,7 +221,7 @@ class StubModel:
             with self.lock:  # once per probe turn: a model does not repeat a search whose results it was given
                 self._searched.add((script.seed, index))
                 self.searches += len(asked)
-            return [{"type": "tool_use", "id": f"toolu_search_{n:02d}", "name": SEARCH_TOOL,
+            return [{"type": "tool_use", "id": f"toolu_search_{index:03d}_{n:02d}", "name": SEARCH_TOOL,
                      "input": {"query": _query(script, p)}} for n, p in enumerate(asked)]
         seen = "\n".join(t for m in messages for t in _texts(m.get("content")))
         lines = []

@@ -176,6 +176,7 @@ from contexto.proxy import (
     EncodedBodyError,
     _Handler,
     _LoopbackServer,
+    classify_path,
     decode_request_body,
     utc_now,
 )
@@ -933,7 +934,8 @@ class ServeService:
             event["error"] = error
         self.log.log(event)
         why = UNBOUNDED_REASONS.get(reason)
-        if why is None or path != MESSAGES_PATH:
+        _, canonical = classify_path(path)
+        if why is None or canonical != MESSAGES_PATH:
             return
         now = self.clock()
         with self._lock:
@@ -1529,7 +1531,8 @@ class _ServeHandler(_Handler):
         """The session this request belongs to (leased), or None for a request that has none. Raises
         ``_Unrouted`` for a request that could have had one and cannot: it names a session it cannot
         have, or it is a ``/v1/messages`` that names none."""
-        if self.command != "POST" or path_only not in (MESSAGES_PATH, COUNT_TOKENS_PATH):
+        api, canonical = classify_path(path_only) if self.command == "POST" else (None, None)
+        if api != "messages" or canonical not in (MESSAGES_PATH, COUNT_TOKENS_PATH):
             return None
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
             return None  # _Handler refuses it
@@ -1557,7 +1560,7 @@ class _ServeHandler(_Handler):
         if header_id is not None and body_id is not None and header_id != body_id:
             raise _Unrouted("session_id_mismatch")
         cli_session = header_id or body_id
-        messages = path_only == MESSAGES_PATH
+        messages = canonical == MESSAGES_PATH
         if cli_session is None:
             if messages:
                 raise _Unrouted("no_session_id")

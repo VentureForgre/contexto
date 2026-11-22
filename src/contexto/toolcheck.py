@@ -71,14 +71,18 @@ GRACE_S = 30.0
 # previous launch's server answers well over this long before the next engine starts.
 WALL_SLACK_S = 2.0
 DIALECTS = frozenset({"anthropic", "responses"})
-_LISTED_TOOL = re.compile(r"^(mcp__contexto__contexto_[a-z_]+)[ \t]*$")
+_LISTED_TOOL = re.compile(r"^(?:[-*]\s+)?`?(mcp__contexto__contexto_[a-z_]+)`?[ \t]*$")
 # Claude Code 2.1.302's refusal of a tool no rule allows (captured with zero spend against a local stub).
 _DENIED = re.compile(r"requested permissions to use (mcp__contexto__contexto_[a-z_]+), but you haven't granted it")
-_SERVER_LINE = re.compile(r"^contexto(?:[ \t(:]|$)")  # "contexto" or "contexto (ENOENT): ..." in a server list
+# "contexto" or "contexto (ENOENT): ..." in a server list (with optional markdown bullet/backticks).
+_SERVER_LINE = re.compile(r"^(?:[-*]\s+)?`?contexto`?(?:[ \t(:]|$)")
 # A user message's <system-reminder> block that is a deferred-tool listing or an MCP notice (4.x model ids,
 # measured on 2.1.302 with tool search on and on 2.1.310): its first line inside the tag.
-_NOTICE_BLOCK = re.compile(r"\s*<system-reminder>\s*(?:The following deferred tools |\d+ deferred tools are available "
-                           r"again|The following MCP servers |# MCP Server Instructions[ \t]*(?:\r?\n|\Z))")
+_NOTICE_BLOCK = re.compile(
+    r"\s*<system-reminder>\s*(?:The following deferred tools |\d+ deferred tools are available "
+    r"again|The following MCP servers |MCP server[s]? .*contexto|# MCP Server Instructions[ \t]*(?:\r?\n|\Z))",
+    re.IGNORECASE,
+)
 CONTEXT_TAG, CONTEXT_END = "<system-reminder>", "</system-reminder>"
 INTERRUPT_MARKER = "[Request interrupted by user"  # contexto.rewrite.INTERRUPT_MARKER: Esc during a tool run
 TOOL_RESULT_MISSING = "[Tool result missing due to internal error]"  # contexto.rewrite.TOOL_RESULT_MISSING
@@ -174,25 +178,18 @@ def _system_texts(request: dict[str, Any]) -> list[str]:
     return texts
 
 
-def contexto_notices(texts: list[str]) -> tuple[bool, bool]:
-    """Read Claude Code's system texts in order (2.1.302's notices, captured with zero spend) and return
-    (a Contexto tool is still offered by name, the contexto server is down). Later notices override
-    earlier ones, because Claude Code adds notices and never edits history:
+def contexto_notice_state(texts: list[str]) -> tuple[bool, bool, bool]:
+    """Read Claude Code's system texts in order and return ``(offered, down, explicit_removed)``:
+    whether a Contexto tool is still offered by name, whether a disconnect/failure notice marked the
+    ``contexto`` server down, and whether an explicit removal notice removed Contexto's deferred tools.
 
-    - a tool name on its own line counts as offered, unless it falls under "The following deferred
-      tools are no longer available", which removes it (tool search; a resumed session whose server
-      could not start, or a live one whose server died);
-    - "N deferred tools are available again ... mcp__contexto__* (N)" offers the names announced
-      earlier again (the server came back);
-    - ``contexto`` under "The following MCP servers have disconnected" or "... failed to connect" means
-      the server is down (with tool search off, the tool list keeps naming the tools after a crash);
-      the server's "## contexto" section under "# MCP Server Instructions", or its tools offered again,
-      means it is up.
-
-    A listing ends at a blank line; the instructions section ends at the next top-level heading."""
+    Matches both Claude Code's measured 2.1.302+ notice wording and minor wording variations
+    (e.g. bulleted tool names or rephrased disconnect/removal headings) while ignoring unrelated
+    lines."""
     offered: set[str] = set()
     announced: set[str] = set()
     down = False
+    explicit_removed = False
     for text in texts:
         if SERVER not in text:  # says nothing about contexto
             continue
@@ -203,34 +200,59 @@ def contexto_notices(texts: list[str]) -> tuple[bool, bool]:
             if not line:
                 if section != "instructions":
                     section = None
-            elif "deferred tools" in low and "no longer available" in low:
+            elif "deferred tools" in low and ("no longer available" in low or "removed" in low or "unavailable" in low):
                 section = "removed"
-            elif "deferred tools" in low and "available again" in low:
+            elif "deferred tools" in low and ("available again" in low or "reconnected" in low):
                 section = None
                 if TOOL_PREFIX in line:
                     offered |= announced or {TOOL_PREFIX + "*"}
                     down = False
+                    explicit_removed = False
             elif "deferred tools" in low and "available" in low:
                 section = "offered"
-            elif low.startswith("the following mcp servers") and ("disconnected" in low or "failed to connect" in low):
+            elif ("mcp server" in low and ("disconnected" in low or "failed to connect" in low)
+                  and (low.startswith(("the following mcp servers", "mcp server")) or ":" in low)):
                 section = "down"
+                # Handle single-line form such as "MCP server disconnected: contexto"
+                if ":" in line:
+                    tail = line.split(":", 1)[1].strip()
+                    if _SERVER_LINE.match(tail):
+                        down = True
+                        explicit_removed = True
             elif line == "# MCP Server Instructions":
                 section = "instructions"
             elif (named := _LISTED_TOOL.match(line)) is not None:
                 if section == "removed":
                     offered.discard(named.group(1))
+                    explicit_removed = True
                 else:
                     offered.add(named.group(1))
                     announced.add(named.group(1))
                     down = False
+                    explicit_removed = False
             elif section == "down" and _SERVER_LINE.match(line):
                 down = True
+                explicit_removed = True
             elif section == "instructions":
                 if line == f"## {SERVER}":
                     down = False
+                    explicit_removed = False
                 elif line.startswith("# "):
                     section = None
-    return bool(offered), down
+    return bool(offered), down, explicit_removed
+
+
+def contexto_notices(texts: list[str]) -> tuple[bool, bool]:
+    """Read Claude Code's system texts in order (2.1.302+'s notices) and return
+    ``(a Contexto tool is still offered by name, the contexto server is down)``."""
+    offered, down, _ = contexto_notice_state(texts)
+    return offered, down
+
+
+def _has_deferred_tools(tools: list[Any]) -> bool:
+    """Whether ``tools`` structurally indicates deferred MCP tool loading (``ToolSearch`` or any
+    ``defer_loading`` placeholder)."""
+    return any(isinstance(t, dict) and (t.get("name") == "ToolSearch" or bool(t.get("defer_loading"))) for t in tools)
 
 
 def anthropic_tools_offered(request: dict[str, Any]) -> bool | None:
@@ -356,9 +378,24 @@ class ToolCheck:
         if not main:
             return []
         if dialect == "anthropic":
-            present = anthropic_tools_offered(request)
-            if present is None:
+            tools = request.get("tools")
+            if not isinstance(tools, list) or not tools:
                 return []
+            in_tools = any(_named(t) for t in tools)
+            offered, down, explicit_removed = contexto_notice_state(_system_texts(request))
+            if down:
+                present = False
+            elif in_tools or offered:
+                present = True
+            elif explicit_removed:
+                present = False
+            elif _has_deferred_tools(tools) and self.listed():
+                # Structural fallback: tool search / deferred loading is active and the MCP server's
+                # mcp_listed_at heartbeat confirmed tools/list succeeded during this launch, so a
+                # prose change in Claude Code's deferred-tool listing does not raise a false alarm.
+                present = True
+            else:
+                present = False
         else:
             present = bool(responses_tools_offered(request)) or self.listed()
         self.dialect, self.present = dialect, present

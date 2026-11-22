@@ -783,7 +783,7 @@ def test_only_the_tools_used_element_is_skipped(kind, tmp_path):
 
 def test_an_untested_cli_version_only_expires_rooms(kind, tmp_path):
     store = make_store(kind, tmp_path)
-    untested = {"User-Agent": "claude-cli/2.1.400 (external, sdk-cli)"}
+    untested = {"User-Agent": "claude-cli/2.2.0 (external, sdk-cli)"}
     engine, main, clock = delegated(store, headers=untested)
     body = request(main["messages"] + [assistant("waiting"), idle_notification("toolu_A")])
     _, _, events = engine(body, untested, MESSAGES)
@@ -792,7 +792,7 @@ def test_an_untested_cli_version_only_expires_rooms(kind, tmp_path):
     assert store.side_rooms() == {}
 
 
-UNTESTED = {"User-Agent": "claude-cli/2.1.303 (external, sdk-cli)"}
+UNTESTED = {"User-Agent": "claude-cli/2.2.0 (external, sdk-cli)"}
 
 
 @pytest.mark.parametrize("first, then, closes", [

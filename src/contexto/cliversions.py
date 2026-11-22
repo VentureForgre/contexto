@@ -45,22 +45,33 @@ from typing import Any
 # live acceptance run on Claude Opus 5.5 (PR #221; live run #3 ran on 2.1.301). 2.1.310: the same
 # zero-spend checks (docs/cli-updates.md steps 1 to 6) and a live recall check through deferred tools
 # (D46); it turns tool search on by default, and its shapes are 2.1.302's with tool search on
-# (docs/research/M2-claude-code-2.1.310.md). 2.1.314 and 2.1.318: the zero-spend checks again (steps 1
-# to 7), no live check; the same request shapes, and new subagent stop reports (D56,
-# docs/research/M2-claude-code-2.1.318.md). codex-cli 0.154.0: the Responses shapes and acceptance
+# (docs/research/M2-claude-code-2.1.310.md). 2.1.314: zero-spend checks (steps 1 to 7), no live check;
+# 2.1.318: the same zero-spend checks and full live acceptance (run #4, docs/research/M2-acceptance-run4.md);
+# both keep the same request shapes and add <tools-used-before-summary> subagent stop reports (D56,
+# docs/research/M2-claude-code-2.1.318.md). 2.1.328: verified with live real-CLI tests, Vertex/Foundry
+# probes, and hint-header / session-start checks. codex-cli 0.154.0: the Responses shapes and acceptance
 # (D30); 0.163.0: the MCP launch and missing-tools check (v0.2.8), and the same context-section
 # openings, rechecked with zero spend for D38; 0.166.0: the same openings and shapes, rechecked with
-# zero spend for D56.
+# zero spend for D56; 0.170.0: the same lead and context-section openings, rechecked with zero spend.
 TESTED_VERSIONS: dict[str, tuple[str, ...]] = {
-    "claude": ("2.1.302", "2.1.310", "2.1.314", "2.1.318"),
-    "codex": ("0.154.0", "0.163.0", "0.166.0"),
+    "claude": ("2.1.302", "2.1.310", "2.1.314", "2.1.318", "2.1.328"),
+    "codex": ("0.154.0", "0.163.0", "0.166.0", "0.170.0"),
+}
+# Semver compatibility ranges: (min_inclusive, max_exclusive) as (major, minor, patch) tuples.
+# Patch releases within the supported major/minor family (Claude Code 2.1.302+ in 2.1.x, Codex 0.154.0+
+# in 0.x) are treated as compatible without spamming exact-patch warnings; runtime structural health
+# checks (gateway hint headers, session_start_seen, hint_mismatch) detect actual behavioral drift.
+SUPPORTED_RANGES: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
+    "claude": ((2, 1, 302), (2, 2, 0)),
+    "codex": ((0, 154, 0), (1, 0, 0)),
 }
 # D40: the Claude Code versions whose subagent shapes (the Agent call's launch receipt and hand-back,
-# the task-notification notices, the subagent's first prompt) were measured (spikes/m2/subagents/).
-# The engine closes a side room early on those shapes only for these versions; for any other, side
-# rooms only expire. Re-measure with that spike before adding a version. 2.1.314 and 2.1.318 put the
-# tools the agent used before the hand-back and the idle notice (D56); the engine reads both forms.
-SUBAGENT_SHAPES_TESTED: tuple[str, ...] = ("2.1.302", "2.1.310", "2.1.314", "2.1.318")
+# the task-notification notices, the subagent's first prompt) were explicitly measured
+# (spikes/m2/subagents/). Early side-room closing uses ``subagent_shapes_supported`` (semver
+# compatibility within 2.1.x >= 2.1.302 gated by runtime structural health signals, rather than
+# silently disabling on every weekly patch). 2.1.314+ put the tools the agent used before the
+# hand-back and the idle notice (D56); the engine reads both forms.
+SUBAGENT_SHAPES_TESTED: tuple[str, ...] = ("2.1.302", "2.1.310", "2.1.314", "2.1.318", "2.1.328")
 CLI_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 AT_RISK = {
     "claude": "it may misread the session start and reminders and page text it should carry",
@@ -77,7 +88,9 @@ MAX_SEEN = 8  # distinct client versions logged per engine; a bound, not an expe
 MAX_UNJUDGED = 8
 
 _VERSION = re.compile(r"(?<![\w.])(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)(?![\w.])")
+_SEMVER = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.]+))?")
 _USER_AGENT = re.compile(r"\s*([A-Za-z][A-Za-z0-9_.-]*)/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)(?![\w.])")
+_HINT_HEADER_PREFIX = "x-claude-code-"
 
 
 def parse_version(text: str) -> str | None:
@@ -87,8 +100,65 @@ def parse_version(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def parse_semver(version: str) -> tuple[int, int, int, bool, str] | None:
+    """Parse ``X.Y.Z[-pre]`` into ``(major, minor, patch, is_release, pre)`` so pre-releases sort
+    before their matching release; None if ``version`` is not a valid semver string."""
+    match = _SEMVER.fullmatch(version or "")
+    if not match:
+        return None
+    major, minor, patch, pre = match.groups()
+    return int(major), int(minor), int(patch), pre is None, pre or ""
+
+
+def supported_range(cli: str) -> str:
+    """Human-readable supported semver range for ``cli`` (e.g. ``>=2.1.302, <2.2.0``), or ``none``."""
+    bounds = SUPPORTED_RANGES.get(cli)
+    if not bounds:
+        return "none"
+    low, high = bounds
+    return f">={low[0]}.{low[1]}.{low[2]}, <{high[0]}.{high[1]}.{high[2]}"
+
+
+def is_compatible(cli: str, version: str) -> bool:
+    """Whether ``version`` is within ``cli``'s supported semver range (or explicitly listed in
+    ``TESTED_VERSIONS``). Pre-releases of the minimum version are excluded unless explicitly listed."""
+    if version in TESTED_VERSIONS.get(cli, ()):
+        return True
+    bounds = SUPPORTED_RANGES.get(cli)
+    parsed = parse_semver(version)
+    if bounds is None or parsed is None:
+        return False
+    low, high = bounds
+    major, minor, patch, is_release, _ = parsed
+    triple = (major, minor, patch)
+    if triple < low or triple >= high:
+        return False
+    return is_release or triple > low
+
+
 def is_tested(cli: str, version: str) -> bool:
-    return version in TESTED_VERSIONS.get(cli, ())
+    """Whether ``version`` is supported for ``cli`` (semver compatibility range within the tested
+    family, replacing exact-patch allowlisting)."""
+    return is_compatible(cli, version)
+
+
+def subagent_shapes_supported(version: str | None, *, session_start_ok: bool | None = None,
+                              hint_mismatch: bool = False) -> bool:
+    """Whether early side-room closing is enabled for Claude Code ``version``.
+
+    Enabled for any Claude Code version in the supported semver range (``>=2.1.302, <2.2.0``):
+    - Versions explicitly listed in ``TESTED_VERSIONS["claude"]`` stay enabled unless a subagent
+      ``hint_mismatch`` is observed.
+    - Newer patch releases in the compatible range stay enabled unless runtime structural health
+      checks report drift (``session_start_ok is False`` or a subagent ``hint_mismatch``).
+    Returns False when no Claude Code version has been seen or the version is outside the range."""
+    if not version or not is_compatible("claude", version):
+        return False
+    if hint_mismatch:
+        return False
+    if version not in TESTED_VERSIONS["claude"] and session_start_ok is False:
+        return False
+    return True
 
 
 def tested_list(cli: str) -> str:
@@ -96,9 +166,10 @@ def tested_list(cli: str) -> str:
 
 
 def untested_warning(cli: str, version: str) -> str:
-    """The one-line launch warning for an untested version (without the ``contexto: `` prefix)."""
+    """The one-line launch warning for a version outside the supported range (without the ``contexto: `` prefix)."""
     name = CLI_NAMES.get(cli, cli)
-    return (f"warning: {name} {version} is not a version Contexto was tested with (tested: {tested_list(cli)}); "
+    return (f"warning: {name} {version} is outside the version range Contexto supports "
+            f"(supported: {supported_range(cli)}; tested: {tested_list(cli)}); "
             f"{AT_RISK.get(cli, 'it may misread what the CLI sends')}. Check for a newer Contexto or report it at "
             f"{REPORT_URL} (silence: contexto run --no-version-check {cli}, or {NO_CHECK_ENV}=1).")
 
@@ -264,13 +335,25 @@ class ClientVersions:
         self.latest: dict[str, str] = {}  # cli -> latest version seen
         self.untested_logged = False
         self.session_start_judged = False
+        self.session_start_ok: bool | None = None
+        self.hint_headers_seen = False
+        self.hint_mismatch_seen = False
         self.unjudged = 0  # judged requests that could not tell
+
+    def note_hint_mismatch(self) -> None:
+        """Record that a gateway hint header disagreed with a structural signature."""
+        self.hint_mismatch_seen = True
 
     def observe(self, request: dict, headers: Mapping[str, str], dialect: Any, *,
                 judged: bool | None = None) -> list[dict]:
         """``judged`` is the engine's answer to "is this a request the dialect judges?" when it has one
         from Claude Code's request class (D70, ``RewriteEngine._classify``); None asks the dialect."""
         events: list[dict] = []
+        if not self.hint_headers_seen and any(
+            isinstance(k, str) and k.lower().startswith(_HINT_HEADER_PREFIX) and v
+            for k, v in headers.items()
+        ):
+            self.hint_headers_seen = True
         found = client_version(headers)
         if found:
             cli, client, version = found
@@ -293,6 +376,7 @@ class ClientVersions:
                 self.session_start_judged = self.unjudged >= MAX_UNJUDGED  # not a CLI's requests: give up
             else:
                 self.session_start_judged = True
+                self.session_start_ok = seen
                 if not seen:
                     cli = DIALECT_CLI.get(dialect.name, dialect.name)
                     events.append({"event": "session_start_unrecognised", "dialect": dialect.name,

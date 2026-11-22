@@ -260,10 +260,10 @@ def _is_upstream_4xx(event: dict[str, Any]) -> bool:
 
 
 def _is_model_path(event: dict[str, Any]) -> bool:
-    from contexto.proxy import TRANSFORMED_PATHS  # lazily: the proxy is not needed to read a session
+    from contexto.proxy import is_transformed_path  # lazily: the proxy is not needed to read a session
 
     path = event.get("path")
-    return isinstance(path, str) and path in TRANSFORMED_PATHS
+    return isinstance(path, str) and is_transformed_path(path)
 
 
 def session_summary(home: Path, session_id: str) -> dict[str, Any]:

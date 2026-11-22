@@ -29,7 +29,7 @@ from contexto import cli
 from contexto.cliversions import TESTED_VERSIONS
 from contexto.commands import doctor
 from contexto.mcp import TOOLS
-from contexto.upstream import CLOUD_PROVIDER_KEYS
+from contexto.upstream import CLOUD_PROVIDER_KEYS, UNSUPPORTED_CLOUD_PROVIDER_KEYS
 
 CHECK_IDS = ["python", "claude", "codex", "settings", "claude-upstream", "codex-upstream", "claude-key",
              "codex-key", "store", "mcp", "provider"]
@@ -281,12 +281,12 @@ def test_a_tested_version_passes_and_names_the_path(both, capsys, fast_mcp):
 
 
 def test_an_untested_version_is_a_warning_that_lists_the_tested_ones(world, capsys, fast_mcp):
-    fake_cli(world, "claude", "2.1.999 (Claude Code)")
+    fake_cli(world, "claude", "2.2.0 (Claude Code)")
     fake_cli(world, "codex", f"codex-cli {TESTED_CODEX}")
     code, found = checks(capsys)
     claude = found["claude"]
     assert code == 0 and claude["status"] == "warn" and claude["details"]["tested"] is False
-    assert "2.1.999" in claude["summary"] and ", ".join(TESTED_VERSIONS["claude"]) in claude["summary"]
+    assert "2.2.0" in claude["summary"] and ", ".join(TESTED_VERSIONS["claude"]) in claude["summary"]
     assert "newer Contexto" in claude["action"]
 
 
@@ -1211,10 +1211,11 @@ def test_no_switch_on_passes(both, capsys, fast_mcp, monkeypatch):
     assert found["provider"]["details"] == {"variables": [], "unread": []}
 
 
-@pytest.mark.parametrize("variable", list(CLOUD_PROVIDER_KEYS))
+@pytest.mark.parametrize("variable", list(UNSUPPORTED_CLOUD_PROVIDER_KEYS))
 def test_a_switch_in_the_environment_fails_as_the_launcher_refuses(both, capsys, fast_mcp, monkeypatch, variable):
-    """D70 (#271): `contexto run claude` refuses this launch with exit 2, so doctor fails it, with the
-    launcher's words: the summary is ``cloud_provider_note`` and the next step the rest of the message."""
+    """D70 (#271): `contexto run claude` refuses unsupported cloud providers with exit 2, so doctor
+    fails it, with the launcher's words: the summary is ``cloud_provider_note`` and the next step the
+    rest of the message."""
     monkeypatch.setenv(variable, "1")
     code, found = checks(capsys)
     provider = found["provider"]
@@ -1227,6 +1228,22 @@ def test_a_switch_in_the_environment_fails_as_the_launcher_refuses(both, capsys,
     assert f"{note}. {provider['action']}" == launcher_message(both)
     assert provider["details"] == {"variables": [{"variable": variable, "provider": CLOUD_PROVIDER_KEYS[variable],
                                                   "sources": ["env"]}], "unread": []}
+
+
+@pytest.mark.parametrize("variable,extra,url_key", [
+    ("CLAUDE_CODE_USE_VERTEX", {"CLOUD_ML_REGION": "us-east5"}, "ANTHROPIC_VERTEX_BASE_URL"),
+    ("CLAUDE_CODE_USE_FOUNDRY", {"ANTHROPIC_FOUNDRY_RESOURCE": "myres"}, "ANTHROPIC_FOUNDRY_BASE_URL"),
+])
+def test_intercepted_cloud_provider_passes_in_doctor(both, capsys, fast_mcp, monkeypatch, variable, extra, url_key):
+    monkeypatch.setenv(variable, "1")
+    for k, v in extra.items():
+        monkeypatch.setenv(k, v)
+    code, found = checks(capsys)
+    assert code == 0 and found["provider"]["status"] == "pass"
+    assert url_key in found["provider"]["summary"]
+    assert found["provider"]["details"]["variables"][0]["intercepted"] is True
+    assert found["claude-upstream"]["status"] == "pass"
+    assert found["claude-upstream"]["details"]["provider"] == variable
 
 
 def test_a_switch_in_a_settings_env_block_names_the_file(both, capsys, fast_mcp):
