@@ -313,7 +313,7 @@ The model reads a paged turn back:
   a quarter of the bound.
 - **Window budget** (`W`): `bound - headroom - F`, what is left for turns.
 - **Window target**: the size a rotation cuts the retained turns down to: `W` times
-  `--window-fraction` (0.5 by default). The other half is room to grow before the next rotation. A
+  `--window-fraction` (0.25 by default). The rest is room to grow before the next rotation. A
   rotation made for the room (reason `min_turn_room`) uses `W - min_turn_room` in place of `W`.
 - **Room**: the tokens `contexto_recall`, `contexto_search` and `contexto_state` may return in the
   current turn. A **side room** is a subagent's own.

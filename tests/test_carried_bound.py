@@ -168,7 +168,7 @@ def session_5x(turns: int, opus: bool = True) -> list[dict]:
 # Small enough that 5.x sessions rotate and engage the fallback within 40 turns (restart tests, and
 # the v0.2.8 record in fixtures/, which tests/fixtures/make_v028_epoch_record.py wrote with it).
 RESUME_CONFIG = dict(bound=60_000, headroom_floor=2_000, pin_budget=200, index_budget=200, min_turn_room=2_000,
-                     carried_text_budget=1_500, carried_budget=1_000_000, window_fraction=0.5)
+                     carried_text_budget=1_500, carried_budget=1_000_000, window_fraction=0.5, stable_prefix=False)
 
 
 def request(messages: list[dict]) -> dict:

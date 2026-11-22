@@ -5009,11 +5009,17 @@ the owner's delegation. Open decisions are listed at the end with the options an
     `UNCERTAIN_DOCUMENT_TOKENS` above `PDF_MAX_BASE64`) so small scans stay readable once while massive
     uncounted PDFs cannot silently blow past `config.bound`.
   - **Prompt-cache economics (`rewrite.py`, `inturn.py`, `store/__init__.py`).**
-    - Active Anthropic `cache_control` breakpoint management respects Anthropic's 4-breakpoint ceiling:
-      places a breakpoint after immutable session-start carried blocks and after the stable epoch
-      prefix when `k > 0`, migrates any `cache_control` removed by folding to the last surviving
-      message before the fold, and places a breakpoint at `p - 1` before in-turn stubbing at index `p`
-      (persisted as optional `in_turn.stub_bp`).
+    - Scoped conversation keys (`agent`, `parent`, `class`, and colliding `/clear` `session`) are
+      derived via SHA-256 into fixed-length `<dialect>:<64-hex>` keys so every key satisfies
+      `store._CONVERSATION` and `store.check_room_id()` without persisting raw header or session IDs.
+    - Active Anthropic `cache_control` breakpoint management respects Anthropic's 4-breakpoint ceiling
+      (including top-level `request.cache_control`) and non-increasing TTL ordering (defaulting
+      Contexto-added message breakpoints to 5m ephemeral unless a later message or top-level
+      `cache_control` carries `1h`): places a breakpoint after immutable session-start carried blocks,
+      after the stable epoch prefix when `k > 0`, migrates any `cache_control` removed by folding to
+      the last surviving message before the fold, and places a breakpoint at `p - 1` (walking back
+      past uncacheable messages) before in-turn stubbing at index `p` (persisted as optional
+      `in_turn.stub_bp`).
     - `Config.stable_prefix = True` places immutable session-start carried blocks (`# Environment`,
       `CLAUDE.md`, `skills`, `agent_types`, `mcp_instructions`, `model`, `attribution`,
       `deferred_tools`) before the mutable rotating preamble with a breakpoint between them, while
@@ -5021,10 +5027,15 @@ the owner's delegation. Open decisions are listed at the end with the options an
     - `Config.window_fraction` default moves from `0.5` to `0.25` (matching A28's offline replay
       results in `docs/research/M2-cache-aware-rotation.md` and `inturn.BATCH_FRACTION`).
     - TTL-aware cold-cache rotation (`Config.cache_ttl_seconds = 300.0`,
-      `Config.cold_cache_fraction = 0.6`, respecting Anthropic's `1h` TTL marker) tracks
-      `last_response_monotonic` per conversation and rotates opportunistically (`reason: "cache_cold"`)
-      at lower occupancy when the Anthropic prompt cache is already expired. Pre-D71 epoch records
-      still resume by defaulting the new optional `Config` fields in `resume_state()`.
+      `Config.cold_cache_fraction = 0.6`, inspecting message/top-level `cache_control` TTLs first so
+      mixed 1h-head / 5m-messages requests still use 5m TTL) tracks `last_response_monotonic` via
+      `time.monotonic()` per conversation and rotates opportunistically (`reason: "cache_cold"`) at
+      lower occupancy when the Anthropic prompt cache is already expired.
+    - In `resume_state()`, missing `"stable_prefix"` in pre-D71 records backfills to `False` (its
+      pre-D71 layout) so a pre-D71 record never silently reorders `messages[0]` under surviving
+      thinking blocks: pre-D71 default records (`window_fraction: 0.5`, no `stable_prefix`) return
+      `settings_changed` under D71 defaults and take one clean rotation on upgrade, while pre-D71
+      records resumed with explicit `window_fraction=0.5, stable_prefix=False` still resume cleanly.
 
 ## Open decisions
 
