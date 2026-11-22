@@ -149,9 +149,9 @@ def test_the_start_text_is_counted_once_in_f_and_w_at_the_first_rotation(endpoin
     store = project(home, tmp_path / "carry", tokens)
     text = store.carried_text(CONFIG.pin_budget)
     turns = TURNS[endpoint] // 2  # enough for the first rotation
-    # Rule 4's F and W at a turn-start rotation. On Messages this script's tool rounds would have D63 page the
-    # earlier turns inside a turn first, a rotation that sizes neither, so paging inside the turn is off here.
-    config = replace(CONFIG, in_turn_paging=False) if endpoint == MESSAGES else CONFIG
+    # Rule 4's F and W at a turn-start rotation. With in-turn paging on, this script's tool rounds would
+    # page earlier turns inside a turn first, a rotation that sizes neither, so paging inside the turn is off here.
+    config = replace(CONFIG, in_turn_paging=False)
     carry = run_session(store, endpoint, config, turns, ratio)
     control = run_session(project(home / "control", tmp_path / "control", tokens, carry=False), endpoint, config,
                           turns, ratio)

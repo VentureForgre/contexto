@@ -211,11 +211,12 @@ def digest(run: list[tuple]) -> str:
 # so each kind of store gave the same two hashes.
 # Again with D63 (PR #274), recorded from D63 merged with main 293b3478, the commit before D69, and the
 # same from the merge: D63's paging inside the script's tool loops changes the Claude Code requests and
-# its config field both records; the Codex requests are main's, byte for byte.
+# its config field both records. ResponsesInTurn extends in-turn paging to Codex, changing the Codex
+# requests the same way while all four nothing-carried stores stay identical.
 BEFORE_D69 = {MESSAGES: ("f3ce67fee80060c63749d3016bf6ee1f7c1706cdb56c7175c643fe76e452c7a8",
                          "7b7bed49ae2ddd199bbd502f5bd4a2bbd3450d307dec51c75694b2321e08686a"),
-              RESPONSES: ("4c7ae60ad65681f5c86c390789ca93f6a899d0dc76f2c20c129cae0e650135f7",
-                          "5009bfb3c9945449db2f1c40daabb23f6c90024a1e91954066777ac556d58bf3")}
+              RESPONSES: ("a152d1c5f67274335799026dd797e4334c3322c38614e3bbde6dc15820bd9eae",
+                          "65dc50fa01fd5b1a1911573303842acb32ff440e6d6926fa90856d2ba07d1f1d")}
 STORES = ("memory", "no_project", "nothing_carried", "memory_off")
 
 

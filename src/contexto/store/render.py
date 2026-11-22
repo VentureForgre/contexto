@@ -144,12 +144,13 @@ def render_page(page: dict[str, Any], searchable: bool = False) -> str:
     turn = page.get("turn")
     messages = page.get("messages")
     own = own_call_ids(messages) if searchable else set()
+    dev_only = is_developer_only_page(messages)
     for message in messages if isinstance(messages, list) else []:
         if not isinstance(message, dict):
             lines.append("[malformed message omitted]")
             continue
         if is_responses_item(message):
-            item_lines = _responses_lines(turn, message)
+            item_lines = _responses_lines(turn, message, include_developer=dev_only)
             lines.extend(_blank(item_lines) if is_own_item(message, own) else item_lines)
             continue
         role = message.get("role", "unknown")
@@ -219,27 +220,52 @@ def is_responses_item(message: dict[str, Any]) -> bool:
         and (part["type"].startswith("input_") or part["type"] == "output_text") for part in content)
 
 
-def _responses_lines(turn: Any, item: dict[str, Any]) -> list[str]:
+def is_developer_only_page(messages: Any) -> bool:
+    """True when ``messages`` holds only Responses ``developer`` or ``system`` message items (for example a
+    carried Codex developer message paged by the bounded fallback). Standalone developer pages are
+    rendered, stubbed and searched as context pages (ranked after turn pages), matching Claude Code's
+    standalone ``system`` pages, while developer items mixed into a regular turn stay omitted."""
+    return (isinstance(messages, list) and bool(messages)
+            and all(isinstance(m, dict) and is_responses_item(m) and m.get("type", "message") == "message"
+                    and m.get("role") in ("developer", "system") for m in messages))
+
+
+def _responses_lines(turn: Any, item: dict[str, Any], *, include_developer: bool = False) -> list[str]:
     """One Responses item's lines (M2 B20). The item is mapped to Messages API blocks by lane A's
     ``ResponsesDialect.retained_blocks`` (A14), the mapping the retained-window snapshot uses, and those
     blocks are rendered by ``render_page`` itself, so a page line and an in-view line read the same:
     message text parts as the text (Codex context sections, images, and files left out), a
     ``function_call`` or ``custom_tool_call`` as ``tool_use <name> <sorted JSON input>``, and an output
     as ``tool_result:`` and its text. Reasoning, other item types, and system-like items (developer
-    and system messages, context-only user messages, ``additional_tools``) render nothing."""
-    message = as_message(item)
+    and system messages in a turn, context-only user messages, ``additional_tools``) render nothing;
+    with ``include_developer`` (a standalone carried developer page), its text parts render under its
+    role."""
+    message = as_message(item, include_developer=include_developer)
     return [] if message is None else render_page({"turn": turn, "messages": [message]}).split("\n")
 
 
-def as_message(message: Any) -> dict[str, Any] | None:
+def as_message(message: Any, *, include_developer: bool = False) -> dict[str, Any] | None:
     """A page message as a Messages API message: a Messages API message as it is (the same object),
     a Responses item through ``ResponsesDialect.retained_blocks`` (B20), or None for an item that is
     not searchable (system-like, reasoning, other types). Rendering, search, and the stub all read
-    pages through this one mapping (B23), so what search matches is what the page shows."""
+    pages through this one mapping (B23), so what search matches is what the page shows.
+
+    With ``include_developer`` (for a standalone paged Codex ``developer`` or ``system`` context page),
+    the message's text parts are returned under its role, including tagged sections, so recall and search
+    find it the way they find a paged Claude Code ``system`` message."""
     if not isinstance(message, dict) or not is_responses_item(message):
         return message
-    from contexto.codex import RESPONSES  # imported here: contexto.codex builds on the engine, which imports this
+    from contexto.codex import RESPONSES, _damaged_block, _is_damaged_part, _is_text_part, _parts
 
+    if (include_developer and message.get("type", "message") == "message"
+            and message.get("role") in ("developer", "system")):
+        role = message["role"]
+        content = message.get("content")
+        if content is not None and not isinstance(content, (str, list)):
+            return {"role": role, "content": [_damaged_block()]}
+        blocks = [_damaged_block() if _is_damaged_part(p) else {"type": "text", "text": p["text"]}
+                  for p in _parts(message) if _is_damaged_part(p) or _is_text_part(p)]
+        return {"role": role, "content": blocks} if blocks else None
     if RESPONSES.is_system_like(message):
         return None
     blocks = RESPONSES.retained_blocks(message)

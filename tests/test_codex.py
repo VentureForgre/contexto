@@ -148,18 +148,35 @@ def test_reasoning_after_rotation_passes_untouched_and_prefix_is_stable():
 
 
 def test_store_failure_enters_degraded_mode_with_the_responses_dialect():
-    """Rule 14 on the Responses dialect (A2d after the #43 seam): the input list is extended append-only."""
+    """Rule 14 on the Responses dialect (A2d after the #43 seam): the input list is extended append-only;
+    with in-turn paging on, a tool-loop request over the bound retries the store and recovers if it succeeds."""
     class FailingStore(MemoryStore):
-        def page_out(self, turns, first_turn):
-            raise OSError("synthetic")
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.fail = True
 
+        def page_out(self, turns, first_turn):
+            if self.fail:
+                raise OSError("synthetic")
+            return super().page_out(turns, first_turn)
+
+    no_inturn = Config(bound=6_000, headroom_floor=500, pin_budget=200, index_budget=200, in_turn_paging=False)
     items = history(8) + [prompt("new prompt")]
-    up, st, ev, _ = run(items, store=FailingStore(key=b"k" * 32))
+    up, st, ev, _ = run(items, store=FailingStore(key=b"k" * 32), config=no_inturn)
     assert names(ev)[:2] == ["store_error", "degraded_enter"] and "rotation" not in names(ev)
     assert st.degraded and up["input"] == items and ev[-1]["degraded"] is True
     loop = items + [reasoning(99), call(99), output(99)]
-    up2, _, ev2, _ = run(loop, state=st, store=FailingStore(key=b"k" * 32))
+    up2, _, ev2, _ = run(loop, state=st, store=FailingStore(key=b"k" * 32), config=no_inturn)
     assert up2["input"] == loop and ev2[-1]["degraded"] is True and "store_error" not in names(ev2)
+
+    # With in-turn paging enabled, a degraded tool-loop request retries the store and leaves degraded mode on recovery.
+    store = FailingStore(key=b"k" * 32)
+    up3, st3, ev3, _ = run(items, store=store)
+    assert st3.degraded and names(ev3)[:2] == ["store_error", "degraded_enter"]
+    store.fail = False
+    up4, st4, ev4, _ = run(loop, state=st3, store=store)
+    assert not st4.degraded and "degraded_leave" in names(ev4) and "in_turn_batch" in names(ev4)
+    assert len(up4["input"]) < len(loop)
 
 
 def test_room_condition_rotates_the_responses_dialect_too():
@@ -176,11 +193,16 @@ def test_room_condition_rotates_the_responses_dialect_too():
     assert roomy.bound - ev[-1]["sent_estimate"] - roomy.headroom_floor >= roomy.min_turn_room
 
 
-def test_no_rotation_inside_a_tool_loop():
+def test_in_turn_paging_runs_inside_a_tool_loop_unless_disabled():
     items = history(10) + [prompt("go"), call(50), output(50, FILL * 3)]
-    up, st, ev, store = run(items)
+    no_inturn = Config(bound=6_000, headroom_floor=500, pin_budget=200, index_budget=200, in_turn_paging=False)
+    up, st, ev, store = run(items, config=no_inturn)
     assert "rotation" not in names(ev) and not store.pages and up["input"] == items
     assert ev[-1].get("over_bound") is True
+
+    up2, st2, ev2, store2 = run(items)
+    assert "in_turn_batch" in names(ev2) and store2.pages and len(up2["input"]) < len(items)
+    assert not ev2[-1].get("over_bound")
 
 
 def test_usage_reads_input_tokens_as_the_total():
@@ -221,7 +243,8 @@ def isolated_from_the_checkout(tmp_path, monkeypatch):
     monkeypatch.chdir(work)
     monkeypatch.setenv("HOME", str(tmp_path / "user-home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
-    for name in ("ANTHROPIC_BASE_URL", "CONTEXTO_CODEX_UPSTREAM", "CONTEXTO_CODEX_KEY_HELPER", "CODEX_HOME"):
+    for name in ("ANTHROPIC_BASE_URL", "CONTEXTO_CODEX_UPSTREAM", "CONTEXTO_CODEX_KEY_HELPER",
+                 "CONTEXTO_CODEX_WEBSOCKET", "CODEX_HOME", "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -521,7 +544,7 @@ def test_run_codex_checks_the_codex_binary_unless_silenced(tmp_path, monkeypatch
 
 def test_tag_leading_user_prompts_stay_turn_starts():
     from contexto.codex import CONTEXT_SECTIONS_CODEX_VERSION
-    assert CONTEXT_SECTIONS_CODEX_VERSION == "0.166.0"  # measured on 0.154.0, rechecked on 0.163.0 (D38), 0.166.0 (D56)
+    assert CONTEXT_SECTIONS_CODEX_VERSION == "0.170.0"  # measured on 0.154.0, rechecked on 0.163.0, 0.166.0, 0.170.0
     d = ResponsesDialect()
     for text in ("<div>fix this layout</div>", "<template>synthetic</template>", "<T>generic question",
                  "<environment_context_extra>not measured", "# AGENTS.md is a file name I mention"):
@@ -1063,3 +1086,256 @@ def test_a_skipped_untrusted_base_url_is_named_before_the_anthropic_refusal(tmp_
     assert "--codex-upstream" in lines[0]
     assert "is api.anthropic.com" in lines[1] and "--codex-upstream https://api.openai.com/v1" in lines[1]
     assert session_names(tmp_path / "ctx") == []
+
+
+# Out-of-the-box $OPENAI_API_KEY, ~/.codex preservation, and serve self-loop refusal -----------------
+
+
+def test_openai_api_key_defaults_upstream_and_uses_native_env_key(tmp_path):
+    from contexto.codex import OPENAI_API_KEY_ENV, OPENAI_UPSTREAM, codex_upstream_with_source
+
+    empty = tmp_path / "empty-home"
+    empty.mkdir()
+    env = {OPENAI_API_KEY_ENV: "sk-synthetic-not-a-real-key"}
+    assert codex_upstream_with_source("apikey", None, env, "https://api.anthropic.com", "default") == (
+        OPENAI_UPSTREAM, "openai-env")
+
+    launch = plan_codex(["exec", "hi"], PROXY, "S_OOB", env=env, cwd=tmp_path, home=empty)
+    try:
+        assert launch.upstream == OPENAI_UPSTREAM
+        raw = (launch.codex_home / "config.toml").read_text()
+        assert "sk-synthetic" not in raw
+        cfg = tomllib.loads(raw)
+        provider = cfg["model_providers"]["contexto"]
+        assert provider["env_key"] == OPENAI_API_KEY_ENV
+        assert "auth" not in provider
+        assert provider["base_url"] == PROXY and provider["wire_api"] == "responses"
+        assert provider["supports_websockets"] is False
+    finally:
+        launch.cleanup()
+
+
+def test_openai_api_key_precedence_and_never_sent_to_claude_upstream(tmp_path):
+    from contexto.codex import OPENAI_API_KEY_ENV, codex_upstream_with_source
+
+    empty = tmp_path / "empty-home"
+    empty.mkdir()
+    env = {OPENAI_API_KEY_ENV: "sk-synthetic-openai"}
+
+    # Explicit --codex-upstream with OPENAI_API_KEY still uses native env_key.
+    launch = plan_codex([], PROXY, "S1", env=env, cwd=tmp_path, home=empty, upstream="https://custom.invalid/v1")
+    try:
+        cfg = tomllib.loads((launch.codex_home / "config.toml").read_text())
+        assert cfg["model_providers"]["contexto"]["env_key"] == OPENAI_API_KEY_ENV
+        assert "auth" not in cfg["model_providers"]["contexto"]
+        assert launch.upstream == "https://custom.invalid/v1"
+    finally:
+        launch.cleanup()
+
+    # Explicit key helper beats OPENAI_API_KEY and does NOT auto-default upstream to api.openai.com.
+    with pytest.raises(CodexLaunchError, match="api.anthropic.com"):
+        codex_upstream_with_source("apikey", None, {**env, KEY_HELPER_ENV: "echo k"},
+                                   "https://api.anthropic.com", "default")
+
+    # Trusted Claude apiKeyHelper also beats OPENAI_API_KEY.
+    c_home = claude_home(tmp_path, helper="/from/claude")
+    launch_claude = plan_codex([], PROXY, "S2", env=env, cwd=tmp_path, home=c_home,
+                               upstream="https://custom.invalid/v1")
+    try:
+        cfg = tomllib.loads((launch_claude.codex_home / "config.toml").read_text())
+        assert cfg["model_providers"]["contexto"]["auth"] == {"command": "/bin/sh", "args": ["-c", "/from/claude"]}
+        assert "env_key" not in cfg["model_providers"]["contexto"]
+    finally:
+        launch_claude.cleanup()
+
+    # Non-Anthropic Claude upstream (CLIProxyAPI) keeps precedence over OPENAI_API_KEY...
+    assert codex_upstream_with_source("apikey", None, env, "http://127.0.0.1:8317", "env") == (
+        "http://127.0.0.1:8317/v1", "claude-env+/v1")
+    # ...and plan_codex REFUSES to send OPENAI_API_KEY to that Claude-derived upstream without a key helper!
+    with pytest.raises(CodexLaunchError, match="OPENAI_API_KEY is not sent to a Claude-derived upstream"):
+        plan_codex([], PROXY, "S3", env=env, cwd=tmp_path, home=empty,
+                   claude_upstream="http://127.0.0.1:8317")
+
+
+def test_preserves_user_codex_config_and_assets_without_leaking_secrets(tmp_path):
+    user_home = tmp_path / "user-home"
+    user_codex = user_home / ".codex"
+    user_codex.mkdir(parents=True)
+    (user_codex / "config.toml").write_text(
+        'model = "gpt-5.4"\n'
+        'approval_policy = "on-request"\n'
+        'model_provider = "user-custom"\n'
+        '\n'
+        '[features]\n'
+        'enable_request_compression = true\n'
+        'shell_snapshot = true\n'
+        '\n'
+        '[model_providers.other]\n'
+        'name = "Other"\n'
+        'base_url = "https://other.invalid/v1"\n'
+        '\n'
+        '[mcp_servers.my_tools]\n'
+        'command = "/usr/local/bin/my-mcp"\n'
+        'args = ["--port", "9000"]\n'
+        '\n'
+        '[profiles.fast]\n'
+        'model = "gpt-5-mini"\n'
+    )
+    (user_codex / "AGENTS.md").write_text("# User Agents\n")
+    (user_codex / "skills").mkdir()
+    (user_codex / "skills" / "my-skill.md").write_text("skill body\n")
+    (user_codex / "prompts").mkdir()
+    (user_codex / "rules").mkdir()
+    (user_codex / "agents").mkdir()
+    # Secrets and user session state must NEVER be copied or symlinked!
+    (user_codex / "auth.json").write_text('{"OPENAI_API_KEY": "sk-secret-auth-json"}')
+    (user_codex / "sessions").mkdir()
+    (user_codex / "sessions" / "user-rollout.jsonl").write_text("{}")
+
+    home_dir = tmp_path / "ctx" / "sessions" / "S_KEEP" / "codex-home"
+    launch = plan_codex(
+        [], PROXY, "S_KEEP",
+        env={"OPENAI_API_KEY": "sk-synth"},
+        cwd=tmp_path,
+        home=user_home,
+        codex_home_dir=home_dir,
+    )
+    try:
+        cfg = tomllib.loads((home_dir / "config.toml").read_text())
+        # User settings preserved:
+        assert cfg["model"] == "gpt-5.4"
+        assert cfg["approval_policy"] == "on-request"
+        assert cfg["features"]["shell_snapshot"] is True
+        assert cfg["model_providers"]["other"]["base_url"] == "https://other.invalid/v1"
+        assert cfg["mcp_servers"]["my_tools"] == {"command": "/usr/local/bin/my-mcp", "args": ["--port", "9000"]}
+        assert cfg["profiles"]["fast"] == {"model": "gpt-5-mini"}
+        # Contexto overrides win:
+        assert cfg["model_provider"] == "contexto"
+        assert cfg["features"]["enable_request_compression"] is False
+        assert cfg["model_providers"]["contexto"]["base_url"] == PROXY
+        assert cfg["mcp_servers"]["contexto"]["command"] == sys.executable
+        # Non-secret assets symlinked:
+        for name in ("AGENTS.md", "skills", "prompts", "rules", "agents"):
+            linked = home_dir / name
+            assert linked.is_symlink() and linked.resolve() == (user_codex / name).resolve()
+        # Secrets and user sessions NOT copied or linked:
+        assert not (home_dir / "auth.json").exists()
+        assert not (home_dir / "sessions").exists()
+        assert "sk-secret-auth-json" not in (home_dir / "config.toml").read_text()
+    finally:
+        launch.cleanup()
+
+    # Cleanup removes symlinks and config.toml without touching user's ~/.codex!
+    assert not (home_dir / "config.toml").exists()
+    for name in ("AGENTS.md", "skills", "prompts", "rules", "agents"):
+        assert not (home_dir / name).exists()
+        assert (user_codex / name).exists()
+    assert (user_codex / "skills" / "my-skill.md").read_text() == "skill body\n"
+
+
+def test_corrupt_user_codex_config_falls_back_cleanly_with_note(tmp_path):
+    user_home = tmp_path / "user-home"
+    user_codex = user_home / ".codex"
+    user_codex.mkdir(parents=True)
+    (user_codex / "config.toml").write_text("not valid = = toml [[[")
+
+    launch = plan_codex([], PROXY, "S_BAD_TOML", env={"OPENAI_API_KEY": "sk-synth"}, cwd=tmp_path, home=user_home)
+    try:
+        cfg = tomllib.loads((launch.codex_home / "config.toml").read_text())
+        assert cfg["model_provider"] == "contexto"
+        assert any("could not be parsed" in note for note in launch.notes)
+    finally:
+        launch.cleanup()
+
+
+def test_run_codex_refuses_serve_upstream_self_loop(tmp_path, monkeypatch, codex_bin):
+    from contexto import launcher, servecontract
+
+    ctx_home = tmp_path / "ctx"
+    ctx_home.mkdir(mode=0o700)
+    monkeypatch.setenv("CONTEXTO_HOME", str(ctx_home))
+    monkeypatch.setattr(launcher, "run_child", lambda *a, **k: pytest.fail("codex must not start"))
+    token = servecontract.new_token()
+    tok_path = ctx_home / servecontract.TOKEN_FILE
+    tok_path.write_text(token + "\n")
+    tok_path.chmod(0o600)
+    state_path = ctx_home / servecontract.STATE_FILE
+    state_path.write_text(json.dumps({"port": 43123, "pid": os.getpid()}))
+    state_path.chmod(0o600)
+
+    err = io.StringIO()
+    args = parse("--codex-upstream", f"http://127.0.0.1:43123/{token}/v1",
+                 "--codex-key-helper", "echo k", "codex", "exec", "hi")
+    assert run_codex(args, stderr=err) == 2
+    assert "is this Contexto home's `contexto serve`" in err.getvalue()
+    assert token not in err.getvalue()
+    assert session_names(ctx_home) == []
+
+
+def test_real_codex_cli_zero_spend_oob_with_openai_api_key_and_user_codex_home(tmp_path, monkeypatch):
+    """Real-client zero-spend e2e check against local `codex` (skipped if codex is not installed):
+    verifies `contexto run codex` works out of the box with ONLY OPENAI_API_KEY (zero --codex-* flags),
+    merges user's ~/.codex/config.toml + skills/, registers Contexto's MCP tools, and forwards Bearer auth."""
+    import http.server
+    import shutil
+    import threading
+
+    real_codex = shutil.which("codex")
+    if real_codex is None:
+        pytest.skip("codex CLI not installed")
+
+    received: list[dict] = []
+
+    class StubHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length else b""
+            received.append({
+                "path": self.path,
+                "auth": self.headers.get("Authorization", ""),
+                "body": json.loads(body.decode("utf-8", "replace")) if body else {},
+            })
+            payload = json.dumps({"error": {"message": "synthetic 401 stop", "type": "invalid_request_error"}}).encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        user_home = tmp_path / "real-user-home"
+        user_codex = user_home / ".codex"
+        (user_codex / "skills").mkdir(parents=True)
+        (user_codex / "config.toml").write_text('model = "gpt-5.4"\n')
+        (user_codex / "skills" / "demo.md").write_text("demo skill\n")
+
+        ctx_home = tmp_path / "ctx"
+        monkeypatch.setenv("HOME", str(user_home))
+        monkeypatch.setenv("CONTEXTO_HOME", str(ctx_home))
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-zero-spend-synthetic-key")
+        # Redirect only the default upstream constant to our loopback 401 stub so ZERO --codex-* flags are passed!
+        import contexto.codex as codex_mod
+        monkeypatch.setattr(codex_mod, "OPENAI_UPSTREAM", f"http://127.0.0.1:{port}/v1")
+
+        err = io.StringIO()
+        args = parse("--session", "REAL_OOB", "codex", "exec", "--skip-git-repo-check", "say ok")
+        code = run_codex(args, stderr=err)
+        assert code != 0  # 401 stops Codex cleanly without spending tokens
+        assert received, f"codex did not reach stub upstream; stderr={err.getvalue()}"
+        first = received[0]
+        assert first["path"].endswith("/responses")
+        assert first["auth"] == "Bearer sk-zero-spend-synthetic-key"
+        assert first["body"].get("model") == "gpt-5.4"  # preserved from user's ~/.codex/config.toml
+        events = log_events(ctx_home, "REAL_OOB")
+        assert not any(e["event"] == "mcp_tools_missing" for e in events)
+        assert any(e["event"] == "launch" and e["upstream_source"] == "openai-env" for e in events)
+    finally:
+        server.shutdown()
+        server.server_close()

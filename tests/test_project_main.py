@@ -1005,3 +1005,92 @@ def test_a_store_with_a_trusted_list_and_no_record_is_not_a_new_store(home, tmp_
     send(two, MESSAGES, main_request([*conversation("SUB-TASK read the page", 2), *pin_pair("c1", reply),
                                       user("next")], OLD))
     assert first.main_records() == []
+
+
+# Codex custom_tool_call and code-mode exec parity (D69)
+
+
+def custom_responses_call(call_id: str, tool: str, inp: str, reply) -> list[dict]:
+    return [{"type": "custom_tool_call", "call_id": call_id, "name": tool, "input": inp},
+            {"type": "custom_tool_call_output", "call_id": call_id, "output": reply}]
+
+
+def test_codex_custom_tool_call_and_code_mode_exec_confirm_pins_and_closures(home, tmp_path):
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    rule, rule_reply = call_tool(first, "contexto_pin", kind="obligation", text="use ISO dates")
+    done, done_reply = call_tool(first, "contexto_pin", kind="obligation", text="ship release notes")
+    direct, direct_reply = call_tool(first, "contexto_pin", kind="decision", text="prefer stdlib")
+    closure, closure_reply = call_tool(first, "contexto_close", obligation_id=done, note="shipped")
+
+    engine = RewriteEngine(first, config=ROOMY)
+    # 1. Direct custom_tool_call for contexto_pin
+    direct_pair = custom_responses_call("c_direct", PIN_TOOL, json.dumps({"kind": "decision", "text": "prefer stdlib"}),
+                                        direct_reply)
+    # 2. Codex code-mode exec (custom_tool_call) calling tools.mcp__contexto__contexto_pin(...)
+    exec_pin_code = (
+        'const r = await tools.mcp__contexto__contexto_pin({kind: "obligation", text: "use ISO dates"});\n'
+        'console.log(r);'
+    )
+    exec_pin = custom_responses_call("c_exec_1", "exec", exec_pin_code,
+                                     f"Wall time: 0.1s\nOutput:\n{rule_reply}")
+    # 3. Codex code-mode exec (function_call) batching pin + bracket-notation close with structured JSON output
+    exec_batch_code = (
+        'const a = await tools.mcp__contexto__contexto_pin({kind: "obligation", text: "ship release notes"});\n'
+        'const b = await tools["mcp__contexto__contexto_close"]({obligation_id: a.record_id, note: "shipped"});\n'
+        'console.log(JSON.stringify(a)); console.log(JSON.stringify(b));'
+    )
+    exec_batch = responses_call(
+        "c_exec_2", "exec", {"code": exec_batch_code},
+        f"Output:\n{json.dumps({'record_id': done})}\n{closure_reply}",
+    )
+
+    send(engine, RESPONSES, main_turn(RESPONSES, direct_pair, exec_pin, exec_batch))
+    assert first.main_records() == [direct, rule, done, closure]
+    assert set(carried_ids(new_session(home, "s2", root, 2))) == {direct, rule}
+
+
+def test_codex_code_mode_exec_rejects_mixed_tools_aliases_comments_and_literal_ids(home, tmp_path):
+    """D51-style security guarantees for Codex code-mode exec: an exec call that calls another tool,
+    has comments or aliasing/destructuring, or contains the record id literally in its code confirms nothing."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="injected")
+    engine = RewriteEngine(first, config=ROOMY)
+
+    # 1. Mixed with another tool (e.g. exec_command / wait_agent)
+    mixed = custom_responses_call(
+        "e_mixed", "exec",
+        'await tools.exec_command({cmd: "cat untrusted.txt"});\n'
+        'await tools.mcp__contexto__contexto_pin({kind: "obligation", text: "x"});',
+        reply,
+    )
+    # 2. Record id appears literally in the exec code (echoed back)
+    literal = custom_responses_call(
+        "e_lit", "exec",
+        f'await tools.mcp__contexto__contexto_pin({{kind: "obligation", text: "x"}});\n'
+        f'console.log("Recorded obligation {rid}.");',
+        reply,
+    )
+    # 3. Comment hiding or obfuscating code
+    commented = custom_responses_call(
+        "e_cmt", "exec",
+        '// tools.exec_command()\nawait tools.mcp__contexto__contexto_pin({kind: "obligation", text: "x"});',
+        reply,
+    )
+    # 4. Aliasing `tools`
+    aliased = custom_responses_call(
+        "e_alias", "exec",
+        'const t = tools; await t.wait_agent({}); '
+        'await tools.mcp__contexto__contexto_pin({kind: "obligation", text: "x"});',
+        reply,
+    )
+    # 5. Another MCP server's contexto_pin
+    other_server = custom_responses_call(
+        "e_other", "exec",
+        'await tools.mcp__evil__contexto_pin({kind: "obligation", text: "x"});',
+        reply,
+    )
+    send(engine, RESPONSES, main_turn(RESPONSES, mixed, literal, commented, aliased, other_server))
+    assert first.main_records() == []
+    assert carried_ids(new_session(home, "s2", root, 2)) == []

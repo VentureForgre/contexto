@@ -37,6 +37,8 @@ is never a line of its own: look for it inside a `request` line.
 | [`proxy_stop_incomplete`](#proxy_stop_incomplete) | proxy | own line | notice |
 | [`request_refused`](#request_refused) | proxy | own line | notice |
 | [`websocket_rejected`](#websocket_rejected) | proxy | own line | problem |
+| [`websocket_session`](#websocket_session) | proxy | own line | normal, notice, problem |
+| [`websocket_turn`](#websocket_turn) | proxy | own line | normal |
 | [`encoded_body_rejected`](#encoded_body_rejected) | proxy | own line | problem |
 | [`request_too_deep`](#request_too_deep) | proxy | own line | problem |
 | [`transform_error`](#transform_error) | proxy | own line | problem |
@@ -625,10 +627,52 @@ a DNS-rebound name tried to reach the proxy. The session is unaffected.
 
 Writer: proxy. Where: own line. Kind: problem.
 
-A client asked for a WebSocket, which would bypass the bound. The proxy answered 501. The launcher
-keeps Codex on HTTP, so this means a client was not started through `contexto run`.
+A client asked for a WebSocket when WebSocket relay is disabled or on a path that is not a Responses
+endpoint. The proxy answered 501. The launcher keeps Codex on HTTP by default (opt in with
+`--codex-websocket` or `CONTEXTO_CODEX_WEBSOCKET=1`).
 
 - `path`: the request path.
+
+### `websocket_session`
+
+Writer: proxy. Where: own line. Kind: normal, notice, problem.
+
+Written once when an opt-in Responses WebSocket relay ends (or fails to connect or upgrade).
+
+- `path`: the request path.
+- `status`: the HTTP status returned by upstream (101 for an upgraded WebSocket session, 502 on a
+  connect or handshake failure, or upstream's non-101 status forwarded for HTTP fallback).
+- `turns`: how many `response.create` turns completed on the connection.
+- `duration_ms`: total connection duration in milliseconds.
+- `close_code`: present when either side sent a WebSocket close frame with a 2-byte status code.
+- `error`: present when the handshake or frame relay failed.
+
+### `websocket_turn`
+
+Writer: proxy. Where: own line. Kind: normal.
+
+One Responses API turn (`response.create` client frame through its terminal server event) relayed
+over an opt-in WebSocket connection.
+
+- `path`: the request path.
+- `model`: the model name from the `response.create` frame, or null.
+- `original_request_bytes`: byte length of the client's original text frame.
+- `request_bytes`: byte length of the forwarded text frame after rewriting.
+- `duration_ms`: milliseconds from `response.create` to the terminal event.
+- `usage`: the Responses `usage` dict from the terminal event, or null.
+- `over_bound`: true when any transform or usage event marked the turn over the bound.
+- `epoch`: present when the transform returned an epoch number.
+- `transform_events`: present when the transform returned engine events, reduced to scalars.
+- `transform_error`: present when transforming or serializing the frame failed (the client's original
+  frame was forwarded unchanged).
+- `transform_skipped`: present when the frame was not transformed (for example `previous_response_id`
+  was set or `input` was not a list).
+- `usage_events`: present when `observe_usage` returned events, reduced to scalars.
+- `end_event`: present when a terminal Responses event was seen (`completed`, `incomplete`, `failed`,
+  or `none`).
+- `response_status`: present when the terminal event reported a Responses status.
+- `incomplete_reason`: present when the terminal event reported `incomplete_details.reason`.
+- `error_code`: present when the terminal event or an error frame reported an error code.
 
 ### `encoded_body_rejected`
 

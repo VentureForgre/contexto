@@ -490,6 +490,10 @@ class UsageReader:
             return
         if not isinstance(payload, dict):
             return
+        self.feed_payload(payload)
+
+    def feed_payload(self, payload: dict[str, Any]) -> None:
+        """One parsed JSON event dict (shared by SSE streams and WebSocket frames)."""
         if self.api == "responses":
             if payload.get("type") in RESPONSE_END_EVENTS:
                 self.end_event = payload["type"].split(".", 1)[1]
@@ -932,7 +936,7 @@ class ContextoProxy:
                  observe_usage: ObserveUsage | None = None, observe_thinking: bool = False,
                  upstream_source: str | None = None, affinity_key: str | None = None,
                  on_tool_calls: Callable[[tuple[str, ...]], None] | None = None,
-                 strip_hint_headers: bool = False) -> None:
+                 strip_hint_headers: bool = False, allow_websocket: bool = False) -> None:
         parts = urlsplit(upstream)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("upstream must be an http(s) base URL")
@@ -958,6 +962,8 @@ class ContextoProxy:
         self.upstream_source = upstream_source
         # D70: leave Claude Code's gated hint headers out of what is sent upstream (module docstring).
         self.strip_hint_headers = strip_hint_headers
+        # Opt-in RFC 6455 WebSocket relay on Responses endpoints (contexto.ws); HTTP remains default.
+        self.allow_websocket = allow_websocket
         self.transform_lock = threading.Lock()
         self.last_epoch: Any = None  # the engine's epoch from its last successful transform
         self._in_flight = 0  # requests being handled; idle keep-alive connections are not counted
@@ -1157,8 +1163,13 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
-            # Not tunneled: a WebSocket session (Codex's default transport) would bypass the bound.
-            # The launcher keeps Codex on HTTP; anything else is refused visibly, not mangled.
+            if self.owner.allow_websocket and path_only in RESPONSES_PATHS:
+                from contexto.ws import handle_websocket
+
+                handle_websocket(self, self.owner, path_only)
+                return
+            # Not tunneled unless opted in on a Responses endpoint: an uninspected WebSocket would
+            # bypass the bound. The launcher keeps Codex on HTTP by default.
             self.owner.log({"event": "websocket_rejected", "path": path_only})
             self._send_local_error(501, "contexto proxy: WebSocket is not supported; use HTTP",
                                    "invalid_request_error")

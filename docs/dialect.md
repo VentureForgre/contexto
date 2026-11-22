@@ -152,8 +152,8 @@ under-estimated.
 
 ### `in_turn`
 
-`in_turn: MessagesInTurn | None`. `contexto.inturn.MESSAGES` on the base class, `None` on
-`ResponsesDialect`. D63 (rule 5).
+`in_turn: MessagesInTurn | ResponsesInTurn | None`. `contexto.inturn.MESSAGES` on the base class,
+`contexto.inturn.RESPONSES` on `ResponsesDialect`. D63 (rule 5).
 
 The primitives in-turn paging needs from this API: where the running turn's tool results are and
 which call each answers, what a stub may stand for (`stubbable`) and what it says the result was
@@ -165,8 +165,8 @@ tool loop is sent as before D63.
 
 - Anthropic: `MessagesInTurn` (`tool_use` and `tool_result` blocks, text, image and document
   content).
-- Responses: `None`. Codex tool loops are not paged inside the turn yet; the replay harness keeps
-  its Codex targets marked `NOT_BUILT`.
+- Responses: `ResponsesInTurn` (`*_call` and `*_output` items, `reasoning`, hosted `*_call` items,
+  and `input_text` / `input_image` / `input_file` parts).
 
 A new dialect starts with `None`. Writing one means the same primitives for its item shapes, and the
 replay harness's targets (`spikes/m2/inturn`) for its scripts.

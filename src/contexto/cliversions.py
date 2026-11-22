@@ -53,7 +53,7 @@ from typing import Any
 # zero spend for D56.
 TESTED_VERSIONS: dict[str, tuple[str, ...]] = {
     "claude": ("2.1.302", "2.1.310", "2.1.314", "2.1.318"),
-    "codex": ("0.154.0", "0.163.0", "0.166.0"),
+    "codex": ("0.154.0", "0.163.0", "0.166.0", "0.170.0"),
 }
 # D40: the Claude Code versions whose subagent shapes (the Agent call's launch receipt and hand-back,
 # the task-notification notices, the subagent's first prompt) were measured (spikes/m2/subagents/).

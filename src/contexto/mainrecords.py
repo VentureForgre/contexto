@@ -57,17 +57,109 @@ from typing import Any, NamedTuple
 
 from contexto.mcp import UNPINNED_NOTE
 from contexto.store.pinned import FACT_KINDS
-from contexto.store.render import OWN_TOOL_PREFIX
+from contexto.store.render import CODE_MODE_TOOL, OWN_TOOL_PREFIX, _code
 
 PIN_TOOL = OWN_TOOL_PREFIX + "contexto_pin"
 CLOSE_TOOL = OWN_TOOL_PREFIX + "contexto_close"
 _ID = r"rec_[0-9a-f]{24}"
+_ID_RE = re.compile(_ID)
 _PINNED = re.compile(rf"Recorded (obligation|decision|event|artifact|reference) ({_ID})\.")
 _CLOSED = re.compile(rf"Closed {_ID} with ({_ID})\.")
 _STRUCTURED = re.compile(rf'\{{\s*"record_id"\s*:\s*"({_ID})"\s*\}}')
+_TOOLS_WORD = re.compile(r"\btools\b")
+_RECORD_NAME = f"(?:{PIN_TOOL}|{CLOSE_TOOL})"
+_RECORD_CODE_CALL = re.compile(
+    r"""\btools\s*(?:\[\s*(["'`])(?P<q>""" + _RECORD_NAME + r""")\1\s*\]|\.(?P<d>""" + _RECORD_NAME + r"""))\s*\(""")
 _TEXT_TYPES = ("text", "input_text", "output_text")
 KEYS_KEPT = 64  # conversations tracked at once; the oldest is forgotten past it
 REPORTED_KEPT = 4096  # call ids already reported as unmatched; the oldest is forgotten past it
+
+
+class _ExecSpec(NamedTuple):
+    """A Codex code-mode ``exec`` call whose only tool calls are literal ``contexto_pin`` / ``contexto_close``."""
+
+    tools: frozenset[str]  # subset of {PIN_TOOL, CLOSE_TOOL}
+    max_calls: int  # number of literal pin/close calls in the exec code
+    code_ids: frozenset[str]  # any rec_... ids already present in the code (cannot be newly minted)
+
+
+def _exec_record_spec(name: Any, raw_args: Any) -> _ExecSpec | None:
+    """For a Codex code-mode ``exec`` call whose code has no comments and whose every ``tools`` mention
+    is a literal call to ``contexto_pin`` or ``contexto_close`` (at least one), return the tools called,
+    their count, and any record ids already in the code; None for any other call (D51/D69)."""
+    if name != CODE_MODE_TOOL:
+        return None
+    code = _code(raw_args)
+    if code is None or "//" in code or "/*" in code:
+        return None
+    matches = list(_RECORD_CODE_CALL.finditer(code))
+    if not matches or len(matches) != len(_TOOLS_WORD.findall(code)):
+        return None
+    tools = frozenset(m.group("q") or m.group("d") for m in matches)
+    return _ExecSpec(tools=tools, max_calls=len(matches), code_ids=frozenset(_ID_RE.findall(code)))
+
+
+def _exec_confirmed_ids(spec: _ExecSpec, text: str) -> list[str]:
+    """Extract newly created record ids from the output of a pure pin/close code-mode ``exec`` call.
+
+    Accepts exact server reply text, per-line replies (for example after Codex's ``Output:`` header or
+    batched calls), or JSON objects holding ``record_id`` / MCP ``content`` / ``structuredContent``.
+    Any record id that already appeared literally in the ``exec`` code is rejected so injected text
+    cannot confirm a pre-existing subagent record. At most ``spec.max_calls`` unique ids are returned.
+    """
+    candidates: list[str] = []
+
+    def consider(candidate: str) -> None:
+        if len(candidates) >= spec.max_calls:
+            return
+        for tool in spec.tools:
+            rid = confirmed_id(tool, candidate)
+            if rid and rid not in spec.code_ids and rid not in candidates:
+                candidates.append(rid)
+                return
+
+    def walk_json(value: Any, depth: int = 0) -> None:
+        if depth > 8 or len(candidates) >= spec.max_calls:
+            return
+        if isinstance(value, str):
+            consider(value.strip())
+            return
+        if isinstance(value, list):
+            for item in value:
+                walk_json(item, depth + 1)
+            return
+        if isinstance(value, dict):
+            if set(value) == {"record_id"} and isinstance(value["record_id"], str):
+                consider(json.dumps(value))
+                return
+            structured = value.get("structuredContent")
+            if isinstance(structured, dict):
+                walk_json(structured, depth + 1)
+            content = value.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") in _TEXT_TYPES and isinstance(part.get("text"), str):
+                        consider(part["text"].strip())
+
+    stripped = text.strip()
+    consider(stripped)
+    if not candidates:
+        try:
+            walk_json(json.loads(stripped))
+        except ValueError:
+            pass
+    if not candidates:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            consider(line)
+            if line.startswith(("{", "[")):
+                try:
+                    walk_json(json.loads(line))
+                except ValueError:
+                    pass
+    return candidates
 
 
 def confirmed_id(tool: str, text: str) -> str | None:
@@ -117,7 +209,7 @@ class MainRecords:
     for their result (call id -> tool name); and the call ids already reported as unmatched."""
 
     _read: dict[str, int] = field(default_factory=dict)
-    _waiting: dict[str, dict[str, str]] = field(default_factory=dict)
+    _waiting: dict[str, dict[str, str | _ExecSpec]] = field(default_factory=dict)
     _reported: dict[str, None] = field(default_factory=dict)  # insertion-ordered, the newest REPORTED_KEPT
 
     def scan(self, key: str, messages: Any) -> list[str]:
@@ -159,32 +251,47 @@ class MainRecords:
 
         return Read(found, unmatched, commit)
 
-    def _result(self, call_id: Any, value: Any, is_error: bool, waiting: dict[str, str], found: list[str],
-                unmatched: list[dict[str, str]]) -> None:
-        tool = waiting.pop(call_id, None) if isinstance(call_id, str) else None
-        if tool is None:
+    def _result(self, call_id: Any, value: Any, is_error: bool, waiting: dict[str, str | _ExecSpec],
+                found: list[str], unmatched: list[dict[str, str]]) -> None:
+        entry = waiting.pop(call_id, None) if isinstance(call_id, str) else None
+        if entry is None:
             return
         text, reason = (None, "is_error") if is_error else _result_text(value)
-        record_id = confirmed_id(tool, text) if text is not None else None
-        if record_id:
-            found.append(record_id)
-            return
+        if isinstance(entry, _ExecSpec):
+            ids = _exec_confirmed_ids(entry, text) if text is not None else []
+            if ids:
+                found.extend(ids)
+                return
+            tool_label = (next(iter(entry.tools)).removeprefix(OWN_TOOL_PREFIX)
+                          if len(entry.tools) == 1 else "exec")
+        else:
+            record_id = confirmed_id(entry, text) if text is not None else None
+            if record_id:
+                found.append(record_id)
+                return
+            tool_label = entry.removeprefix(OWN_TOOL_PREFIX)
         if call_id not in self._reported:
             self._reported[call_id] = None
             if len(self._reported) > REPORTED_KEPT:
                 self._reported.pop(next(iter(self._reported)))
-            unmatched.append({"event": "main_record_unmatched", "tool": tool.removeprefix(OWN_TOOL_PREFIX),
+            unmatched.append({"event": "main_record_unmatched", "tool": tool_label,
                               "reason": reason or "reply"})
 
-    def _message(self, message: dict, waiting: dict[str, str], found: list[str],
+    def _message(self, message: dict, waiting: dict[str, str | _ExecSpec], found: list[str],
                  unmatched: list[dict[str, str]]) -> None:
         kind = message.get("type")
-        if kind == "function_call":  # Responses API
+        if kind in ("function_call", "custom_tool_call"):  # Responses API (direct MCP or code-mode exec)
             name, call_id = message.get("name"), message.get("call_id")
-            if name in (PIN_TOOL, CLOSE_TOOL) and isinstance(call_id, str):
+            if not isinstance(call_id, str):
+                return
+            if name in (PIN_TOOL, CLOSE_TOOL):
                 waiting[call_id] = name
+            else:
+                spec = _exec_record_spec(name, message.get("arguments" if kind == "function_call" else "input"))
+                if spec is not None:
+                    waiting[call_id] = spec
             return
-        if kind == "function_call_output":
+        if kind in ("function_call_output", "custom_tool_call_output"):
             self._result(message.get("call_id"), message.get("output"), False, waiting, found, unmatched)
             return
         content = message.get("content")

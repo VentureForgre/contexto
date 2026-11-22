@@ -127,8 +127,8 @@ def test_untested_warning_is_one_line_naming_tested_versions_report_and_silence(
     assert "tested: 2.1.302, 2.1.310, 2.1.314, 2.1.318" in line and REPORT_URL in line
     # The flag goes before the CLI's name: after it, it would be passed to the CLI.
     assert "contexto run --no-version-check claude" in line and f"{NO_CHECK_ENV}=1" in line
-    codex = untested_warning("codex", "0.170.0")
-    assert "Codex 0.170.0" in codex and "tested: 0.154.0, 0.163.0, 0.166.0" in codex and "\n" not in codex
+    codex = untested_warning("codex", "0.199.0")
+    assert "Codex 0.199.0" in codex and "tested: 0.154.0, 0.163.0, 0.166.0, 0.170.0" in codex and "\n" not in codex
     assert "contexto run --no-version-check codex" in codex
 
 
@@ -419,8 +419,8 @@ def test_codex_session_start_unrecognised():
     events = check.observe({"input": codex_lead(sections=False)}, {"user-agent": CODEX_UA}, RESPONSES)
     assert names(events) == ["cli_version", "session_start_unrecognised"]
     assert events[-1] == {"event": "session_start_unrecognised", "dialect": "responses",
-                          "signature_version": "0.166.0", "cli_version": "0.163.0",
-                          "tested_versions": "0.154.0, 0.163.0, 0.166.0"}
+                          "signature_version": "0.170.0", "cli_version": "0.163.0",
+                          "tested_versions": "0.154.0, 0.163.0, 0.166.0, 0.170.0"}
     ok = ClientVersions()
     assert names(ok.observe({"input": codex_lead()}, {"user-agent": CODEX_UA}, RESPONSES)) == ["cli_version"]
 
