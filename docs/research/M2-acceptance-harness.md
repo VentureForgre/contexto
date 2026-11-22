@@ -316,15 +316,15 @@ request. Its 5 rotation requests are left out of the gaps above. With PR #48 the
 **The approval figure.** `run.py live` refuses an approval below `budget.simulate`'s worst-case H1,
 so that simulation is the budget to approve. `run.py approval-table` prints it, and the table
 between the markers below is that output; a test fails if they differ. Defaults: 18 turns of 40
-KB, head 48,144, bound 150,000, 2 recalls sized by B9 (below).
+KB, head 48,358, bound 150,000, 2 recalls sized by B9 (below).
 
 <!-- approval-table:begin -->
 | Line | Expected tokens | Worst case (guard reserve) |
 |---|---|---|
-| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,910,314 | 6,597,272 |
-| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,687,813 | 2,875,817 |
-| Full-context baseline through a plain CLI session (alternative) | 5,064,678 | - |
-| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,598,127** | **9,473,089** |
+| H1 acceptance run through the proxy, 6 probe turns (D27) | 3,919,730 | 6,608,828 |
+| Full-context baseline, 6 direct requests, one per probe turn (D27) | 2,689,097 | 2,877,101 |
+| Full-context baseline through a plain CLI session (alternative) | 5,068,744 | - |
+| **Total, H1 + baseline (live refuses an approval below the worst case)** | **6,608,827** | **9,485,929** |
 <!-- approval-table:end -->
 
 **Official zero-spend rerun** (2026-10-16, main at 9dc2936: engine with PR #48's records and

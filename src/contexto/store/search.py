@@ -92,6 +92,42 @@ RECENCY_WEIGHT = 0.5  # the newest match's relevance is multiplied by 1.5, the o
 SHOWN_IN_DETAIL = 3  # contexto_search shows this many of the best pages in detail (mcp.SEARCH_LIMIT)
 
 
+_CAMEL_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_IDENT_SEP = re.compile(r"[_\-./:\\]+")
+_CODE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-./]*")
+
+
+def split_identifier(word: str) -> tuple[str, ...]:
+    """Split camelCase, PascalCase, acronyms, snake_case, kebab-case, and dotted identifiers into
+    folded component words (e.g. ``refreshToken`` -> ``('refresh', 'token')``)."""
+    parts: list[str] = []
+    for seg in _IDENT_SEP.split(word):
+        if not seg:
+            continue
+        for piece in _CAMEL_SPLIT.split(seg):
+            if piece:
+                parts.append(fold(piece))
+    return tuple(parts)
+
+
+def code_tokens(text: str) -> str:
+    """Fold ``text`` and append code-split and squeezed tokens for identifiers so FTS5 matches
+    ``refreshToken``, ``refresh_token``, ``refresh-token``, and ``refresh token`` uniformly."""
+    folded = fold(text)
+    extras: list[str] = []
+    for m in _CODE_TOKEN_RE.finditer(text):
+        tok = m.group(0)
+        parts = split_identifier(tok)
+        if len(parts) > 1:
+            extras.extend(parts)
+            squeezed = "".join(parts)
+            if squeezed != fold(tok):
+                extras.append(squeezed)
+    if not extras:
+        return folded
+    return folded + " " + " ".join(extras)
+
+
 def fold(text: str) -> str:
     """``text`` lowercased one character at a time, so offsets into the result are offsets into ``text``.
 
@@ -226,7 +262,18 @@ def rank(entries: Sequence[SearchEntry], query: str,
     freq = dict(zip(words, df))
     if q.multiword:
         freq[phrase] = sum(1 for m in matched if m[3])
-    idf = {t: math.log(1 + (n - freq[t] + 0.5) / (freq[t] + 0.5)) for t in terms if freq[t]}
+    return score_matched(matched, freq, n, terms, phrase, q.multiword)
+
+
+def score_matched(matched: list[tuple[str, int, bool, bool, tuple[int, ...]]], freq: dict[bytes, int], n: int,
+                  terms: list[bytes], phrase: bytes, multiword: bool) -> list[str]:
+    """Score and rank matched pages using D41 BM25 (b=0), recency prior, and newest-turn boost.
+
+    Shared by ``rank`` and the SQLite FTS5 index so both produce identical rankings.
+    """
+    if not matched:
+        return []
+    idf = {t: math.log(1 + (n - freq[t] + 0.5) / (freq[t] + 0.5)) for t in terms if freq.get(t)}
     weights = [idf.get(t) for t in terms]
     by_age = sorted(range(len(matched)), key=lambda m: (matched[m][1], matched[m][0]))
     position = {m: (k / (len(by_age) - 1) if len(by_age) > 1 else 1.0) for k, m in enumerate(by_age)}
@@ -234,7 +281,7 @@ def rank(entries: Sequence[SearchEntry], query: str,
     for m, (page_id, turn, context, on, tf) in enumerate(matched):
         relevance = 0.0
         for weight, held, term in zip(weights, tf, terms):
-            if weight is None or (term == phrase and q.multiword and not on):
+            if weight is None or (term == phrase and multiword and not on):
                 continue
             relevance += weight * held * (K1 + 1) / (held + K1)  # BM25 with b 0: no length term (D41)
         score = relevance * (1 + RECENCY_WEIGHT * position[m])
@@ -531,6 +578,14 @@ def _folded_form(squeezed: str) -> re.Pattern[bytes]:
     return re.compile(b"".join(parts) + re.escape(search_key(squeezed[-1:])))
 
 
+def _split_form(parts: tuple[str, ...]) -> re.Pattern[bytes]:
+    """Match code-split identifier parts separated by whitespace or punctuation (e.g. ``refresh token``,
+    ``refresh_token``, ``refresh-token``), so ``refreshToken`` and ``refresh_token`` also match prose
+    ``refresh token``."""
+    sep = rb"[\s_.\-/]+"
+    return re.compile(sep.join(re.escape(search_key(p)) for p in parts))
+
+
 def _form_frequency(text: bytes, form: re.Pattern[bytes]) -> int:
     """As ``term_frequency``, for a term given as a pattern: the number of the page's texts in which
     ``form`` occurs, at most ``PAGE_CAP``. (Each text counts once, as with ``TEXT_CAP`` 1.)"""
@@ -693,6 +748,12 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
     # page without its separators would also show ``port8.0`` for ``port-80``.
     confirm = [_folded_form(squeeze(w)) if shaped[j] and _DIGIT_PAIR.search(squeeze(w)) else None
                for j, w in enumerate(plan.words)]
+    # Code-split pattern (e.g. refreshToken / refresh_token -> matches "refresh token" in prose too).
+    split_forms: list[re.Pattern[bytes] | None] = []
+    for j in range(count):
+        parts = split_identifier(plan.typed[j]) if shaped[j] else ()
+        split_forms.append(_split_form(parts) if len(parts) > 1 and not _DIGIT_PAIR.search(squeeze(plan.words[j]))
+                           else None)
     fold_pages = any(shaped)
     df = [0] * count
     n = 0
@@ -711,17 +772,23 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
             if shaped[j]:
                 # a word found as typed is also found once the separators are gone, so one scan finds both
                 frequency = term_frequency(without, squeezed[j])
-                if not frequency:
-                    continue
-                as_typed = term_frequency(text, raw[j])
-                if as_typed:
-                    held = (EXACT, as_typed)
-                else:
-                    if confirm[j] is not None:
-                        frequency = _form_frequency(text, confirm[j])
-                        if not frequency:
-                            continue
+                if frequency:
+                    as_typed = term_frequency(text, raw[j])
+                    if as_typed:
+                        held = (EXACT, as_typed)
+                    else:
+                        if confirm[j] is not None:
+                            frequency = _form_frequency(text, confirm[j])
+                            if not frequency:
+                                continue
+                        held = (FOLDED, frequency)
+                elif split_forms[j] is not None:
+                    frequency = _form_frequency(text, split_forms[j])
+                    if not frequency:
+                        continue
                     held = (FOLDED, frequency)
+                else:
+                    continue
             else:
                 frequency = term_frequency(text, raw[j])  # 0 when the page does not hold the word
                 if not frequency:
@@ -819,6 +886,8 @@ def rank_approximate(entries: Sequence[SearchEntry], query: str,
                 if j not in labels:
                     labels[j] = confirm[j] or _folded_form(squeeze(plan.words[j]))
                 found = labels[j].search(text)
+                if found is None and split_forms[j] is not None:
+                    found = split_forms[j].search(text)
                 form = found.group().decode("utf-8", "surrogatepass") if found else squeeze(plan.words[j])
             matched.append(WordMatch(plan.words[j], row[j][0], form))
         out.append(ApproxHit(page_id, turn, tuple(matched),

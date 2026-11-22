@@ -8,29 +8,35 @@ the CLI render a page identically. ``recall_chunk`` is the offset and limit rule
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
 from contexto.canonical import loads_bounded
-from contexto.store.search import Query, matching_lines, text_matches
+from contexto.store.search import Query, fold, matching_lines, plan_words, squeeze, text_matches
 
 RECALL_LIMIT = 32_000  # characters per contexto_recall call, at most
 DEFAULT_RECALL_LIMIT = 12_000  # characters per call before the engine has recorded the window
 MAX_CHARS_PER_TOKEN = 1.5  # W converts to characters at no more than this many per token
+# Expanded search snippets may use the session's measured bytes/token up to this safe ceiling.
+EXPAND_MAX_CHARS_PER_TOKEN = 3.5
 
 
-def recall_limit(window_tokens: int | None, bytes_per_token: float | None) -> tuple[int, str]:
+def recall_limit(window_tokens: int | None, bytes_per_token: float | None, *,
+                 measured: bool = False) -> tuple[int, str]:
     """Characters per recall call and a note saying how the limit was set (M2 contract PR #53).
 
     Recall results arrive inside a tool loop, where the engine cannot rotate, so one call is kept to
     about a quarter of the session's window budget ``W``: ``W / 4`` tokens at the smaller of the
-    measured bytes per token and 1.5, and never more than 32,000 characters. Before the engine has
-    recorded ``W`` (``SessionStore.set_window``), the limit is 12,000 characters.
+    measured bytes per token and 1.5 (or ``EXPAND_MAX_CHARS_PER_TOKEN`` when ``measured=True`` for
+    expanded search snippets), and never more than 32,000 characters. Before the engine has recorded
+    ``W`` (``SessionStore.set_window``), the limit is 12,000 characters.
     """
     if not window_tokens or not bytes_per_token:
         return DEFAULT_RECALL_LIMIT, (f"chunks use the {DEFAULT_RECALL_LIMIT:,}-character default because this "
                                       "session's window budget is not recorded yet")
-    chars = int(window_tokens / 4 * min(bytes_per_token, MAX_CHARS_PER_TOKEN))
+    cap = EXPAND_MAX_CHARS_PER_TOKEN if measured else MAX_CHARS_PER_TOKEN
+    chars = int(window_tokens / 4 * min(bytes_per_token, cap))
     limit = max(1, min(RECALL_LIMIT, chars))
     if limit == RECALL_LIMIT:
         return limit, f"chunks are at most {RECALL_LIMIT:,} characters"
@@ -39,19 +45,30 @@ def recall_limit(window_tokens: int | None, bytes_per_token: float | None) -> tu
 
 # Contexto's own MCP tools whose results copy older pages or the pinned state (D51): search, recall, and
 # state. contexto_pin and contexto_close are not among them: their inputs are the model's own words, and
-# stay searchable. Claude Code, and Codex calling one directly, prefix the server's name; Codex's code mode
-# calls them from the JavaScript of its exec tool, as tools["mcp__contexto__contexto_search"](...) or
-# tools.mcp__contexto__contexto_search(...).
+# stay searchable. Claude Code, and Codex calling one directly, prefix the server's name (any configured
+# MCP server name, not only "contexto", e.g. mcp__<server>__contexto_search, or bare contexto_search);
+# Codex's code mode calls them from the JavaScript of its exec tool, as
+# tools["mcp__<server>__contexto_search"](...) or tools.mcp__<server>__contexto_search(...).
 OWN_TOOL_PREFIX = "mcp__contexto__"
-ECHO_TOOLS = tuple(OWN_TOOL_PREFIX + name for name in ("contexto_search", "contexto_recall", "contexto_state"))
+ECHO_TOOL_NAMES = ("contexto_search", "contexto_recall", "contexto_state")
+ECHO_TOOLS = tuple(OWN_TOOL_PREFIX + name for name in ECHO_TOOL_NAMES)
 CODE_MODE_TOOL = "exec"
-_ECHO_NAME = "(?:" + "|".join(ECHO_TOOLS) + ")"
+_ECHO_SUFFIX = "(?:" + "|".join(ECHO_TOOL_NAMES) + ")"
+_ECHO_NAME = r"(?:mcp__[A-Za-z0-9][A-Za-z0-9_-]*__)?" + _ECHO_SUFFIX
+_ECHO_TOOL_RE = re.compile(r"^" + _ECHO_NAME + r"$")
 _TOOLS_WORD = re.compile(r"\btools\b")
 # A literal call of one of those tools on the code-mode tools object: the whole reference and its "(".
 _ECHO_CODE_CALL = re.compile(r"""\btools\s*(?:\[\s*(["'`])""" + _ECHO_NAME + r"""\1\s*\]|\.""" + _ECHO_NAME
                              + r""")\s*\(""")
 _CALL_TYPES = ("function_call", "custom_tool_call")
 _OUTPUT_TYPES = ("function_call_output", "custom_tool_call_output")
+
+
+def _extra_echo_names() -> tuple[str, ...]:
+    prefix = os.environ.get("CONTEXTO_MCP_PREFIX", "").strip()
+    if not prefix:
+        return ()
+    return tuple(prefix + name for name in ECHO_TOOL_NAMES)
 
 
 def _code(arguments: Any) -> str | None:
@@ -69,15 +86,22 @@ def _code(arguments: Any) -> str | None:
 
 
 def _own_call(name: Any, code: str | None) -> bool:
-    """A call of search, recall, or state. An exec call counts only when every mention of ``tools`` in its
-    code is a literal call of one of them (at least one) and the code has no comment: any other way of
-    reaching a tool (destructuring, an alias, a computed or optional member, another tool) may run a
-    tool whose output must stay searchable, so such a call is not counted (D51)."""
-    if isinstance(name, str) and name in ECHO_TOOLS:
+    """A call of search, recall, or state under any configured MCP server prefix. An exec call counts
+    only when every mention of ``tools`` in its code is a literal call of one of them (at least one) and
+    the code has no comment: any other way of reaching a tool (destructuring, an alias, a computed or
+    optional member, another tool) may run a tool whose output must stay searchable, so such a call is
+    not counted (D51)."""
+    if isinstance(name, str) and (_ECHO_TOOL_RE.fullmatch(name) is not None or name in _extra_echo_names()):
         return True
     if name != CODE_MODE_TOOL or code is None or "//" in code or "/*" in code:
         return False
-    echo = len(_ECHO_CODE_CALL.findall(code))
+    pattern = _ECHO_CODE_CALL
+    extra = _extra_echo_names()
+    if extra:
+        ext_pat = _ECHO_NAME + "|" + "|".join(re.escape(n) for n in extra)
+        pattern = re.compile(r"""\btools\s*(?:\[\s*(["'`])(?:""" + ext_pat + r""")\1\s*\]|\.(?:""" + ext_pat
+                             + r"""))""" + r"""\s*\(""")
+    echo = len(pattern.findall(code))
     return echo > 0 and echo == len(_TOOLS_WORD.findall(code))
 
 
@@ -267,6 +291,10 @@ def recall_chunk(page: dict[str, Any], offset: int = 0, limit: int = RECALL_LIMI
 MATCH_CONTEXT = 1  # lines shown before and after each matching line (B17: 1, down from 2)
 MATCHES_PER_PAGE = 3  # matching lines shown per page, each with its context
 MATCH_LINE_CHARS = 200  # characters shown of any one line
+EXPAND_MATCH_CONTEXT = 5  # lines shown either side when expand=True
+EXPAND_MATCHES_PER_PAGE = 6  # matching lines shown per page when expand=True
+EXPAND_LINE_CHARS = 500  # characters shown per line when expand=True
+MAX_CONTEXT_LINES = 20  # maximum user-configurable context_lines on contexto_search
 
 
 def match_lines(text: str, query: str | Query, context: int = MATCH_CONTEXT, per_page: int = MATCHES_PER_PAGE,
@@ -330,6 +358,67 @@ def retained_matches(entries: list[dict[str, Any]], query: str | Query, *,
         every = entry["text"].count("\n") + 1  # ALL matching lines: the newest are chosen by the caller
         shown, _ = match_lines(entry["text"], q, context=0, per_page=every)
         found += [(entry["turn"], entry["message_index"], start, end, text) for start, end, is_match, text in shown
+                  if is_match]
+    found.sort(key=lambda m: (m[0], m[1], m[2]), reverse=True)
+    return found
+
+
+def retained_matches_approximate(entries: list[dict[str, Any]], query: str, *,
+                                 asked: bool = True) -> list[tuple[int, int, int, int, str]]:
+    """Approximate matching lines of a retained-window snapshot when strict ``retained_matches`` finds none:
+    drops stop words, matches code-split / separator-folded identifiers (``refresh_token`` <-> ``refreshToken``
+    <-> ``refresh token``), and allows partial matches passing the relevance floor."""
+    from contexto.store.search import APPROX_FLOOR, _folded_form, _split_form, split_identifier
+
+    plan = plan_words(query)
+    if plan is None or not entries:
+        return []
+    count = len(plan.words)
+    shaped = [plan.shaped(j) for j in range(count)]
+    folded_pats = [_folded_form(squeeze(w)) if shaped[j] else None for j, w in enumerate(plan.words)]
+    split_pats = []
+    for j in range(count):
+        parts = split_identifier(plan.typed[j]) if shaped[j] else ()
+        split_pats.append(_split_form(parts) if len(parts) > 1 else None)
+    newest = max((e["turn"] for e in entries), default=None)
+    found: list[tuple[int, int, int, int, str]] = []
+    for entry in entries:
+        if asked and entry["turn"] == newest and entry["role"] == "user":
+            continue
+        text = entry["text"]
+        low = fold(text)
+        low_bytes = low.encode("utf-8", "surrogatepass")
+        matched_forms: list[str] = []
+        matched_idx: list[int] = []
+        for j, word in enumerate(plan.words):
+            if word in low:
+                matched_forms.append(word)
+                matched_idx.append(j)
+                continue
+            if folded_pats[j] is not None:
+                m = folded_pats[j].search(low_bytes)
+                if m is not None:
+                    matched_forms.append(m.group().decode("utf-8", "surrogatepass"))
+                    matched_idx.append(j)
+                    continue
+            if split_pats[j] is not None:
+                m = split_pats[j].search(low_bytes)
+                if m is not None:
+                    matched_forms.append(m.group().decode("utf-8", "surrogatepass"))
+                    matched_idx.append(j)
+                    continue
+        if not matched_idx:
+            continue
+        matched_count = len(matched_idx)
+        any_specific = any(plan.specific(j) for j in matched_idx)
+        if not (matched_count == count or any_specific
+                or (matched_count >= 2 and matched_count / count >= APPROX_FLOOR)):
+            continue
+        forms = tuple(dict.fromkeys(matched_forms))
+        q = Query(" ".join(forms), forms)
+        every = text.count("\n") + 1
+        shown, _ = match_lines(text, q, context=0, per_page=every)
+        found += [(entry["turn"], entry["message_index"], start, end, line) for start, end, is_match, line in shown
                   if is_match]
     found.sort(key=lambda m: (m[0], m[1], m[2]), reverse=True)
     return found

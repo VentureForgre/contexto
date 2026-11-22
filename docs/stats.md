@@ -464,6 +464,7 @@ that is in neither.
 | `start_text_unavailable` | The records carried from earlier sessions could not be read for a request; the text already sent was kept. |
 | `main_records_unavailable` | A pin the main conversation made could not be recorded as the main conversation's, so a later session may not carry it. |
 | `trusted_conversations_unavailable` | The list of main conversations the proxy trusted could not be written, so a later launch may not trust this one. |
+| `meta_corrupt` | The session's `meta.json` is corrupt (not valid UTF-8 JSON or not a JSON object), so a metadata write was refused rather than silently wiping it. |
 
 A launch opens its session before it starts the proxy, so `ledger_repaired`, `pruned_while_opening`
 and `affinity_salt_unavailable` are logged just before a run's proxy start. They are counted in
@@ -490,8 +491,8 @@ Events that are **not** counted, because they happen in normal use:
   conversation in flight.
 - `resync`: `/rewind`, or an edit to an earlier message.
 - `rotation_noop`, `epoch_not_resumed`, `head_changed`, `window_minimal`, `side_room_expired`,
-  `hold_skipped`, `upstream_retry`, `stale_temp_removed`: the engine's and the proxy's ordinary
-  bookkeeping.
+  `hold_skipped`, `upstream_retry`, `stale_temp_removed`, `sessions_auto_pruned`: the engine's,
+  store's and proxy's ordinary bookkeeping.
 - `estimate_error`: the estimate was more than 10% under the real count; the next request is sized
   from the real one.
 - `pdf_allowance`, `pdf_pages_uncertain`: sizing notes about a PDF, which the launcher prints.

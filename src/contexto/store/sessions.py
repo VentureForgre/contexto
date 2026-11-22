@@ -108,10 +108,28 @@ def session_ids(home: Path) -> list[str]:
     return ids
 
 
+def _page_count(pages_dir: Path) -> int:
+    if not pages_dir.is_dir():
+        return 0
+    seen: set[str] = set()
+    try:
+        with os.scandir(pages_dir) as it:
+            for de in it:
+                if not de.name.startswith("pg_") or not de.is_file(follow_symlinks=False):
+                    continue
+                if de.name.endswith(".json"):
+                    seen.add(de.name.removesuffix(".json"))
+                elif de.name.endswith(".json.gz"):
+                    seen.add(de.name.removesuffix(".json.gz"))
+    except OSError:
+        return 0
+    return len(seen)
+
+
 def session_info(home: Path, session_id: str) -> SessionInfo:
     store = SessionStore.open_existing(home, session_id)
     created, last = _times(store.dir)
-    pages = sum(1 for p in store.pages_dir.glob("pg_*.json") if p.is_file()) if store.pages_dir.is_dir() else 0
+    pages = _page_count(store.pages_dir)
     try:
         records = len(store.ledger.records())
     except LedgerError:

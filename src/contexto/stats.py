@@ -112,6 +112,7 @@ FAULT_EVENTS = {
     "start_text_unavailable": "the records carried from earlier sessions could not be read for a request",
     "main_records_unavailable": "a pin of the main conversation could not be recorded, so it may not be carried",
     "trusted_conversations_unavailable": "the list of trusted main conversations could not be written",
+    "meta_corrupt": "the session's meta.json is corrupt, so a metadata write was refused rather than wiping it",
 }
 # Deliberately not faults. The first group are the log's ordinary records, most with a number of their
 # own; the second happen in normal use; docs/stats.md gives the reason for each.
@@ -124,7 +125,7 @@ NOT_FAULT_EVENTS = frozenset({
     "stale_temp_removed", "estimate_error", "pdf_allowance", "pdf_pages_uncertain", "cli_version_untested",
     "proxy_stop_incomplete", "carried_text_growing", "sizing_not_restored", "window_budget_warning",
     "hint_mismatch", "start_text", "start_text_changed", "project_memory", "main_record_unmatched",
-    "in_turn_batch", "in_turn_exhausted",
+    "in_turn_batch", "in_turn_exhausted", "sessions_auto_pruned",
     # contexto serve: its session records, then the events it writes to serve.log, which stats never reads.
     "serve_open", "serve_close",
     "serve_start", "serve_stop", "serve_error", "session_open", "session_open_failed", "session_close",
