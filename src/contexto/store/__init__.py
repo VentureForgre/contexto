@@ -318,8 +318,24 @@ def read_retained(data: Any) -> tuple[int, int, int, list[dict[str, Any]]] | Non
 EPOCH_VERSION = 1
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _HEX32 = re.compile(r"[0-9a-f]{32}")
-EPOCH_DIALECTS = ("anthropic", "responses")
-_CONVERSATION = re.compile(r"(?:anthropic|responses):[0-9a-f]{64}")  # rewrite.keyed(dialect, request)
+EPOCH_DIALECTS = ("anthropic", "responses", "chat_completions", "gemini")
+
+
+def _valid_epoch_dialect(v: Any) -> bool:
+    if not isinstance(v, str):
+        return False
+    if v in EPOCH_DIALECTS:
+        return True
+    from contexto.dialects import dialect_names
+
+    return v in dialect_names()
+
+
+def _valid_conversation(v: Any) -> bool:
+    if not isinstance(v, str) or ":" not in v:
+        return False
+    dialect_name, _, digest = v.partition(":")
+    return _valid_epoch_dialect(dialect_name) and bool(_HEX64.fullmatch(digest))
 
 
 def _hex64(v: Any) -> bool:
@@ -354,8 +370,8 @@ EPOCH_FIELDS: dict[str, Callable[[Any], bool]] = {
     **{name: (lambda v: isinstance(v, str)) for name in ("pinned_text", "index_text")},
     "preamble_sha256": _hex64,
     "head_fingerprint": _hex64,
-    "dialect": lambda v: v in EPOCH_DIALECTS,
-    "conversation": lambda v: isinstance(v, str) and bool(_CONVERSATION.fullmatch(v)),
+    "dialect": _valid_epoch_dialect,
+    "conversation": _valid_conversation,
     "model": lambda v: v is None or isinstance(v, str),
     "paged_carried": lambda v: isinstance(v, list) and all(_hex64(h) for h in v) and v == sorted(set(v)),
     # dataclasses.asdict(Config), kept opaque: the engine compares it for equality, so a new setting

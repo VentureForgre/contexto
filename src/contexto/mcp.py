@@ -444,6 +444,9 @@ class Server:
             message = loads_bounded(line)
         except ValueError:  # not JSON, or nested deeper than MAX_JSON_DEPTH
             return _error(None, PARSE_ERROR, "Parse error")
+        return self.handle(message)
+
+    def handle(self, message: Any) -> dict[str, Any] | None:
         if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
                 or not isinstance(message.get("method"), str)):
             if isinstance(message, dict) and "method" not in message and ("result" in message or "error" in message):
@@ -1363,8 +1366,12 @@ UNEXPECTED_ANSWER = (NOT_RUN + "the Contexto service gave an answer this server 
 SESSION_UNOPENED = (NOT_RUN + "the Contexto service named session {session} for this call, but that session cannot "
                     "be opened ({reason}). `contexto mcp --serve` never creates a session and never uses another "
                     "one. Go on without this tool, and tell the user.")
+AMBIGUOUS_ACTIVE = (NOT_RUN + "multiple sessions are open in `contexto serve` ({reason}), so this call's session "
+                    "is ambiguous. Pass an explicit session id (via Streamable HTTP `/<token>/s/<session>/mcp`, "
+                    "`X-Contexto-Session`, or `_meta[\"contexto/session\"]`).")
 _RESOLVE_REPLIES = {serveclient.NOT_RUNNING: SERVICE_NOT_RUNNING, serveclient.UNKNOWN_TOOL_USE: UNKNOWN_TOOL_USE,
-                    serveclient.TOKEN_REFUSED: TOKEN_REFUSED, serveclient.UNEXPECTED_ANSWER: UNEXPECTED_ANSWER}
+                    serveclient.TOKEN_REFUSED: TOKEN_REFUSED, serveclient.UNEXPECTED_ANSWER: UNEXPECTED_ANSWER,
+                    serveclient.AMBIGUOUS_SESSION: AMBIGUOUS_ACTIVE}
 
 
 class SessionUnavailable(Exception):
@@ -1463,12 +1470,27 @@ class ServeServer(Server):
     """
 
     def __init__(self, resolve: Callable[[str], str], sessions: Sessions, stdout: IO[str],
-                 stderr: IO[str] | None = None, *, provider: str | None = None) -> None:
+                 stderr: IO[str] | None = None, *, provider: str | None = None,
+                 resolve_session: Callable[[str], str] | None = None,
+                 resolve_active: Callable[[], str | None] | None = None,
+                 default_session: str | None = None,
+                 claude_code: bool = False) -> None:
         super().__init__(None, stdout, stderr)  # type: ignore[arg-type]  # no store until a call is resolved
         self.resolve = resolve
+        self.resolve_session = resolve_session
+        self.resolve_active = resolve_active
+        self.default_session = default_session
+        self.claude_code = claude_code
+        self._client_name: str | None = None
         self.sessions = sessions
         self.provider = provider  # provider_note() of this server's environment and directory
         self.servers: OrderedDict[str, Server] = OrderedDict()  # by session id, least recently used first
+
+    def _initialize(self, params: dict[str, Any]) -> dict[str, Any]:
+        info = params.get("clientInfo")
+        if isinstance(info, dict) and isinstance(info.get("name"), str):
+            self._client_name = info["name"]
+        return super()._initialize(params)
 
     def _tools_list(self, params: dict[str, Any]) -> dict[str, Any]:
         self.listed = True
@@ -1477,43 +1499,95 @@ class ServeServer(Server):
     def _tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
         name = params["name"]
         try:
-            server = self._session_server(params)
+            server, call_params = self._session_server(params)
         except _NotRun as exc:
             self._diag(f"{name}: no session for this call ({exc.why})")
             return _tool_error(exc.reply.format(tool=name, **exc.fields))
         except Exception as exc:  # fails this call only, as a result the model can read
             self._diag(f"{name}: internal error finding the session: {type(exc).__name__}")
             return _tool_error(TOOL_FAILED.format(tool=name, error=type(exc).__name__))
-        return server._tools_call(params)
+        return server._tools_call(call_params)
 
-    def _session_server(self, params: dict[str, Any]) -> Server:
+    def _resolve_explicit(self, key: str) -> str:
+        """Resolve an explicit session key via the service when available, else accept an existing
+        Contexto session id directly."""
+        if self.resolve_session is not None:
+            try:
+                return self.resolve_session(key)
+            except serveclient.ResolveError as exc:
+                if exc.kind != serveclient.UNKNOWN_TOOL_USE:
+                    # If the service is down, allow opening a valid existing Contexto session id directly.
+                    try:
+                        self.sessions.check(key)
+                        return key
+                    except SessionUnavailable:
+                        pass
+                    raise _NotRun(_RESOLVE_REPLIES[exc.kind], str(exc), reason=exc.reason,
+                                  switch=SWITCH_SET.format(note=self.provider) if self.provider else "") from None
+        return key
+
+    def _session_server(self, params: dict[str, Any]) -> tuple[Server, dict[str, Any]]:
+        call_params = params
         meta = params.get("_meta")
-        tool_use_id = meta.get(META_TOOL_USE) if isinstance(meta, dict) else None
-        if not isinstance(tool_use_id, str) or not 0 < len(tool_use_id) <= TOOL_USE_ID_MAX:
+        session: str | None = None
+        if meta is not None and not isinstance(meta, dict):
             raise _NotRun(NO_TOOL_USE_ID, "no tool-use id")
-        try:
-            session = self.resolve(tool_use_id)
-        except serveclient.ResolveError as exc:
-            raise _NotRun(_RESOLVE_REPLIES[exc.kind], str(exc), reason=exc.reason,
-                          switch=SWITCH_SET.format(note=self.provider) if self.provider else "") from None
+        if isinstance(meta, dict) and META_TOOL_USE in meta:
+            tool_use_id = meta.get(META_TOOL_USE)
+            if not isinstance(tool_use_id, str) or not 0 < len(tool_use_id) <= TOOL_USE_ID_MAX:
+                raise _NotRun(NO_TOOL_USE_ID, "no tool-use id")
+            try:
+                session = self.resolve(tool_use_id)
+            except serveclient.ResolveError as exc:
+                raise _NotRun(_RESOLVE_REPLIES[exc.kind], str(exc), reason=exc.reason,
+                              switch=SWITCH_SET.format(note=self.provider) if self.provider else "") from None
+        else:
+            # Fallback 1: explicit session in _meta or tool arguments (for non-Claude stdio MCP clients).
+            explicit: Any = None
+            if isinstance(meta, dict):
+                explicit = meta.get("contexto/session") or meta.get("X-Contexto-Session")
+            args = params.get("arguments")
+            if explicit is None and isinstance(args, dict):
+                for arg_key in ("contexto_session", "session"):
+                    candidate = args.get(arg_key)
+                    if isinstance(candidate, str) and candidate:
+                        explicit = candidate
+                        trimmed = {k: v for k, v in args.items() if k != arg_key}
+                        call_params = {**params, "arguments": trimmed}
+                        break
+            if isinstance(explicit, str) and 0 < len(explicit) <= TOOL_USE_ID_MAX:
+                session = self._resolve_explicit(explicit)
+            elif self.default_session and 0 < len(self.default_session) <= TOOL_USE_ID_MAX:
+                # Fallback 2: explicit X-Contexto-Session / CONTEXTO_SESSION environment variable.
+                session = self._resolve_explicit(self.default_session)
+            elif (not self.claude_code and not (self._client_name or "").lower().startswith("claude")
+                  and self.resolve_active is not None):
+                # Fallback 3: unambiguous single active session in the running service.
+                try:
+                    session = self.resolve_active()
+                except serveclient.ResolveError as exc:
+                    raise _NotRun(_RESOLVE_REPLIES[exc.kind], str(exc), reason=exc.reason,
+                                  switch=SWITCH_SET.format(note=self.provider) if self.provider else "") from None
+            if session is None:
+                raise _NotRun(NO_TOOL_USE_ID, "no tool-use id")
         try:
             server = self.servers.get(session)
             if server is not None:
                 self.sessions.check(session)
                 self.servers.move_to_end(session)
-                return server
+                return server, call_params
             store = self.sessions.open(session)
         except SessionUnavailable as exc:
             self._drop(session)
             raise _NotRun(SESSION_UNOPENED, f"session cannot be opened: {exc.reason}", reason=exc.reason,
                           session=_clip(repr(session), ECHO_CHARS)) from None
         except LockFileDamagedError as exc:  # every tool says so, naming the file, as --session mode does
-            return Server(UnopenedStore(session, exc), self.stdout, self.stderr)
+            return Server(UnopenedStore(session, exc), self.stdout, self.stderr), call_params
         server = self.servers[session] = Server(store, self.stdout, self.stderr, project_tools=False)
         server._record_listed()
         while len(self.servers) > STORE_CACHE:
             self._drop(next(iter(self.servers)))
-        return server
+        return server, call_params
 
     def _drop(self, session: str) -> None:
         """Forget ``session``'s open store, if one is kept, and release its hold on the session."""

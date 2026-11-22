@@ -106,10 +106,17 @@ def is_context_part(part: Any) -> bool:
 
 class ResponsesDialect(Dialect):
     name = "responses"
+    api_name = "responses"
     field = "input"
     media_floor = False  # D48: OpenAI prices images by tiles (85 tokens at low detail), under Claude's floor
     # D63: no in-turn paging for Codex yet. The Responses primitives go here (see contexto.inturn.MessagesInTurn).
     in_turn = None
+
+    def matches_endpoint(self, endpoint: str) -> bool:
+        return endpoint.endswith("/responses")
+
+    def is_count_endpoint(self, endpoint: str) -> bool:
+        return False
 
     def is_context_block(self, block: Any) -> bool:
         return False  # Codex sends context as separate messages, not inside the prompt message
@@ -217,6 +224,12 @@ class ResponsesDialect(Dialect):
 
     def usage_tokens(self, usage: dict) -> int:
         return usage.get("input_tokens") or 0  # cached_tokens is a subset of input_tokens
+
+    def output_tokens(self, usage: dict) -> int:
+        return usage.get("output_tokens") or 0
+
+    def prepare_upstream(self, request: dict) -> dict:
+        return request
 
     def judges_session_start(self, request: dict) -> bool:
         return True  # Codex's main requests carry no top-level tools in code mode; every request has the lead

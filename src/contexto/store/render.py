@@ -83,7 +83,8 @@ def _own_call(name: Any, code: str | None) -> bool:
 
 def own_call_ids(messages: Any) -> set[str]:
     """The ids of a turn's calls of Contexto's search, recall, and state tools (``ECHO_TOOLS``):
-    ``tool_use`` ids (Messages API) and ``call_id`` of calls (Responses API). Their inputs and results
+    ``tool_use`` ids (Messages API), ``call_id`` of calls (Responses API), Chat Completions
+    ``tool_calls`` ids, and Gemini ``functionCall`` ids/names. Their inputs and results
     are kept verbatim in the page, for recall, but search, the stub, and the index do not read them: a
     search result is a copy of older pages, and as the newest page holding it, it outranked the pages
     it quoted (D51). Pin and close calls are the model's own words and stay searchable."""
@@ -98,6 +99,27 @@ def own_call_ids(messages: Any) -> set[str]:
                     message.get("name"), _code(message.get("arguments" if kind == "function_call" else "input"))):
                 ids.add(call_id)
             continue
+        if is_chat_completions_item(message):
+            if message.get("role") == "assistant" and isinstance(message.get("tool_calls"), list):
+                for call in message["tool_calls"]:
+                    if not isinstance(call, dict):
+                        continue
+                    fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                    cid = call.get("id")
+                    if isinstance(cid, str) and _own_call(fn.get("name"), _code(fn.get("arguments"))):
+                        ids.add(cid)
+            continue
+        if is_gemini_item(message):
+            for part in message.get("parts") if isinstance(message.get("parts"), list) else []:
+                if not isinstance(part, dict):
+                    continue
+                fc = part.get("functionCall") if isinstance(part.get("functionCall"), dict) else part.get(
+                    "function_call")
+                if isinstance(fc, dict):
+                    cid = fc.get("id") or fc.get("name")
+                    if isinstance(cid, str) and _own_call(fc.get("name"), None):
+                        ids.add(cid)
+            continue
         content = message.get("content") if message.get("role") == "assistant" else None
         for block in content if isinstance(content, list) else []:
             if (isinstance(block, dict) and block.get("type") == "tool_use" and isinstance(block.get("id"), str)
@@ -107,10 +129,15 @@ def own_call_ids(messages: Any) -> set[str]:
 
 
 def is_own_item(item: Any, own: set[str]) -> bool:
-    """A Responses item that is one of ``own``'s calls or its output."""
-    call_id = item.get("call_id") if isinstance(item, dict) else None
-    return (bool(own) and isinstance(call_id, str) and call_id in own
-            and item.get("type") in (*_CALL_TYPES, *_OUTPUT_TYPES))
+    """A Responses, Chat Completions, or Gemini item that is one of ``own``'s calls or its output."""
+    if not own or not isinstance(item, dict):
+        return False
+    call_id = item.get("call_id")
+    if isinstance(call_id, str) and call_id in own and item.get("type") in (*_CALL_TYPES, *_OUTPUT_TYPES):
+        return True
+    if item.get("role") == "tool" and isinstance(item.get("tool_call_id"), str) and item["tool_call_id"] in own:
+        return True
+    return False
 
 
 def is_own_block(block: Any, own: set[str]) -> bool:
@@ -148,8 +175,8 @@ def render_page(page: dict[str, Any], searchable: bool = False) -> str:
         if not isinstance(message, dict):
             lines.append("[malformed message omitted]")
             continue
-        if is_responses_item(message):
-            item_lines = _responses_lines(turn, message)
+        if is_responses_item(message) or is_chat_completions_item(message) or is_gemini_item(message):
+            item_lines = _dialect_lines(turn, message, own if searchable else set())
             lines.extend(_blank(item_lines) if is_own_item(message, own) else item_lines)
             continue
         role = message.get("role", "unknown")
@@ -219,30 +246,74 @@ def is_responses_item(message: dict[str, Any]) -> bool:
         and (part["type"].startswith("input_") or part["type"] == "output_text") for part in content)
 
 
-def _responses_lines(turn: Any, item: dict[str, Any]) -> list[str]:
-    """One Responses item's lines (M2 B20). The item is mapped to Messages API blocks by lane A's
-    ``ResponsesDialect.retained_blocks`` (A14), the mapping the retained-window snapshot uses, and those
-    blocks are rendered by ``render_page`` itself, so a page line and an in-view line read the same:
-    message text parts as the text (Codex context sections, images, and files left out), a
-    ``function_call`` or ``custom_tool_call`` as ``tool_use <name> <sorted JSON input>``, and an output
-    as ``tool_result:`` and its text. Reasoning, other item types, and system-like items (developer
-    and system messages, context-only user messages, ``additional_tools``) render nothing."""
+def is_chat_completions_item(message: dict[str, Any]) -> bool:
+    """An OpenAI Chat Completions message whose shape differs from Anthropic Messages: ``role: "tool"``,
+    ``role: "developer"``, ``role: "function"``, or an assistant message carrying ``tool_calls`` or
+    ``reasoning_content``."""
+    if "type" in message:
+        return False
+    role = message.get("role")
+    if role in ("tool", "developer", "function"):
+        return True
+    return role == "assistant" and ("tool_calls" in message or "reasoning_content" in message)
+
+
+def is_gemini_item(message: dict[str, Any]) -> bool:
+    """A Google Gemini ``contents`` item: carries ``parts`` (a list) and no ``content`` key."""
+    return "parts" in message and "content" not in message and isinstance(message.get("parts"), list)
+
+
+def _dialect_lines(turn: Any, item: dict[str, Any], own: set[str] | None = None) -> list[str]:
+    """Render one non-Anthropic dialect item through ``as_message`` and ``render_page``."""
     message = as_message(item)
-    return [] if message is None else render_page({"turn": turn, "messages": [message]}).split("\n")
+    if message is None:
+        return []
+    rendered = render_page({"turn": turn, "messages": [message]})
+    if not own:
+        return rendered.split("\n")
+    # Blank individual own blocks (e.g., mixed assistant text + own tool_use in Chat Completions / Gemini)
+    lines = []
+    role = message.get("role", "unknown")
+    content = message.get("content")
+    if isinstance(content, list) and any(is_own_block(b, own) for b in content):
+        lines.append(f"[turn {turn}] {role}:")
+        for block in content:
+            part = render_page({"turn": turn, "messages": [{"role": role, "content": [block]}]}).split("\n")[1:]
+            lines.extend(_blank(part) if is_own_block(block, own) else part)
+        return lines
+    return rendered.split("\n")
+
+
+def _responses_lines(turn: Any, item: dict[str, Any]) -> list[str]:
+    """One Responses item's lines (M2 B20)."""
+    return _dialect_lines(turn, item)
 
 
 def as_message(message: Any) -> dict[str, Any] | None:
     """A page message as a Messages API message: a Messages API message as it is (the same object),
-    a Responses item through ``ResponsesDialect.retained_blocks`` (B20), or None for an item that is
-    not searchable (system-like, reasoning, other types). Rendering, search, and the stub all read
-    pages through this one mapping (B23), so what search matches is what the page shows."""
-    if not isinstance(message, dict) or not is_responses_item(message):
+    a Responses, Chat Completions, or Gemini item through its dialect's ``retained_blocks``, or None
+    for an item that is not searchable (system-like, reasoning, other types). Rendering, search, and
+    the stub all read pages through this one mapping (B23), so what search matches is what the page shows."""
+    if not isinstance(message, dict):
         return message
-    from contexto.codex import RESPONSES  # imported here: contexto.codex builds on the engine, which imports this
+    dialect = None
+    if is_responses_item(message):
+        from contexto.codex import RESPONSES
 
-    if RESPONSES.is_system_like(message):
+        dialect = RESPONSES
+    elif is_chat_completions_item(message):
+        from contexto.dialects.chat_completions import CHAT_COMPLETIONS
+
+        dialect = CHAT_COMPLETIONS
+    elif is_gemini_item(message):
+        from contexto.dialects.gemini import GEMINI
+
+        dialect = GEMINI
+    if dialect is None:
+        return message
+    if dialect.is_system_like(message):
         return None
-    blocks = RESPONSES.retained_blocks(message)
+    blocks = dialect.retained_blocks(message)
     return {"role": blocks[0][0], "content": [block for _, block in blocks]} if blocks else None
 
 

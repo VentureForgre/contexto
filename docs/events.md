@@ -1707,6 +1707,7 @@ ready. This is the line to find an open by, as `proxy_start` is for a run.
 - `upstream_source`: as in [`proxy_start`](#proxy_start).
 - `observe_thinking`: whether `--observe-thinking` is on.
 - `affinity_header`: whether the proxy adds a session-affinity header to requests.
+- `pages`: page files the session's store held when opened (for `contexto stats`).
 
 ### `serve_close`
 
@@ -1719,6 +1720,7 @@ new [`serve_open`](#serve_open).
   `--max-sessions` allows, and this one was the least recently used without a request in flight),
   or `shutdown` (the service stopped).
 - `requests`: how many requests the service routed to the session since it opened it.
+- `pages`: page files the session's store held when closed (for `contexto stats`).
 
 ## MCP server events
 

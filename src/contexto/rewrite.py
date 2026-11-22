@@ -500,6 +500,7 @@ class Dialect:
     ``contexto.codex.ResponsesDialect`` implements the Responses API (Codex)."""
 
     name = "anthropic"
+    api_name = "messages"
     field = "messages"
     # D48: whether media's floor cost (MediaCost.floor) is at or under what this API charges, so the ratio
     # can take it off real usage. True for Claude's pixel prices.
@@ -507,6 +508,12 @@ class Dialect:
     # D63 (rule 5): this API's in-turn paging primitives (contexto.inturn.MessagesInTurn), or None for a
     # dialect that does not page inside a turn.
     in_turn: Any = inturn.MESSAGES
+
+    def matches_endpoint(self, endpoint: str) -> bool:
+        return endpoint in (MESSAGES, COUNT_TOKENS)
+
+    def is_count_endpoint(self, endpoint: str) -> bool:
+        return endpoint == COUNT_TOKENS
 
     def is_context_block(self, block: Any) -> bool:
         return _anthropic_is_context_block(block)
@@ -572,6 +579,12 @@ class Dialect:
     def usage_tokens(self, usage: dict) -> int:
         return sum(usage.get(k) or 0
                    for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+    def output_tokens(self, usage: dict) -> int:
+        return usage.get("output_tokens") or 0
+
+    def prepare_upstream(self, request: dict) -> dict:
+        return request
 
     def judges_session_start(self, request: dict) -> bool:
         """D38: Claude Code's title, topic, and quota side requests have no tool list and no session start."""
@@ -1570,9 +1583,13 @@ class StoreCalls:
         return value
 
 
-def window_model_name(request: dict) -> str | None:
+def window_model_name(request: dict, endpoint: str | None = None) -> str | None:
     """The request's model as ``set_window`` accepts it (1 to 200 printable characters), else None."""
     model = request.get("model")
+    if not isinstance(model, str) and endpoint:
+        from contexto.dialects import model_from_endpoint
+
+        model = model_from_endpoint(endpoint)
     return model if isinstance(model, str) and 0 < len(model) <= 200 and model.isprintable() else None
 
 
@@ -1995,12 +2012,9 @@ def usage_tokens(usage: dict, dialect: Dialect | None = None) -> int:
 
 def dialect_for(endpoint: str) -> Dialect | None:
     """The dialect for a proxied endpoint, or None when the endpoint is passed through unchanged."""
-    if endpoint in (MESSAGES, COUNT_TOKENS):
-        return ANTHROPIC
-    if endpoint.endswith("/responses"):
-        from contexto.codex import RESPONSES  # imported lazily: contexto.codex builds on this module
-        return RESPONSES
-    return None
+    from contexto.dialects import dialect_for as registry_dialect_for
+
+    return registry_dialect_for(endpoint)
 
 
 def turn_id(messages: list[dict], dialect: Dialect) -> str:
@@ -2522,10 +2536,10 @@ class RewriteEngine:
             return request, headers, []
         key = keyed(dialect, request)
         state = self.states.get(key)
-        if endpoint == COUNT_TOKENS:  # never publishes a room, here or on usage (contract PR #89, 6ffc22b)
+        if dialect.is_count_endpoint(endpoint):  # never publishes a room, here or on usage (contract PR #89, 6ffc22b)
             epoch = state.epoch if state else 0
-            return count_tokens_view(request, state), headers, [{"event": "count_tokens", "epoch": epoch}]
-        restore = self._restore(window_model_name(request)) if self._restore_pending else None
+            return count_tokens_view(request, state, dialect), headers, [{"event": "count_tokens", "epoch": epoch}]
+        restore = self._restore(window_model_name(request, endpoint)) if self._restore_pending else None
         resumed: list[dict] = []
         from_record = False
         if state is None and not self._record_consumed:
@@ -2564,6 +2578,7 @@ class RewriteEngine:
         finally:
             inturn.TURN.reset(turn)
             _WINDOW_OWNER.reset(owner)
+        upstream = dialect.prepare_upstream(upstream)
         self._turn_numbers[key] = inturn.current_turn(request.get(dialect.field) or [], self.states[key], dialect)
         events[0:0] = resumed
         # The CLI's own request (rewrite() leaves it unchanged); the engine's request event stays last.
@@ -2588,7 +2603,7 @@ class RewriteEngine:
             events[-1]["cli_session"] = bool(session and session.entrypoint)
         # D70: the hints the request carried, already reduced to their fixed vocabularies.
         events[-1].update({name: value for name, value in hints._asdict().items() if value is not None})
-        if main and endpoint != COUNT_TOKENS:
+        if main and not dialect.is_count_endpoint(endpoint):
             closes: list[dict] = []
             self._close_finished_side_rooms(request.get(dialect.field) or [], dialect, closes)
             # D69 with D70: a request classed subagent, workflow or auxiliary is never the main
@@ -3255,7 +3270,9 @@ class RewriteEngine:
         its transform lock, so parsing a large or crafted PDF does not hold up every other session; the
         engine then finds the counts cached. Reads the request only, and never raises."""
         if isinstance(request, dict):
-            for field_name in ("messages", "input"):  # Messages, Responses
+            from contexto.dialects import history_fields
+
+            for field_name in history_fields():
                 prime_media(request.get(field_name))
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
@@ -3295,7 +3312,7 @@ class RewriteEngine:
         request returning their results continues it.
         """
         dialect = dialect_for(endpoint)
-        if dialect is None or endpoint == COUNT_TOKENS:
+        if dialect is None or dialect.is_count_endpoint(endpoint):
             return []
         key = keyed(dialect, request)
         state = self.states.get(key)
@@ -3383,13 +3400,13 @@ class RewriteEngine:
                 # this response's output (thinking and tool_use are passed back in the loop). The proxy
                 # calls this at message_delta, inside the stream hold (PR #74), so the room lands before
                 # any held tool_use reaches the CLI.
-                output = usage.get("output_tokens") or 0
+                output = dialect.output_tokens(usage)
                 messages = request.get(dialect.field) or []
                 # Main moves only at a request (D50): a response arriving after another conversation's
                 # request took over publishes a side room, and main_changed is logged where it moves.
                 if key == self._main:
                     calls.set_turn_room(turn_id(messages, dialect), self.turn_room(real + output))
-                    state = publish_window(calls, state, self.estimator, window_model_name(request))
+                    state = publish_window(calls, state, self.estimator, window_model_name(request, endpoint))
                 elif callable(getattr(self.store, "set_side_room", None)):
                     # D40: this conversation's own room, from its own usage, for the tool calls this
                     # response releases; every call is charged against it and main's room alike.
