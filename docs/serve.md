@@ -116,7 +116,8 @@ claude --settings ~/.contexto/serve-settings.json
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:7837/<token>",
-    "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"
+    "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
+    "CONTEXTO_HINT_HEADERS": "stripped"
   },
   "permissions": {
     "allow": [
@@ -341,8 +342,9 @@ the check is outside both limits for the rest of its life, so a long streamed re
 - **A service already runs for this home.** One line naming its port and process id, exit 1.
 - **Upstream is the service itself.** Refused, as described under [Upstream](#upstream).
 - **Cloud-provider switches.** Claude Code with `CLAUDE_CODE_USE_BEDROCK`,
-  `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE` or
-  `CLAUDE_CODE_USE_ANTHROPIC_AWS` set sends nothing to `ANTHROPIC_BASE_URL` (measured on 2.1.322),
+  `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`,
+  `CLAUDE_CODE_USE_ANTHROPIC_AWS` or `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` set sends nothing to
+  `ANTHROPIC_BASE_URL` (measured on 2.1.322 and 2.1.318),
   so such a client never reaches the service. The service cannot see its clients' environments. It
   warns, at start and in `--print-settings`, when the check `contexto run claude` refuses a launch
   by finds one of them on: in its own environment or in a Claude Code settings file read from the
@@ -356,10 +358,11 @@ the check is outside both limits for the rest of its life, so a long streamed re
 
 ## Limits
 
-- No status line. Called by Claude Code, `contexto statusline` shows nothing for a session the
-  service has open. Given the session with `--session`, it prints its numbers with the bound
-  `contexto stats` gives, which for a session a `contexto run` launch made is the last launch's, not
-  the service's (see [Status line](statusline.md#calling-it-from-your-own-status-line)).
+- Status line requires your own `statusLine` script calling `contexto statusline`: `--print-settings`
+  does not inject a `statusLine` command, because clients may already have one. Once called with
+  Claude Code's `session_id` on stdin (or `--session`), `contexto statusline` resolves live
+  `contexto serve` sessions and prints their current prompt, service bound, pages, recalls and
+  searches (see [Status line](statusline.md#calling-it-from-your-own-status-line)).
 - Loopback only, for one user. The service is not meant to be shared between accounts on a machine
   or reached from another machine.
 - Claude Code's Messages API only. A Codex `/responses` request, a Chat Completions request, and

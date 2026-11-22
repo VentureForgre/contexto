@@ -90,13 +90,18 @@ The session log says what was decided, in the `launch` event's `statusline` fiel
 | Value | Meaning |
 |---|---|
 | `added` | Contexto's status line is in the settings it passed. |
-| `off:flag`, `off:env` | You turned it off with `--no-statusline` or `CONTEXTO_NO_STATUSLINE`. |
+| `off:flag`, `off:env`, `off:config` | You turned it off with `--no-statusline`, `CONTEXTO_NO_STATUSLINE`, or `statusline = false` in `config.toml`. |
 | `own:<kind>` | A settings file has a `statusLine`. `<kind>` names the highest-ranking one: `managed`, `main-checkout-local`, `local`, `project` or `user`. |
-| `unreadable:<kind>` | A settings file exists and could not be read as a JSON object. |
+| `unreadable:<kind>` | A settings file exists and could not be read cleanly by `read_settings_file`. |
 | `hooks_off:<kind>` | A settings file sets `disableAllHooks`. |
 | `managed_hooks_only` | Managed settings allow only managed hooks. |
 | `unsafe_path` | A path in the command holds `${`. Claude Code expands that in an MCP config (D55). It did not in a status line command on 2.1.318 and 2.1.322, but a path cannot be escaped if a later version does. |
 | `error` | Deciding failed. Nothing is added, and the launch goes on. |
+
+When Contexto skips adding its status line for any reason other than an explicit opt-out (`own:*`,
+`unreadable:*`, `hooks_off:*`, `managed_hooks_only`, `unsafe_path`, or `error`), `contexto run
+claude` also prints a one-line notice on stderr (and `contexto doctor` reports it under its
+`statusline` check).
 
 To see it: `grep '"event":"launch"' ~/.contexto/sessions/ID/log.jsonl`.
 
@@ -144,13 +149,11 @@ order:
    one it served before. If two open launches serve
    the same Claude Code session, either could be the one asking, so nothing is printed.
 
-The status line covers `contexto run` launches only. When the JSON on stdin names a Claude Code
-session, a session that [`contexto serve`](serve.md) has opened since its last `contexto run` launch
-prints nothing in steps 2 and 3. Named by `--session`, or by `$CONTEXTO_SESSION` with no session on
-stdin (run by hand), it prints that session's numbers with the bound `contexto stats` gives: for a
-session a launch made, the last launch's bound, not the service's `--bound`; for a session only the
-service made, none until a request goes over the service's bound or the bound proves too small, and
-the service's after that.
+The status line covers both `contexto run` launches and live [`contexto serve`](serve.md) sessions.
+When the JSON on stdin names a Claude Code session served by `contexto serve`, `contexto statusline`
+uses the service's `serve_open` record for the session's bound and start time, so your own status
+line script shows the current prompt, bound, page count, recalls and searches for `serve` clients as
+well.
 
 There is no fourth step. If none of the three names a session, nothing is printed. In a plain
 `claude` session that Contexto is not serving, that is the right answer: a line with another

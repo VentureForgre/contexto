@@ -30,6 +30,9 @@ class SessionInfo:
     records: int | None  # None when the ledger cannot be read
     last_activity: str
     size_bytes: int  # disk space the session directory uses, symlinks not followed
+    cli: str | None = None  # "claude", "codex", or None when unlogged
+    peak_tokens: int | None = None  # peak prompt tokens (measured, else estimate), or None
+    faults: int = 0  # total fault events in log.jsonl
 
 
 def _iso(ts: float) -> str:
@@ -108,6 +111,18 @@ def session_ids(home: Path) -> list[str]:
     return ids
 
 
+def _log_highlights(home: Path, session_id: str) -> tuple[str | None, int | None, int]:
+    """``(cli, peak_tokens, faults)`` from the session's ``log.jsonl`` via ``stats.session_stats``
+    (log-only, never opens pages or ledger)."""
+    from contexto.stats import session_stats
+
+    try:
+        out = session_stats(home, session_id, store=False)
+    except Exception:
+        return None, None, 0
+    return out.get("cli"), out["prompt"]["peak_tokens"], int(out["faults"]["total"] or 0)
+
+
 def session_info(home: Path, session_id: str) -> SessionInfo:
     store = SessionStore.open_existing(home, session_id)
     created, last = _times(store.dir)
@@ -116,7 +131,9 @@ def session_info(home: Path, session_id: str) -> SessionInfo:
         records = len(store.ledger.records())
     except LedgerError:
         records = None
-    return SessionInfo(session_id, _iso(created), pages, records, _iso(last), disk_usage(store.dir))
+    cli_name, peak_tokens, fault_count = _log_highlights(home, session_id)
+    return SessionInfo(session_id, _iso(created), pages, records, _iso(last), disk_usage(store.dir),
+                       cli=cli_name, peak_tokens=peak_tokens, faults=fault_count)
 
 
 def list_sessions(home: Path) -> list[SessionInfo]:

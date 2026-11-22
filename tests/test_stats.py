@@ -163,6 +163,7 @@ def test_stats_reads_a_session_s_numbers_from_its_log_and_store(tmp_path):
                             "read_share": round(270_000 / 368_210, 4)}
     assert out["bytes"] == {"cli_sent": 1_940_000, "forwarded": 1_470_000,
                             "forwarded_share": round(1_470_000 / 1_940_000, 4),
+                            "saved": 470_000, "saved_share": round(470_000 / 1_940_000, 4),
                             "largest_cli_request": 700_000, "largest_forwarded_request": 590_000}
     assert out["compaction"] == {"seen": 0, "detectable": True, "reasons": [], "cli_versions": ["2.1.318"]}
     assert out["run_seconds"] == 3_725 and out["log"]["ignored_values"] == 0
@@ -1055,8 +1056,8 @@ def test_the_paths_stats_counts_are_the_proxy_s():
 
 DOCUMENTED = {
     "": ["version", "session", "scope", "runs", "cli", "bound", "started", "ended", "span_seconds", "run_seconds",
-         "log", "requests", "prompt", "over_bound", "paging", "pages", "tools", "pins", "cache", "bytes", "compaction",
-         "faults"],
+         "log", "requests", "prompt", "over_bound", "paging", "pages", "tools", "pins", "cache", "tokens", "cost",
+         "bytes", "compaction", "faults"],
     "log": ["missing", "lines", "unreadable_lines", "ignored_values"],
     "requests": ["model", "main", "side", "with_usage", "failed", "status", "aborted", "cut_short", "not_transformed",
                  "rejected_encoding", "in_flight_at_stop", "count_tokens", "other"],
@@ -1069,7 +1070,10 @@ DOCUMENTED = {
     "pins": ["readable", "active_records", "open_obligations"],
     "cache": ["requests", "unreported_requests", "input_tokens", "cache_read_tokens", "cache_write_tokens",
               "read_share"],
-    "bytes": ["cli_sent", "forwarded", "forwarded_share", "largest_cli_request", "largest_forwarded_request"],
+    "tokens": ["input", "output", "cache_read", "cache_write", "saved_estimate"],
+    "cost": ["currency", "estimated_usd", "priced_requests", "unpriced_requests", "unpriced_models", "by_model"],
+    "bytes": ["cli_sent", "forwarded", "forwarded_share", "saved", "saved_share",
+              "largest_cli_request", "largest_forwarded_request"],
     "compaction": ["seen", "detectable", "reasons", "cli_versions"],
     "faults": ["total", "events", "degraded", "store_errors", "messages"],
     "faults.degraded": ["entered", "left", "now", "since", "unpaged_requests", "largest_unpaged_request_bytes"],
@@ -1417,3 +1421,58 @@ def test_a_log_whose_requests_all_carry_a_request_class_can_show_a_compaction_on
     # The header does not stand in for the session id the engine needs.
     write_log(tmp_path, "h3", [*launch(0), hinted(request(1, events=(version("2.1.322"),), cli_session=False))])
     assert session_stats(tmp_path, "h3")["compaction"]["reasons"] == ["no_session_id"]
+
+
+def test_stats_tracks_output_tokens_bytes_saved_and_estimated_usd_cost(tmp_path):
+    """Cost, output-token, and cache observability across Claude 4.x/5.x, Codex, and unknown models."""
+    r1 = request(1, tokens=55_000, cache_read=40_000, original=100_000, sent=60_000,
+                 model="claude-sonnet-4-6")
+    r1["usage"] = {"input_tokens": 10_000, "cache_read_input_tokens": 40_000,
+                   "cache_creation_input_tokens": 5_000, "output_tokens": 2_000}
+    r2 = request(2, tokens=20_000, cache_read=10_000, original=50_000, sent=30_000, model="gpt-5.3-codex",
+                 api="responses")
+    r2["usage"] = {"input_tokens": 20_000, "output_tokens": 1_000,
+                   "input_tokens_details": {"cached_tokens": 10_000}}
+    r3 = request(3, tokens=5_000, original=10_000, sent=10_000, model="unknown-future-model-99")
+    r3["usage"]["output_tokens"] = 500
+    write_log(tmp_path, "cost1", [*launch(0), r1, r2, r3, *stop(10)])
+
+    out = session_stats(tmp_path, "cost1")
+    assert out["bytes"]["cli_sent"] == 160_000
+    assert out["bytes"]["forwarded"] == 100_000
+    assert out["bytes"]["saved"] == 60_000
+    assert out["bytes"]["saved_share"] == pytest.approx(60_000 / 160_000)
+    # Total prompt input tokens: 55k (r1) + 20k (r2) + 5k (r3) = 80k
+    assert out["tokens"]["input"] == 80_000
+    assert out["tokens"]["cache_read"] == 50_000
+    assert out["tokens"]["cache_write"] == 5_000
+    assert out["tokens"]["output"] == 3_500
+    assert out["tokens"]["saved_estimate"] == round(60_000 / 3.5)
+    cost = out["cost"]
+    assert cost["currency"] == "USD"
+    assert cost["priced_requests"] == 2
+    assert cost["unpriced_requests"] == 1
+    assert cost["unpriced_models"] == ["unknown-future-model-99"]
+    assert cost["estimated_usd"] > 0
+    assert set(cost["by_model"]) == {"claude-sonnet-4-6", "gpt-5.3-codex", "unknown-future-model-99"}
+    assert cost["by_model"]["unknown-future-model-99"]["estimated_usd"] is None
+
+    full = "\n".join(render(out))
+    assert "tokens" in full and "output" in full
+    assert "cost" in full and "$" in full and "unpriced: unknown-future-model-99" in full
+    assert "saved" in full
+
+    brief = "\n".join(render(out, brief=True))
+    assert "tokens" in brief and "cost" in brief
+
+
+def test_stats_reads_serve_open_cli_and_bound(tmp_path):
+    write_log(tmp_path, "srv1", [
+        {"ts": ts(0), "event": "serve_open", "cli": "claude", "config": {"bound": 90_000}},
+        request(1, tokens=12_000, model="claude-haiku-4-5"),
+    ])
+    out = session_stats(tmp_path, "srv1")
+    assert out["cli"] == "claude"
+    assert out["bound"] == 90_000
+    assert out["runs"] == 1
+    assert out["cost"]["priced_requests"] == 1

@@ -273,6 +273,34 @@ When only some requests reported the field, the text says how many the share cov
 `70% of input tokens read from cache (measured, over the 1 of 3 requests with usage that reported a
 cache field)`.
 
+### `tokens`
+
+Measured input, output and cache token totals across `requests.with_usage`, plus an estimate of
+input tokens saved by Contexto.
+
+| Key | Meaning |
+|---|---|
+| `tokens.input` | Total measured input tokens across all model requests with usage. |
+| `tokens.output` | Total measured `output_tokens` across all model requests with usage. |
+| `tokens.cache_read` | Total measured cache-read input tokens. |
+| `tokens.cache_write` | Total measured cache-creation input tokens. |
+| `tokens.saved_estimate` | Estimated input tokens saved across requests (`bytes.saved / 3.5`), 0 when no bytes were saved. |
+
+### `cost`
+
+Estimated USD spend computed per model request from the published prices in
+`src/contexto/bench/data/prices.json`. Unknown or unrecorded models are counted as unpriced rather
+than raising an error.
+
+| Key | Meaning |
+|---|---|
+| `cost.currency` | Always `"USD"`. |
+| `cost.estimated_usd` | Estimated total spend in USD over `cost.priced_requests`, or `null` when no request had a priced model. |
+| `cost.priced_requests` | Model requests with usage whose model was matched in the price table. |
+| `cost.unpriced_requests` | Model requests with usage whose model was missing or unknown. |
+| `cost.unpriced_models` | Sorted unique unknown model ids encountered. |
+| `cost.by_model` | Map from model id (or `"unknown"`) to `{requests, input_tokens, output_tokens, estimated_usd}`. |
+
 ### `bytes`
 
 Measured by the proxy, over model requests.
@@ -282,6 +310,8 @@ Measured by the proxy, over model requests.
 | `bytes.cli_sent` | The sum of the request bodies the CLI sent (decoded, if the CLI compressed them). |
 | `bytes.forwarded` | The sum of the bodies Contexto sent upstream. |
 | `bytes.forwarded_share` | `forwarded / cli_sent`, or `null`. |
+| `bytes.saved` | `max(0, cli_sent - forwarded)`, bytes Contexto kept off the wire. |
+| `bytes.saved_share` | `saved / cli_sent`, or `null`. |
 | `bytes.largest_cli_request`, `bytes.largest_forwarded_request` | The largest single body on each side. |
 
 The CLI resends its whole history with each request, so `cli_sent` grows with the square of the

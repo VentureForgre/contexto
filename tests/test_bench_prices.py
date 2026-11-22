@@ -30,7 +30,10 @@ def request(uncached=0, cache_write=0, cache_read=0, output=0) -> dict:
 
 def test_the_shipped_table_has_the_published_prices_with_source_and_date():
     table = prices.load()
-    assert prices.models(table) == list(PUBLISHED)
+    names = prices.models(table)
+    assert names[:len(PUBLISHED)] == list(PUBLISHED)
+    assert {"claude-sonnet-4-5", "claude-opus-4-6", "claude-haiku-4-5",
+            "gpt-5-codex", "gpt-5.2-codex", "o3"} <= set(names)
     assert (table["currency"], table["unit"], table["source"], table["accessed"]) == (
         "USD", "per million tokens", SOURCE, "2026-11-12")
     for model, rows in PUBLISHED.items():
@@ -117,12 +120,15 @@ def test_cost_ignores_fields_it_does_not_price():
 
 def test_an_unknown_model_is_an_error_that_lists_the_known_ones():
     with pytest.raises(prices.PriceError) as exc:
-        prices.cost([request(uncached=1)], "claude-opus-4-1")
+        prices.cost([request(uncached=1)], "claude-unknown-9-9")
     text = str(exc.value)
-    assert "no price for model 'claude-opus-4-1'" in text and "--prices FILE" in text
+    assert "no price for model 'claude-unknown-9-9'" in text and "--prices FILE" in text
     assert "claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5, claude-fable-5-2" in text
     with pytest.raises(prices.PriceError, match="no price for model 'x'"):
         prices.cost([], "x")  # an error even when there is nothing to price
+    assert prices.resolve_optional("claude-unknown-9-9") is None
+    assert prices.try_request_cost(request(uncached=100), "claude-unknown-9-9") is None
+    assert prices.resolve_optional("gpt-4.1-2025-04-14") == "gpt-4.1"
 
 
 def test_a_dated_snapshot_id_is_priced_as_its_model():

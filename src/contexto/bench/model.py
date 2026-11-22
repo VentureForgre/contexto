@@ -319,15 +319,31 @@ class Script:
             if 0 <= d.turn < n and (not d.label.strip() or f"DECISION {d.label}:" not in self.turns[d.turn]):
                 problems.append(f"decisions: the label of {where} is not asked for in that turn, so no reply "
                                 "can be judged right")
+            elif 0 <= d.turn < n and d.probe in by_id and d.value == by_id[d.probe].answer:
+                from contexto.bench.script import decision_reply_ok
+
+                try:
+                    if not decision_reply_ok(self, d.turn, d.reply):
+                        problems.append(
+                            f"decisions: the label {d.label!r} of {where} cannot be matched by the reply rule")
+                except ValueError:
+                    pass
         problems += [f"decisions: decision turn {i + 1} has no decision" for i, kind in enumerate(self.kinds)
                      if kind == "decision" and i not in seen]
 
+        folded_paths: dict[str, str] = {}
         for path in self.files:
             parts = path.split("/")
             above = next((a for a in ("/".join(parts[:i]) for i in range(1, len(parts))) if a in self.files), None)
             problem = _path_problem(path) or (f"is below the file {above!r}" if above else None)
             if problem:
                 problems.append(f"files: {path!r} {problem}")
+            else:
+                folded = path.casefold()
+                if folded in folded_paths:
+                    problems.append(f"files: {path!r} clashes by case with {folded_paths[folded]!r}")
+                else:
+                    folded_paths[folded] = path
         for path in self.reads:
             problem = _path_problem(path)
             if problem:
@@ -342,6 +358,11 @@ class Script:
             problems.append("reads: the toolloop turn reads no files")
         elif self.reads and not loops:
             problems.append("reads: files are read but no turn is a toolloop turn")
+        elif loops == 1 and self.reads:
+            loop_turn = self.turns[self.kinds.index("toolloop")]
+            listed = tuple(line.strip() for line in loop_turn.splitlines() if line.strip().startswith(f"{FILE_DIR}/"))
+            if listed != self.reads:
+                problems.append("turns: the toolloop turn's path list differs from reads")
         if problems:
             raise ValueError(f"not a benchmark script: {'; '.join(problems[:5])}")
 
@@ -390,6 +411,8 @@ def _path_problem(path: str) -> str | None:
         return "is empty"
     if any(ord(c) < 0x20 for c in path):  # NUL fails the write; a newline breaks the tool-loop turn's list
         return "holds a control character"
+    if not path.isprintable():
+        return "holds a non-printable character"
     if "\\" in path:
         return "holds a backslash"
     if path.startswith("/") or re.match(r"^[A-Za-z]:", path):

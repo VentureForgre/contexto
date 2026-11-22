@@ -138,6 +138,7 @@ from urllib.parse import urlsplit
 
 from contexto import __version__, servecontract
 from contexto.canonical import loads_bounded
+from contexto.config import ConfigError, FileConfig, load_config
 from contexto.hints import FORWARDED, HINT_HEADERS_KEY, HINT_MARKER_KEY, STRIPPED
 from contexto.launcher import (
     CLAUDE_SESSION_HEADER,
@@ -145,6 +146,7 @@ from contexto.launcher import (
     DEFAULT_BOUND,
     EXIT_PROXY,
     EXIT_USAGE,
+    IN_TURN_PAGING_ENV,
     LaunchError,
     LaunchOptions,
     NoticeLog,
@@ -1673,21 +1675,24 @@ class _StopSignals:
         return self.received or signal.SIGTERM
 
 
-def _chosen_port(args: Any, home: Path) -> int:
+def _chosen_port(args: Any, home: Path, config: FileConfig | None = None) -> int:
     """``--port`` when given; else the port of the service that runs for this home (it holds the
-    lock); else the default."""
+    lock); else ``[serve].port`` in ``config.toml``; else the default."""
     if args.port is not None:
         return args.port
     state = running_state(home)
-    return state["port"] if state is not None else DEFAULT_PORT
+    if state is not None:
+        return state["port"]
+    cfg_port = config.serve.port if config is not None else None
+    return cfg_port if cfg_port is not None else DEFAULT_PORT
 
 
-def print_settings(args: Any, home: Path, stdout, stderr) -> int:
+def print_settings(args: Any, home: Path, stdout, stderr, config: FileConfig | None = None) -> int:
     token = ensure_token(home)
     found = cloud_provider(cwd=Path.cwd())
     if found is not None:
         print(f"contexto serve: {cloud_provider_warning(found)}", file=stderr)
-    print(json.dumps(settings_payload(_chosen_port(args, home), token), indent=2), file=stdout)
+    print(json.dumps(settings_payload(_chosen_port(args, home, config), token), indent=2), file=stdout)
     return 0
 
 
@@ -1761,43 +1766,73 @@ def status(home: Path, stdout) -> int:
     return 0
 
 
-def serve(args: Any, home: Path, stderr) -> int:
+def serve(args: Any, home: Path, stderr, config: FileConfig | None = None) -> int:
     signals = _StopSignals()
     signals.install()
     try:
-        return _serve(args, home, stderr, signals)
+        return _serve(args, home, stderr, signals, config=config)
     finally:
         signals.restore()
 
 
-def serve_options(args: Any, env: dict[str, str] | None = None) -> LaunchOptions:
-    """The launch options every session of the service gets. D63's in-turn paging is on unless
-    ``--no-in-turn-paging`` is given or ``CONTEXTO_IN_TURN_PAGING`` turns it off, as for ``contexto run``."""
-    return LaunchOptions(bound=args.bound, upstream=args.upstream, observe_thinking=args.observe_thinking,
-                         allow_large_bound=args.allow_large_bound, window_fraction=args.window_fraction,
-                         headroom_floor=args.headroom_floor,
-                         in_turn_paging=in_turn_paging(getattr(args, "no_in_turn_paging", False), env))
+def serve_options(args: Any, env: dict[str, str] | None = None,
+                  config: FileConfig | None = None) -> LaunchOptions:
+    """The launch options every session of the service gets. Precedence: explicit CLI flags >
+    environment variables > ``config.toml`` (``[serve]`` then top-level) > built-in defaults."""
+    active_env = os.environ if env is None else env
+    cfg = config if config is not None else FileConfig()
+
+    bound = args.bound if args.bound is not None else (
+        cfg.serve_value("bound") if cfg.serve_value("bound") is not None else DEFAULT_BOUND)
+    allow_large = bool(getattr(args, "allow_large_bound", False)) or bool(cfg.serve_value("allow_large_bound") or False)
+    wf = args.window_fraction if args.window_fraction is not None else cfg.serve_value("window_fraction")
+    hf = args.headroom_floor if args.headroom_floor is not None else cfg.serve_value("headroom_floor")
+    obs = bool(getattr(args, "observe_thinking", False)) or bool(cfg.serve_value("observe_thinking") or False)
+
+    itp_env_set = bool((active_env.get(IN_TURN_PAGING_ENV) or "").strip())
+    if getattr(args, "no_in_turn_paging", False):
+        itp = False
+    elif getattr(args, "in_turn_paging_on", False):
+        itp = True
+    elif itp_env_set:
+        itp = in_turn_paging(False, dict(active_env))
+    elif cfg.serve_value("in_turn_paging") is not None:
+        itp = bool(cfg.serve_value("in_turn_paging"))
+    else:
+        itp = True
+
+    return LaunchOptions(bound=bound, upstream=args.upstream, observe_thinking=obs,
+                         allow_large_bound=allow_large, window_fraction=wf, headroom_floor=hf,
+                         in_turn_paging=itp, config_upstream=cfg.serve_value("upstream"))
 
 
-def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
-    options = serve_options(args)
+def _serve(args: Any, home: Path, stderr, signals: _StopSignals, config: FileConfig | None = None) -> int:
+    cfg = config if config is not None else FileConfig()
+    options = serve_options(args, config=cfg)
     check_options(options)
-    if args.max_sessions < 1:
-        raise ServeError(f"--max-sessions must be at least 1, got {args.max_sessions}", EXIT_USAGE)
-    if not args.idle_minutes > 0:
-        raise ServeError(f"--idle-minutes must be above 0, got {args.idle_minutes}", EXIT_USAGE)
+    max_sessions = (args.max_sessions if args.max_sessions is not None
+                    else (cfg.serve.max_sessions if cfg.serve.max_sessions is not None else DEFAULT_MAX_SESSIONS))
+    idle_minutes = (args.idle_minutes if args.idle_minutes is not None
+                    else (cfg.serve.idle_minutes if cfg.serve.idle_minutes is not None else DEFAULT_IDLE_MINUTES))
+    forward_hints = (bool(getattr(args, "forward_hint_headers", False))
+                     or bool(cfg.serve.forward_hint_headers or False))
+    if max_sessions < 1:
+        raise ServeError(f"--max-sessions must be at least 1, got {max_sessions}", EXIT_USAGE)
+    if not idle_minutes > 0:
+        raise ServeError(f"--idle-minutes must be above 0, got {idle_minutes}", EXIT_USAGE)
     files = SettingsFiles()  # each settings file read once, for the provider check and the upstream
     provider = cloud_provider(cwd=Path.cwd(), files=files)
-    upstream = resolve_upstream(args.upstream, cwd=Path.cwd(), files=files)
+    upstream = resolve_upstream(args.upstream, cwd=Path.cwd(), files=files, config_upstream=options.config_upstream)
     token = ensure_token(home)
-    port = DEFAULT_PORT if args.port is None else args.port
+    port = (args.port if args.port is not None
+            else (cfg.serve.port if cfg.serve.port is not None else DEFAULT_PORT))
     check_upstream_loop(upstream, port, token)  # first: a malformed URL's error can quote part of it
     check_upstream_url(upstream)
     try:
         service = ServeService(home, upstream, token, config=engine_config(options),
-                               observe_thinking=options.observe_thinking, max_sessions=args.max_sessions,
-                               idle_s=args.idle_minutes * 60, stderr=stderr,
-                               forward_hint_headers=args.forward_hint_headers)
+                               observe_thinking=options.observe_thinking, max_sessions=max_sessions,
+                               idle_s=idle_minutes * 60, stderr=stderr,
+                               forward_hint_headers=forward_hints)
     except ValueError as exc:
         raise ServeError(f"invalid upstream (from {upstream.source}): {exc}", EXIT_USAGE) from None
     try:
@@ -1834,15 +1869,19 @@ def run(args: Any, *, stdout=None, stderr=None) -> int:
     try:
         home = contexto_home()
         check_home(home)
+        cfg = load_config(home)
         if args.print_settings:
-            return print_settings(args, home, stdout, stderr)
+            return print_settings(args, home, stdout, stderr, config=cfg)
         if args.print_mcp_config:
             return print_mcp_config(home, stdout)
         if args.rotate_token:
             return rotate(home, stdout)
         if args.status:
             return status(home, stdout)
-        return serve(args, home, stderr)
+        return serve(args, home, stderr, config=cfg)
+    except ConfigError as exc:
+        print(f"contexto serve: {exc}", file=stderr)
+        return EXIT_USAGE
     except (ServeError, LaunchError) as exc:
         print(f"contexto serve: {exc}", file=stderr)
         return exc.code

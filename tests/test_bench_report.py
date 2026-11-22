@@ -140,7 +140,7 @@ def test_tokens_sizes_and_cost_per_arm(tmp_path):
         assert block["max_input"] == max(sizes)
         assert block["over_bound"] == sum(1 for size in sizes if size > SMALL_BOUND)
         # The cost at every model of the table, the run's own model first.
-        assert list(block["cost"]) == [MODEL, "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2"]
+        assert list(block["cost"]) == [MODEL, *(m for m in prices.models(table) if m != MODEL)]
         for model, usd in block["cost"].items():
             assert usd == pytest.approx(prices.cost(requests, model, "5m", table))
             assert block["cost_per_unit"][model] == pytest.approx(usd / 3)

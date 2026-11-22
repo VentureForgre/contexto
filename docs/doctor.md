@@ -6,7 +6,8 @@ line per check. Run it in the project where you would run `contexto run claude` 
 from that project's `.claude/` settings files.
 
 ```sh
-contexto doctor          # one line per check
+contexto doctor          # one line per check (zero network)
+contexto doctor --live   # also verify upstream reachability, TLS and auth over the network
 contexto doctor --json   # the same results as JSON
 ```
 
@@ -90,11 +91,12 @@ check: the launcher reaches its refusal with it.
 
 ## What doctor never does
 
-- **No network request.** Doctor reports the upstream Contexto would use and does not contact it,
-  so it cannot tell you whether the upstream is reachable or the key is valid. The only processes it
-  starts are `claude --version` and `codex --version` (as `contexto run` does) and Contexto's own
-  MCP server, which it talks to over stdin and stdout. What `claude --version` and `codex --version`
-  do is up to those CLIs.
+- **No network request by default.** Plain `contexto doctor` reports the upstream Contexto would use
+  and does not contact it. Pass `--live` when you want doctor to make a lightweight network probe to
+  verify upstream reachability, TLS, and auth. The only processes plain doctor starts are
+  `claude --version` and `codex --version` (as `contexto run` does) and Contexto's own MCP server,
+  which it talks to over stdin and stdout. What `claude --version` and `codex --version` do is up to
+  those CLIs.
 - **No key helper is run.** A helper is your command and may have side effects, and for Codex a
   project's `apiKeyHelper` counts only in a folder Claude Code has recorded as trusted. Doctor says
   where a helper is configured and that it was not run, so it cannot tell you whether the helper
@@ -344,9 +346,12 @@ as the text form. Stopped before that (Ctrl+C, SIGTERM, SIGHUP), it prints nothi
 - `schema` is `1`. It changes only if a field below is removed or changes meaning; new fields may
   be added without changing it.
 - `ok` is `true` when no check failed, which is when the exit code is 0.
-- `checks` always holds the eleven checks in this order: `python`, `claude`, `codex`, `settings`,
-  `claude-upstream`, `codex-upstream`, `claude-key`, `codex-key`, `store`, `mcp`, `provider`.
-- `status` is `pass`, `warn`, `fail` or `skip`.
+- `checks` holds the checks in this order: `python`, `claude`, `codex`, `config`, `settings`,
+  `claude-upstream`, `codex-upstream`, `claude-key`, `codex-key`, `store`, `serve`, `statusline`,
+  `mcp`, `provider` (plus `live-upstream` when `--live` is passed).
+- `status` is `pass`, `warn`, `fail` or `skip`. When one CLI is usable and the other is simply not
+  installed on `PATH`, the uninstalled optional CLI is reported as `skip` (0 warnings for a clean
+  Claude-only install).
 - `summary` is the line the text form prints. Its wording is for people and may change; read
   `status` and `details` in scripts.
 - `action` is the "what to do" line, a string for `warn` and `fail` and `null` otherwise.

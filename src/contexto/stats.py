@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import errno
 import json
+import math
 import os
 import re
 import stat
@@ -47,6 +48,35 @@ from contexto.paths import session_dir
 from contexto.private import open_regular
 
 STATS_VERSION = 1  # the ``--json`` shape; raised only when a documented key changes meaning or goes
+SAVED_BYTES_PER_TOKEN = 3.5  # seed text ratio used to estimate input tokens saved from bytes saved
+_PRICE_TABLE: dict[str, Any] | None = None
+
+
+def _price_table() -> dict[str, Any] | None:
+    """Lazily load and cache the shipped price table so ``statusline`` never pays for it."""
+    global _PRICE_TABLE
+    if _PRICE_TABLE is None:
+        try:
+            from contexto.bench import prices
+
+            _PRICE_TABLE = prices.load()
+        except Exception:
+            return None
+    return _PRICE_TABLE
+
+
+def _try_price(model: str | None, uncached: int, cache_write: int, cache_read: int, output: int) -> float | None:
+    table = _price_table()
+    if table is None or not model:
+        return None
+    try:
+        from contexto.bench import prices
+
+        return prices.try_request_cost(
+            {"uncached": uncached, "cache_write": cache_write, "cache_read": cache_read, "output": output},
+            model, "5m", table)
+    except Exception:
+        return None
 
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
@@ -270,7 +300,7 @@ def log_values(directory: Path, start: int = 0) -> Iterator[Any]:
 
 
 HELD_LINES = 64  # lines kept between one run's exit and the next proxy start; a launch writes a few
-_RUN_MARK = re.compile(rb'"event":\s*"(?:proxy_start|launch)"')
+_RUN_MARK = re.compile(rb'"event":\s*"(?:proxy_start|serve_open|launch)"')
 _LOOK_BACK_BYTES = 1 << 16
 
 
@@ -307,10 +337,10 @@ def _run_begins(fd: int, start_line: int) -> int:
                 continue
             value = None if _too_long(line) else _line_value(line)
             if isinstance(value, dict):
-                if value.get("event") == "exit":
+                if value.get("event") in ("exit", "serve_close"):
                     return begin
                 held += 1
-                if value.get("event") == "proxy_start" or held > HELD_LINES:
+                if value.get("event") in ("proxy_start", "serve_open") or held > HELD_LINES:
                     return start_line
             begin = at
     return begin
@@ -342,8 +372,10 @@ def _last_run_tail(directory: Path) -> tuple[int, int, dict[str, Any] | None]:
                 done = len(data) if end < 0 else end
                 value = None if done - begin > LOG_BLOCK_BYTES else _line_value(data[begin:done])
                 name = value.get("event") if isinstance(value, dict) else None
-                if name == "proxy_start":
+                if name in ("proxy_start", "serve_open"):
                     runs, last, carried = runs + 1, base + begin, launch
+                    if name == "serve_open":
+                        launch = value
                 elif name == "launch":
                     launch = value
         if last is None:
@@ -427,7 +459,8 @@ def log_unwritable_message(error: BaseException) -> str:
 class _Tally:
     """The numbers of one scope (the whole log, or its last run), filled one log line at a time."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, price: bool = True) -> None:
+        self._price = price
         self.cli: str | None = None
         self.bound: int | None = None
         self.first_ts: str | None = None  # as logged; only a ``ts`` that is a time counts
@@ -448,6 +481,12 @@ class _Tally:
         self.out_of_room = 0
         self.cache = {"requests": 0, "unreported_requests": 0, "input_tokens": 0, "cache_read_tokens": 0,
                       "cache_write_tokens": 0}
+        self.tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        self.cost_usd = 0.0
+        self.priced_requests = 0
+        self.unpriced_requests = 0
+        self.unpriced_models: set[str] = set()
+        self.cost_by_model: dict[str, dict[str, Any]] = {}
         self.bytes = {"cli_sent": 0, "forwarded": 0, "largest_cli_request": 0, "largest_forwarded_request": 0}
         self.fault_events: dict[str, int] = {}
         self.entered = self.left = self.unpaged = 0
@@ -567,7 +606,7 @@ class _Tally:
             self._request(event, when)
         elif name == "mcp_call":
             self._tool(event)
-        elif name == "launch":
+        elif name in ("launch", "serve_open"):
             self.cli = self._text(event.get("cli")) or self.cli
             config = event.get("config")
             if isinstance(config, dict):
@@ -582,7 +621,7 @@ class _Tally:
             # the run's gain (PR #263 review A, round 3).
             if self.run_open and not self.replaying_held:
                 self._stopped, self._pages_stop = True, self._number(event.get("pages"))
-        elif name == "exit":
+        elif name in ("exit", "serve_close"):
             self._close_run(None)
         elif name == "proxy_stop_incomplete":  # requests with no line of their own: said, not a fault
             self.requests["in_flight_at_stop"] += self._number(event.get("in_flight")) or 0
@@ -721,7 +760,8 @@ class _Tally:
             if unpaged:
                 self.over["degraded"] += 1
 
-        prompt = self._usage(event.get("usage"), event.get("api"))
+        model_name = self._text(event.get("model"))
+        prompt = self._usage(event.get("usage"), event.get("api"), model_name)
         estimate = self._number(engine.get("sent_estimate"))
         estimate = estimate if estimate is not None else self._number(engine.get("estimate"))
         if prompt is not None:
@@ -733,33 +773,62 @@ class _Tally:
         if main and (prompt is not None or estimate is not None):
             self.last = (prompt, "usage") if prompt is not None else (estimate, "estimate")
 
-    def _usage(self, usage: Any, api: Any) -> int | None:
-        """The prompt tokens the API counted for one request, or None; also adds them to the cache
-        numbers when the response said how much was read from cache. Messages usage reports the cached
-        parts apart from ``input_tokens``; Responses usage reports ``cached_tokens`` as a part of it.
-        The proxy logs ``null`` for a cache field the API left out (an Anthropic-compatible gateway
-        may), and that is not a measured 0: such a request is counted in ``unreported_requests``."""
+    def _usage(self, usage: Any, api: Any, model: str | None = None) -> int | None:
+        """The prompt tokens the API counted for one request, or None; also adds them to the cache,
+        token, and estimated-cost numbers. Messages usage reports the cached parts apart from
+        ``input_tokens``; Responses usage reports ``cached_tokens`` as a part of it. The proxy logs
+        ``null`` for a cache field the API left out (an Anthropic-compatible gateway may), and that is
+        not a measured 0: such a request is counted in ``unreported_requests``."""
         if not isinstance(usage, dict):
             return None
         fresh = self._number(usage.get("input_tokens"))
+        output = self._number(usage.get("output_tokens"))
         if api == "responses":
             details = usage.get("input_tokens_details")
             read = self._number(details.get("cached_tokens")) if isinstance(details, dict) else None
-            write, prompt = None, fresh
+            write = self._number(usage.get("cache_write_tokens"))
+            prompt = fresh
+            read_clamped = min(read, prompt) if read is not None and prompt is not None else 0
+            uncached = max(0, (prompt or 0) - read_clamped)
         else:
             read = self._number(usage.get("cache_read_input_tokens"))
             write = self._number(usage.get("cache_creation_input_tokens"))
             prompt = (fresh or 0) + (read or 0) + (write or 0)
+            read_clamped = min(read, prompt) if read is not None else 0
+            uncached = fresh or 0
         if not prompt:
             return None
         self.requests["with_usage"] += 1
+        out_tokens = output or 0
+        write_tokens = write or 0
+        self.tokens["input"] += prompt
+        self.tokens["output"] += out_tokens
+        self.tokens["cache_read"] += read_clamped
+        self.tokens["cache_write"] += write_tokens
         if read is None:
             self.cache["unreported_requests"] += 1
         else:
             self.cache["requests"] += 1
             self.cache["input_tokens"] += prompt
-            self.cache["cache_read_tokens"] += min(read, prompt)
-            self.cache["cache_write_tokens"] += write or 0
+            self.cache["cache_read_tokens"] += read_clamped
+            self.cache["cache_write_tokens"] += write_tokens
+        if self._price:
+            usd = _try_price(model, uncached, write_tokens, read_clamped, out_tokens)
+            key = model or "unknown"
+            bucket = self.cost_by_model.setdefault(
+                key, {"requests": 0, "input_tokens": 0, "output_tokens": 0,
+                      "estimated_usd": 0.0 if usd is not None else None})
+            bucket["requests"] += 1
+            bucket["input_tokens"] += prompt
+            bucket["output_tokens"] += out_tokens
+            if usd is not None:
+                self.priced_requests += 1
+                self.cost_usd = math.fsum((self.cost_usd, usd))
+                bucket["estimated_usd"] = math.fsum(((bucket["estimated_usd"] or 0.0), usd))
+            else:
+                self.unpriced_requests += 1
+                if model:
+                    self.unpriced_models.add(model)
         return prompt
 
     def degraded_now(self) -> bool:
@@ -943,7 +1012,7 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
                 unreadable += 1
                 continue
             name = event.get("event")
-            if name == "proxy_start":
+            if name in ("proxy_start", "serve_open"):
                 runs += 1
                 cli, bound = tally.cli or cli, tally.bound if tally.bound is not None else bound
                 if last_run:
@@ -957,15 +1026,15 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
                 tally.line(event)
             elif between:
                 held.append(event)
-                if name == "exit" or len(held) > HELD_LINES:
+                if name in ("exit", "serve_close") or len(held) > HELD_LINES:
                     # Not a launch's few lines (an exit with no proxy start before it, or too many): they
                     # stay with what came before. After an exit, the lines that follow are held again.
                     for earlier in held:
                         tally.line(earlier)
-                    held, between = [], name == "exit"
+                    held, between = [], name in ("exit", "serve_close")
             else:
                 tally.line(event)
-                between = name == "exit"
+                between = name in ("exit", "serve_close")
     except OSError:
         missing = True
     if not (last_run and runs):
@@ -981,6 +1050,12 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
     measured = tally.peak is not None
     peak = tally.peak if measured else tally.peak_unmeasured
     cache, sizes, gains = tally.cache, tally.bytes, tally.gains
+    bytes_saved = max(0, sizes["cli_sent"] - sizes["forwarded"])
+    tokens_saved = round(bytes_saved / SAVED_BYTES_PER_TOKEN) if bytes_saved else 0
+    by_model = {
+        m: {**b, "estimated_usd": round(b["estimated_usd"], 6) if b["estimated_usd"] is not None else None}
+        for m, b in sorted(tally.cost_by_model.items())
+    }
     reasons = [reason for reason in COMPACTION_REASONS if reason in tally.undetectable]
     return {
         "version": STATS_VERSION,
@@ -1008,7 +1083,15 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
         "tools": {**tally.tools, "out_of_room": tally.out_of_room},
         "pins": pins,
         "cache": {**cache, "read_share": _share(cache["cache_read_tokens"], cache["input_tokens"])},
-        "bytes": {**sizes, "forwarded_share": _share(sizes["forwarded"], sizes["cli_sent"])},
+        "tokens": {**tally.tokens, "saved_estimate": tokens_saved},
+        "cost": {"currency": "USD",
+                 "estimated_usd": round(tally.cost_usd, 6) if tally.priced_requests else None,
+                 "priced_requests": tally.priced_requests,
+                 "unpriced_requests": tally.unpriced_requests,
+                 "unpriced_models": sorted(tally.unpriced_models),
+                 "by_model": by_model},
+        "bytes": {**sizes, "forwarded_share": _share(sizes["forwarded"], sizes["cli_sent"]),
+                  "saved": bytes_saved, "saved_share": _share(bytes_saved, sizes["cli_sent"])},
         "compaction": ({"seen": tally.compactions, "detectable": not reasons, "reasons": reasons,
                         "cli_versions": tally.cli_versions} if tally.messages_api else None),
         "faults": _fault_report(tally, session_id, earlier_run=tally.ended_degraded and not last_run),
@@ -1163,6 +1246,40 @@ def _compaction_text(compaction: dict[str, Any]) -> str:
     return f"none seen; whether Claude Code compacted cannot be told from this log ({why})"
 
 
+def usd_text(amount: float) -> str:
+    """Format a USD spend figure clearly: ``$0.0042`` below a cent, ``$0.42`` or ``$12.34`` otherwise."""
+    if amount == 0:
+        return "$0.00"
+    if amount < 0.01:
+        return f"${amount:.4f}"
+    return f"${amount:,.2f}"
+
+
+def _tokens_text(tokens: dict[str, Any]) -> str | None:
+    parts: list[str] = []
+    if tokens["input"] or tokens["output"]:
+        io = f"{_about(tokens['input'])} input, {_about(tokens['output'])} output (measured)"
+        parts.append(io)
+    if tokens["saved_estimate"]:
+        parts.append(f"about {_about(tokens['saved_estimate'])} input tokens saved (estimated)")
+    return "; ".join(parts) if parts else None
+
+
+def _cost_text(cost: dict[str, Any]) -> str | None:
+    priced, unpriced = cost["priced_requests"], cost["unpriced_requests"]
+    if not priced and not unpriced:
+        return None
+    if priced and not unpriced:
+        return f"~{usd_text(cost['estimated_usd'])} {cost['currency']} (estimated from published prices)"
+    if priced:
+        total = priced + unpriced
+        models = ", ".join(cost["unpriced_models"]) if cost["unpriced_models"] else "unknown model"
+        return (f"~{usd_text(cost['estimated_usd'])} {cost['currency']} "
+                f"(estimated over {priced:,} of {total:,} requests; unpriced: {models})")
+    models = ", ".join(cost["unpriced_models"]) if cost["unpriced_models"] else "model not recorded"
+    return f"unpriced (no published price for {models})"
+
+
 def render(out: dict[str, Any], *, brief: bool = False) -> list[str]:
     """The stats as indented text lines, one per subject, each only when its data exists. ``brief``
     is the exit summary's: the byte line, and the request line unless some request failed or is in no
@@ -1219,10 +1336,22 @@ def render(out: dict[str, Any], *, brief: bool = False) -> list[str]:
                           "requests with usage that reported a cache field")
         lines.append(f"  cache       {percent_text(cache['read_share'])} of input tokens read from cache "
                      f"(measured{over_which})")
+    tokens = out.get("tokens")
+    if tokens is not None:
+        tok_line = _tokens_text(tokens)
+        if tok_line and (not brief or tokens["output"] or tokens["saved_estimate"]):
+            lines.append(f"  tokens      {tok_line}")
+    cost = out.get("cost")
+    if cost is not None:
+        cost_line = _cost_text(cost)
+        if cost_line and (not brief or cost["priced_requests"]):
+            lines.append(f"  cost        {cost_line}")
     sizes = out["bytes"]
     if sizes["cli_sent"] and not brief:
+        saved_part = (f", saved {size_text(sizes['saved'])} ({percent_text(sizes['saved_share'])})"
+                      if sizes.get("saved") else "")
         lines.append(f"  bytes       the CLI sent {size_text(sizes['cli_sent'])}, Contexto forwarded "
-                     f"{size_text(sizes['forwarded'])} ({percent_text(sizes['forwarded_share'])})")
+                     f"{size_text(sizes['forwarded'])} ({percent_text(sizes['forwarded_share'])}){saved_part}")
     compaction = out["compaction"]
     if compaction is not None and requests["model"]:
         lines.append(f"  compaction  {_compaction_text(compaction)}")

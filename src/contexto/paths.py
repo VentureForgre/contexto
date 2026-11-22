@@ -23,6 +23,15 @@ def contexto_home(env: Mapping[str, str] | None = None) -> Path:
     return absolute_home(home) if home else absolute_home(Path.home() / ".contexto")
 
 
+CONFIG_FILE = "config.toml"
+
+
+def config_path(home: Path | None = None, env: Mapping[str, str] | None = None) -> Path:
+    """``$CONTEXTO_HOME/config.toml`` (or ``home/config.toml`` when ``home`` is given)."""
+    base = contexto_home(env) if home is None else Path(home)
+    return base / CONFIG_FILE
+
+
 # Passed on to the MCP server when set: Codex starts MCP servers with a restricted environment (D39).
 SEARCH_CACHE_ENV = "CONTEXTO_SEARCH_CACHE_MB"
 

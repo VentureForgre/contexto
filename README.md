@@ -127,10 +127,10 @@ Your upstream must be the vendor's API with an API key, or a CLIProxyAPI instanc
   requests. The [FAQ](docs/faq.md) describes logging a subscription in to CLIProxyAPI instead.
   Whether your plan allows either route is for you to check against its terms, and the risk to the
   account is yours.
-- **Claude Code set to a cloud provider** (Amazon Bedrock, Google Vertex AI, Microsoft Foundry or
-  Claude Platform on AWS). Claude Code then sends its requests to that provider, not through
-  Contexto, so nothing is bounded. v0.5.24 does not check for this and
-  starts a session anyway; a build from the unreleased code on `main` refuses to
+- **Claude Code set to a cloud provider** (Amazon Bedrock, Google Vertex AI, Microsoft Foundry,
+  Amazon Bedrock Mantle, Claude Platform on AWS or Claude Platform on Google Cloud). Claude Code then
+  sends its requests to that provider, not through Contexto, so nothing is bounded. v0.5.24 does not
+  check for this and starts a session anyway; a build from the unreleased code on `main` refuses to
   start the session.
 - **Sessions that end before the compaction point, when a large request is fine for you.** They do
   not compact, with or without Contexto. The exception: by default Claude Code compacts a
@@ -213,8 +213,10 @@ memory, notes Claude writes for itself from your corrections and preferences. Bo
 of every session. The API's [memory tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool)
 lets the model write files under `/memories` that your application stores and that later
 conversations read back. All three hold what someone chose to save, across sessions. Contexto holds
-every paged-out turn of one session word for word, and nothing across sessions. It edits none of
-those files.
+every paged-out turn of a session word for word, and on `main` also carries active decisions and
+open obligations pinned in the main conversation across sessions of the same project (and lets the
+model search earlier sessions of that project on request; see
+[Project memory](docs/project-memory.md)). It edits none of those files.
 
 ## What you see
 

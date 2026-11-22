@@ -9,7 +9,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from contexto.launcher import BOUND_GUARD, DEFAULT_BOUND, options_from_args, run_claude
+from contexto.config import ConfigError, load_config
+from contexto.launcher import BOUND_GUARD, DEFAULT_BOUND, EXIT_USAGE, options_from_args, run_claude
 from contexto.paths import PROJECT_MEMORY_ENV
 
 
@@ -18,11 +19,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "run", help="run Claude Code or Codex with its prompt kept under a bound",
         description="Run Claude Code or Codex with every model request going through a local Contexto proxy "
                     "that keeps the upstream prompt under --bound. Contexto options go before "
-                    "'claude' or 'codex'; everything after it is passed to the CLI unchanged.",
+                    "'claude' or 'codex'; everything after it is passed to the CLI unchanged. "
+                    "Defaults can be set in $CONTEXTO_HOME/config.toml (CLI > env > config.toml > built-in).",
         epilog="Exit codes: the CLI's own code; 128+N if it died from signal N; 2 usage error; "
                "1 Contexto could not start (the proxy, or the session store under $CONTEXTO_HOME); "
                "127 'claude' or 'codex' not found on PATH or not runnable; 130 Ctrl+C during the version check.")
-    parser.add_argument("--bound", type=int, default=DEFAULT_BOUND,
+    parser.add_argument("--bound", type=int, default=None,
                         help=f"upstream prompt bound in tokens (default {DEFAULT_BOUND:,}; "
                              f"above {BOUND_GUARD:,} needs --allow-large-bound)")
     parser.add_argument("--allow-large-bound", action="store_true",
@@ -45,12 +47,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--no-version-check", action="store_true",
                         help="do not compare the CLI's --version with the versions Contexto was tested with "
                              "(also CONTEXTO_NO_VERSION_CHECK=1)")
+    parser.add_argument("--version-check", dest="version_check_on", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--quiet", action="store_true",
                         help="do not print the summary when the CLI exits; warnings are still printed "
                              "(also CONTEXTO_QUIET=1)")
+    parser.add_argument("--no-quiet", dest="quiet_off", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--no-statusline", action="store_true",
                         help="claude only: do not add Contexto's status line to Claude Code (it is added only "
                              "when no settings file has a statusLine; also CONTEXTO_NO_STATUSLINE=1)")
+    parser.add_argument("--statusline", dest="statusline_on", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--no-project-memory", action="store_true",
                         help="keep this session out of project memory: it carries nothing from the earlier "
                              "sessions of this directory's project (a resumed session stops sending what it "
@@ -58,14 +66,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                              "cannot search them, and gives nothing to "
                              f"later ones (also {PROJECT_MEMORY_ENV}=0, false, off or no). The session records "
                              "it, so resuming it later stays off without this option")
+    parser.add_argument("--project-memory", dest="project_memory_on", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--no-in-turn-paging", action="store_true",
                         help="do not page inside a running turn: a tool loop that outgrows the bound is sent "
                              "whole, as before v0.6.0 (also CONTEXTO_IN_TURN_PAGING=0)")
+    parser.add_argument("--in-turn-paging", dest="in_turn_paging_on", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("cli", choices=["claude", "codex"], help="the CLI to run")
     parser.add_argument("cli_args", nargs=argparse.REMAINDER, help="arguments passed to the CLI unchanged")
     try:
         from contexto.codex import add_arguments  # lane A packet A5 (builder-2)
-    except ImportError:
+    except Exception:  # missing, or broken on import: other commands still work (STATUS.md D64)
         pass
     else:
         add_arguments(parser)
@@ -80,4 +92,9 @@ def run(args: argparse.Namespace) -> int:
             print("contexto: codex support is not installed in this build", file=sys.stderr)
             return 2
         return run_codex(args)
-    return run_claude(options_from_args(args))
+    try:
+        cfg = load_config()
+    except ConfigError as exc:
+        print(f"contexto: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    return run_claude(options_from_args(args, config=cfg))

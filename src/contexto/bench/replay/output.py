@@ -500,19 +500,34 @@ def markdown(script: Script, data: dict[str, Any]) -> str:
 
 def write(out: Path, script: Script, manifest_data: dict[str, Any], rows: list[dict[str, Any]],
           reach_rows: list[dict[str, Any]], data: dict[str, Any]) -> list[Path]:
-    """Write the output directory and return the paths written."""
+    """Write the output directory atomically via staging files and return the paths written.
+    A signal or error during staging removes staged files and leaves no partial output."""
+    import os
+    import shutil
+    import tempfile
+
     out.mkdir(parents=True, exist_ok=True)
-    script_path = out / "scripts" / f"seed-{script.seed}.json"
-    script.write(script_path)
-    files = {
-        "manifest.json": json.dumps(manifest_data, indent=1) + "\n",
-        "requests.jsonl": "".join(json.dumps(row) + "\n" for row in rows),
-        "reach.jsonl": "".join(json.dumps(row) + "\n" for row in reach_rows),
-        "results.json": json.dumps(data, indent=1) + "\n",
-        "results.md": markdown(script, data),
+    script_rel = Path("scripts") / f"seed-{script.seed}.json"
+    files: dict[Path, str] = {
+        script_rel: script.to_json(),
+        Path("manifest.json"): json.dumps(manifest_data, indent=1) + "\n",
+        Path("requests.jsonl"): "".join(json.dumps(row) + "\n" for row in rows),
+        Path("reach.jsonl"): "".join(json.dumps(row) + "\n" for row in reach_rows),
+        Path("results.json"): json.dumps(data, indent=1) + "\n",
+        Path("results.md"): markdown(script, data),
     }
-    written = [script_path]
-    for name, text in files.items():
-        (out / name).write_text(text, encoding="utf-8")
-        written.append(out / name)
-    return written
+    stage = Path(tempfile.mkdtemp(prefix=".replay-stage-", dir=out))
+    try:
+        for rel, text in files.items():
+            dest = stage / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(text, encoding="utf-8")
+        written: list[Path] = []
+        for rel in files:
+            target = out / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(stage / rel, target)
+            written.append(target)
+        return written
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)

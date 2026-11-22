@@ -31,8 +31,8 @@ from contexto.commands import doctor
 from contexto.mcp import TOOLS
 from contexto.upstream import CLOUD_PROVIDER_KEYS
 
-CHECK_IDS = ["python", "claude", "codex", "settings", "claude-upstream", "codex-upstream", "claude-key",
-             "codex-key", "store", "mcp", "provider"]
+CHECK_IDS = ["python", "claude", "codex", "config", "settings", "claude-upstream", "codex-upstream",
+             "claude-key", "codex-key", "store", "serve", "statusline", "mcp", "provider"]
 TESTED_CLAUDE = TESTED_VERSIONS["claude"][-1]
 TESTED_CODEX = TESTED_VERSIONS["codex"][-1]
 SECRET = "sk-doctor-SECRET-0123456789abcdefghijklmnopqrstuvwxyz"  # 53 characters
@@ -134,9 +134,10 @@ def test_everything_in_place_passes_every_check_and_exits_0(both, capsys, monkey
     assert code == 0 and err == ""
     lines = out.splitlines()
     marked = [line for line in lines if line.startswith("[")]
-    assert len(marked) == len(CHECK_IDS) and all(line.startswith("[ok]") for line in marked), out
+    assert len(marked) == len(CHECK_IDS), out
+    assert not any(line.startswith(("[warn]", "[FAIL]")) for line in marked), out
     assert not any(line.lstrip().startswith("->") for line in lines)  # nothing to do
-    assert lines[-1] == "Ready: 11 passed."
+    assert lines[-1] == "Ready: 13 passed, 1 skipped."
     assert f"Claude Code {TESTED_CLAUDE}" in out and f"Codex {TESTED_CODEX}" in out
     assert "https://api.anthropic.com" in out and "https://api.openai.com" in out
     assert "listed its 5 tools" in out and str(both.store) in out
@@ -290,22 +291,25 @@ def test_an_untested_version_is_a_warning_that_lists_the_tested_ones(world, caps
     assert "newer Contexto" in claude["action"]
 
 
-def test_a_missing_second_cli_is_a_warning_and_its_other_checks_are_skipped(world, capsys, fast_mcp):
+def test_a_missing_second_cli_is_a_warning_and_its_other_checks_are_skipped(world, capsys, fast_mcp, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET)
     fake_cli(world, "claude", f"{TESTED_CLAUDE} (Claude Code)")
     code, found = checks(capsys)
     assert code == 0
-    assert found["codex"]["status"] == "warn" and "not found on PATH" in found["codex"]["summary"]
-    assert found["codex"]["action"]
+    assert found["codex"]["status"] == "skip" and "optional" in found["codex"]["summary"]
+    assert found["codex"]["action"] is None
     assert found["codex-upstream"]["status"] == found["codex-key"]["status"] == "skip"
     assert "codex" in found["codex-upstream"]["summary"]
     assert found["claude-upstream"]["status"] == "pass"
+    # Clean Claude-only install has 0 warnings!
+    assert not [c for c in found.values() if c["status"] == "warn"], found
 
 
 def test_codex_alone_is_enough_and_the_claude_only_checks_are_skipped(world, capsys, fast_mcp):
     fake_cli(world, "codex", f"codex-cli {TESTED_CODEX}")
     code, found = checks(capsys)
-    assert code == 0 and found["claude"]["status"] == "warn" and found["codex"]["status"] == "pass"
-    assert [found[i]["status"] for i in ("claude-upstream", "claude-key", "provider")] == ["skip"] * 3
+    assert code == 0 and found["claude"]["status"] == "skip" and found["codex"]["status"] == "pass"
+    assert [found[i]["status"] for i in ("claude-upstream", "claude-key", "statusline", "provider")] == ["skip"] * 4
 
 
 def test_neither_cli_fails_both_and_exits_1(world, capsys, fast_mcp):
@@ -348,17 +352,21 @@ def test_a_claude_that_cannot_be_started_still_gets_the_provider_check(world, ca
     assert [found[i]["status"] for i in ("claude-upstream", "claude-key")] == ["skip"] * 2
 
 
-def test_a_missing_cli_names_its_install_command_once(world, capsys, fast_mcp):
-    """PR #258 review (both): since #257 the line carries the install command and "If it is installed, add
-    its directory to PATH", and the next step said "Install Codex and put it on PATH" again."""
+def test_a_missing_cli_names_its_install_command_once(world, capsys, fast_mcp, monkeypatch):
+    """When one CLI is ready, an uninstalled optional CLI is skipped with 0 warnings; when neither is
+    installed, each missing CLI fails and names its install command once."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     fake_cli(world, "claude", f"{TESTED_CLAUDE} (Claude Code)")
     _, out, _ = run(capsys)
     line = line_of(out, "Codex: ")
-    assert line == ("[warn] Codex: 'codex' not found on PATH. Install Codex: curl -fsSL https://chatgpt.com/codex/"
+    assert line == "[skip] Codex: not installed (optional; only `contexto run codex` needs it)"
+    assert "warning" not in out.splitlines()[-1]
+    (world.bin / "claude").unlink()
+    _, out, _ = run(capsys)
+    line = line_of(out, "Codex: ")
+    assert line == ("[FAIL] Codex: 'codex' not found on PATH. Install Codex: curl -fsSL https://chatgpt.com/codex/"
                     "install.sh | sh (other ways: https://learn.chatgpt.com/docs/codex/cli). If it is installed, add "
                     "its directory to PATH.")
-    step = out.splitlines()[out.splitlines().index(line) + 1]
-    assert step.strip() == "-> Only `contexto run codex` needs it"
     assert out.count("Install Codex") == 1
 
 
@@ -944,8 +952,13 @@ def test_the_managed_settings_file_is_read_and_named_as_the_guard_reads_it(both,
     assert check["details"]["files"][-1] == {"kind": "managed", "state": "unusable", "problem": "is not valid JSON"}
     managed.write_text("{}")
     _, check, line = settings_line(capsys)
-    assert check["status"] == "pass"
-    assert line.endswith("read Claude Code's managed settings file (managed-settings.json)")
+    assert check["status"] == "warn"
+    assert "Claude Code's managed settings file (managed-settings.json)" in line
+    assert check["details"]["managed_present"] is True and check["details"]["managed_sets_base_url"] is False
+    managed.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://corp.example"}}))
+    _, check, line = settings_line(capsys)
+    assert check["status"] == "warn" and "ANTHROPIC_BASE_URL" in line
+    assert check["details"]["managed_sets_base_url"] is True
 
 
 def test_source_text_names_the_place_and_never_a_path(tmp_path):
@@ -1488,3 +1501,143 @@ def test_a_settings_file_with_a_non_json_number_is_named_as_unusable(both, capsy
     path.write_text(f'{{"cleanupPeriodDays": {literal}}}')
     _, found = checks(capsys)
     assert found["settings"]["status"] == "warn" and "is not valid JSON" in found["settings"]["summary"]
+
+
+def test_doctor_config_check_valid_and_invalid(both, capsys, fast_mcp):
+    both.store.mkdir(parents=True, exist_ok=True)
+    cfg = both.store / "config.toml"
+    cfg.write_text('bound = 120000\nupstream = "https://cfg-up.example.test"\n', encoding="utf-8")
+    code, found = checks(capsys)
+    assert code == 0
+    assert found["config"]["status"] == "pass" and found["config"]["details"]["settings"] == 2
+    assert found["claude-upstream"]["details"]["origin"] == "https://cfg-up.example.test"
+    assert found["claude-upstream"]["details"]["source"] == "config"
+
+    cfg.write_text("bound = [bad toml\n", encoding="utf-8")
+    code, found = checks(capsys)
+    assert code == 1 and found["config"]["status"] == "fail" and "TOML syntax error" in found["config"]["summary"]
+
+
+def test_doctor_serve_check_permissions_and_stale_state(both, capsys, fast_mcp):
+    both.store.mkdir(parents=True, exist_ok=True)
+    # Not configured -> skip
+    _, found = checks(capsys)
+    assert found["serve"]["status"] == "skip"
+
+    # Bad 0644 token permission -> warn
+    tok = both.store / "serve.token"
+    tok.write_text("a" * 64 + "\n", encoding="utf-8")
+    tok.chmod(0o644)
+    _, found = checks(capsys)
+    assert found["serve"]["status"] == "warn" and "0644" in found["serve"]["summary"]
+
+    # Fix permissions -> pass (configured, not running)
+    tok.chmod(0o600)
+    _, found = checks(capsys)
+    assert found["serve"]["status"] == "pass" and "not running" in found["serve"]["summary"]
+
+    # Stale serve.json without lock held -> warn
+    st = both.store / "serve.json"
+    st.write_text(json.dumps({"pid": 99999, "port": 8765, "url": "http://127.0.0.1:8765"}), encoding="utf-8")
+    st.chmod(0o600)
+    _, found = checks(capsys)
+    assert found["serve"]["status"] == "warn" and "stale" in found["serve"]["summary"]
+
+
+def test_doctor_statusline_check_reports_added_own_off_and_unreadable(both, capsys, fast_mcp):
+    _, found = checks(capsys)
+    assert found["statusline"]["status"] == "pass" and found["statusline"]["details"]["state"] == "added"
+
+    write_settings(both.home / ".claude" / "settings.json", {"statusLine": {"type": "command", "command": "echo hi"}})
+    _, found = checks(capsys)
+    assert found["statusline"]["status"] == "pass" and found["statusline"]["details"]["state"] == "own:user"
+
+    (both.home / ".claude" / "settings.json").write_text("{bad json", encoding="utf-8")
+    _, found = checks(capsys)
+    assert found["statusline"]["status"] == "warn" and found["statusline"]["details"]["state"] == "unreadable:user"
+
+    (both.home / ".claude" / "settings.json").unlink()
+    both.store.mkdir(parents=True, exist_ok=True)
+    (both.store / "config.toml").write_text("statusline = false\n", encoding="utf-8")
+    _, found = checks(capsys)
+    assert found["statusline"]["status"] == "skip" and found["statusline"]["details"]["state"] == "off:config"
+
+
+def test_doctor_warns_when_managed_settings_exist_or_set_base_url(both, capsys, fast_mcp, monkeypatch):
+    managed = both.tmp / "managed-settings.json"
+    monkeypatch.setattr(doctor, "managed_settings_path", lambda: managed)
+
+    # Managed settings present without ANTHROPIC_BASE_URL -> warn
+    write_settings(managed, {"cleanupPeriodDays": 30})
+    _, found = checks(capsys)
+    assert found["settings"]["status"] == "warn"
+    assert "managed settings" in found["settings"]["summary"].lower()
+
+    # Managed settings sets ANTHROPIC_BASE_URL -> stronger warning naming ANTHROPIC_BASE_URL
+    write_settings(managed, {"env": {"ANTHROPIC_BASE_URL": "https://corp.example.test"}})
+    _, found = checks(capsys)
+    assert found["settings"]["status"] == "warn"
+    assert "ANTHROPIC_BASE_URL" in found["settings"]["summary"]
+
+
+def test_doctor_live_flag_probes_upstream_and_default_stays_zero_network(both, capsys, fast_mcp, monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen_auth: list[str | None] = []
+    reply_status = [200]
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            seen_auth.append(self.headers.get("x-api-key"))
+            self.send_response(reply_status[0])
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://127.0.0.1:{port}")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-live-secret-never-printed")
+        monkeypatch.setenv("CONTEXTO_CODEX_UPSTREAM", f"http://127.0.0.1:{port}/v1")
+
+        # Default (no --live): zero network requests and no live-upstream check
+        code, found = checks(capsys)
+        assert code == 0 and "live-upstream" not in found and seen_auth == []
+
+        # --live with 200 -> pass, auth ok, secret never printed
+        code, out, _ = run(capsys, "--live", "--json")
+        data = json.loads(out)
+        by_id = {c["id"]: c for c in data["checks"]}
+        assert code == 0 and by_id["live-upstream"]["status"] == "pass"
+        assert "auth ok" in by_id["live-upstream"]["summary"]
+        assert "sk-live-secret" not in out
+        assert "sk-live-secret-never-printed" in seen_auth
+
+        # --live with 401 -> warn (auth rejected)
+        reply_status[0] = 401
+        code, out, _ = run(capsys, "--live", "--json")
+        by_id = {c["id"]: c for c in json.loads(out)["checks"]}
+        assert code == 0 and by_id["live-upstream"]["status"] == "warn"
+        assert "auth rejected" in by_id["live-upstream"]["summary"]
+
+        # --live with 500 -> warn
+        reply_status[0] = 500
+        code, out, _ = run(capsys, "--live", "--json")
+        by_id = {c["id"]: c for c in json.loads(out)["checks"]}
+        assert code == 0 and by_id["live-upstream"]["status"] == "warn"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    # --live with unreachable port -> fail
+    code, out, _ = run(capsys, "--live", "--json")
+    by_id = {c["id"]: c for c in json.loads(out)["checks"]}
+    assert code == 1 and by_id["live-upstream"]["status"] == "fail"
+    assert "unreachable" in by_id["live-upstream"]["summary"]

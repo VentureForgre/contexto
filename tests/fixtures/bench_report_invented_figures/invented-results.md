@@ -130,6 +130,27 @@ The token classes of each arm are measured, and are priced here at every model i
 | claude-sonnet-5-5 | $0.0470 ($0.2818 over 6 sessions) | $0.1737 ($1.0424 over 6 sessions) | $0.1080 ($0.6478 over 6 sessions) |
 | claude-opus-5-5 | $0.0939 ($0.5636 over 6 sessions) | $0.3475 ($2.0848 over 6 sessions) | $0.2159 ($1.2956 over 6 sessions) |
 | claude-fable-5-2 | $0.1798 ($1.0785 over 6 sessions) | $0.6638 ($3.9827 over 6 sessions) | $0.4264 ($2.5584 over 6 sessions) |
+| claude-haiku-4-5 | $0.0255 ($0.1530 over 6 sessions) | $0.0947 ($0.5679 over 6 sessions) | $0.0553 ($0.3321 over 6 sessions) |
+| claude-sonnet-4 | $0.0765 ($0.4591 over 6 sessions) | $0.2840 ($1.7038 over 6 sessions) | $0.1660 ($0.9963 over 6 sessions) |
+| claude-sonnet-4-5 | $0.0765 ($0.4591 over 6 sessions) | $0.2840 ($1.7038 over 6 sessions) | $0.1660 ($0.9963 over 6 sessions) |
+| claude-sonnet-4-6 | $0.0765 ($0.4591 over 6 sessions) | $0.2840 ($1.7038 over 6 sessions) | $0.1660 ($0.9963 over 6 sessions) |
+| claude-opus-4 | $0.3826 ($2.2956 over 6 sessions) | $1.4198 ($8.5189 over 6 sessions) | $0.8302 ($4.9815 over 6 sessions) |
+| claude-opus-4-1 | $0.3826 ($2.2956 over 6 sessions) | $1.4198 ($8.5189 over 6 sessions) | $0.8302 ($4.9815 over 6 sessions) |
+| claude-opus-4-5 | $0.1275 ($0.7652 over 6 sessions) | $0.4733 ($2.8396 over 6 sessions) | $0.2767 ($1.6605 over 6 sessions) |
+| claude-opus-4-6 | $0.1275 ($0.7652 over 6 sessions) | $0.4733 ($2.8396 over 6 sessions) | $0.2767 ($1.6605 over 6 sessions) |
+| claude-opus-4-7 | $0.1275 ($0.7652 over 6 sessions) | $0.4733 ($2.8396 over 6 sessions) | $0.2767 ($1.6605 over 6 sessions) |
+| gpt-4.1 | $0.0569 ($0.3414 over 6 sessions) | $0.2133 ($1.2798 over 6 sessions) | $0.1073 ($0.6439 over 6 sessions) |
+| gpt-4.1-mini | $0.0114 ($0.0683 over 6 sessions) | $0.0427 ($0.2560 over 6 sessions) | $0.0215 ($0.1288 over 6 sessions) |
+| gpt-5 | $0.0292 ($0.1750 over 6 sessions) | $0.1053 ($0.6319 over 6 sessions) | $0.0811 ($0.4869 over 6 sessions) |
+| gpt-5-mini | $0.0058 ($0.0350 over 6 sessions) | $0.0211 ($0.1264 over 6 sessions) | $0.0162 ($0.0974 over 6 sessions) |
+| gpt-5-codex | $0.0292 ($0.1750 over 6 sessions) | $0.1053 ($0.6319 over 6 sessions) | $0.0811 ($0.4869 over 6 sessions) |
+| gpt-5.1-codex | $0.0292 ($0.1750 over 6 sessions) | $0.1053 ($0.6319 over 6 sessions) | $0.0811 ($0.4869 over 6 sessions) |
+| gpt-5.2-codex | $0.0408 ($0.2450 over 6 sessions) | $0.1474 ($0.8846 over 6 sessions) | $0.1136 ($0.6816 over 6 sessions) |
+| gpt-5.3-codex | $0.0408 ($0.2450 over 6 sessions) | $0.1474 ($0.8846 over 6 sessions) | $0.1136 ($0.6816 over 6 sessions) |
+| gpt-5.4 | $0.0571 ($0.3428 over 6 sessions) | $0.2094 ($1.2566 over 6 sessions) | $0.1431 ($0.8586 over 6 sessions) |
+| o3 | $0.0569 ($0.3414 over 6 sessions) | $0.2133 ($1.2798 over 6 sessions) | $0.1073 ($0.6439 over 6 sessions) |
+| o4-mini | $0.0313 ($0.1878 over 6 sessions) | $0.1173 ($0.7039 over 6 sessions) | $0.0590 ($0.3541 over 6 sessions) |
+| codex-mini-latest | $0.0427 ($0.2560 over 6 sessions) | $0.1600 ($0.9599 over 6 sessions) | $0.0805 ($0.4829 over 6 sessions) |
 
 - Prices: https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-12, USD per million tokens.
 - Cache writes are priced at the 5-minute rate for every arm, the cache lifetime the manifest records; a request record does not carry its own.

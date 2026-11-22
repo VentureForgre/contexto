@@ -456,16 +456,19 @@ def resolve_codex_upstream(auth_mode: str, explicit: str | None, env: dict[str, 
 
 
 def codex_upstream_with_source(auth_mode: str, explicit: str | None, env: dict[str, str],
-                               claude_upstream: str | None, claude_source: str | None = None) -> tuple[str, str]:
+                               claude_upstream: str | None, claude_source: str | None = None, *,
+                               config_upstream: str | None = None) -> tuple[str, str]:
     """``resolve_codex_upstream`` plus where the URL came from, for the session line and log (D35):
-    ``codex-flag``, ``codex-env``, ``chatgpt-default``, or ``claude-<source>+/v1`` (the Claude
-    upstream's own source label, such as ``claude-settings:local+/v1``). Never the URL itself."""
+    ``codex-flag``, ``codex-env``, ``codex-config``, ``chatgpt-default``, or ``claude-<source>+/v1``
+    (the Claude upstream's own source label, such as ``claude-settings:local+/v1``). Never the URL itself."""
     if auth_mode not in (API_KEY_MODE, CHATGPT_MODE):
         raise CodexLaunchError(f"unknown Codex auth mode: {auth_mode}")
     if explicit:
         return explicit, "codex-flag"
     if env.get(UPSTREAM_ENV):
         return env[UPSTREAM_ENV], "codex-env"
+    if config_upstream:
+        return config_upstream, "codex-config"
     if auth_mode == CHATGPT_MODE:
         return CHATGPT_UPSTREAM, "chatgpt-default"
     if claude_upstream:
@@ -662,6 +665,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
 
     from contexto import cliversions
     from contexto import upstream as upstream_module
+    from contexto.config import ConfigError, load_config
 
     # Always the real ones, whatever ``launcher`` is: they touch only the store and stderr, and their
     # ``LaunchError`` is the one caught below whenever ``launcher`` is the real module.
@@ -678,7 +682,11 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
     codex_args = list(args.cli_args)
     created: Path | None = None  # the session directory this launch made
     try:
-        options = launcher.options_from_args(args)
+        cfg = load_config()
+        try:
+            options = launcher.options_from_args(args, config=cfg)
+        except TypeError:  # a test stand-in launcher whose options_from_args takes one argument
+            options = launcher.options_from_args(args)
         launcher.check_options(options)
         codex = shutil.which(CODEX_BIN)
         if codex is None:  # named as `run claude` names it: missing, not executable, a directory, a broken link
@@ -704,12 +712,12 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                 f"CODEX_HOME after Codex exits (Codex refuses {NO_DAEMON_FLAG} with it), so Contexto does not "
                 f"run it; run 'codex {shared}' without Contexto, or pass --remote.")
         # Codex ignores .claude/, so a project's base URL only from a folder Claude Code trusts (D52).
-        claude = upstream_module.resolve_upstream(args.upstream, trusted_only=True)
+        claude = upstream_module.resolve_upstream(args.upstream, trusted_only=True, config_upstream=cfg.upstream)
         ignored = (untrusted_note("env.ANTHROPIC_BASE_URL", claude.ignored, "Pass --codex-upstream", os.environ)
                    if claude.ignored else None)
         try:
             target, source = codex_upstream_with_source(args.codex_auth, args.codex_upstream, dict(os.environ),
-                                                        claude.url, claude.source)
+                                                        claude.url, claude.source, config_upstream=cfg.codex_upstream)
         except CodexLaunchError:
             # A refusal of the derived upstream (Anthropic's, or none): first say why Claude Code's
             # upstream fell back, when an untrusted project's base URL was skipped.
@@ -741,9 +749,9 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         created = None if existed else paths.session_dir(home, session_id)
         record_project_memory(store, memory)  # before anything reads the store: the proxy, the MCP server
         config = launcher.engine_config(options)
-        proxy, engine_name = launcher.start_proxy(store, target, source, config, args.observe_thinking,
+        proxy, engine_name = launcher.start_proxy(store, target, source, config, options.observe_thinking,
                                                   stderr=stderr)
-    except (CodexLaunchError, launcher.LaunchError) as exc:
+    except (CodexLaunchError, ConfigError, launcher.LaunchError) as exc:
         print(f"contexto: {exc}", file=stderr)
         _remove_session(created)
         return getattr(exc, "code", 2)
@@ -761,7 +769,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             print(f"contexto: {note}", file=stderr)
         store.log({"event": "launch", "cli": "codex", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": source, "codex_auth": args.codex_auth,
-                   "observe_thinking": args.observe_thinking, "user_arg_count": len(codex_args),
+                   "observe_thinking": options.observe_thinking, "user_arg_count": len(codex_args),
                    "affinity_header": getattr(proxy, "affinity_header", None) is not None,
                    "no_daemon": no_daemon,
                    **({"codex_version_error": version_error} if version_error else {})})
@@ -774,7 +782,7 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             print(f"contexto: warning: cannot read the Codex version ({version_error}) and 'codex --help' does not "
                   f"list {NO_DAEMON_FLAG}, so it is not passed; Codex may leave a background app-server running "
                   "after it exits.", file=stderr, flush=True)
-        if not launcher.check_cli_version("codex", codex, store, enabled=not getattr(args, "no_version_check", False),
+        if not launcher.check_cli_version("codex", codex, store, enabled=options.version_check,
                                           stderr=stderr, installed=installed):
             code = launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started
             return code

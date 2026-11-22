@@ -705,10 +705,12 @@ def claude_key_helper(cwd: Path, home: Path, env: Mapping[str, str] | None = Non
 
 def resolve_upstream(explicit: str | None = None, *, env: Mapping[str, str] | None = None,
                      cwd: Path | None = None, home: Path | None = None, trusted_only: bool = False,
-                     files: SettingsFiles | None = None) -> Upstream:
+                     files: SettingsFiles | None = None, config_upstream: str | None = None) -> Upstream:
     """The upstream per the module docstring. ``trusted_only`` skips project files in a folder Claude
     Code has not trusted (``contexto run codex``); ``Upstream.ignored`` names the skipped kinds.
-    ``files`` is the caller's ``SettingsFiles`` when it reads more than the base URL."""
+    ``files`` is the caller's ``SettingsFiles`` when it reads more than the base URL.
+    ``config_upstream`` is the optional ``upstream`` from ``config.toml``, used after settings files
+    and ``ANTHROPIC_BASE_URL`` and before ``DEFAULT_UPSTREAM``."""
     if explicit:
         return Upstream(explicit, "flag")
     env = os.environ if env is None else env
@@ -719,4 +721,6 @@ def resolve_upstream(explicit: str | None = None, *, env: Mapping[str, str] | No
     value = env.get(BASE_URL_KEY, "").strip()
     if value:
         return Upstream(value, "env", found.ignored)
+    if config_upstream:
+        return Upstream(config_upstream, "config", found.ignored)
     return Upstream(DEFAULT_UPSTREAM, "default", found.ignored)
