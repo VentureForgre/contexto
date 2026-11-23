@@ -246,9 +246,14 @@ observe_thinking = true
     assert opts_bad_pm.project_memory is False
     assert launcher.project_memory_wanted(opts_bad_pm, env={"CONTEXTO_PROJECT_MEMORY": "bogus"}) is False
 
-    # 5. CONTEXTO_PROJECT_MEMORY=0 resolves into LaunchOptions.project_memory=False
+    # 5. CONTEXTO_PROJECT_MEMORY=0 resolves into LaunchOptions.project_memory=False, while direct
+    #    LaunchOptions(project_memory=False) still overrides CONTEXTO_PROJECT_MEMORY=1 (legacy API).
     opts_pm_off = launcher.options_from_args(args, config=FileConfig(), env={"CONTEXTO_PROJECT_MEMORY": "0"})
     assert opts_pm_off.project_memory is False
+    assert launcher.project_memory_wanted(launcher.LaunchOptions(project_memory=False),
+                                          env={"CONTEXTO_PROJECT_MEMORY": "1"}) is False
+    #    Meanwhile config.toml project_memory=false IS overridden by CONTEXTO_PROJECT_MEMORY=1.
+    assert launcher.project_memory_wanted(opts, env={"CONTEXTO_PROJECT_MEMORY": "1"}) is True
 
     # 6. Contradictory CLI boolean pairs are refused by argparse
     for bad_argv in (["run", "--quiet", "--no-quiet", "claude"],

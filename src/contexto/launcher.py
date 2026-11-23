@@ -270,6 +270,7 @@ class LaunchOptions:
     config_upstream: str | None = None  # optional upstream default from config.toml
     statusline_source: str | None = None  # "flag", "env", "config", "cli", or None
     project_memory_explicit: bool = False  # True when CLI explicitly set --project-memory / --no-project-memory
+    project_memory_source: str | None = None  # "cli", "env", "config", or None
     version_check_explicit: bool = False  # True when CLI explicitly set --version-check / --no-version-check
 
 
@@ -953,7 +954,7 @@ def project_memory_wanted(options: LaunchOptions, stderr=None, env: dict[str, st
     ``CONTEXTO_PROJECT_MEMORY`` (``contexto.paths.project_memory_env``), else ``config.toml``, else on.
     A value of the variable Contexto does not know gets one line on stderr naming the ones it does, and
     changes nothing. Shared by claude and codex."""
-    if options.project_memory_explicit:
+    if options.project_memory_explicit or options.project_memory_source == "cli":
         return options.project_memory
     on, unknown = project_memory_env(env)
     if unknown is not None:
@@ -962,11 +963,10 @@ def project_memory_wanted(options: LaunchOptions, stderr=None, env: dict[str, st
               f"off or no turns project memory off; 1, true, on, yes or unset leaves it on",
               file=stderr or sys.stderr, flush=True)
         return options.project_memory
-    if env is not None and (env.get(PROJECT_MEMORY_ENV) or "").strip():
+    active = env if env is not None else os.environ
+    if options.project_memory_source == "config" and (active.get(PROJECT_MEMORY_ENV) or "").strip():
         return on
-    if env is None and (os.environ.get(PROJECT_MEMORY_ENV) or "").strip():
-        return on
-    return options.project_memory
+    return options.project_memory and on
 
 
 def record_project_memory(store: Any, wanted: bool) -> None:
@@ -1362,13 +1362,13 @@ def options_from_args(args: Any, *, config: FileConfig | None = None,
     pm_env_set = bool((active_env.get(PROJECT_MEMORY_ENV) or "").strip())
     pm_env_on, pm_env_unknown = project_memory_env(dict(active_env)) if pm_env_set else (True, None)
     if pm_cli is not None:
-        project_memory = pm_cli
+        project_memory, pm_source = pm_cli, "cli"
     elif pm_env_set and pm_env_unknown is None:
-        project_memory = pm_env_on
+        project_memory, pm_source = pm_env_on, "env"
     elif cfg.project_memory is not None:
-        project_memory = cfg.project_memory
+        project_memory, pm_source = cfg.project_memory, "config"
     else:
-        project_memory = True
+        project_memory, pm_source = True, None
 
     itp_cli = _cli_bool(args, "in_turn_paging_on", "no_in_turn_paging")
     itp_env_set = bool((active_env.get(IN_TURN_PAGING_ENV) or "").strip())
@@ -1381,7 +1381,8 @@ def options_from_args(args: Any, *, config: FileConfig | None = None,
         version_check=version_check, quiet=quiet, statusline=statusline,
         project_memory=project_memory, in_turn_paging=in_turn,
         config_upstream=cfg.upstream, statusline_source=statusline_source,
-        project_memory_explicit=pm_cli is not None, version_check_explicit=vc_cli is not None)
+        project_memory_explicit=pm_cli is not None, project_memory_source=pm_source,
+        version_check_explicit=vc_cli is not None)
 
 
 def check_options(options: LaunchOptions) -> None:

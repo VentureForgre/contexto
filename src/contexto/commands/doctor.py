@@ -59,7 +59,8 @@ home ``contexto run`` cannot use, an MCP server that does not start and list exa
 a cloud-provider switch that is on or a settings file that may turn one on (``contexto run claude``
 refuses to launch, exit 2), and a check that cannot be made at all (no working directory, no home
 directory, no temporary directory: ``Fault``). Everything else is a warning: an untested or unreadable
-CLI version, one of the two CLIs missing, a settings file that cannot be used, no key found (a login
+CLI version, a CLI on PATH that cannot start (an uninstalled optional CLI is skipped when the other
+CLI is usable), a settings file that cannot be used, no key found (a login
 the CLI holds also works), no upstream or key helper for Codex (a flag to ``contexto run`` can supply
 either), a setting skipped as untrusted, and a store home that is read-only while its ``sessions``
 directory can be used. A check that does not apply because its CLI is missing is skipped.
