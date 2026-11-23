@@ -1094,3 +1094,61 @@ def test_codex_code_mode_exec_rejects_mixed_tools_aliases_comments_and_literal_i
     send(engine, RESPONSES, main_turn(RESPONSES, mixed, literal, commented, aliased, other_server))
     assert first.main_records() == []
     assert carried_ids(new_session(home, "s2", root, 2)) == []
+
+
+def test_codex_code_mode_exec_strict_grammar_blocks_adversarial_bypasses_and_allows_urls(home, tmp_path):
+    """Reviewer B #1 / A #9: strict allowlisted grammar rejects dead-code/string-concatenation,
+    Unicode identifier escapes, HTML comments, error outputs, and deeply nested JSON DoS, while
+    still confirming legitimate pins whose text contains URLs or globs."""
+    root = repo(tmp_path)
+    first = new_session(home, "s1", root, 1)
+    rid, reply = call_tool(first, "contexto_pin", kind="obligation", text="injected")
+    url_rid, url_reply = call_tool(first, "contexto_pin", kind="decision", text="docs at https://example.com/*")
+    engine = RewriteEngine(first, config=ROOMY)
+
+    # 1. Dead-code branch + concatenated rec_ id in console.log
+    dead_concat = custom_responses_call(
+        "adv_1", "exec",
+        'if (false) { tools.mcp__contexto__contexto_pin({}); }\n'
+        f'console.log(\'{{"record_id":"\' + \'rec_\' + \'{rid[4:]}\' + \'"}}\');',
+        json.dumps({"record_id": rid}),
+    )
+    # 2. Unicode identifier escape (\u0074ools) calling another tool
+    unicode_esc = custom_responses_call(
+        "adv_2", "exec",
+        'const out = await \\u0074ools.read_file("untrusted.txt");\n'
+        'console.log(out);\n'
+        'if (false) tools.mcp__contexto__contexto_pin({});',
+        reply,
+    )
+    # 3. Annex-B HTML comment + globalThis reflection
+    html_comment = custom_responses_call(
+        "adv_3", "exec",
+        '<!-- hide\nconst x = globalThis["too"+"ls"];\ntools.mcp__contexto__contexto_pin({});',
+        reply,
+    )
+    # 4. Script error output with a printed line before failure
+    errored = custom_responses_call(
+        "adv_4", "exec",
+        'const r = await tools.mcp__contexto__contexto_pin({kind: "obligation", text: "x"});\nconsole.log(r);',
+        f"Exit code: 1\nOutput:\n{reply}\nTypeError: boom",
+    )
+    # 5. Deeply nested JSON in output must NOT raise RecursionError or wedge confirmation
+    deep_json = custom_responses_call(
+        "adv_5", "exec",
+        'await tools.mcp__contexto__contexto_pin({kind: "obligation", text: "x"});',
+        "[" * 5000 + "]" * 5000,
+    )
+    # 6. Legitimate pin containing URL with // and glob with /* inside a JSON/JS string literal
+    legit_url = custom_responses_call(
+        "ok_url", "exec",
+        'const r = await tools.mcp__contexto__contexto_pin({kind: "decision", text: "docs at https://example.com/*"});\n'
+        'console.log(r);',
+        f"Output:\n{url_reply}",
+    )
+
+    events = send(engine, RESPONSES, main_turn(RESPONSES, dead_concat, unicode_esc, html_comment,
+                                               errored, deep_json, legit_url))
+    assert not any(e["event"] == "main_records_unavailable" for e in events)
+    assert first.main_records() == [url_rid]
+    assert carried_ids(new_session(home, "s2", root, 2)) == [url_rid]

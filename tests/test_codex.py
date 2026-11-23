@@ -1173,6 +1173,7 @@ def test_preserves_user_codex_config_and_assets_without_leaking_secrets(tmp_path
         '[model_providers.other]\n'
         'name = "Other"\n'
         'base_url = "https://other.invalid/v1"\n'
+        'experimental_bearer_token = "sk-other-provider-secret"\n'
         '\n'
         '[mcp_servers.my_tools]\n'
         'command = "/usr/local/bin/my-mcp"\n'
@@ -1180,6 +1181,9 @@ def test_preserves_user_codex_config_and_assets_without_leaking_secrets(tmp_path
         '\n'
         '[profiles.fast]\n'
         'model = "gpt-5-mini"\n'
+        'model_provider = "other"\n'
+        '[profiles.fast.features]\n'
+        'enable_request_compression = true\n'
     )
     (user_codex / "AGENTS.md").write_text("# User Agents\n")
     (user_codex / "skills").mkdir()
@@ -1206,9 +1210,12 @@ def test_preserves_user_codex_config_and_assets_without_leaking_secrets(tmp_path
         assert cfg["model"] == "gpt-5.4"
         assert cfg["approval_policy"] == "on-request"
         assert cfg["features"]["shell_snapshot"] is True
-        assert cfg["model_providers"]["other"]["base_url"] == "https://other.invalid/v1"
         assert cfg["mcp_servers"]["my_tools"] == {"command": "/usr/local/bin/my-mcp", "args": ["--port", "9000"]}
-        assert cfg["profiles"]["fast"] == {"model": "gpt-5-mini"}
+        # Profile kept, but model_provider stripped and compression forced off so profiles cannot bypass proxy:
+        assert cfg["profiles"]["fast"] == {"model": "gpt-5-mini", "features": {"enable_request_compression": False}}
+        # Unrelated model_providers (which may hold secrets) are NEVER copied:
+        assert list(cfg["model_providers"]) == ["contexto"]
+        assert "sk-other-provider-secret" not in (home_dir / "config.toml").read_text()
         # Contexto overrides win:
         assert cfg["model_provider"] == "contexto"
         assert cfg["features"]["enable_request_compression"] is False
@@ -1339,3 +1346,77 @@ def test_real_codex_cli_zero_spend_oob_with_openai_api_key_and_user_codex_home(t
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_openai_api_key_with_claude_api_key_helper_never_sends_anthropic_helper_to_openai(tmp_path):
+    """Reviewer A #1 / B #2: when upstream defaults to api.openai.com via OPENAI_API_KEY (openai-env),
+    plan_codex must use native env_key and never fall back to Claude Code's Anthropic apiKeyHelper."""
+    from contexto.codex import OPENAI_API_KEY_ENV, OPENAI_UPSTREAM
+
+    c_home = claude_home(tmp_path, helper="/from/claude/anthropic-helper")
+    launch = plan_codex(
+        ["exec", "hi"], PROXY, "S_NO_LEAK",
+        env={OPENAI_API_KEY_ENV: "sk-synth-openai"},
+        cwd=tmp_path,
+        home=c_home,
+        claude_upstream="https://api.anthropic.com",
+    )
+    try:
+        assert launch.upstream == OPENAI_UPSTREAM
+        cfg = tomllib.loads((launch.codex_home / "config.toml").read_text())
+        provider = cfg["model_providers"]["contexto"]
+        assert provider["env_key"] == OPENAI_API_KEY_ENV
+        assert "auth" not in provider
+    finally:
+        launch.cleanup()
+
+
+def test_dump_toml_preserves_table_arrays_with_subtables_before_scalars():
+    """Reviewer A #2 / B #7: scalars inside [[array]] items must emit before subtables/nested arrays."""
+    from contexto.codex import _dump_toml
+
+    doc = {
+        "entries": [
+            {"meta": {"env": "prod"}, "nested": [{"sub": {"a": 1}, "k": "v"}], "name": "first"},
+            {"name": "second", "meta": {"env": "dev"}},
+        ],
+    }
+    parsed = tomllib.loads(_dump_toml(doc))
+    assert parsed == doc
+
+
+def test_relative_codex_home_broken_config_symlink_fifo_and_preexisting_links(tmp_path, monkeypatch):
+    """Reviewer A #7, #12 / B #3, #8: relative CODEX_HOME creates absolute symlinks, cleanup never
+    deletes pre-existing symlinks, broken config.toml symlink is replaced, FIFO config never hangs."""
+    monkeypatch.chdir(tmp_path)
+    rel_codex = Path("rel-codex")
+    (rel_codex / "skills").mkdir(parents=True)
+    (rel_codex / "skills" / "s.md").write_text("hi")
+    os.mkfifo(rel_codex / "config.toml")  # must not hang!
+
+    home_dir = tmp_path / "session-codex-home"
+    home_dir.mkdir(mode=0o700)
+    (home_dir / "config.toml").symlink_to(tmp_path / "does-not-exist")  # broken symlink
+    preexisting = tmp_path / "preexisting-prompts"
+    preexisting.mkdir()
+    (home_dir / "prompts").symlink_to(preexisting)
+    (rel_codex / "prompts").mkdir()
+
+    launch = plan_codex(
+        [], PROXY, "S_EDGE",
+        env={"OPENAI_API_KEY": "sk-synth", "CODEX_HOME": "rel-codex"},
+        cwd=tmp_path,
+        home=tmp_path,
+        codex_home_dir=home_dir,
+    )
+    try:
+        assert any("not a regular file" in note for note in launch.notes)
+        assert (home_dir / "skills").is_symlink()
+        assert Path(os.readlink(home_dir / "skills")).is_absolute()
+        assert (home_dir / "skills" / "s.md").read_text() == "hi"
+        assert (home_dir / "prompts").resolve() == preexisting.resolve()
+    finally:
+        launch.cleanup()
+    # Newly created skills symlink removed; pre-existing prompts symlink preserved!
+    assert not os.path.lexists(home_dir / "skills")
+    assert os.path.lexists(home_dir / "prompts") and (home_dir / "prompts").resolve() == preexisting.resolve()

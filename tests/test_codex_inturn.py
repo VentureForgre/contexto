@@ -207,9 +207,11 @@ def test_long_codex_tool_loop_stays_under_bound_and_pages_are_recallable():
     assert len(notes) == 1 and "Contexto folded" in notes[0]
     page_id = inturn.note_page(notes[0])
     assert page_id is not None and store.get_page(page_id) is not None
-    # Folded content is searchable and rendered cleanly.
+    # Folded content is searchable and rendered cleanly (both function_call_output and local_shell_call_output).
     hits = store.search("fn_marker_0")
     assert hits and "fn_marker_0" in render_page(store.get_page(hits[0]))
+    sh_hits = store.search("shell_marker_2")
+    assert sh_hits and "shell_marker_2" in render_page(store.get_page(sh_hits[0]))
     # No orphaned outputs without their paired call.
     kept_calls = {i["call_id"] for i in up["input"] if str(i.get("type", "")).endswith("_call") and "call_id" in i}
     kept_outs = {i["call_id"] for i in up["input"] if str(i.get("type", "")).endswith("_output") and "call_id" in i}
@@ -284,3 +286,31 @@ def test_responses_folds_and_index_pages_work_when_note_cap_is_exceeded(monkeypa
     note_text = up["input"][len(lead())]["content"][-1]["text"]
     assert inturn.note_size(note_text) <= note_bytes
     assert listing_id in note_text
+
+
+def test_responses_clipped_pure_truncation_and_reasoning_replacement_never_orphan_calls():
+    """Reviewer A #4, #5, #10: pure truncation (matched == n) drops a truncated round whole;
+    additional *_call types are assistant items; missing call_id is non-foldable; FOLDED stops merging."""
+    # Additional *_call types recognized as assistant items
+    for kind in ("computer_call", "file_search_call", "code_interpreter_call", "mcp_call"):
+        assert RESPONSES.is_assistant({"type": kind, "id": "x"})
+
+    # Missing call_id on a client call makes the round non-foldable
+    bad_round_items = [user_prompt("go"), {"type": "function_call", "name": "exec", "arguments": "{}"}]
+    rnds = inturn.RESPONSES.rounds(bad_round_items, 0, len(bad_round_items))
+    assert len(rnds) == 1 and rnds[0].foldable is False
+
+    # Pure truncation (matched == n) inside a folded Responses round drops that entire round.
+    items = [
+        user_prompt("go"),
+        reasoning(0), fn_call(0), fn_output(0, "o0"),
+        reasoning(1), fn_call(1), fn_output(1, "o1"),
+    ]
+    edits = inturn.InTurn(folds=((0, ((1, 7),), "pg_0123456789abcdef"),))
+    truncated = items[:6]  # fn_output(1) dropped; matched == n == 6
+    clipped = inturn.clipped(edits, 6, truncated, RESPONSES)
+    # Round 0 (1..4) stays folded; round 1 (4..6, missing its output) is dropped whole!
+    assert clipped.folds == ((0, ((1, 4),), "pg_0123456789abcdef"),)
+    viewed = inturn.view(truncated, EpochState(inturn=clipped), RESPONSES)
+    # fn_call(1) is kept in view so a later fn_output(1) will never be orphaned.
+    assert any(isinstance(i, dict) and i.get("call_id") == "call_1" for i in viewed)

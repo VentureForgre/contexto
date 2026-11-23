@@ -119,6 +119,41 @@ def test_close_payload_round_trip():
     p = close_payload(1000, "bye")
     assert parse_close_code(p) == 1000
     assert parse_close_code(b"") is None
+    # Multibyte UTF-8 truncation never splits mid-codepoint (Reviewer A #11).
+    long_utf8 = close_payload(1000, "é" * 100)
+    assert len(long_utf8) <= 125
+    assert long_utf8[2:].decode("utf-8") == "é" * 61
+
+
+def test_ws_protocol_hardening_close_len_frame_cap_and_fallback_body():
+    """Reviewer A #6, #11 / B #5: reject 1-byte close frame, cap 0-byte OP_CONT floods,
+    handle 204/304/keep-alive fallback bodies immediately, and reject negative chunk sizes."""
+    from contexto.ws import _read_http_fallback_body
+
+    # 1-byte close frame is forbidden by RFC 6455 §5.5.1.
+    with pytest.raises(WSProtocolError):
+        read_frame(_ByteReader(lambda n: b"", initial=encode_frame(OP_CLOSE, b"\x03")))
+
+    # Infinite 0-byte OP_CONT flood hits max_frames cap.
+    flood = encode_frame(OP_TEXT, b"a", fin=False) + encode_frame(OP_CONT, b"", fin=False) * 20
+    with pytest.raises(WSProtocolError) as exc:
+        read_message(_ByteReader(lambda n: b"", initial=flood), expect_masked=False, max_frames=10)
+    assert exc.value.code == 1009
+
+    # 204/304/keep-alive fallback body returns immediately without calling recv.
+    def fail_recv(_n: int) -> bytes:
+        raise AssertionError("must not block reading body")
+
+    assert _read_http_fallback_body(_ByteReader(fail_recv), 204, []) == b""
+    assert _read_http_fallback_body(_ByteReader(fail_recv), 304, []) == b""
+    assert _read_http_fallback_body(_ByteReader(fail_recv), 400, []) == b""
+
+    # Negative chunk size rejected.
+    with pytest.raises(WSProtocolError):
+        _read_http_fallback_body(
+            _ByteReader(lambda n: b"", initial=b"-1\r\n"),
+            400, [("Transfer-Encoding", "chunked")],
+        )
 
 
 # End-to-end WebSocket proxy tests --------------------------------------------------------------------
@@ -326,9 +361,14 @@ def test_ws_relay_rewrites_response_create_holds_tool_calls_and_observes_usage()
             ev4 = read_message(reader, expect_masked=False)
             assert ev4 is not None and json.loads(ev4[1])["type"] == "response.completed"
 
-            # Close cleanly
+            # Close cleanly and verify upstream's echoed OP_CLOSE actually reaches the client (RFC 6455 §7.1.1).
+            close_codes: list[int | None] = []
             sock.sendall(encode_frame(OP_CLOSE, close_payload(1000, "done"), mask=os.urandom(4)))
-            assert read_message(reader, expect_masked=False) is None
+            assert read_message(
+                reader, expect_masked=False,
+                on_control=lambda op, p: close_codes.append(parse_close_code(p)) if op == OP_CLOSE else None,
+            ) is None
+            assert close_codes == [1000]
         finally:
             sock.close()
     finally:
@@ -351,6 +391,16 @@ def test_ws_relay_rewrites_response_create_holds_tool_calls_and_observes_usage()
     assert rewritten_turn2["type"] == "response.create"
     assert len(rewritten_turn2["input"]) < len(turn2_items)
     assert store.pages
+
+    # Verify stats.py tallies websocket_turn events cleanly (Reviewer B #6).
+    from contexto.stats import _Tally
+    tally = _Tally()
+    for ev in log.events:
+        tally.line(ev)
+    assert tally.requests["model"] == 2
+    assert tally.requests["with_usage"] == 2
+    assert tally.peak == 1000
+    assert tally.paging["rotations"] >= 1
 
     # Verify session log recorded both websocket_turn events and one websocket_session event.
     turns = [e for e in log.events if e["event"] == "websocket_turn"]
@@ -479,3 +529,44 @@ def test_codex_websocket_opt_in_config_and_env(tmp_path):
     finally:
         launch.cleanup()
     assert RESPONSES.in_turn is not None
+
+
+def test_proxy_stop_closes_active_websocket_cleanly_without_incomplete_event():
+    """Reviewer B #10: stopping the proxy while a WebSocket is idle shuts the sockets cleanly
+    so proxy.stop() does not block for STOP_DRAIN_S or log proxy_stop_incomplete."""
+    import time
+
+    connected = threading.Event()
+
+    def upstream_fn(conn, reader, req_line, headers, frames):
+        accept = accept_key(headers["sec-websocket-key"])
+        conn.sendall((
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+        ).encode("iso-8859-1"))
+        connected.set()
+        # Hold open until proxy stops.
+        read_message(reader, expect_masked=True)
+
+    upstream = _FakeWSUpstream(upstream_fn)
+    log = _ListLog()
+    proxy = ContextoProxy(f"http://127.0.0.1:{upstream.port}/v1", log, allow_websocket=True)
+    proxy.start()
+    sock = None
+    try:
+        sock, _, head = _client_ws_connect(proxy.port, "/responses")
+        assert b"101 Switching Protocols" in head
+        assert connected.wait(timeout=5)
+        t0 = time.monotonic()
+        proxy.stop()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.5
+    finally:
+        if sock is not None:
+            sock.close()
+        upstream.close()
+
+    assert not any(e["event"] == "proxy_stop_incomplete" for e in log.events)
+    assert any(e["event"] == "websocket_session" for e in log.events)

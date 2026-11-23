@@ -11,9 +11,10 @@ How the relay keeps a WebSocket conversation bounded:
   rules as HTTP POST (rule 14: on a transform or serialization failure the client's original frame is
   forwarded unchanged).
 - Server frames from the first tool call (``response.output_item.added`` whose item type ends in
-  ``_call``) are held until the turn's terminal event (``response.completed``,
-  ``response.incomplete``, ``response.failed``, or an error / close), so ``observe_usage`` publishes
-  the real-usage recall room before the CLI sees any tool call (matching ``StreamHold`` on SSE).
+  ``_call``) are held (up to ``MAX_HELD_BYTES``) until the turn's terminal event
+  (``response.completed``, ``response.incomplete``, ``response.failed``, or an error / close), so
+  ``observe_usage`` publishes the real-usage recall room before the CLI sees any tool call (matching
+  ``StreamHold`` on SSE).
 - ``Sec-WebSocket-Extensions`` is stripped from the upstream upgrade request so permessage-deflate
   is not negotiated and frames remain readable without compression extensions.
 - A non-101 upstream response (for example 401, 404, 426, or 501) is forwarded back to the client as
@@ -27,6 +28,7 @@ import collections
 import hashlib
 import json
 import os
+import re
 import socket
 import ssl
 import struct
@@ -40,8 +42,13 @@ from contexto.hints import without_hint_headers
 
 WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_WS_MESSAGE_BYTES = 64 * 1024 * 1024  # matches proxy.MAX_DECODED_BODY_BYTES
+MAX_HELD_BYTES = MAX_WS_MESSAGE_BYTES
+MAX_PENDING_TURNS = 32
+MAX_FRAMES_PER_MESSAGE = 4096
 MAX_HANDSHAKE_BYTES = 64 * 1024
 MAX_FALLBACK_BODY_BYTES = 16 * 1024 * 1024
+MAX_TRAILER_LINES = 100
+MASK_CHUNK_BYTES = 65536
 WS_JOIN_TIMEOUT_S = 2.0
 
 OP_CONT = 0x0
@@ -52,6 +59,10 @@ OP_PING = 0x9
 OP_PONG = 0xA
 DATA_OPCODES = frozenset({OP_TEXT, OP_BINARY})
 CONTROL_OPCODES = frozenset({OP_CLOSE, OP_PING, OP_PONG})
+
+# RFC 9110 §5.6.2 token for header names and safe single-line header values / status reasons (no CRLF/NUL/CTLs).
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_ILLEGAL_HEADER_VALUE_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
 # Headers removed before forwarding the upgrade request upstream (hop-by-hop + WS handshake headers
 # that the proxy regenerates or intentionally withholds, such as Sec-WebSocket-Extensions).
@@ -72,6 +83,14 @@ class WSProtocolError(Exception):
         self.reason = reason
 
 
+def _valid_header_name(name: str) -> bool:
+    return bool(name and _HEADER_NAME_RE.fullmatch(name))
+
+
+def _valid_header_value(value: str) -> bool:
+    return _ILLEGAL_HEADER_VALUE_RE.search(value) is None
+
+
 def accept_key(client_key: str) -> str:
     """RFC 6455 §4.2.2 Sec-WebSocket-Accept value for ``client_key``."""
     digest = hashlib.sha1(client_key.strip().encode("ascii") + WS_GUID).digest()
@@ -90,12 +109,29 @@ def valid_client_key(key: str | None) -> bool:
 
 
 def apply_mask(data: bytes, mask: bytes) -> bytes:
-    """XOR ``data`` with the 4-byte RFC 6455 masking key."""
+    """XOR ``data`` with the 4-byte RFC 6455 masking key in bounded chunks to avoid large bignum allocations."""
     if not data:
         return b""
     n = len(data)
-    repeated = (mask * (n // 4 + 1))[:n]
-    return (int.from_bytes(data, "big") ^ int.from_bytes(repeated, "big")).to_bytes(n, "big")
+    if n <= MASK_CHUNK_BYTES:
+        repeated = (mask * (n // 4 + 1))[:n]
+        return (int.from_bytes(data, "big") ^ int.from_bytes(repeated, "big")).to_bytes(n, "big")
+    out = bytearray(n)
+    full_mask = mask * (MASK_CHUNK_BYTES // 4)
+    full_mask_int = int.from_bytes(full_mask, "big")
+    mv = memoryview(data)
+    offset = 0
+    while offset < n:
+        end = min(offset + MASK_CHUNK_BYTES, n)
+        size = end - offset
+        if size == MASK_CHUNK_BYTES:
+            masked = (int.from_bytes(mv[offset:end], "big") ^ full_mask_int).to_bytes(size, "big")
+        else:
+            rep = (mask * (size // 4 + 1))[:size]
+            masked = (int.from_bytes(mv[offset:end], "big") ^ int.from_bytes(rep, "big")).to_bytes(size, "big")
+        out[offset:end] = masked
+        offset = end
+    return bytes(out)
 
 
 def encode_frame(opcode: int, payload: bytes = b"", *, fin: bool = True, mask: bytes | None = None) -> bytes:
@@ -115,9 +151,15 @@ def encode_frame(opcode: int, payload: bytes = b"", *, fin: bool = True, mask: b
 
 
 def close_payload(code: int, reason: str = "") -> bytes:
-    """RFC 6455 §5.5.1 close frame payload (2-byte status code + UTF-8 reason, capped to 125 bytes)."""
-    body = reason.encode("utf-8", "replace")[:123]
-    return struct.pack("!H", code) + body
+    """RFC 6455 §5.5.1 close frame payload (2-byte status code + valid UTF-8 reason, capped to 125 bytes)."""
+    raw = reason.encode("utf-8", "replace")
+    if len(raw) > 123:
+        # Trim back to a valid UTF-8 character boundary so we never emit truncated multibyte UTF-8.
+        cut = 123
+        while cut > 0 and (raw[cut] & 0xC0) == 0x80:
+            cut -= 1
+        raw = raw[:cut]
+    return struct.pack("!H", code) + raw
 
 
 def parse_close_code(payload: bytes) -> int | None:
@@ -134,6 +176,8 @@ class _ByteReader:
 
     def read_exact(self, n: int) -> bytes:
         """Read exactly ``n`` bytes, or return ``b""`` on clean EOF before any byte, or raise EOFError."""
+        if n < 0:
+            raise ValueError("negative read length")
         if n == 0:
             return b""
         while len(self._buf) < n:
@@ -190,6 +234,8 @@ def read_frame(reader: _ByteReader, *, expect_masked: bool | None = None,
     length = b1 & 0x7F
     if opcode in CONTROL_OPCODES and (not fin or length > 125):
         raise WSProtocolError(1002, "invalid control frame")
+    if opcode == OP_CLOSE and length == 1:
+        raise WSProtocolError(1002, "invalid close frame length")
     if length == 126:
         ext = reader.read_exact(2)
         if not ext:
@@ -219,16 +265,21 @@ def read_frame(reader: _ByteReader, *, expect_masked: bool | None = None,
 
 def read_message(reader: _ByteReader, *, expect_masked: bool | None = None,
                  on_control: Callable[[int, bytes], None] | None = None,
-                 max_bytes: int = MAX_WS_MESSAGE_BYTES) -> tuple[int, bytes] | None:
+                 max_bytes: int = MAX_WS_MESSAGE_BYTES,
+                 max_frames: int = MAX_FRAMES_PER_MESSAGE) -> tuple[int, bytes] | None:
     """Read one complete (possibly fragmented) WebSocket data message, dispatching interleaved control
     frames through ``on_control``. Returns ``(opcode, payload)`` for data messages, or None on EOF
     or after a close frame."""
     active_op: int | None = None
     chunks = bytearray()
+    frames_seen = 0
     while True:
         frame = read_frame(reader, expect_masked=expect_masked, max_bytes=max_bytes)
         if frame is None:
             return None
+        frames_seen += 1
+        if frames_seen > max_frames:
+            raise WSProtocolError(1009, "too many frames in WebSocket message")
         fin, opcode, payload = frame
         if opcode in CONTROL_OPCODES:
             if on_control is not None:
@@ -255,56 +306,88 @@ def read_message(reader: _ByteReader, *, expect_masked: bool | None = None,
 
 
 def _parse_http_response_head(raw: bytes) -> tuple[int, str, list[tuple[str, str]]]:
-    """Parse an HTTP/1.x status line and headers from raw bytes ending in ``\\r\\n\\r\\n``."""
+    """Parse and validate an HTTP/1.x status line and headers from raw bytes ending in ``\\r\\n\\r\\n``."""
     lines = raw.decode("iso-8859-1").split("\r\n")
     status_parts = lines[0].split(" ", 2)
     if len(status_parts) < 2 or not status_parts[0].startswith("HTTP/"):
         raise WSProtocolError(1002, "malformed upstream HTTP status line")
     status = int(status_parts[1])
+    if not (100 <= status <= 599):
+        raise WSProtocolError(1002, "out-of-range upstream HTTP status")
     reason = status_parts[2] if len(status_parts) > 2 else ""
+    if not _valid_header_value(reason):
+        raise WSProtocolError(1002, "invalid upstream HTTP reason phrase")
     headers: list[tuple[str, str]] = []
     for line in lines[1:]:
         if not line:
             break
-        if ":" in line:
-            k, v = line.split(":", 1)
-            headers.append((k.strip(), v.strip()))
+        if ":" not in line:
+            raise WSProtocolError(1002, "malformed upstream HTTP header")
+        k, v = line.split(":", 1)
+        name, value = k.strip(), v.strip()
+        if not _valid_header_name(name) or not _valid_header_value(value):
+            raise WSProtocolError(1002, "invalid upstream HTTP header")
+        headers.append((name, value))
     return status, reason, headers
 
 
-def _read_http_fallback_body(reader: _ByteReader, headers: list[tuple[str, str]],
+def _read_http_fallback_body(reader: _ByteReader, status: int, headers: list[tuple[str, str]],
                              limit: int = MAX_FALLBACK_BODY_BYTES) -> bytes:
-    """Read a non-101 HTTP response body so it can be forwarded cleanly to the client."""
-    lower = {k.lower(): v for k, v in headers}
-    if "chunked" in lower.get("transfer-encoding", "").lower():
+    """Read a non-101 HTTP response body so it can be forwarded cleanly to the client.
+
+    Raises ``WSProtocolError`` if the body exceeds ``limit`` or has invalid framing, so the proxy
+    never silently truncates an error body or hangs on a keep-alive bodyless response.
+    """
+    if status in (204, 304) or 100 <= status < 200:
+        return b""
+    lower: dict[str, list[str]] = {}
+    for k, v in headers:
+        lower.setdefault(k.lower(), []).append(v)
+    te = ", ".join(lower.get("transfer-encoding", ())).lower()
+    if "chunked" in te:
         out = bytearray()
         while True:
             line = reader.read_until(b"\r\n", 1024)
             size = int(line.split(b";", 1)[0].strip() or b"0", 16)
+            if size < 0:
+                raise WSProtocolError(1002, "negative chunk size")
             if size == 0:
-                while reader.read_until(b"\r\n", 1024) != b"\r\n":
-                    pass
-                return bytes(out)
+                for _ in range(MAX_TRAILER_LINES):
+                    if reader.read_until(b"\r\n", 1024) == b"\r\n":
+                        return bytes(out)
+                raise WSProtocolError(1002, "too many chunked trailers")
             if len(out) + size > limit:
-                return bytes(out)
-            out += reader.read_exact(size)
-            reader.read_exact(2)  # trailing CRLF
+                raise WSProtocolError(1009, "fallback response body exceeds limit")
+            chunk = reader.read_exact(size)
+            if len(chunk) < size:
+                raise EOFError("truncated chunked fallback body")
+            out += chunk
+            crlf = reader.read_exact(2)
+            if crlf != b"\r\n":
+                raise WSProtocolError(1002, "malformed chunk terminator")
     if "content-length" in lower:
-        try:
-            length = max(0, min(int(lower["content-length"]), limit))
-        except ValueError:
-            length = 0
-        return reader.read_exact(length) if length else b""
+        length = int(lower["content-length"][-1].strip())
+        if length < 0:
+            raise WSProtocolError(1002, "negative Content-Length")
+        if length > limit:
+            raise WSProtocolError(1009, "fallback response body exceeds limit")
+        if not length:
+            return b""
+        body = reader.read_exact(length)
+        if len(body) < length:
+            raise EOFError("truncated Content-Length fallback body")
+        return body
+    conn_tokens = _ws_header_tokens(", ".join(lower.get("connection", ())))
+    if "close" not in conn_tokens:
+        return b""
     out = bytearray()
-    while len(out) < limit:
-        try:
-            chunk = reader.read_some(min(65536, limit - len(out)))
-        except OSError:
-            break
+    while True:
+        chunk = reader.read_some(65536)
         if not chunk:
-            break
+            return bytes(out)
+        if len(out) + len(chunk) > limit:
+            raise WSProtocolError(1009, "fallback response body exceeds limit")
         out += chunk
-    return bytes(out)
 
 
 def _open_upstream_socket(owner: Any) -> socket.socket:
@@ -332,6 +415,21 @@ def _ws_header_tokens(value: str | None) -> set[str]:
     return {part.strip().lower() for part in (value or "").split(",") if part.strip()}
 
 
+def _all_header_tokens(headers: Any, name: str) -> set[str]:
+    values = headers.get_all(name) if hasattr(headers, "get_all") else [headers.get(name)]
+    tokens: set[str] = set()
+    for val in values or ():
+        if isinstance(val, str):
+            tokens |= _ws_header_tokens(val)
+    return tokens
+
+
+def _strip_hint_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Apply ``without_hint_headers`` while preserving duplicate headers."""
+    keep_lower = {k.lower() for k in without_hint_headers({k: v for k, v in pairs})}
+    return [(k, v) for k, v in pairs if k.lower() in keep_lower]
+
+
 def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
     """Upgrade a local client WebSocket request on a Responses endpoint and relay frames through the
     proxy's transform and usage hooks."""
@@ -351,16 +449,30 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
     handler.close_connection = True
     client_key = handler.headers.get("Sec-WebSocket-Key")
     ws_version = (handler.headers.get("Sec-WebSocket-Version") or "").strip()
-    if (handler.command != "GET" or "upgrade" not in _ws_header_tokens(handler.headers.get("Connection"))
+    conn_tokens = _all_header_tokens(handler.headers, "Connection")
+    if (handler.command != "GET" or "upgrade" not in conn_tokens
             or ws_version != "13" or not valid_client_key(client_key)):
         handler._send_local_error(400, "contexto proxy: invalid WebSocket upgrade request", "invalid_request_error")
         return
     assert client_key is not None
 
-    req_headers: dict[str, str] = {k: v for k, v in handler.headers.items() if k.lower() not in WS_SKIP_HEADERS}
-    if owner.affinity_header and not any(k.lower() == AFFINITY_HEADER.lower() for k in req_headers):
-        req_headers[AFFINITY_HEADER] = owner.affinity_header
-    forward_headers = without_hint_headers(req_headers) if owner.strip_hint_headers else req_headers
+    skip = WS_SKIP_HEADERS | conn_tokens
+    req_pairs: list[tuple[str, str]] = []
+    for k, v in handler.headers.items():
+        if k.lower() in skip:
+            continue
+        if not _valid_header_name(k) or not _valid_header_value(v):
+            handler._send_local_error(400, "contexto proxy: invalid request header", "invalid_request_error")
+            return
+        req_pairs.append((k, v))
+    if owner.affinity_header and not any(k.lower() == AFFINITY_HEADER.lower() for k, _ in req_pairs):
+        req_pairs.append((AFFINITY_HEADER, owner.affinity_header))
+    forward_pairs = _strip_hint_pairs(req_pairs) if owner.strip_hint_headers else req_pairs
+    req_headers_dict = dict(req_pairs)
+
+    if not _valid_header_value(handler.path):
+        handler._send_local_error(400, "contexto proxy: invalid request path", "invalid_request_error")
+        return
 
     try:
         up_sock = _open_upstream_socket(owner)
@@ -380,7 +492,7 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
             f"Sec-WebSocket-Key: {upstream_key}",
             "Sec-WebSocket-Version: 13",
         ]
-        for name, value in forward_headers.items():
+        for name, value in forward_pairs:
             req_lines.append(f"{name}: {value}")
         req_lines.extend(["", ""])
         up_sock.sendall("\r\n".join(req_lines).encode("iso-8859-1"))
@@ -395,17 +507,25 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
         return
 
     if status != 101:
-        body = b""
         try:
-            body = _read_http_fallback_body(up_reader, up_headers)
-        except (OSError, EOFError, ValueError, WSProtocolError):
-            pass
-        finally:
+            body = _read_http_fallback_body(up_reader, status, up_headers)
+        except (OSError, EOFError, ValueError, WSProtocolError) as exc:
             up_sock.close()
+            owner.log({"event": "websocket_session", "path": path_only, "status": 502, "turns": 0,
+                       "duration_ms": _ms(started), "error": f"fallback_body: {type(exc).__name__}"})
+            handler._send_local_error(502, f"contexto proxy: unreadable upstream response ({type(exc).__name__})")
+            return
+        finally:
+            try:
+                up_sock.close()
+            except OSError:
+                pass
+        up_conn_tokens = _ws_header_tokens(", ".join(v for k, v in up_headers if k.lower() == "connection"))
+        drop = HOP_BY_HOP | up_conn_tokens
         handler._response_started = True
         handler.send_response_only(status, reason)
         for name, value in up_headers:
-            if name.lower() not in HOP_BY_HOP:
+            if name.lower() not in drop:
                 handler.send_header(name, value)
         handler.send_header("Content-Length", str(len(body)))
         handler.end_headers()
@@ -416,12 +536,17 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
                    "duration_ms": _ms(started)})
         return
 
-    up_lower = {k.lower(): v for k, v in up_headers}
-    if up_lower.get("sec-websocket-accept", "").strip() != accept_key(upstream_key):
+    up_lower: dict[str, list[str]] = {}
+    for k, v in up_headers:
+        up_lower.setdefault(k.lower(), []).append(v)
+    up_upgrade = _ws_header_tokens(", ".join(up_lower.get("upgrade", ())))
+    up_conn = _ws_header_tokens(", ".join(up_lower.get("connection", ())))
+    up_accept = (up_lower.get("sec-websocket-accept") or [""])[-1].strip()
+    if "websocket" not in up_upgrade or "upgrade" not in up_conn or up_accept != accept_key(upstream_key):
         up_sock.close()
         owner.log({"event": "websocket_session", "path": path_only, "status": 502, "turns": 0,
                    "duration_ms": _ms(started), "error": "invalid_accept"})
-        handler._send_local_error(502, "contexto proxy: upstream sent invalid Sec-WebSocket-Accept")
+        handler._send_local_error(502, "contexto proxy: upstream sent invalid WebSocket 101 handshake")
         return
 
     # Complete the 101 handshake with the local client.
@@ -431,17 +556,24 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
     handler.send_header("Connection", "Upgrade")
     handler.send_header("Sec-WebSocket-Accept", accept_key(client_key))
     if "sec-websocket-protocol" in up_lower:
-        handler.send_header("Sec-WebSocket-Protocol", up_lower["sec-websocket-protocol"])
+        handler.send_header("Sec-WebSocket-Protocol", up_lower["sec-websocket-protocol"][-1])
     handler.end_headers()
     handler.wfile.flush()
 
     client_sock = handler.connection
+    register = getattr(owner, "register_ws_sockets", None)
+    unregister = getattr(owner, "unregister_ws_sockets", None)
+    if callable(register):
+        register(client_sock, up_sock)
+
     client_reader = _ByteReader(handler.rfile.read1)
     client_write_lock = threading.Lock()
     upstream_write_lock = threading.Lock()
     state_lock = threading.Lock()
     pending: collections.deque[tuple[dict[str, Any] | None, dict[str, Any]]] = collections.deque()
     closed = threading.Event()
+    client_close_seen = threading.Event()
+    upstream_close_seen = threading.Event()
     session_info: dict[str, Any] = {"turns": 0, "close_code": None, "error": None}
 
     def send_client(frame: bytes) -> None:
@@ -457,6 +589,12 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
             closed.set()
             _shut_socket(up_sock)
             _shut_socket(client_sock)
+
+    def queue_pending(original: dict[str, Any] | None, meta: dict[str, Any]) -> None:
+        with state_lock:
+            if len(pending) >= MAX_PENDING_TURNS:
+                pending.popleft()
+            pending.append((original, meta))
 
     def log_turn(meta: dict[str, Any], reader: UsageReader, usage_events: list[dict[str, Any]]) -> None:
         turn_entry: dict[str, Any] = {
@@ -513,8 +651,7 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
         if not isinstance(msg.get("input"), list) or msg.get("previous_response_id"):
             meta["transform_skipped"] = ("previous_response_id" if msg.get("previous_response_id")
                                          else "input is not a list")
-            with state_lock:
-                pending.append((None, meta))
+            queue_pending(None, meta)
             return payload
 
         preserves = getattr(owner.transform, "preserves_input", False) is True
@@ -527,8 +664,7 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
                 original = json.loads(before)
             except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
                 meta["transform_skipped"] = f"cannot serialize request: {type(exc).__name__}"
-                with state_lock:
-                    pending.append((None, meta))
+                queue_pending(None, meta)
                 return payload
 
         prime = getattr(owner.transform, "prime", None)
@@ -539,14 +675,13 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
                 pass
         try:
             with owner.transform_lock:
-                new_msg, _, events = owner.transform(msg, dict(req_headers), path_only)
+                new_msg, _, events = owner.transform(msg, dict(req_headers_dict), path_only)
             if not isinstance(new_msg, dict):
                 raise TypeError("transform must return (dict, dict, list)")
         except Exception as exc:
             meta["transform_error"] = type(exc).__name__
             handler._log_transform_error(type(exc).__name__, "transform", path_only)
-            with state_lock:
-                pending.append((original, meta))
+            queue_pending(original, meta)
             return payload
 
         meta["transform_events"] = [_scalar_summary(e) for e in events if isinstance(e, dict)]
@@ -566,13 +701,17 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
             else:
                 out = payload if after == before else after
         meta["request_bytes"] = len(out)
-        with state_lock:
-            pending.append((original, meta))
+        queue_pending(original, meta)
         return out
 
     def client_to_upstream() -> None:
+        clean_close = False
+
         def on_ctrl(opcode: int, payload: bytes) -> None:
+            nonlocal clean_close
             if opcode == OP_CLOSE:
+                clean_close = True
+                client_close_seen.set()
                 code = parse_close_code(payload)
                 with state_lock:
                     if session_info["close_code"] is None:
@@ -602,14 +741,20 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
         except (OSError, EOFError):
             pass
         finally:
+            if clean_close and not upstream_close_seen.is_set():
+                # Give upstream a bounded window to echo OP_CLOSE (RFC 6455 §7.1.1) before tearing down.
+                upstream_close_seen.wait(timeout=WS_JOIN_TIMEOUT_S)
             stop_both()
 
     def upstream_to_client() -> None:
         reader = UsageReader("text/event-stream", api="responses")
         holding = False
         held: list[bytes] = []
+        held_bytes = 0
+        hold_overflowed = False
         client_calls = False
         announced = 0
+        clean_close = False
 
         def announce() -> None:
             nonlocal announced
@@ -622,8 +767,9 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
             except Exception as exc:
                 owner.log({"event": "tool_calls_hook_error", "error": type(exc).__name__})
 
-        def finish_turn() -> None:
-            nonlocal reader, holding, held, client_calls, announced
+        def finish_turn() -> list[bytes]:
+            nonlocal reader, holding, held, held_bytes, hold_overflowed, client_calls, announced
+            to_flush = list(held)
             with state_lock:
                 item = pending.popleft() if pending else None
                 if item is not None:
@@ -639,26 +785,49 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
             reader = UsageReader("text/event-stream", api="responses")
             holding = False
             held = []
+            held_bytes = 0
+            hold_overflowed = False
             client_calls = False
             announced = 0
+            return to_flush
 
-        def release_held() -> None:
-            nonlocal holding, held
-            frames, held, holding = held, [], False
-            for frame in frames:
-                send_client(frame)
+        def append_or_send(wire_frame: bytes) -> None:
+            nonlocal holding, held, held_bytes, hold_overflowed
+            if not holding:
+                send_client(wire_frame)
+                return
+            if held_bytes + len(wire_frame) > MAX_HELD_BYTES:
+                # Cap memory: release buffered frames fail-open and stop holding for this turn.
+                owner.log({"event": "hold_skipped", "path": path_only, "encoding": "identity", "chunked": False})
+                to_flush = list(held)
+                held = []
+                held_bytes = 0
+                holding = False
+                hold_overflowed = True
+                for frame in to_flush:
+                    send_client(frame)
+                send_client(wire_frame)
+                return
+            held.append(wire_frame)
+            held_bytes += len(wire_frame)
 
         def on_ctrl(opcode: int, payload: bytes) -> None:
+            nonlocal clean_close
             if opcode == OP_CLOSE:
+                clean_close = True
+                upstream_close_seen.set()
                 code = parse_close_code(payload)
                 with state_lock:
                     if session_info["close_code"] is None:
                         session_info["close_code"] = code
-                if held:
-                    try:
-                        release_held()
-                    except OSError:
-                        pass
+                # Observe usage and log any in-progress turn BEFORE flushing held tool calls and OP_CLOSE.
+                if held or pending:
+                    to_flush = finish_turn()
+                    for frame in to_flush:
+                        try:
+                            send_client(frame)
+                        except OSError:
+                            break
             try:
                 send_client(encode_frame(opcode, payload))
             except OSError:
@@ -672,34 +841,20 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
                 opcode, payload = msg
                 wire_frame = encode_frame(opcode, payload)
                 if opcode != OP_TEXT:
-                    if holding:
-                        held.append(wire_frame)
-                    else:
-                        send_client(wire_frame)
+                    append_or_send(wire_frame)
                     continue
                 try:
                     event_obj = loads_bounded(payload)
                 except ValueError:
                     event_obj = None
                 if not isinstance(event_obj, dict):
-                    if holding:
-                        held.append(wire_frame)
-                    else:
-                        send_client(wire_frame)
+                    append_or_send(wire_frame)
                     continue
                 kind = event_obj.get("type")
                 reader.feed_payload(event_obj)
                 announce()
-                if kind in RESPONSE_END_EVENTS:
-                    to_flush = list(held)
-                    finish_turn()
-                    for frame in to_flush:
-                        send_client(frame)
-                    send_client(wire_frame)
-                    continue
-                if kind in ("error", "response.error"):
-                    to_flush = list(held)
-                    finish_turn()
+                if kind in RESPONSE_END_EVENTS or kind in ("error", "response.error"):
+                    to_flush = finish_turn()
                     for frame in to_flush:
                         send_client(frame)
                     send_client(wire_frame)
@@ -708,13 +863,11 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
                     out_item = event_obj.get("item")
                     item_type = str(out_item.get("type", "")) if isinstance(out_item, dict) else ""
                     if item_type.endswith("_call"):
-                        holding = True
+                        if not hold_overflowed:
+                            holding = True
                         if is_client_call(out_item):
                             client_calls = True
-                if holding:
-                    held.append(wire_frame)
-                else:
-                    send_client(wire_frame)
+                append_or_send(wire_frame)
         except WSProtocolError as exc:
             with state_lock:
                 session_info["error"] = f"upstream_protocol: {exc.reason}"
@@ -726,26 +879,35 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
         except (OSError, EOFError):
             pass
         finally:
-            if held:
-                try:
-                    to_flush = list(held)
-                    finish_turn()
-                    for frame in to_flush:
+            while True:
+                with state_lock:
+                    has_more = bool(held) or bool(pending)
+                if not has_more:
+                    break
+                to_flush = finish_turn()
+                for frame in to_flush:
+                    try:
                         send_client(frame)
-                except OSError:
-                    pass
+                    except OSError:
+                        break
+            if clean_close and not client_close_seen.is_set():
+                client_close_seen.wait(timeout=WS_JOIN_TIMEOUT_S)
             stop_both()
 
     t_c2u = threading.Thread(target=client_to_upstream, name="contexto-ws-c2u", daemon=True)
     t_u2c = threading.Thread(target=upstream_to_client, name="contexto-ws-u2c", daemon=True)
     t_c2u.start()
     t_u2c.start()
-    t_c2u.join()
-    t_u2c.join(timeout=WS_JOIN_TIMEOUT_S)
     try:
-        up_sock.close()
-    except OSError:
-        pass
+        t_c2u.join()
+        t_u2c.join(timeout=WS_JOIN_TIMEOUT_S)
+    finally:
+        if callable(unregister):
+            unregister(client_sock, up_sock)
+        try:
+            up_sock.close()
+        except OSError:
+            pass
     session_event: dict[str, Any] = {
         "event": "websocket_session",
         "path": path_only,

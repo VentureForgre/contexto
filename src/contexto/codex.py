@@ -35,6 +35,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -54,7 +55,8 @@ from contexto.tokens import TokenEstimator
 from contexto.upstream import claude_key_helper, untrusted_note
 
 MODEL_OUTPUT_TYPES = frozenset({"reasoning", "function_call", "custom_tool_call", "local_shell_call",
-                                "web_search_call", "image_generation_call", "tool_search_call"})
+                                "computer_call", "web_search_call", "file_search_call", "code_interpreter_call",
+                                "image_generation_call", "tool_search_call", "mcp_call"})
 TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
 # Context sections Codex injects as messages, anchored to the exact openings measured on codex-cli
 # 0.154.0 (spikes/m2/codex/probe.sh: skills_instructions, permissions instructions, collaboration_mode,
@@ -125,7 +127,10 @@ class ResponsesDialect(Dialect):
         return any(isinstance(p, dict) and not is_context_part(p) for p in parts)
 
     def is_assistant(self, item: dict) -> bool:
-        return item.get("type") in MODEL_OUTPUT_TYPES or (_is_message(item) and item.get("role") == "assistant")
+        kind = item.get("type")
+        if isinstance(kind, str) and (kind in MODEL_OUTPUT_TYPES or kind.endswith("_call")):
+            return True
+        return _is_message(item) and item.get("role") == "assistant"
 
     def is_system_like(self, item: dict) -> bool:
         if item.get("type") == "additional_tools":
@@ -167,7 +172,7 @@ class ResponsesDialect(Dialect):
                 args = raw  # not JSON, or nested deeper than MAX_JSON_DEPTH: rendered as the string it is
             return [("assistant", {"type": "tool_use", "name": item.get("name", ""),
                                    "input": {} if args is None else args})]
-        if kind in ("function_call_output", "custom_tool_call_output"):
+        if kind.endswith("_output"):
             out = item.get("output")
             if isinstance(out, str):
                 content = out
@@ -252,15 +257,17 @@ RESPONSES = ResponsesDialect()
 # Launch planning (intake decision D22) -----------------------------------------------------------
 #
 # API-key mode, the default and the only mode run live: a private CODEX_HOME (directory 0700, config
-# 0600, removed on exit) whose custom provider points at the proxy and gets its bearer token from
-# ``auth.command`` running the existing key helper through ``/bin/sh -c``. The config names the helper
-# command only, never a key. ChatGPT mode (``--codex-auth chatgpt``): the user's own CODEX_HOME with
-# ``-c`` overrides only and ``requires_openai_auth``: Codex keeps its own login and the proxy passes it
-# through. Under D35 logins belong in CLIProxyAPI (reached in API-key mode) or the vendor's own CLI,
-# never in Contexto, and users follow their providers' terms. Both keep Codex on HTTP (custom
-# providers have no WebSocket transport) and turn request compression off, because the proxy cannot
-# transform compressed bodies. Some Codex calls (rate limits, usage, a remote MCP
-# connection) go to chatgpt.com directly and bypass the proxy by design.
+# 0600, removed on exit) whose custom provider points at the proxy and gets its bearer token either
+# from ``auth.command`` (running the key helper through ``/bin/sh -c``) or natively via ``env_key``
+# (``OPENAI_API_KEY``). User settings from ``~/.codex/config.toml`` are merged (excluding other
+# provider definitions) and non-secret assets are symlinked; the config never holds a key value.
+# ChatGPT mode (``--codex-auth chatgpt``): the user's own CODEX_HOME with ``-c`` overrides only and
+# ``requires_openai_auth``: Codex keeps its own login and the proxy passes it through. Under D35
+# logins belong in CLIProxyAPI (reached in API-key mode) or the vendor's own CLI, never in Contexto,
+# and users follow their providers' terms. Both keep Codex on HTTP by default (opt-in WebSocket relay
+# is enabled via ``--codex-websocket`` or ``CONTEXTO_CODEX_WEBSOCKET=1``) and turn request compression
+# off, because the proxy cannot transform compressed bodies. Some Codex calls (rate limits, usage, a
+# remote MCP connection) go to chatgpt.com directly and bypass the proxy by design.
 
 API_KEY_MODE = "apikey"
 CHATGPT_MODE = "chatgpt"
@@ -421,7 +428,7 @@ def _dump_toml(doc: dict[str, Any]) -> str:
     """Serialize a TOML document (as produced by ``tomllib.loads``) back to valid TOML."""
     lines: list[str] = []
 
-    def emit(table: dict[str, Any], prefix: tuple[str, ...]) -> None:
+    def split_entries(table: dict[str, Any]):
         scalars: list[tuple[str, Any]] = []
         subtables: list[tuple[str, dict[str, Any]]] = []
         table_arrays: list[tuple[str, list[dict[str, Any]]]] = []
@@ -432,10 +439,10 @@ def _dump_toml(doc: dict[str, Any]) -> str:
                 table_arrays.append((k, v))
             else:
                 scalars.append((k, v))
-        if prefix and (scalars or not (subtables or table_arrays)):
-            if lines and lines[-1] != "":
-                lines.append("")
-            lines.append("[" + ".".join(_toml_key(p) for p in prefix) + "]")
+        return scalars, subtables, table_arrays
+
+    def emit_body(table: dict[str, Any], prefix: tuple[str, ...]) -> None:
+        scalars, subtables, table_arrays = split_entries(table)
         for k, v in scalars:
             lines.append(f"{_toml_key(k)} = {_toml(v)}")
         for k, sub in subtables:
@@ -446,71 +453,98 @@ def _dump_toml(doc: dict[str, Any]) -> str:
                 if lines and lines[-1] != "":
                     lines.append("")
                 lines.append(header)
-                for ik, iv in item.items():
-                    if isinstance(iv, dict):
-                        emit(iv, (*prefix, k, ik))
-                    elif _is_table_array(iv):
-                        for nested in iv:
-                            lines.append("")
-                            lines.append("[[" + ".".join(_toml_key(p) for p in (*prefix, k, ik)) + "]]")
-                            for nk, nv in nested.items():
-                                lines.append(f"{_toml_key(nk)} = {_toml(nv)}")
-                    else:
-                        lines.append(f"{_toml_key(ik)} = {_toml(iv)}")
+                emit_body(item, (*prefix, k))
+
+    def emit(table: dict[str, Any], prefix: tuple[str, ...]) -> None:
+        scalars, subtables, table_arrays = split_entries(table)
+        if prefix and (scalars or not (subtables or table_arrays)):
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append("[" + ".".join(_toml_key(p) for p in prefix) + "]")
+        emit_body(table, prefix)
 
     emit(doc, ())
     lines.append("")
     return "\n".join(lines)
 
 
+def _safe_path_label(path: Path) -> str:
+    """Escape non-printable characters before putting a filesystem path in a stderr note."""
+    text = str(path)
+    return text if text.isprintable() else repr(text)
+
+
 def _user_codex_home(env: Mapping[str, str], home: Path) -> Path | None:
-    """The user's own Codex home directory (``$CODEX_HOME`` when set, else ``~/.codex``)."""
+    """The user's own Codex home directory (``$CODEX_HOME`` when set, else ``~/.codex``), resolved
+    to an absolute path so asset symlinks created inside a session ``codex-home`` never break."""
     raw = env.get("CODEX_HOME")
     if raw:
         try:
-            return Path(raw).expanduser()
-        except RuntimeError:
+            return Path(raw).expanduser().resolve(strict=False)
+        except (RuntimeError, OSError):
             return None
-    return home / ".codex"
+    try:
+        return (home / ".codex").resolve(strict=False)
+    except OSError:
+        return home / ".codex"
 
 
 def _load_user_config(user_home: Path | None) -> tuple[dict[str, Any], str | None]:
-    """Read the user's ``config.toml`` for merging into a session ``CODEX_HOME``. Never raises on a
-    missing, unreadable, or malformed config: returns an empty dict and an optional note instead."""
+    """Read the user's ``config.toml`` for merging into a session ``CODEX_HOME``. Opens non-blocking
+    and verifies a regular file with a bounded read so FIFOs, devices, or oversized files cannot hang
+    or exhaust memory. Never raises: returns an empty dict and an optional note instead."""
     if user_home is None:
         return {}, None
     path = user_home / "config.toml"
+    label = _safe_path_label(path)
+    fd: int | None = None
     try:
-        if not path.is_file():
-            return {}, None
-        if path.stat().st_size > USER_CONFIG_MAX_BYTES:
-            return {}, f"ignored {path}: larger than {USER_CONFIG_MAX_BYTES:,} bytes"
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return {}, f"ignored {label}: not a regular file"
+        chunks: list[bytes] = []
+        total = 0
+        while total <= USER_CONFIG_MAX_BYTES:
+            chunk = os.read(fd, min(65536, USER_CONFIG_MAX_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > USER_CONFIG_MAX_BYTES:
+            return {}, f"ignored {label}: larger than {USER_CONFIG_MAX_BYTES:,} bytes"
+        data = tomllib.loads(b"".join(chunks).decode("utf-8"))
         return (data if isinstance(data, dict) else {}), None
+    except FileNotFoundError:
+        return {}, None
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        return {}, f"ignored {path}: could not be parsed ({type(exc).__name__})"
+        return {}, f"ignored {label}: could not be parsed ({type(exc).__name__})"
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _link_user_assets(user_home: Path | None, session_home: Path) -> list[Path]:
     """Symlink non-secret assets (skills, instructions, rules, prompts, agents) from the user's
-    Codex home into ``session_home``. Never touches ``auth.json``, sessions, or databases."""
+    Codex home into ``session_home``. Never touches ``auth.json``, sessions, or databases, and
+    returns only symlinks created by this call so cleanup never unlinks pre-existing entries."""
     if user_home is None:
         return []
     try:
-        if not user_home.is_dir() or user_home.resolve() == session_home.resolve():
+        resolved_user = user_home.resolve()
+        if not resolved_user.is_dir() or resolved_user == session_home.resolve():
             return []
     except OSError:
         return []
     linked: list[Path] = []
     for name in USER_CODEX_ASSETS:
-        src = user_home / name
+        src = resolved_user / name
         dst = session_home / name
         try:
-            if not src.exists():
-                continue
-            if os.path.lexists(dst):
-                if dst.is_symlink() and os.readlink(dst) == str(src):
-                    linked.append(dst)
+            if not src.exists() or os.path.lexists(dst):
                 continue
             dst.symlink_to(src)
             linked.append(dst)
@@ -571,12 +605,25 @@ def api_key_config(proxy_url: str, helper: str | None, session_id: str, contexto
     }
     doc: dict[str, Any] = dict(user_config) if isinstance(user_config, dict) else {}
     doc["model_provider"] = PROVIDER_ID
-    providers = dict(doc["model_providers"]) if isinstance(doc.get("model_providers"), dict) else {}
-    providers[PROVIDER_ID] = provider
-    doc["model_providers"] = providers
+    # Never copy unrelated [model_providers.*] tables into the session config: they can hold
+    # provider-specific bearer tokens or auth headers that should not be duplicated into session files.
+    doc["model_providers"] = {PROVIDER_ID: provider}
     features = dict(doc["features"]) if isinstance(doc.get("features"), dict) else {}
     features["enable_request_compression"] = False
     doc["features"] = features
+    if isinstance(doc.get("profiles"), dict):
+        sanitized_profiles: dict[str, Any] = {}
+        for pname, pval in doc["profiles"].items():
+            if isinstance(pval, dict):
+                entry = {k: v for k, v in pval.items() if k not in ("model_provider", "model_providers")}
+                if isinstance(entry.get("features"), dict):
+                    pfeat = dict(entry["features"])
+                    pfeat["enable_request_compression"] = False
+                    entry["features"] = pfeat
+                sanitized_profiles[pname] = entry
+            else:
+                sanitized_profiles[pname] = pval
+        doc["profiles"] = sanitized_profiles
     mcp_servers = dict(doc["mcp_servers"]) if isinstance(doc.get("mcp_servers"), dict) else {}
     mcp_servers[PROVIDER_ID] = mcp_entry
     doc["mcp_servers"] = mcp_servers
@@ -750,17 +797,20 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     helper = key_helper or base_env.get(KEY_HELPER_ENV)
     env_key: str | None = None
     notes: list[str] = []
-    if not helper:
+    if not helper and source == "openai-env" and base_env.get(OPENAI_API_KEY_ENV, "").strip():
+        # Upstream defaulted to api.openai.com solely because $OPENAI_API_KEY is set: use native
+        # env_key directly and NEVER fall back to Claude Code's apiKeyHelper (which may print an
+        # Anthropic key and leak it to OpenAI).
+        env_key = OPENAI_API_KEY_ENV
+    if not helper and not env_key:
         # A project's apiKeyHelper only from a folder Claude Code trusts: Codex runs it unasked (D52).
         found = claude_key_helper(cwd, home, base_env)
         helper = found.value
         if found.ignored:
             notes.append(untrusted_note("apiKeyHelper", found.ignored,
                                         f"Pass --codex-key-helper (or set {KEY_HELPER_ENV})", base_env))
-    if not helper and not source.startswith("claude-") and base_env.get(OPENAI_API_KEY_ENV, "").strip():
-        # Out-of-the-box OpenAI API key: Codex reads $OPENAI_API_KEY natively via env_key without
-        # Contexto ever reading or writing the secret value. Never used with a Claude-derived upstream
-        # so an OpenAI key cannot leak to a Claude gateway.
+    if not helper and not env_key and not source.startswith("claude-") and base_env.get(OPENAI_API_KEY_ENV, "").strip():
+        # Explicit --codex-upstream / CONTEXTO_CODEX_UPSTREAM with $OPENAI_API_KEY and no helper.
         env_key = OPENAI_API_KEY_ENV
     if not helper and not env_key:
         example = f"With an OpenAI key in $OPENAI_API_KEY, run `{KEY_HELPER_COMMAND}`"
@@ -801,9 +851,10 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     config = codex_home / "config.toml"
     linked: list[Path] = []
     try:
+        if codex_home.is_symlink():
+            raise CodexLaunchError(f"session codex-home {str(codex_home)!r} is a symlink")
         codex_home.chmod(0o700)
-        if config.exists():
-            config.unlink()  # a stale config from an interrupted run
+        config.unlink(missing_ok=True)  # a stale config or broken symlink from an interrupted run
         fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(api_key_config(proxy_url, helper, session_id, contexto_home, base_env,

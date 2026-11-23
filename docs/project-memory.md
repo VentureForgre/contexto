@@ -11,13 +11,11 @@ sessions' pages and read one ([Searching earlier sessions](#searching-earlier-se
 are defined in the README's [How it works](../README.md#how-it-works); pinning is described in
 [MCP tools](mcp-tools.md).
 
-Codex sessions give nothing to project memory. On codex-cli 0.163.0, as measured
-([Codex acceptance plan](research/M2-codex-acceptance-plan.md)), the model calls Contexto's tools
-from inside Codex's code-mode `exec` tool, and Contexto does not read those calls when it checks what
-the main conversation pinned. So a Codex session's pins are never carried, and its closures and
-replacements of carried records count only in that session. A Codex session does start with what
-Claude Code sessions of the project carried. This was not checked on codex-cli 0.166.0 or in a live
-run.
+Both Claude Code and Codex sessions contribute to project memory. On Codex, Contexto confirms
+pins and closures from direct MCP tool calls (`function_call` / `custom_tool_call`) as well as
+from pure Codex code-mode `exec` calls whose statements invoke only `tools.mcp__contexto__contexto_pin`
+or `tools.mcp__contexto__contexto_close` with literal arguments; an `exec` call that mixes other
+tools or arbitrary expressions is never confirmed.
 
 ## What counts as a project
 

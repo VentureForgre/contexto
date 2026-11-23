@@ -503,8 +503,11 @@ class UsageReader:
                     self._take_responses_end(payload["response"])
             elif payload.get("type") in ("response.output_item.added", "response.output_item.done"):
                 self._take_call_id(payload.get("item"))
-            elif payload.get("type") == "error":
-                self._keep("error_code", payload.get("code"))
+            elif payload.get("type") in ("error", "response.error"):
+                code = payload.get("code")
+                if code is None and isinstance(payload.get("error"), dict):
+                    code = payload["error"].get("code")
+                self._keep("error_code", code)
         elif payload.get("type") == "message_stop":
             self.ended = True
         elif payload.get("type") == "content_block_start":
@@ -968,8 +971,18 @@ class ContextoProxy:
         self.last_epoch: Any = None  # the engine's epoch from its last successful transform
         self._in_flight = 0  # requests being handled; idle keep-alive connections are not counted
         self._idle = threading.Condition()
+        self._ws_sockets: set[Any] = set()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+
+    def register_ws_sockets(self, *socks: Any) -> None:
+        with self._idle:
+            self._ws_sockets.update(socks)
+
+    def unregister_ws_sockets(self, *socks: Any) -> None:
+        with self._idle:
+            for sock in socks:
+                self._ws_sockets.discard(sock)
 
     @property
     def port(self) -> int:
@@ -1020,6 +1033,13 @@ class ContextoProxy:
             self._server.shutdown()
             self._server.server_close()
             self._server = None
+            with self._idle:
+                active_ws = list(self._ws_sockets)
+            for sock in active_ws:
+                try:
+                    socket.socket.shutdown(sock, socket.SHUT_RDWR)
+                except OSError:
+                    pass
             deadline = time.monotonic() + STOP_DRAIN_S
             with self._idle:
                 try:
@@ -1162,7 +1182,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_local_error(403, REFUSED_MESSAGE, "permission_error")
             self.close_connection = True
             return
-        if (self.headers.get("Upgrade") or "").lower() == "websocket":
+        upgrade_tokens = {tok.strip().lower() for val in (self.headers.get_all("Upgrade") or [])
+                          for tok in val.split(",") if tok.strip()}
+        if "websocket" in upgrade_tokens:
             if self.owner.allow_websocket and path_only in RESPONSES_PATHS:
                 from contexto.ws import handle_websocket
 

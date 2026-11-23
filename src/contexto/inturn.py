@@ -54,9 +54,9 @@ indexes, with a folded message replaced by ``FOLDED``. A stub and a fold note ar
 CLI's own blocks and the page id, so they are byte-identical on every request. The epoch record carries
 the state (rule 16), written when a batch runs.
 
-**Dialects.** The protocol-specific parts are behind ``Dialect.in_turn`` (``MessagesInTurn`` here). A
-dialect whose ``in_turn`` is None, as the Responses dialect's is in this release, never pages inside a
-turn.
+**Dialects.** The protocol-specific parts are behind ``Dialect.in_turn`` (``MessagesInTurn`` for
+Claude Code and ``ResponsesInTurn`` for Codex). A dialect whose ``in_turn`` is None never pages
+inside a turn.
 """
 
 from __future__ import annotations
@@ -630,7 +630,11 @@ class ResponsesInTurn:
         pending_calls: set[str] = set()
         for i in range(start, end):
             item = items[i]
-            if item is FOLDED or i == start:
+            if i == start:
+                continue
+            if item is FOLDED:
+                if current is not None:
+                    seen_non_model = True
                 continue
             if dialect.is_assistant(item):
                 if self._starts_new_round(item, current is not None, seen_non_model, has_non_reasoning):
@@ -647,6 +651,8 @@ class ResponsesInTurn:
                     cid = _responses_call_id(item)
                     if cid:
                         pending_calls.add(cid)
+                    else:
+                        foldable = False
                 continue
             if current is None:
                 continue
@@ -1223,15 +1229,22 @@ def clipped(edits: InTurn, matched: int, messages: list[dict], dialect: Any) -> 
         if start >= matched or not removed:
             continue
         if removed[-1] >= matched:
-            # The cut: keep only whole rounds strictly before ``matched``; if ``matched`` falls in the
-            # middle of a round (not at its start), that whole round goes back into the request.
+            # The cut: keep only whole foldable rounds strictly before ``matched``; if ``matched``
+            # truncates or modifies any round (including pure truncation where ``matched == n``,
+            # turn-boundary edits, or mid-round replacements), that whole round goes back into the
+            # request so no call stays folded without its output or vice versa.
             turn_end = next((t for t in starts if t > start), n)
             cut = matched
-            if hooks is not None and matched < turn_end:
-                for rnd in hooks.rounds(messages, start, turn_end):
-                    if rnd.removed and rnd.removed[0] < matched <= rnd.removed[-1]:
-                        cut = rnd.removed[0]
-                        break
+            if hooks is not None:
+                removed_set = set(removed)
+                for rnd in hooks.rounds(messages, start, min(turn_end, n)):
+                    if not rnd.removed or not any(i in removed_set for i in rnd.removed):
+                        continue
+                    if (rnd.removed[-1] >= matched or not rnd.foldable
+                            or (matched == n and rnd.removed[-1] == matched - 1
+                                and dialect.is_assistant(messages[rnd.removed[-1]])
+                                and hooks.call_ids_in([messages[i] for i in rnd.removed]))):
+                        cut = min(cut, rnd.removed[0])
             elif matched < n and not dialect.is_assistant(messages[matched]):
                 calls = [i for i in removed if i < matched and dialect.is_assistant(messages[i])]
                 cut = calls[-1] if calls else removed[0]
@@ -1658,7 +1671,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             if left <= target:
                 break
             folded.append(r)
-            left -= sum(counted(i, rw.strip_thinking(sent[i])) for i in r.removed)
+            left -= sum(counted(i, s) for i in r.removed if (s := rw.strip_thinking(sent[i])) is not None)
         if folded:
             removed = [i for r in folded for i in r.removed]
             # The page holds the rounds as sent, a stubbed result as its stub (its original is in its own
@@ -1703,7 +1716,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         resent = tokens(rw.transform_messages(messages, state))
     else:
         sent = view(messages, state, dialect)
-        resent = tokens([rw.strip_thinking(sent[i]) for i in range(first_changed, n)])
+        resent = tokens([s for i in range(first_changed, n) if (s := rw.strip_thinking(sent[i])) is not None])
     only_huge = bool(huge) and counts["results"] == len(huge) and not counts["rounds"] and not counts["turns"]
     events.append({"event": "in_turn_batch", "epoch": state.epoch,
                    "trigger": "result" if only_huge else "bound" if over_bound else "room",

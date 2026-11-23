@@ -1521,3 +1521,17 @@ def test_doctor_fails_codex_upstream_when_pointing_at_contexto_serve(both, capsy
     found = {c["id"]: c for c in json.loads(out)["checks"]}
     assert found["codex-upstream"]["status"] == "fail"
     assert "contexto serve" in found["codex-upstream"]["summary"]
+
+
+def test_doctor_uses_openai_api_key_not_claude_helper_when_upstream_is_openai_env(both, capsys, fast_mcp, monkeypatch):
+    """Reviewer A #1 / B #2: with default Anthropic Claude upstream, apiKeyHelper, and OPENAI_API_KEY,
+    doctor agrees with plan_codex that Codex uses OPENAI_API_KEY against OpenAI, not Claude's helper."""
+    write_settings(both.home / ".claude" / "settings.json", {"apiKeyHelper": f"echo {HELPER_SECRET}"})
+    monkeypatch.setenv("OPENAI_API_KEY", SECRET)
+    code, out, _ = run(capsys, "--json")
+    assert SECRET not in out and HELPER_SECRET not in out
+    found = {c["id"]: c for c in json.loads(out)["checks"]}
+    assert code == 0
+    assert found["codex-upstream"]["details"]["source"] == "openai-env"
+    assert found["codex-key"]["status"] == "pass"
+    assert found["codex-key"]["details"] == {"name": "OPENAI_API_KEY", "source": "env"}

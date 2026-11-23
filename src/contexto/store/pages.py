@@ -234,7 +234,7 @@ def current_stub(page: dict[str, Any]) -> dict[str, Any]:
     messages = page.get("messages")
     if not isinstance(stub, dict) or not isinstance(messages, list):
         return page
-    codex_v010 = (not (stub.get("user_text") or stub.get("tools") or stub.get("paths"))
+    codex_v010 = (not (stub.get("user_text") or stub.get("system_text") or stub.get("tools") or stub.get("paths"))
                   and any(isinstance(m, dict) and is_responses_item(m) for m in messages))
     if not codex_v010 and not own_call_ids(messages):
         return page
@@ -323,9 +323,8 @@ def is_context_page(page: dict[str, Any]) -> bool:
     system messages and Codex developer items one per page (lane A), and each paged context block as
     a user message holding that block (D32). Read from the messages, not the stub (a paged block's
     stub has ``reminder_text``). Search ranks these pages after every turn page, and its reply shows
-    them after every turn page (D34). A Codex developer page has no searchable text today (search
-    reads Responses items through ``as_message``, which drops system-like items, B23), so it never
-    matches; it is recognised so that it would rank as context if that changed."""
+    them after every turn page (D34). Standalone paged Codex ``developer`` pages are rendered and
+    searched through ``as_message(..., include_developer=True)`` and ranked here as context pages."""
     messages = page.get("messages")
     if not isinstance(messages, list) or not messages:
         return False

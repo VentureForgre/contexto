@@ -2,14 +2,17 @@
 
 The engine reads the main conversation's own history. A record is the main conversation's when that
 history holds Contexto's own ``contexto_pin`` or ``contexto_close`` call (a Messages API ``tool_use``
-block in an assistant message, or a Responses API ``function_call`` item, named with the server's
-prefix, ``mcp__contexto__``) and, with the same call id, its result (a ``tool_result`` block or a
-``function_call_output`` item) whose text is exactly the server's success reply: ``Recorded <kind>
-<record id>.`` (with the note an unpinned kind gets), ``Closed <obligation id> with <record id>.``, or
-the server's structured content ``{"record_id": "<record id>"}`` alone, which is what a CLI that
-prefers structured content passes on. A subagent's or a side request's call is in its own conversation,
-never in main's, and a result that only quotes a success reply (a subagent's report returned through
-an Agent call, a file, a page) belongs to another tool's call, so neither is ever taken.
+block in an assistant message, a Responses API ``function_call`` or ``custom_tool_call`` item named
+with the server's prefix ``mcp__contexto__``, or a Codex code-mode ``exec`` call whose parsed JS
+statements invoke ONLY literal ``tools.mcp__contexto__contexto_pin`` / ``contexto_close`` calls with
+literal arguments) and, with the same call id, its result (a ``tool_result`` block or a
+``function_call_output`` / ``custom_tool_call_output`` item) whose text is the server's success reply:
+``Recorded <kind> <record id>.`` (with the note an unpinned kind gets), ``Closed <obligation id> with
+<record id>.``, or the server's structured content ``{"record_id": "<record id>"}`` alone, which is
+what a CLI that prefers structured content passes on. A subagent's or a side request's call is in its
+own conversation, never in main's, and a result that only quotes a success reply (a subagent's report
+returned through an Agent call, a file, a page, or an ``exec`` call mixing other tools or arbitrary
+JS) belongs to another tool's call, so neither is ever taken.
 
 Which main conversation is trusted: the engine (``RewriteEngine._confirm_main_records``) hands a
 conversation's messages to ``scan`` only while it is main and trusted. Trusted are the engine's first
@@ -36,10 +39,10 @@ room), nor is one whose ``x-claude-code-request-class`` is ``subagent``, ``workf
 (D70, sent only while Claude Code's gateway hint headers are on); the scan position stays where it was.
 
 The limits: a pin whose result never reaches a later request of the main conversation (the session
-ends right after it) is not confirmed, so it is never carried. A code-mode call (Codex's ``exec``
-running ``tools.mcp__contexto__contexto_pin(...)``) is not recognised and is not confirmed either. On
-codex-cli 0.163.0, as measured (``docs/research/M2-codex-acceptance-plan.md``), that is the only way the
-model calls Contexto's tools, so a Codex session confirms nothing.
+ends right after it) is not confirmed, so it is never carried. A Codex code-mode ``exec`` call that
+combines ``contexto_pin`` / ``contexto_close`` with any other tool call, control flow, comments,
+template literals, string concatenation, or arbitrary expressions is not confirmed either, so untrusted
+output from other tools cannot forge a confirmation.
 
 ``MainRecords.scan(key, messages)`` reads only the messages it has not read before for that
 conversation (a history shorter than before is read again from the start, as a new one), so each
@@ -55,6 +58,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
+from contexto.canonical import loads_bounded
 from contexto.mcp import UNPINNED_NOTE
 from contexto.store.pinned import FACT_KINDS
 from contexto.store.render import CODE_MODE_TOOL, OWN_TOOL_PREFIX, _code
@@ -66,47 +70,368 @@ _ID_RE = re.compile(_ID)
 _PINNED = re.compile(rf"Recorded (obligation|decision|event|artifact|reference) ({_ID})\.")
 _CLOSED = re.compile(rf"Closed {_ID} with ({_ID})\.")
 _STRUCTURED = re.compile(rf'\{{\s*"record_id"\s*:\s*"({_ID})"\s*\}}')
-_TOOLS_WORD = re.compile(r"\btools\b")
-_RECORD_NAME = f"(?:{PIN_TOOL}|{CLOSE_TOOL})"
-_RECORD_CODE_CALL = re.compile(
-    r"""\btools\s*(?:\[\s*(["'`])(?P<q>""" + _RECORD_NAME + r""")\1\s*\]|\.(?P<d>""" + _RECORD_NAME + r"""))\s*\(""")
 _TEXT_TYPES = ("text", "input_text", "output_text")
 KEYS_KEPT = 64  # conversations tracked at once; the oldest is forgotten past it
 REPORTED_KEPT = 4096  # call ids already reported as unmatched; the oldest is forgotten past it
+_MAX_EXEC_CODE_BYTES = 128 * 1024
+_MAX_EXEC_DEPTH = 32
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NUMBER_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+_EXEC_ERROR_LINE = re.compile(
+    r"^(?:Exit code:\s*[1-9]\d*|Process exited with code\s+[1-9]\d*|"
+    r"(?:Uncaught\s+)?(?:Syntax|Type|Reference|Range|Eval|URI)?Error:)",
+    re.MULTILINE,
+)
 
 
 class _ExecSpec(NamedTuple):
-    """A Codex code-mode ``exec`` call whose only tool calls are literal ``contexto_pin`` / ``contexto_close``."""
+    """A Codex code-mode ``exec`` call whose parsed JS statements invoke only literal
+    ``contexto_pin`` / ``contexto_close`` calls with literal arguments."""
 
     tools: frozenset[str]  # subset of {PIN_TOOL, CLOSE_TOOL}
     max_calls: int  # number of literal pin/close calls in the exec code
-    code_ids: frozenset[str]  # any rec_... ids already present in the code (cannot be newly minted)
+    code_ids: frozenset[str]  # any rec_... ids present in call arguments (cannot be newly minted)
+
+
+class _ExecParseError(Exception):
+    pass
+
+
+class _StrictExecParser:
+    """Strict allowlist recursive-descent parser for pure ``contexto_pin`` / ``contexto_close`` Codex
+    code-mode ``exec`` scripts (D51/D69).
+
+    Only permits a flat sequence of statements of two forms:
+    1. ``[const|let|var <ident> = | return ] [await] tools.<tool>(<arg_obj>)``
+       or ``tools["<tool>"](<arg_obj>)`` / ``tools['<tool>'](<arg_obj>)``
+       where ``<tool>`` is literally ``mcp__contexto__contexto_pin`` or ``contexto_close``, and
+       ``<arg_obj>`` is a literal JS object (plain keys, JSON/JS string/number/bool/null/array/object
+       values, or ``<bound_var>.record_id`` referencing an earlier pin in the same script).
+    2. ``console.log(<expr>[, ...])`` or ``return <expr>`` where each ``<expr>`` is ONLY a previously
+       bound variable ``<bound_var>``, ``<bound_var>.record_id``, ``JSON.stringify(<bound_var>)``,
+       or an array/object of those — never arbitrary string literals, operators, comments, control
+       flow, template literals, Unicode identifier escapes, ``eval``, ``Function``, or other tools.
+    """
+
+    def __init__(self, code: str) -> None:
+        self.s = code
+        self.n = len(code)
+        self.i = 0
+        self.bound: set[str] = set()
+        self.tools: list[str] = []
+        self.code_ids: set[str] = set()
+
+    def _ws(self) -> None:
+        s, n = self.s, self.n
+        while self.i < n and s[self.i] in " \t\r\n":
+            self.i += 1
+
+    def _peek(self, text: str) -> bool:
+        return self.s.startswith(text, self.i)
+
+    def _expect(self, text: str) -> None:
+        self._ws()
+        if not self.s.startswith(text, self.i):
+            raise _ExecParseError(f"expected {text!r}")
+        self.i += len(text)
+
+    def _read_ident(self) -> str:
+        self._ws()
+        m = _IDENT_RE.match(self.s, self.i)
+        if m is None:
+            raise _ExecParseError("expected identifier")
+        self.i = m.end()
+        return m.group(0)
+
+    def _try_keyword(self, kw: str) -> bool:
+        self._ws()
+        end = self.i + len(kw)
+        if self.s.startswith(kw, self.i) and (end == self.n or not (self.s[end].isalnum() or self.s[end] in "_$")):
+            self.i = end
+            return True
+        return False
+
+    def _read_string(self) -> str:
+        self._ws()
+        if self.i >= self.n or self.s[self.i] not in ('"', "'"):
+            raise _ExecParseError("expected string")
+        quote = self.s[self.i]
+        self.i += 1
+        out: list[str] = []
+        s, n = self.s, self.n
+        while self.i < n:
+            ch = s[self.i]
+            self.i += 1
+            if ch == quote:
+                val = "".join(out)
+                self.code_ids.update(_ID_RE.findall(val))
+                return val
+            if ch in ("\n", "\r"):
+                raise _ExecParseError("unterminated string")
+            if ch == "\\":
+                if self.i >= n:
+                    raise _ExecParseError("trailing escape")
+                esc = s[self.i]
+                self.i += 1
+                simple = {'"': '"', "'": "'", "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r",
+                          "t": "\t"}
+                if esc in simple:
+                    out.append(simple[esc])
+                elif esc == "u" and self.i + 4 <= n:
+                    hex4 = s[self.i:self.i + 4]
+                    try:
+                        out.append(chr(int(hex4, 16)))
+                    except ValueError as exc:
+                        raise _ExecParseError("bad unicode escape") from exc
+                    self.i += 4
+                else:
+                    raise _ExecParseError("unsupported escape")
+            else:
+                out.append(ch)
+        raise _ExecParseError("unterminated string")
+
+    def _read_value(self, depth: int = 0) -> None:
+        if depth > _MAX_EXEC_DEPTH:
+            raise _ExecParseError("too deep")
+        self._ws()
+        if self.i >= self.n:
+            raise _ExecParseError("unexpected eof")
+        ch = self.s[self.i]
+        if ch in ('"', "'"):
+            self._read_string()
+            return
+        if ch == "{":
+            self._read_object(depth + 1)
+            return
+        if ch == "[":
+            self._read_array(depth + 1)
+            return
+        if ch == "-" or ch.isdigit():
+            m = _NUMBER_RE.match(self.s, self.i)
+            if m is None:
+                raise _ExecParseError("bad number")
+            self.i = m.end()
+            return
+        if self._try_keyword("true") or self._try_keyword("false") or self._try_keyword("null"):
+            return
+        # Allow referencing <bound_var>.record_id (e.g. closing an obligation pinned earlier in the same exec).
+        ident = self._read_ident()
+        if ident in self.bound and self._peek(".record_id"):
+            self.i += len(".record_id")
+            if self.i < self.n and (self.s[self.i].isalnum() or self.s[self.i] in "_$"):
+                raise _ExecParseError("bad property")
+            return
+        raise _ExecParseError("disallowed value")
+
+    def _read_array(self, depth: int) -> None:
+        self._expect("[")
+        self._ws()
+        if self._peek("]"):
+            self.i += 1
+            return
+        while True:
+            self._read_value(depth)
+            self._ws()
+            if self._peek(","):
+                self.i += 1
+                self._ws()
+                if self._peek("]"):
+                    self.i += 1
+                    return
+                continue
+            self._expect("]")
+            return
+
+    def _read_object(self, depth: int) -> None:
+        self._expect("{")
+        self._ws()
+        if self._peek("}"):
+            self.i += 1
+            return
+        while True:
+            self._ws()
+            if self.i < self.n and self.s[self.i] in ('"', "'"):
+                self._read_string()
+            else:
+                self._read_ident()
+            self._expect(":")
+            self._read_value(depth)
+            self._ws()
+            if self._peek(","):
+                self.i += 1
+                self._ws()
+                if self._peek("}"):
+                    self.i += 1
+                    return
+                continue
+            self._expect("}")
+            return
+
+    def _read_tool_call(self) -> None:
+        self._try_keyword("await")
+        if self._read_ident() != "tools":
+            raise _ExecParseError("expected tools")
+        self._ws()
+        if self._peek("."):
+            self.i += 1
+            tool = self._read_ident()
+        elif self._peek("["):
+            self.i += 1
+            tool = self._read_string()
+            self._expect("]")
+        else:
+            raise _ExecParseError("expected property access on tools")
+        if tool not in (PIN_TOOL, CLOSE_TOOL):
+            raise _ExecParseError("disallowed tool")
+        self._expect("(")
+        self._ws()
+        if not self._peek(")"):
+            self._read_object(0)
+        self._expect(")")
+        self.tools.append(tool)
+
+    def _read_log_expr(self, depth: int = 0) -> None:
+        if depth > _MAX_EXEC_DEPTH:
+            raise _ExecParseError("too deep")
+        self._ws()
+        if self._peek("JSON.stringify"):
+            self.i += len("JSON.stringify")
+            self._expect("(")
+            self._read_log_expr(depth + 1)
+            self._expect(")")
+            return
+        if self._peek("["):
+            self.i += 1
+            self._ws()
+            if self._peek("]"):
+                self.i += 1
+                return
+            while True:
+                self._read_log_expr(depth + 1)
+                self._ws()
+                if self._peek(","):
+                    self.i += 1
+                    self._ws()
+                    if self._peek("]"):
+                        self.i += 1
+                        return
+                    continue
+                self._expect("]")
+                return
+        if self._peek("{"):
+            self.i += 1
+            self._ws()
+            if self._peek("}"):
+                self.i += 1
+                return
+            while True:
+                self._ws()
+                if self.i < self.n and self.s[self.i] in ('"', "'"):
+                    self._read_string()
+                    self._expect(":")
+                    self._read_log_expr(depth + 1)
+                else:
+                    key = self._read_ident()
+                    self._ws()
+                    if self._peek(":"):
+                        self.i += 1
+                        self._read_log_expr(depth + 1)
+                    elif key not in self.bound:
+                        raise _ExecParseError("unbound shorthand")
+                self._ws()
+                if self._peek(","):
+                    self.i += 1
+                    self._ws()
+                    if self._peek("}"):
+                        self.i += 1
+                        return
+                    continue
+                self._expect("}")
+                return
+        ident = self._read_ident()
+        if ident not in self.bound:
+            raise _ExecParseError("unbound identifier")
+        self._ws()
+        if self._peek(".record_id"):
+            self.i += len(".record_id")
+            if self.i < self.n and (self.s[self.i].isalnum() or self.s[self.i] in "_$"):
+                raise _ExecParseError("bad property")
+
+    def parse(self) -> _ExecSpec:
+        while True:
+            self._ws()
+            while self.i < self.n and self.s[self.i] == ";":
+                self.i += 1
+                self._ws()
+            if self.i >= self.n:
+                break
+            if self._try_keyword("const") or self._try_keyword("let") or self._try_keyword("var"):
+                var = self._read_ident()
+                if var in ("tools", "console", "JSON", "eval", "Function", "globalThis"):
+                    raise _ExecParseError("reserved identifier")
+                self._expect("=")
+                self._read_tool_call()
+                self.bound.add(var)
+            elif self._try_keyword("return"):
+                saved = self.i
+                try:
+                    self._read_tool_call()
+                except _ExecParseError:
+                    self.i = saved
+                    self._read_log_expr()
+            elif self._peek("console.log"):
+                self.i += len("console.log")
+                self._expect("(")
+                self._ws()
+                if not self._peek(")"):
+                    while True:
+                        self._read_log_expr()
+                        self._ws()
+                        if self._peek(","):
+                            self.i += 1
+                            continue
+                        break
+                self._expect(")")
+            else:
+                self._read_tool_call()
+            stmt_end = self.i
+            self._ws()
+            if self.i < self.n:
+                if self.s[self.i] == ";":
+                    self.i += 1
+                elif "\n" not in self.s[stmt_end:self.i]:
+                    raise _ExecParseError("missing statement separator")
+        if not self.tools:
+            raise _ExecParseError("no record calls")
+        return _ExecSpec(tools=frozenset(self.tools), max_calls=len(self.tools), code_ids=frozenset(self.code_ids))
 
 
 def _exec_record_spec(name: Any, raw_args: Any) -> _ExecSpec | None:
-    """For a Codex code-mode ``exec`` call whose code has no comments and whose every ``tools`` mention
-    is a literal call to ``contexto_pin`` or ``contexto_close`` (at least one), return the tools called,
-    their count, and any record ids already in the code; None for any other call (D51/D69)."""
+    """For a Codex code-mode ``exec`` call whose parsed JS statements invoke ONLY literal
+    ``contexto_pin`` or ``contexto_close`` calls (at least one) with literal arguments and optional
+    logging/returning of their bound results, return its ``_ExecSpec``; None for any other call."""
     if name != CODE_MODE_TOOL:
         return None
     code = _code(raw_args)
-    if code is None or "//" in code or "/*" in code:
+    if code is None or len(code) > _MAX_EXEC_CODE_BYTES:
         return None
-    matches = list(_RECORD_CODE_CALL.finditer(code))
-    if not matches or len(matches) != len(_TOOLS_WORD.findall(code)):
+    try:
+        return _StrictExecParser(code).parse()
+    except _ExecParseError:
         return None
-    tools = frozenset(m.group("q") or m.group("d") for m in matches)
-    return _ExecSpec(tools=tools, max_calls=len(matches), code_ids=frozenset(_ID_RE.findall(code)))
 
 
 def _exec_confirmed_ids(spec: _ExecSpec, text: str) -> list[str]:
     """Extract newly created record ids from the output of a pure pin/close code-mode ``exec`` call.
 
-    Accepts exact server reply text, per-line replies (for example after Codex's ``Output:`` header or
-    batched calls), or JSON objects holding ``record_id`` / MCP ``content`` / ``structuredContent``.
-    Any record id that already appeared literally in the ``exec`` code is rejected so injected text
-    cannot confirm a pre-existing subagent record. At most ``spec.max_calls`` unique ids are returned.
+    Rejects outputs that report a non-zero exit code or JS runtime error, accepts exact server reply
+    text, per-line replies (for example after Codex's ``Output:`` header or batched calls), or JSON
+    objects holding ``record_id`` / MCP ``content`` / ``structuredContent``. Any record id that
+    appeared in the ``exec`` call arguments is rejected, and at most ``spec.max_calls`` unique ids
+    are returned.
     """
+    if _EXEC_ERROR_LINE.search(text):
+        return []
     candidates: list[str] = []
 
     def consider(candidate: str) -> None:
@@ -145,8 +470,8 @@ def _exec_confirmed_ids(spec: _ExecSpec, text: str) -> list[str]:
     consider(stripped)
     if not candidates:
         try:
-            walk_json(json.loads(stripped))
-        except ValueError:
+            walk_json(loads_bounded(stripped))
+        except (ValueError, RecursionError):
             pass
     if not candidates:
         for line in text.splitlines():
@@ -156,8 +481,8 @@ def _exec_confirmed_ids(spec: _ExecSpec, text: str) -> list[str]:
             consider(line)
             if line.startswith(("{", "[")):
                 try:
-                    walk_json(json.loads(line))
-                except ValueError:
+                    walk_json(loads_bounded(line))
+                except (ValueError, RecursionError):
                     pass
     return candidates
 
@@ -174,8 +499,12 @@ def confirmed_id(tool: str, text: str) -> str | None:
         if found is not None:
             return found.group(1)
     found = _STRUCTURED.fullmatch(text)
-    if found is not None and json.loads(text) == {"record_id": found.group(1)}:
-        return found.group(1)
+    if found is not None:
+        try:
+            if loads_bounded(text) == {"record_id": found.group(1)}:
+                return found.group(1)
+        except (ValueError, RecursionError):
+            return None
     return None
 
 

@@ -714,21 +714,24 @@ def check_codex_key(ctx: Context) -> Check:
         return Check("codex-key", WARN, f"Codex key helper: {KEY_HELPER_ENV} is set and blank, and `contexto run "
                      "codex` refuses a blank helper", f"Unset {KEY_HELPER_ENV} or set it to a command, or pass "
                      "--codex-key-helper to contexto run", {**details, "error": "blank"})
+    claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files)
+    try:
+        _, up_source = codex_upstream_with_source(API_KEY_MODE, None, dict(ctx.env), claude.url, claude.source)
+    except CodexLaunchError:
+        up_source = ""
+    if up_source == "openai-env" and ctx.env.get(OPENAI_API_KEY_ENV, "").strip():
+        return Check("codex-key", PASS,
+                     f"Codex key: {OPENAI_API_KEY_ENV} in the environment (native env_key; no value shown)",
+                     details={"name": OPENAI_API_KEY_ENV, "source": "env"})
     helper = claude_key_helper(ctx.cwd, ctx.home, ctx.env)  # a project's only from a trusted folder (D52)
     if helper.value:
         place = settings_file(helper.source or "", ctx.env)
         return Check("codex-key", PASS, f"Codex key helper: Claude Code's {KEY_HELPER_KEY} in {place} (not run)",
                      details={"name": KEY_HELPER_KEY, "source": f"settings:{helper.source}"})
-    if ctx.env.get(OPENAI_API_KEY_ENV, "").strip():
-        claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files)
-        try:
-            _, up_source = codex_upstream_with_source(API_KEY_MODE, None, dict(ctx.env), claude.url, claude.source)
-        except CodexLaunchError:
-            up_source = ""
-        if up_source and not up_source.startswith("claude-"):
-            return Check("codex-key", PASS,
-                         f"Codex key: {OPENAI_API_KEY_ENV} in the environment (native env_key; no value shown)",
-                         details={"name": OPENAI_API_KEY_ENV, "source": "env"})
+    if up_source and not up_source.startswith("claude-") and ctx.env.get(OPENAI_API_KEY_ENV, "").strip():
+        return Check("codex-key", PASS,
+                     f"Codex key: {OPENAI_API_KEY_ENV} in the environment (native env_key; no value shown)",
+                     details={"name": OPENAI_API_KEY_ENV, "source": "env"})
     details: dict[str, Any] = {"name": None, "source": None}
     if helper.ignored:
         details["ignored"] = list(helper.ignored)
