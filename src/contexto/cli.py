@@ -79,6 +79,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         from contexto.statusline import main as statusline
 
         return statusline(given[1:])
+    if given[:1] == ["mcp"]:
+        # Fast-path startup for `contexto mcp`: skip importing every other CLI subcommand so the MCP
+        # server starts and answers `initialize` immediately.
+        from contexto.commands.mcp import main as mcp_main
+
+        return mcp_main(given[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     func = getattr(args, "func", None)

@@ -97,9 +97,28 @@ _PATH = re.compile(rf"(?<![\w.\-/])(?:(?:[\w.\-]+/)+[\w\-]*[A-Za-z][\w\-]*\.[A-Z
                    rf"|[A-Za-z][\w\-]*\.(?:{_FILE_EXTENSIONS}))(?![\w/]|\.\w)")
 
 
+_PURE_NUMBER = re.compile(r"^\d+(?:[._:-]\d+)*$")
+_DOTTED_VERSION = re.compile(r"^v\d+(?:\.\d+)+$")
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_HEX_HASH = re.compile(r"^[0-9a-fA-F]{8,}$")
+_PREFIXED_ID = re.compile(r"^[A-Za-z]{2,8}_[0-9a-fA-F]{8,}$")
+_DASH_ID = re.compile(r"(?:^|[-_])[A-Za-z]+-\d{3,}$")
+_CODE_ID = re.compile(r"^[A-Z]\d{3,}$")
+
+
 def _value_like(ident: str) -> bool:
-    """Any digit marks a value: ids (AI-93532), cohorts (onyx-4681), regions (west-lo2), versions."""
-    return any(c.isdigit() for c in ident)
+    """Filter pure numbers, dotted versions/dates, UUIDs, hex hashes, and opaque/ticket IDs while
+    keeping technical identifiers that contain digits (``oauth2``, ``sha256``, ``http2``, ``s3``,
+    ``v2``, ``k8s``, ``utf8``)."""
+    if not any(c.isdigit() for c in ident):
+        return False
+    if _PURE_NUMBER.fullmatch(ident) or _DOTTED_VERSION.fullmatch(ident) or _UUID.fullmatch(ident):
+        return True
+    if _HEX_HASH.fullmatch(ident) or _PREFIXED_ID.fullmatch(ident):
+        return True
+    if _DASH_ID.search(ident) or _CODE_ID.fullmatch(ident):
+        return True
+    return False
 
 
 def _json_keys(value: Any) -> list[str]:
@@ -159,9 +178,10 @@ def salient_identifiers(texts: Iterable[str], limit: int = SALIENT_MAX, max_char
     an allowlist of positions: JSON object keys (when the text, or a line of it, parses as JSON),
     the left side of ``key=value`` and ``key = value``, ``key:`` at the start of a line (YAML,
     including ``- key:``), ``"key":``, and file paths that are not themselves in value or list
-    position. Values, list items, array elements, and names in prose are never listed. Neither is
-    any identifier containing a digit (ids such as AI-93532 used as keys), so names with an
-    incidental digit (s3-bucket) are left to search, which finds them in the page text.
+    position. Values, list items, array elements, and names in prose are never listed. Value-like
+    tokens (pure numbers, dotted versions, UUIDs, hex hashes, and ticket/cohort IDs such as
+    ``AI-93532``) are filtered by ``_value_like``, while technical identifiers with digits
+    (``oauth2``, ``sha256``, ``http2``, ``s3``, ``v2``, ``k8s``, ``utf8``) are kept.
 
     Limit: a value written in key position (an answer used as a JSON key, or a line that starts
     with it followed by a colon) is listed like any key. Identifiers are ranked by how rarely they

@@ -136,6 +136,8 @@ CONTEXTO_TOOLS: tuple[tuple[str, int, dict[str, Any]], ...] = (
     ("contexto_pin", 200, {"type": "object", "properties": {
         "kind": _parameter("string", "kind", enum=["alpha", "beta", "gamma", "delta", "epsilon"]),
         "text": _parameter("string", "text", minLength=1),
+        "topic": _parameter("string", "topic", minLength=1),
+        "owner": _parameter("string", "owner", minLength=1),
         "supersedes": _parameter("array", "supersedes", items={"type": "string"}),
         "epistemic": _parameter("string", "epistemic", enum=["first", "second", "third", "fourth"], default="first"),
         "provenance": _parameter("array", "provenance", items={"type": "object", "properties": {
@@ -146,8 +148,12 @@ CONTEXTO_TOOLS: tuple[tuple[str, int, dict[str, Any]], ...] = (
         "obligation_id": _parameter("string", "obligation_id"), "note": _parameter("string", "note")},
         "required": ["obligation_id"], "additionalProperties": False}),
     ("contexto_state", 10, {"type": "object", "properties": {}, "additionalProperties": False}),
-    ("contexto_search", 520, {"type": "object", "properties": {"query": _parameter("string", "query", minLength=1)},
-                              "required": ["query"], "additionalProperties": False}),
+    ("contexto_search", 520, {"type": "object", "properties": {
+        "query": _parameter("string", "query", minLength=1),
+        "expand": _parameter("boolean", "expand", default=False),
+        "context_lines": _parameter("integer", "context_lines", minimum=0, maximum=20),
+        "approximate": _parameter("boolean", "approximate", default=False)},
+        "required": ["query"], "additionalProperties": False}),
 )
 
 

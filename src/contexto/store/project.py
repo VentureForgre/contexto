@@ -104,6 +104,7 @@ import re
 import stat
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -113,12 +114,13 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes
 from contexto.paths import session_dir
-from contexto.private import NotRegularFileError, open_private, read_regular, read_regular_text, write_atomic
-from contexto.store.catalog import PageCatalog, load_page
+from contexto.private import NotRegularFileError, open_private, read_regular, write_atomic
+from contexto.store.catalog import PageCatalog, load_page, read_page_text
+from contexto.store.fts import FtsIndex
 from contexto.store.ledger import LEDGER_FILE, LedgerCorruptError, _intact, _parse, _problems
 from contexto.store.model import _RECORD_ID, Record
-from contexto.store.render import retained_matches
-from contexto.store.search import Query, rank
+from contexto.store.render import retained_matches, retained_matches_approximate
+from contexto.store.search import ApproxHit, Approximate, Plan, Query, rank, rank_approximate
 from contexto.store.state import Conflict, State, derive
 
 __all__ = ["MAIN_RECORDS_KEPT", "Carried", "EarlierPages", "EarlierSearch", "EarlierSession", "InViewLine", "Listing",
@@ -133,6 +135,8 @@ META_FILE = "meta.json"
 KEY_FILE = "page.key"
 LABEL_CHARS = 8  # of a session id, in a carried record's line
 CACHE_HOMES = 8  # data directories whose sessions are cached at once (one, outside tests)
+CACHE_SESSIONS = 256  # maximum sessions cached across all homes (LRU evicted)
+CACHE_MAX_BYTES = 32 << 20  # maximum total source file bytes cached across _CACHE (LRU evicted)
 REPORTED_KEPT = 4096
 
 _EPOCH = datetime(1970, 1, 1)
@@ -246,31 +250,108 @@ class _Meta:
 
 
 _LOCK = threading.Lock()
-# sessions directory -> session id -> file name -> (identity, parsed value)
-_CACHE: dict[str, dict[str, dict[str, tuple[Identity, Any]]]] = {}
+# sessions directory -> session id (LRU OrderedDict) -> file name -> (identity, parsed value)
+_CACHE: OrderedDict[str, OrderedDict[str, dict[str, tuple[Identity, Any]]]] = OrderedDict()
+_CACHE_BYTES = 0
+_CACHE_SESSIONS = 0
 _REPORTED: set[tuple[str, str | None, str]] = set()  # (home, reading session, skipped session) already logged
 
 
 def forget_cache() -> None:
     """Drop everything this process has cached about other sessions. Results never depend on the cache."""
+    global _CACHE_BYTES, _CACHE_SESSIONS
     with _LOCK:
         _CACHE.clear()
+        _CACHE_BYTES = 0
+        _CACHE_SESSIONS = 0
         _REPORTED.clear()
 
 
-def _slot(directory: Path) -> dict[str, tuple[Identity, Any]]:
+def _evict_cache_locked() -> None:
+    """Enforce ``CACHE_HOMES``, ``CACHE_SESSIONS``, and ``CACHE_MAX_BYTES`` (caller holds ``_LOCK``)."""
+    global _CACHE_BYTES, _CACHE_SESSIONS
+    while len(_CACHE) > CACHE_HOMES:
+        _, oldest_home = _CACHE.popitem(last=False)
+        _CACHE_SESSIONS -= len(oldest_home)
+        for files in oldest_home.values():
+            for ident, _ in files.values():
+                _CACHE_BYTES -= ident[1]
+    while _CACHE and (_CACHE_SESSIONS > CACHE_SESSIONS or _CACHE_BYTES > CACHE_MAX_BYTES):
+        home_key, sessions = next(iter(_CACHE.items()))
+        if not sessions:
+            del _CACHE[home_key]
+            continue
+        _, files = sessions.popitem(last=False)
+        _CACHE_SESSIONS -= 1
+        for ident, _ in files.values():
+            _CACHE_BYTES -= ident[1]
+        if not sessions:
+            del _CACHE[home_key]
+    _CACHE_BYTES = max(0, _CACHE_BYTES)
+    _CACHE_SESSIONS = max(0, _CACHE_SESSIONS)
+
+
+def _cache_get(directory: Path, name: str, identity: Identity) -> tuple[bool, Any]:
+    home_key = str(directory.parent)
     with _LOCK:
-        if str(directory.parent) not in _CACHE and len(_CACHE) >= CACHE_HOMES:
-            _CACHE.clear()
-        return _CACHE.setdefault(str(directory.parent), {}).setdefault(directory.name, {})
+        sessions = _CACHE.get(home_key)
+        if sessions is None:
+            return False, None
+        files = sessions.get(directory.name)
+        if files is None:
+            return False, None
+        held = files.get(name)
+        if held is not None and held[0] == identity:
+            _CACHE.move_to_end(home_key)
+            sessions.move_to_end(directory.name)
+            return True, held[1]
+        return False, None
+
+
+def _cache_put(directory: Path, name: str, identity: Identity, value: Any) -> None:
+    global _CACHE_BYTES, _CACHE_SESSIONS
+    size = identity[1]
+    if size > CACHE_MAX_BYTES:
+        return  # single file exceeds whole cache cap: return without evicting everything else
+    home_key = str(directory.parent)
+    with _LOCK:
+        sessions = _CACHE.get(home_key)
+        if sessions is None:
+            sessions = _CACHE[home_key] = OrderedDict()
+        else:
+            _CACHE.move_to_end(home_key)
+        files = sessions.get(directory.name)
+        if files is None:
+            files = sessions[directory.name] = {}
+            _CACHE_SESSIONS += 1
+        else:
+            sessions.move_to_end(directory.name)
+        prev = files.get(name)
+        if prev is not None:
+            _CACHE_BYTES -= prev[0][1]
+        files[name] = (identity, value)
+        _CACHE_BYTES += size
+        _evict_cache_locked()
 
 
 def _keep_only(sessions_dir: Path, names: set[str]) -> None:
     """Forget the cached files of sessions that are no longer listed (pruned)."""
+    global _CACHE_BYTES, _CACHE_SESSIONS
+    home_key = str(sessions_dir)
     with _LOCK:
-        held = _CACHE.get(str(sessions_dir))
-        if held is not None and not held.keys() <= names:
-            _CACHE[str(sessions_dir)] = {name: files for name, files in held.items() if name in names}
+        held = _CACHE.get(home_key)
+        if held is None:
+            return
+        gone = [name for name in held if name not in names]
+        for name in gone:
+            files = held.pop(name)
+            _CACHE_SESSIONS -= 1
+            for ident, _ in files.values():
+                _CACHE_BYTES -= ident[1]
+        if not held:
+            del _CACHE[home_key]
+        _CACHE_BYTES = max(0, _CACHE_BYTES)
+        _CACHE_SESSIONS = max(0, _CACHE_SESSIONS)
 
 
 def _identity(path: Path) -> Identity | None:
@@ -299,10 +380,9 @@ def _cached(directory: Path, name: str, parse: Callable[[bytes], Any], limit: in
         return None
     if identity[1] > limit:
         raise FileTooLargeError(f"{name} is larger than {limit} bytes")
-    slot = _slot(directory)
-    held = slot.get(name)
-    if held is not None and held[0] == identity:
-        return held[1]
+    hit, cached = _cache_get(directory, name, identity)
+    if hit:
+        return cached
     try:
         data = read_regular(path)
     except (FileNotFoundError, NotADirectoryError):
@@ -310,7 +390,7 @@ def _cached(directory: Path, name: str, parse: Callable[[bytes], Any], limit: in
     # A file that grew between the stat and the read is kept under the older identity, so the next
     # look reads it again; it is never kept under an identity newer than its bytes.
     value = parse(data)
-    slot[name] = (identity, value)
+    _cache_put(directory, name, identity, value)
     return value
 
 
@@ -930,6 +1010,8 @@ class EarlierSearch:
     not_searched: int = 0  # older sessions left alone: beyond EARLIER_SESSIONS, EARLIER_PAGES or EARLIER_SECONDS
     pages: int = 0  # page files listed in the sessions searched
     in_view_skipped: int = 0  # sessions searched whose retained.json could not be read: their pages only
+    approximate: bool = False  # True when earlier hits came from approximate fallback
+    plan: Plan | None = None  # approximate search plan, when approximate is True
 
 
 def shown_label(label: str) -> str:
@@ -1003,6 +1085,15 @@ def _window_matches(entries: Sequence[dict[str, Any]], query: str) -> list[tuple
     return found
 
 
+def _window_matches_approximate(entries: Sequence[dict[str, Any]], query: str
+                                ) -> list[tuple[int, int, int, int, str, str]]:
+    """Approximate in-view matches for an earlier session's last snapshot (``asked=False``)."""
+    found = [(*match, _window_role(entry)) for entry in entries
+             for match in retained_matches_approximate([entry], query, asked=False)]
+    found.sort(key=lambda m: (m[0], m[1], m[2]), reverse=True)
+    return found
+
+
 def _real_directory(path: Path) -> None:
     """Raise OSError unless ``path`` is a directory itself, not a symlink to one (FileNotFoundError when
     it is gone, NotADirectoryError for anything else in its place)."""
@@ -1013,18 +1104,23 @@ def _real_directory(path: Path) -> None:
 def read_page(pages_dir: Path, page_id: str) -> dict[str, Any] | None:
     """The page ``page_id`` of the session whose pages are in ``pages_dir``, read without a lock and
     without creating or logging anything; None when there is no such page (a prune, or an id that is
-    not a page id, from which no path is built). OSError when the session directory or ``pages_dir`` is
-    a symlink, or the file cannot be read or is not a regular file; one of ``PAGE_DAMAGE`` when the file
-    is not a page record."""
+    not a page id, from which no path is built). Supports both ``.json`` and ``.json.gz`` pages. OSError
+    when the session directory or ``pages_dir`` is a symlink, or the file cannot be read or is not a
+    regular file; one of ``PAGE_DAMAGE`` when the file is not a page record."""
     if not isinstance(page_id, str) or not _PAGE_ID.fullmatch(page_id):
         return None
     try:
         _real_directory(pages_dir.parent)
         _real_directory(pages_dir)
-        text = read_regular_text(pages_dir / f"{page_id}.json")
     except FileNotFoundError:
         return None
-    return load_page(text, page_id)
+    for suffix in (".json", ".json.gz"):
+        try:
+            text = read_page_text(pages_dir / f"{page_id}{suffix}")
+        except FileNotFoundError:
+            continue
+        return load_page(text, page_id)
+    return None
 
 
 class EarlierPages:
@@ -1032,8 +1128,9 @@ class EarlierPages:
 
     Nothing is ever written to those sessions: no lock is taken, nothing is logged in them, and no file
     or directory is created; a session directory or a ``pages`` directory that is a symlink is not read.
-    Each session searched gets a ``PageCatalog`` of its own, which lists ``pages/`` at every search and
-    reads only the files it has not seen, so a page that a prune removes is gone at the next listing.
+    When an earlier session already has a fresh ``search.sqlite`` FTS5 index, it is queried strictly
+    read-only without scanning page files; otherwise each session searched gets a ``PageCatalog`` of its
+    own, which lists ``pages/`` at every search and reads only the files it has not seen.
 
     The search text held for earlier sessions counts against the same budget as the current session's
     (``own``, the current session's catalog: ``CONTEXTO_SEARCH_CACHE_MB``). The current session's text
@@ -1045,6 +1142,7 @@ class EarlierPages:
     def __init__(self, own: PageCatalog) -> None:
         self._own = own
         self._catalogs: dict[str, PageCatalog] = {}  # by session id, newest session first
+        self._fts: dict[str, FtsIndex] = {}  # strictly read-only FTS5 readers per earlier session
         # session id -> (identity, entries, bytes counted) of its retained.json, for the sessions in _catalogs
         self._snapshots: dict[str, tuple[Identity, tuple[dict[str, Any], ...], int]] = {}
 
@@ -1067,6 +1165,15 @@ class EarlierPages:
     def _drop(self, session_id: str) -> None:
         self._catalogs.pop(session_id, None)
         self._snapshots.pop(session_id, None)
+        fts = self._fts.pop(session_id, None)
+        if fts is not None:
+            fts.close()
+
+    def _fts_for(self, member: Member) -> FtsIndex:
+        fts = self._fts.get(member.id)
+        if fts is None:
+            fts = self._fts[member.id] = FtsIndex(member.dir, read_only=True)
+        return fts
 
     def trim(self) -> None:
         """Let go of earlier sessions' text until it fits what the current session leaves of the budget,
@@ -1118,12 +1225,20 @@ class EarlierPages:
             self._snapshots[member.id] = (identity, entries, len(data))
         return entries
 
-    def _ranked(self, catalog: PageCatalog, query: str, allowed: int | None) -> tuple[list[str] | None, int]:
+    def _ranked(self, member: Member, catalog: PageCatalog, query: str, allowed: int | None
+                ) -> tuple[list[str] | None, int]:
         """The session's matching page ids, best first, and how many page files it lists; None for a
-        session with more than ``allowed`` (which is then not read). As ``SessionStore.search``, a page
-        removed while the search runs is left out by ranking again on a new listing."""
+        session with more than ``allowed`` (which is then not read). Uses a read-only SQLite FTS5 index
+        when fresh, else falls back to ``PageCatalog`` scanning."""
+        with catalog._lock:
+            listing = catalog._listing()
+        listed = len(listing)
+        if allowed is not None and listed > allowed:
+            return None, listed
+        fts_hits = self._fts_for(member).search(query, listing, lambda name: None)
+        if fts_hits is not None and catalog.all_present(list(listing)):
+            return fts_hits, listed
         found: list[str] = []
-        listed = 0
         for _ in range(3):
             entries, fetch, names = catalog.search_entries()
             listed = len(entries)
@@ -1134,86 +1249,137 @@ class EarlierPages:
                 break
         return found, listed
 
+    def _ranked_approximate(self, member: Member, catalog: PageCatalog, query: str, allowed: int | None
+                            ) -> tuple[Approximate | None, int]:
+        """Approximate matches for one earlier session, using read-only FTS5 when fresh else PageCatalog."""
+        with catalog._lock:
+            listing = catalog._listing()
+        listed = len(listing)
+        if allowed is not None and listed > allowed:
+            return None, listed
+        fts_hits = self._fts_for(member).search_approximate(query, listing, lambda name: None)
+        if fts_hits is not None and catalog.all_present(list(listing)):
+            return fts_hits, listed
+        found = Approximate()
+        for _ in range(3):
+            entries, fetch, names = catalog.search_entries()
+            listed = len(entries)
+            if allowed is not None and listed > allowed:
+                return None, listed
+            found = rank_approximate(entries, query, fetch)
+            if catalog.all_present(names):
+                break
+        return found, listed
+
     def search(self, project: Project, query: str,
-               view: Callable[[str, str, dict[str, Any]], Any] | None = None) -> EarlierSearch:
+               view: Callable[[str, str, dict[str, Any]], Any] | None = None, *,
+               approximate: bool = False,
+               fallback_approximate: bool | None = None,
+               approx_view: Callable[[str, str, dict[str, Any], ApproxHit, Plan | None], Any] | None = None
+               ) -> EarlierSearch:
         """Search the newest ``EARLIER_SESSIONS`` earlier sessions of ``project``, newest first, and
-        return the best ``EARLIER_HITS`` matches of each that has one: first the newest matching lines of
-        what was in view at its last request (its last ``retained.json``, matched as the current session's
-        window is, ``render.retained_matches``; at most ``EARLIER_HITS - 1`` when a page matches too, so
-        its best page is always shown), then its best readable pages.
+        return the best ``EARLIER_HITS`` matches of each that has one.
 
-        Read at most: the page files of those sessions, each once for ranking (not at all while its text
-        is held), up to ``EARLIER_PAGES`` files in all and for ``EARLIER_SECONDS`` (then the older
-        sessions are left alone and counted), each searched session's ``retained.json`` (not while it is
-        held), and for each session with a match its best pages once more to show them. A session whose
-        pages cannot be listed is skipped and counted; a snapshot that cannot be used is left out and
-        counted (``in_view_skipped``), its session's pages searched as ever; a page that is damaged or
-        was removed meanwhile is left out; none of it raises.
-
-        ``view(label, page_id, page)``, when given, is called on each page to be shown as soon as its
-        session's pages are read, and ``SessionHits.pages`` holds what it returns in place of the page
-        record, so a search holds the records of one session's shown pages at a time, not of up to 50
-        sessions' (review B on D69, round 2, N2: 50 sessions of 3 pages of 8 MB reached 1.8 GB). It is
-        given the label the session's ``SessionHits`` has; its time counts in ``EARLIER_SECONDS``."""
+        When ``approximate=True`` or when ``fallback_approximate`` is enabled (defaulting to True only
+        when ``approx_view`` is provided) and strict search finds no earlier match, runs an approximate /
+        code-split pass over the earlier sessions and their last snapshots, marking
+        ``EarlierSearch.approximate = True``. Callers without ``approx_view`` (such as CLI strict search)
+        stay strictly matched unless ``approximate=True`` or ``fallback_approximate=True`` is requested.
+        """
+        allow_fallback = (approx_view is not None) if fallback_approximate is None else bool(fallback_approximate)
         started = _clock()
         members = project.earlier[:EARLIER_SESSIONS]
         not_searched = len(project.earlier) - len(members)
         order = {member.id: n for n, member in enumerate(members)}
-        self._catalogs = {sid: catalog for sid, catalog in self._catalogs.items() if sid in order}
+        for sid in list(self._catalogs):
+            if sid not in order:
+                self._drop(sid)
         self._snapshots = {sid: held for sid, held in self._snapshots.items() if sid in order}
         self.trim()
-        hits: list[SessionHits] = []
-        searched = skipped = listed = unusable = 0
-        for n, member in enumerate(members):
-            if searched and _clock() - started > EARLIER_SECONDS:
-                not_searched += len(members) - n  # their held text stays: the next search may reach them
-                break
-            try:
-                _real_directory(member.dir)
-                _real_directory(member.pages_dir)
-                catalog = self._catalogs.get(member.id)
-                if catalog is None:
-                    catalog = self._catalogs[member.id] = PageCatalog(member.pages_dir, _no_log, 0)
-                catalog.set_text_budget(self._room(member.id))
-                found, count = self._ranked(catalog, query, EARLIER_PAGES - listed if searched else None)
-            except OSError:  # gone (a prune), a symlink, or a directory that cannot be listed
-                self._drop(member.id)
-                skipped += 1
-                continue
-            if found is None:  # the page limit: this session and every older one are left alone
-                for older in members[n:]:
-                    self._drop(older.id)
-                not_searched += len(members) - n
-                break
-            searched += 1
-            listed += count
-            pages: list[tuple[str, dict[str, Any]]] = []
-            gone = 0
-            for page_id in found:
-                if len(pages) == EARLIER_HITS:
+
+        def run_pass(use_approx: bool) -> EarlierSearch:
+            hits: list[SessionHits] = []
+            searched = skipped = listed = unusable = 0
+            extra_not_searched = 0
+            last_plan: Plan | None = None
+            for n, member in enumerate(members):
+                if searched and _clock() - started > EARLIER_SECONDS:
+                    extra_not_searched += len(members) - n
                     break
                 try:
-                    page = read_page(member.pages_dir, page_id)
-                except (OSError, *PAGE_DAMAGE):
-                    page = None
-                if page is None:  # removed or damaged since it was ranked
-                    gone += 1
-                else:
-                    pages.append((page_id, page))
-            entries = self._snapshot(member)
-            if entries is None:
-                unusable += 1
-            matched = _window_matches(entries or (), query)
-            lines = [InViewLine(*m) for m in matched[:EARLIER_HITS - (1 if pages else 0)]]
-            pages = pages[:EARLIER_HITS - len(lines)]
-            if pages or lines:
-                label = shown_label(project.label(member.id))
-                shown = tuple(pages) if view is None else tuple((page_id, view(label, page_id, page))
-                                                                for page_id, page in pages)
-                hits.append(SessionHits(member.id, label, session_date(member.created),
-                                        len(found) - gone, shown, tuple(lines), len(matched)))
-            pages.clear()  # this session's records go before the next session's pages are ranked
-            page = None
+                    _real_directory(member.dir)
+                    _real_directory(member.pages_dir)
+                    catalog = self._catalogs.get(member.id)
+                    if catalog is None:
+                        catalog = self._catalogs[member.id] = PageCatalog(member.pages_dir, _no_log, 0)
+                    catalog.set_text_budget(self._room(member.id))
+                    allowed = EARLIER_PAGES - listed if searched else None
+                    if use_approx:
+                        approx_found, count = self._ranked_approximate(member, catalog, query, allowed)
+                        found_ids = None if approx_found is None else [h.id for h in approx_found]
+                        found_total = 0 if approx_found is None else approx_found.total
+                        approx_by_id = {} if approx_found is None else {h.id: h for h in approx_found}
+                        if approx_found is not None and approx_found.plan is not None:
+                            last_plan = approx_found.plan
+                    else:
+                        found_ids, count = self._ranked(member, catalog, query, allowed)
+                        found_total = 0 if found_ids is None else len(found_ids)
+                        approx_by_id = {}
+                except OSError:  # gone (a prune), a symlink, or a directory that cannot be listed
+                    self._drop(member.id)
+                    skipped += 1
+                    continue
+                if found_ids is None:  # the page limit: this session and every older one are left alone
+                    for older in members[n:]:
+                        self._drop(older.id)
+                    extra_not_searched += len(members) - n
+                    break
+                searched += 1
+                listed += count
+                pages: list[tuple[str, dict[str, Any]]] = []
+                gone = 0
+                for page_id in found_ids:
+                    if len(pages) == EARLIER_HITS:
+                        break
+                    try:
+                        page = read_page(member.pages_dir, page_id)
+                    except (OSError, *PAGE_DAMAGE):
+                        page = None
+                    if page is None:  # removed or damaged since it was ranked
+                        gone += 1
+                    else:
+                        pages.append((page_id, page))
+                entries = self._snapshot(member)
+                if entries is None:
+                    unusable += 1
+                matched = (_window_matches_approximate(entries or (), query) if use_approx
+                           else _window_matches(entries or (), query))
+                lines = [InViewLine(*m) for m in matched[:EARLIER_HITS - (1 if pages else 0)]]
+                pages = pages[:EARLIER_HITS - len(lines)]
+                if pages or lines:
+                    label = shown_label(project.label(member.id))
+                    if use_approx and approx_view is not None:
+                        shown = tuple((page_id, approx_view(label, page_id, page, approx_by_id[page_id], last_plan))
+                                      for page_id, page in pages)
+                    elif view is not None:
+                        shown = tuple((page_id, view(label, page_id, page)) for page_id, page in pages)
+                    else:
+                        shown = tuple(pages)
+                    hits.append(SessionHits(member.id, label, session_date(member.created),
+                                            max(0, found_total - gone), shown, tuple(lines), len(matched)))
+                pages.clear()
+                page = None
+            return EarlierSearch(tuple(hits), searched, skipped, not_searched + extra_not_searched, listed, unusable,
+                                 approximate=use_approx, plan=last_plan if use_approx else None)
+
+        if approximate:
+            result = run_pass(True)
+        else:
+            result = run_pass(False)
+            if allow_fallback and not result.hits and members and (_clock() - started <= EARLIER_SECONDS):
+                fallback = run_pass(True)
+                if fallback.hits:
+                    result = fallback
         self._catalogs = dict(sorted(self._catalogs.items(), key=lambda item: order[item[0]]))
         self._snapshots = {sid: self._snapshots[sid] for sid in self._catalogs if sid in self._snapshots}
-        return EarlierSearch(tuple(hits), searched, skipped, not_searched, listed, unusable)
+        return result

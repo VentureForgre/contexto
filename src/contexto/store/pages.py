@@ -26,6 +26,8 @@ from contexto.store.search import Query, SearchEntry, rank, search_text, searcha
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
 STUB_TEXT_CHARS = 200
+SHORT_USER_TEXT_CHARS = 20  # short prompts ("continue", "fix test") also record a concise assistant outcome
+STUB_ASSISTANT_CHARS = 120
 # D63: the kinds of page in-turn paging writes (``contexto.inturn``). A page without ``kind`` is a whole
 # turn, as every page written before D63 is. A result page holds one tool call and its result verbatim;
 # a rounds page holds tool rounds folded out of a running turn. ``kind`` is not part of the page id.
@@ -49,6 +51,81 @@ PINNED_FIRST_LINE = DEFAULT_LINES[0]
 _PATH_KEYS = ("file_path", "path", "notebook_path")
 # Absolute or relative paths with at least one separator and a file name, as written in text.
 _PATH_RE = re.compile(r"(?<![\w/.-])(?:~?/|\./|\.\./)?(?:[\w.-]+/)+[\w.-]*\w")
+_URL_RE = re.compile(r"(?:https?|ftp|wss?|ssh|file|mailto)://[^\s<>\"'`)\]}]+", re.IGNORECASE)
+_MIME_PREFIXES = frozenset({
+    "application", "audio", "font", "image", "message", "model", "multipart", "text", "video",
+})
+_WRITE_TOOL_TOKENS = frozenset({
+    "edit", "write", "patch", "create", "delete", "rename", "move", "replace",
+    "multiedit", "notebookedit",
+})
+_PATCH_FILE_RE = re.compile(r"^\*\*\*\s+(?:Update|Add|Delete|Move to)\s+File:\s*(.+?)\s*$", re.MULTILINE)
+_TRIVIAL_OUTCOMES = frozenset({"ok", "okay", "done", "noted", "yes", "sure", "got it", "understood"})
+
+# Optional secret-pattern redaction before persisting raw pages (opt-in via CONTEXTO_REDACT_SECRETS).
+_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"), "[REDACTED]"),
+    (re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b"), "[REDACTED]"),
+    (re.compile(r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b"), "[REDACTED]"),
+    (re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b"), "[REDACTED]"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "[REDACTED]"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "[REDACTED]"),
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{35}\b"), "[REDACTED]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "[REDACTED]"),
+    (re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._~+/=-]{16,}"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\s/@]+:)[^@\s/]+(@)"),
+     r"\1[REDACTED]\2"),
+)
+
+
+def redact_secrets_text(text: str) -> str:
+    """Replace high-confidence secret patterns in ``text`` with ``[REDACTED]``."""
+    out = text
+    for pattern, repl in _SECRET_PATTERNS:
+        out = pattern.sub(repl, out)
+    return out
+
+
+def redact_page_messages(value: Any) -> Any:
+    """Copy ``value`` with secret patterns redacted from all string values, iteratively (safe at MAX_JSON_DEPTH)."""
+    if isinstance(value, str):
+        return redact_secrets_text(value)
+    if not isinstance(value, (dict, list)):
+        return value
+    root: Any = {} if isinstance(value, dict) else []
+    stack: list[tuple[Any, Any]] = [(value, root)]
+    while stack:
+        src, dst = stack.pop()
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if isinstance(v, str):
+                    dst[k] = redact_secrets_text(v)
+                elif isinstance(v, dict):
+                    child: dict[str, Any] = {}
+                    dst[k] = child
+                    stack.append((v, child))
+                elif isinstance(v, list):
+                    child_list: list[Any] = []
+                    dst[k] = child_list
+                    stack.append((v, child_list))
+                else:
+                    dst[k] = v
+        else:
+            for v in src:
+                if isinstance(v, str):
+                    dst.append(redact_secrets_text(v))
+                elif isinstance(v, dict):
+                    child = {}
+                    dst.append(child)
+                    stack.append((v, child))
+                elif isinstance(v, list):
+                    child_list = []
+                    dst.append(child_list)
+                    stack.append((v, child_list))
+                else:
+                    dst.append(v)
+    return root
 
 
 def same_content(a: dict[str, Any], b: dict[str, Any]) -> bool:
@@ -87,9 +164,23 @@ def _view(turn: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [m for m in (as_message(item, include_developer=dev_only) for item in turn) if isinstance(m, dict)]
 
 
+def _walk_strings(value: Any):
+    """Yield every string inside nested dicts and lists, iteratively (safe against deep nesting)."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, dict):
+            stack.extend(reversed(list(item.values())))
+        elif isinstance(item, list):
+            stack.extend(reversed(item))
+
+
 def _texts(turn: list[dict[str, Any]]):
-    """Every human-readable string in a turn: text, tool inputs, and tool results (both dialects), except
-    the inputs and results of Contexto's search, recall, and state calls (``own_call_ids``, D51)."""
+    """Every human-readable string in a turn: text, tool inputs (including nested dicts/lists), and tool
+    results (both dialects), except the inputs and results of Contexto's search, recall, and state calls
+    (``own_call_ids``, D51)."""
     own = own_call_ids(turn)
     dev_only = is_developer_only_page(turn)
     for item in turn:
@@ -109,11 +200,8 @@ def _texts(turn: list[dict[str, Any]]):
                     yield block.get("text", "")
             elif kind == "tool_use":
                 tool_input = block.get("input")
-                if isinstance(tool_input, str):  # a Codex custom_tool_call's raw input (B23)
-                    yield tool_input
-                for v in (tool_input.values() if isinstance(tool_input, dict) else ()):
-                    if isinstance(v, str):
-                        yield v
+                if isinstance(tool_input, (str, dict, list)):
+                    yield from _walk_strings(tool_input)
             elif kind == "tool_result":
                 inner = block.get("content")
                 if isinstance(inner, str):
@@ -171,21 +259,88 @@ def _reminder_first_line(turn: list[dict[str, Any]]) -> str | None:
     return EMPTY_REMINDER_STUB
 
 
+def _is_write_tool(name: str) -> bool:
+    """Whether a tool name edits, writes, patches, creates, or moves files."""
+    bare = name.rsplit("__", 1)[-1]
+    tokens = {t for t in re.split(r"[^a-z0-9]+", bare.lower()) if t}
+    return bool(tokens & _WRITE_TOOL_TOKENS)
+
+
+def _walk_tool_paths(tool_input: Any, is_write: bool) -> list[str]:
+    """Extract file paths from a tool_use input (including nested dicts/lists and apply_patch headers)."""
+    found: list[str] = []
+    stack = [tool_input]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key in _PATH_KEYS:
+                value = item.get(key)
+                if isinstance(value, str) and value and value not in found:
+                    found.append(value)
+            stack.extend(reversed(list(item.values())))
+        elif isinstance(item, list):
+            stack.extend(reversed(item))
+        elif isinstance(item, str) and is_write and "*** " in item:
+            for m in _PATCH_FILE_RE.finditer(item):
+                p = m.group(1).strip()
+                if p and p not in found:
+                    found.append(p)
+    return found
+
+
+def _is_mime_type(candidate: str) -> bool:
+    """True when ``candidate`` looks like a MIME media type (``application/json``, ``text/plain``)."""
+    parts = candidate.split("/")
+    return len(parts) == 2 and parts[0].lower() in _MIME_PREFIXES and "." not in parts[1]
+
+
+def _assistant_outcome(view: list[dict[str, Any]]) -> str | None:
+    """Concise outcome line from the final assistant text block when user text is short."""
+    for message in reversed(view):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        texts: list[str] = []
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if _is_text(block):
+                    texts.append(block.get("text", ""))
+        for text in reversed(texts):
+            for raw_line in text.splitlines():
+                stripped = raw_line.strip()
+                if stripped.startswith("```"):
+                    continue
+                line = stripped.lstrip("#-*• ").strip()
+                if len(line) < 4:
+                    continue
+                if line.lower().rstrip(".!") in _TRIVIAL_OUTCOMES:
+                    continue
+                return line[:STUB_ASSISTANT_CHARS]
+    return None
+
+
 def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
     """First 200 characters of the turn-start user text, tool names used, and file paths mentioned.
+
+    Edited/written file paths from write/edit tools are prioritized ahead of read tool paths and
+    regex-scraped paths (which exclude URLs and MIME types). When user text is short (for example
+    ``"continue"`` or ``"fix test"``), adds a concise ``assistant_text`` outcome line if available.
 
     A page with no user text but a system message (lane A's carried-text fallback pages each such
     message on its own) adds ``system_text``: the first non-empty line of the system text (inside
     the ``<system-reminder>`` tag when the CLI wraps it), or a placeholder when it is empty. A page
     whose only message is a user message made entirely of context blocks (a paged context block,
     D32) is treated the same way: empty ``user_text`` and ``reminder_text``, the first non-empty line
-    inside the tag. Other pages with user text keep exactly the three fields. Stubs never reach page
-    ids, which hash only the turn number and the messages.
+    inside the tag. Other pages with longer user text keep the three base fields. Stubs never reach
+    page ids, which hash only the turn number and the messages.
     """
     view = _view(turn)  # Responses (Codex) items as Messages API messages, the same view search reads (B23)
     first_user = next((m for m in view if m.get("role") == "user"), {})
     tools: list[str] = []
-    paths: list[str] = []
+    edited_paths: list[str] = []
+    read_paths: list[str] = []
     for message in view:
         content = message.get("content")
         for block in content if isinstance(content, list) else []:
@@ -193,27 +348,39 @@ def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
                 name = block.get("name")
                 if isinstance(name, str) and name and name not in tools:
                     tools.append(name)
-                for key in _PATH_KEYS:
-                    tool_input = block.get("input")
-                    value = tool_input.get(key) if isinstance(tool_input, dict) else None
-                    if isinstance(value, str) and value and value not in paths:
-                        paths.append(value)
+                is_write = isinstance(name, str) and _is_write_tool(name)
+                target = edited_paths if is_write else read_paths
+                for p in _walk_tool_paths(block.get("input"), is_write):
+                    if p not in target:
+                        target.append(p)
+    paths: list[str] = []
+    for p in (*edited_paths, *read_paths):
+        if p not in paths:
+            paths.append(p)
     for text in _texts(turn):
-        for match in _PATH_RE.findall(text):
+        cleaned = _URL_RE.sub(" ", text)
+        for match in _PATH_RE.findall(cleaned):
+            if _is_mime_type(match):
+                continue
             if match not in paths:
                 paths.append(match)
     reminder = _reminder_first_line(turn)
-    stub = {
-        "user_text": "" if reminder is not None else _user_text(first_user)[:STUB_TEXT_CHARS],
+    user_text = "" if reminder is not None else _user_text(first_user)[:STUB_TEXT_CHARS]
+    stub: dict[str, Any] = {
+        "user_text": user_text,
         "tools": tools,
         "paths": paths[:STUB_MAX_PATHS],
     }
     if reminder is not None:
         stub["reminder_text"] = reminder
-    elif not stub["user_text"].strip():
+    elif not user_text.strip():
         system = _system_first_line(turn)
         if system is not None:
             stub["system_text"] = system
+    elif 0 < len(user_text.strip()) <= SHORT_USER_TEXT_CHARS and len(user_text.strip().split()) <= 2:
+        outcome = _assistant_outcome(view)
+        if outcome is not None:
+            stub["assistant_text"] = outcome
     return stub
 
 
@@ -372,6 +539,10 @@ _TOKEN = re.compile(r"[\w.\-/]+")
 def index_line(page: dict[str, Any], salient: bool = False) -> str:
     stub = page["stub"]
     text = " ".join(stub["user_text"].split())
+    if stub.get("assistant_text"):
+        outcome = " ".join(stub["assistant_text"].split())
+        if outcome:
+            text = f"{text} -> {outcome}" if text else outcome
     if not text and stub.get("system_text"):
         text = "[earlier system message] " + stub["system_text"]
     if not text and stub.get("reminder_text"):

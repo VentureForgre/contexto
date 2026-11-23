@@ -2,35 +2,35 @@
 [fake upstream] listening on 127.0.0.1:8399, counting 1 token per 3.5 bytes received
 $ contexto run --bound 60000 --headroom-floor 5000 --no-version-check \
     --upstream http://127.0.0.1:8399 claude
-contexto: session cfd581cd682e446599ba9c5aa8a1d3cd (bound 60,000, upstream flag)
-[stub claude] turn 0: history 13,470 tokens -> [fake upstream] received 13,470 tokens
+contexto: session c897dc3a4c0e4994a94b05d440624f91 (bound 60,000, upstream flag)
+[stub claude] turn 0: history 13,653 tokens -> [fake upstream] received 13,653 tokens
 [stub claude] turn 1 ends with: "The release codename is amber-kestrel-17."
-[stub claude] turn 1: history 25,796 tokens -> [fake upstream] received 25,796 tokens
-[stub claude] turn 2: history 38,110 tokens -> [fake upstream] received 38,110 tokens
-[stub claude] turn 3: history 50,424 tokens -> [fake upstream] received 14,140 tokens
-[stub claude] turn 4: history 62,738 tokens -> [fake upstream] received 26,454 tokens
-[stub claude] turn 5: history 75,052 tokens -> [fake upstream] received 38,768 tokens
-[stub claude] turn 6: history 87,366 tokens -> [fake upstream] received 14,337 tokens
-[stub claude] turn 7: history 99,680 tokens -> [fake upstream] received 26,651 tokens
+[stub claude] turn 1: history 25,979 tokens -> [fake upstream] received 25,979 tokens
+[stub claude] turn 2: history 38,293 tokens -> [fake upstream] received 38,293 tokens
+[stub claude] turn 3: history 50,607 tokens -> [fake upstream] received 14,323 tokens
+[stub claude] turn 4: history 62,921 tokens -> [fake upstream] received 26,637 tokens
+[stub claude] turn 5: history 75,235 tokens -> [fake upstream] received 38,951 tokens
+[stub claude] turn 6: history 87,549 tokens -> [fake upstream] received 14,520 tokens
+[stub claude] turn 7: history 99,863 tokens -> [fake upstream] received 26,834 tokens
 [stub claude] runs (the turns now on disk): contexto sessions show $CONTEXTO_SESSION \
 [stub claude]     | grep -E 'Pages:|Over-bound|pg_' | cut -c1-74
 Pages: 6
 Over-bound turns: 0
-  pg_da504ccff9e42761 turn 5: Build log for step 5. Keep it for reference.
-  pg_7e351ebe3b2cbb9b turn 4: Build log for step 4. Keep it for reference.
-  pg_ef3c4a3b50b54087 turn 3: Build log for step 3. Keep it for reference.
-  pg_da7640ecfda8e3cb turn 2: Build log for step 2. Keep it for reference.
-  pg_9ea19b7846e1ffd7 turn 1: Build log for step 1. Keep it for reference.
-  pg_3b694593b6ee2ce6 turn 0: Build log for step 0. Keep it for reference.
+  pg_bb3b1591f2680f20 turn 5: Build log for step 5. Keep it for reference.
+  pg_98335ae51dff43b8 turn 4: Build log for step 4. Keep it for reference.
+  pg_63d822d0c859e173 turn 3: Build log for step 3. Keep it for reference.
+  pg_7ee2dc1885aad61f turn 2: Build log for step 2. Keep it for reference.
+  pg_21b1ca6fbbb693bf turn 1: Build log for step 1. Keep it for reference.
+  pg_1c97e46aa3e54f0f turn 0: Build log for step 0. Keep it for reference.
 [stub claude] turn 8 asks: "What is the release codename?"
-[stub claude] turn 8: history 99,721 tokens -> [fake upstream] received 26,692 tokens
+[stub claude] turn 8: history 99,904 tokens -> [fake upstream] received 26,876 tokens
 [fake upstream] scripted reply: call contexto_search {"query": "release codename"}
 [stub claude] ran contexto_search on the contexto MCP server, which returns:
 [best matching pages by relevance, shown newest first:]
-pg_9ea19b7846e1ffd7 (turn 1)
+pg_21b1ca6fbbb693bf (turn 1)
   42050: build 01.0904 linked module mod_164 in 335 ms
 > 42096: The release codename is amber-kestrel-17.
   42138: [turn 1] assistant:
 [Paged hits come from paged-out turns and from tool results paged out inside a turn (marked "paged inside turn N"). An unmarked hit is older than the conversation in view; a hit paged inside a turn can be newer than an earlier copy in view. Prefer the newest by turn, then by position.]
-[stub claude] turn 8: history 99,951 tokens -> [fake upstream] received 26,922 tokens
+[stub claude] turn 8: history 100,134 tokens -> [fake upstream] received 27,105 tokens
 [stub claude] scripted reply: "The search result names it: amber-kestrel-17."
