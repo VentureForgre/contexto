@@ -52,7 +52,11 @@ STATS_VERSION = 1  # the ``--json`` shape; raised only when a documented key cha
 
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
-MODEL_PATHS = frozenset({MESSAGES_PATH, "/responses", "/v1/responses"})  # a prompt sent for a completion
+MODEL_PATHS = frozenset({
+    MESSAGES_PATH, "/responses", "/v1/responses", "/chat/completions", "/v1/chat/completions",
+})  # static prompt paths sent for a completion (tests/test_stats.py checks == proxy.USAGE_FEEDBACK_PATHS)
+_GEMINI_MODEL_PATH = re.compile(r"^/v1(?:beta|alpha)?/models/[^/:]+:(?:generateContent|streamGenerateContent)$")
+_GEMINI_COUNT_PATH = re.compile(r"^/v1(?:beta|alpha)?/models/[^/:]+:countTokens$")
 _VERTEX_COUNT_TOKENS_RE = re.compile(
     r"^/(?:v1/)?projects/[A-Za-z0-9][A-Za-z0-9._-]*/locations/[A-Za-z0-9][A-Za-z0-9._-]*"
     r"/publishers/anthropic/models/count-tokens:rawPredict\Z"
@@ -74,11 +78,13 @@ def _is_messages_path(path: Any) -> bool:
 def _is_count_tokens_path(path: Any) -> bool:
     return (isinstance(path, str)
             and (path == COUNT_TOKENS_PATH or path in _FOUNDRY_COUNT_TOKENS_PATHS
-                 or bool(_VERTEX_COUNT_TOKENS_RE.match(path))))
+                 or bool(_VERTEX_COUNT_TOKENS_RE.match(path))
+                 or bool(_GEMINI_COUNT_PATH.match(path))))
 
 
 def _is_model_path(path: Any) -> bool:
-    return isinstance(path, str) and (path in MODEL_PATHS or _is_messages_path(path))
+    return (isinstance(path, str)
+            and (path in MODEL_PATHS or _is_messages_path(path) or bool(_GEMINI_MODEL_PATH.match(path))))
 TOOL_NAMES = ("recall", "search", "state", "pin", "close")  # Contexto's MCP tools, without ``contexto_``
 
 # The Claude Code versions on which the compaction summary's wording was measured (the note above
@@ -299,7 +305,7 @@ def log_values(directory: Path, start: int = 0) -> Iterator[Any]:
 
 
 HELD_LINES = 64  # lines kept between one run's exit and the next proxy start; a launch writes a few
-_RUN_MARK = re.compile(rb'"event":\s*"(?:proxy_start|launch)"')
+_RUN_MARK = re.compile(rb'"event":\s*"(?:proxy_start|launch|serve_open)"')
 _LOOK_BACK_BYTES = 1 << 16
 
 
@@ -336,10 +342,10 @@ def _run_begins(fd: int, start_line: int) -> int:
                 continue
             value = None if _too_long(line) else _line_value(line)
             if isinstance(value, dict):
-                if value.get("event") == "exit":
+                if value.get("event") in ("exit", "serve_close"):
                     return begin
                 held += 1
-                if value.get("event") == "proxy_start" or held > HELD_LINES:
+                if value.get("event") in ("proxy_start", "serve_open") or held > HELD_LINES:
                     return start_line
             begin = at
     return begin
@@ -371,8 +377,10 @@ def _last_run_tail(directory: Path) -> tuple[int, int, dict[str, Any] | None]:
                 done = len(data) if end < 0 else end
                 value = None if done - begin > LOG_BLOCK_BYTES else _line_value(data[begin:done])
                 name = value.get("event") if isinstance(value, dict) else None
-                if name == "proxy_start":
+                if name in ("proxy_start", "serve_open"):
                     runs, last, carried = runs + 1, base + begin, launch
+                    if name == "serve_open":
+                        launch = value
                 elif name == "launch":
                     launch = value
         if last is None:
@@ -596,7 +604,7 @@ class _Tally:
             self._request(event, when)
         elif name == "mcp_call":
             self._tool(event)
-        elif name == "launch":
+        elif name in ("launch", "serve_open"):
             self.cli = self._text(event.get("cli")) or self.cli
             config = event.get("config")
             if isinstance(config, dict):
@@ -611,6 +619,10 @@ class _Tally:
             # the run's gain (PR #263 review A, round 3).
             if self.run_open and not self.replaying_held:
                 self._stopped, self._pages_stop = True, self._number(event.get("pages"))
+        elif name == "serve_close":
+            if self.run_open and not self.replaying_held:
+                self._stopped, self._pages_stop = True, self._number(event.get("pages"))
+            self._close_run(None)
         elif name == "exit":
             self._close_run(None)
         elif name == "proxy_stop_incomplete":  # requests with no line of their own: said, not a fault
@@ -771,12 +783,24 @@ class _Tally:
         may), and that is not a measured 0: such a request is counted in ``unreported_requests``."""
         if not isinstance(usage, dict):
             return None
-        fresh = self._number(usage.get("input_tokens"))
         if api == "responses":
+            fresh = self._number(usage.get("input_tokens"))
             details = usage.get("input_tokens_details")
             read = self._number(details.get("cached_tokens")) if isinstance(details, dict) else None
             write, prompt = None, fresh
+        elif api == "chat_completions":
+            fresh = self._number(usage.get("prompt_tokens") if "prompt_tokens" in usage else usage.get("input_tokens"))
+            details = usage.get("prompt_tokens_details")
+            read = self._number(details.get("cached_tokens")) if isinstance(details, dict) else None
+            write, prompt = None, fresh
+        elif api == "gemini":
+            fresh = self._number(usage.get("promptTokenCount") if "promptTokenCount" in usage
+                                 else usage.get("prompt_token_count"))
+            read = self._number(usage.get("cachedContentTokenCount") if "cachedContentTokenCount" in usage
+                                else usage.get("cached_content_token_count"))
+            write, prompt = None, fresh
         else:
+            fresh = self._number(usage.get("input_tokens"))
             read = self._number(usage.get("cache_read_input_tokens"))
             write = self._number(usage.get("cache_creation_input_tokens"))
             prompt = (fresh or 0) + (read or 0) + (write or 0)
@@ -1001,7 +1025,7 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
                 unreadable += 1
                 continue
             name = event.get("event")
-            if name == "proxy_start":
+            if name in ("proxy_start", "serve_open"):
                 runs += 1
                 cli, bound = tally.cli or cli, tally.bound if tally.bound is not None else bound
                 if last_run:
@@ -1015,15 +1039,15 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
                 tally.line(event)
             elif between:
                 held.append(event)
-                if name == "exit" or len(held) > HELD_LINES:
+                if name in ("exit", "serve_close") or len(held) > HELD_LINES:
                     # Not a launch's few lines (an exit with no proxy start before it, or too many): they
                     # stay with what came before. After an exit, the lines that follow are held again.
                     for earlier in held:
                         tally.line(earlier)
-                    held, between = [], name == "exit"
+                    held, between = [], name in ("exit", "serve_close")
             else:
                 tally.line(event)
-                between = name == "exit"
+                between = name in ("exit", "serve_close")
     except OSError:
         missing = True
     if not (last_run and runs):

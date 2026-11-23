@@ -84,10 +84,10 @@ PDF_MAX_BASE64 = 32 << 20  # base64 characters a PDF is decoded from: the API's 
 # 300 bytes), so this costs at most about 19 MB, and no request holds enough PDFs to cycle it.
 PDF_CACHE_SIZE = 65_536
 PDF_PARSE_MAX_WAIT = 1.0  # seconds a PDF waits for smaller ones before it is parsed next (_SmallestFirst)
-IMAGE_TYPES = frozenset({"image", "input_image"})  # Messages, Responses
+IMAGE_TYPES = frozenset({"image", "input_image", "image_url"})  # Messages, Responses, Chat Completions
 HEAD_CHARS = 64  # base64 characters that hold the PNG, GIF and WebP dimensions
 JPEG_HEAD_CHARS = 262_144  # a JPEG's frame header follows its EXIF and ICC segments: read up to 192 KB
-MEDIA_KEYS = ("content", "output", "source")  # where a block or item can hold media
+MEDIA_KEYS = ("content", "output", "source", "parts")  # where a block or item can hold media
 MEDIA_DEPTH = 10  # messages, message, content, tool_result, content, document, source, content, image
 
 # D61: markers a JPEG's walk reads before giving up on finding the frame header. Real files reach it within a
@@ -202,6 +202,20 @@ def _media_kind(node: dict) -> str | None:
     if kind == "input_file":
         data = node.get("file_data")
         return None if isinstance(data, str) and data.startswith("data:text/") else "document"
+    inline = node.get("inlineData") if isinstance(node.get("inlineData"), dict) else node.get("inline_data")
+    if isinstance(inline, dict):
+        mime = str(inline.get("mimeType") or inline.get("mime_type") or "").lower()
+        if mime.startswith("image/"):
+            return "image"
+        if mime and not mime.startswith("text/"):
+            return "document"
+    file_data = node.get("fileData") if isinstance(node.get("fileData"), dict) else node.get("file_data")
+    if isinstance(file_data, dict):
+        mime = str(file_data.get("mimeType") or file_data.get("mime_type") or "").lower()
+        if mime.startswith("image/"):
+            return "image"
+        if mime and not mime.startswith("text/"):
+            return "document"
     return None
 
 
@@ -242,12 +256,15 @@ def split_media(node: Any, depth: int = 0) -> tuple[Any, list[dict]]:
 
 
 def _base64_payload(block: dict) -> str | None:
-    """The base64 data of an inline image or file: a Messages ``base64`` source or a Responses data URL."""
+    """The base64 data of an inline image or file: Messages ``base64``, Responses/Chat Completions
+    data URL, or Gemini ``inlineData``."""
     source = block.get("source")
     if isinstance(source, dict):
         data = source.get("data") if source.get("type") == "base64" else None
+    elif isinstance(inline := (block.get("inlineData") or block.get("inline_data")), dict):
+        data = inline.get("data")
     else:
-        data = block.get("image_url") if block.get("type") == "input_image" else block.get("file_data")
+        data = block.get("image_url") if block.get("type") in ("input_image", "image_url") else block.get("file_data")
         if isinstance(data, dict):  # the Chat Completions shape {"url": ...}
             data = data.get("url")
         if isinstance(data, str):
@@ -615,8 +632,18 @@ def estimate_value_tokens(value: Any, bytes_per_token: float | None = None) -> i
 
 
 def is_tool_output(item: Any) -> bool:
-    """A Responses item a tool returned (``function_call_output``, ``custom_tool_call_output``, ...)."""
-    return isinstance(item, dict) and isinstance(item.get("type"), str) and item["type"].endswith("_output")
+    """A tool-result item in Responses (``*_output``), Chat Completions (``role: "tool"``), or
+    Gemini (a ``contents`` item carrying a ``functionResponse`` part)."""
+    if not isinstance(item, dict):
+        return False
+    if isinstance(item.get("type"), str) and item["type"].endswith("_output"):
+        return True
+    if item.get("role") in ("tool", "function"):
+        return True
+    parts = item.get("parts")
+    return isinstance(parts, list) and any(
+        isinstance(p, dict) and ("functionResponse" in p or "function_response" in p) for p in parts
+    )
 
 
 def measure_item_tool_bytes(items: list[Any]) -> int:

@@ -17,13 +17,14 @@ from contexto.store.recall import DEFAULT_LINES, salient_identifiers
 from contexto.store.render import (
     as_message,
     is_developer_only_page,
+    is_gemini_item,
     is_own_block,
     is_own_item,
     is_responses_item,
     own_call_ids,
 )
 from contexto.store.search import Query, SearchEntry, rank, search_text, searchable
-from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
+from contexto.tokens import estimate_item_tokens, estimate_message_tokens, estimate_tokens, message_bytes
 
 STUB_TEXT_CHARS = 200
 SHORT_USER_TEXT_CHARS = 20  # short prompts ("continue", "fix test") also record a concise assistant outcome
@@ -418,12 +419,18 @@ def build_page(key: bytes, turn: list[dict[str, Any]], turn_number: int, kind: s
     ``block``, its result's block index in that message, so parallel results list in their calls' order
     (Reviewer A at 7575c76f). None is part of the id, and all are optional: a page without them sorts as
     before."""
-    text, tool = message_bytes(turn)
+    if any(isinstance(m, dict) and is_gemini_item(m) for m in turn):
+        page_bytes = len(canonical_bytes(turn))
+        page_tokens = estimate_item_tokens(turn)
+    else:
+        text, tool = message_bytes(turn)
+        page_bytes = text + tool
+        page_tokens = estimate_message_tokens(turn)
     page = {
         "turn": turn_number,
         "messages": turn,
-        "bytes": text + tool,
-        "tokens": estimate_message_tokens(turn),
+        "bytes": page_bytes,
+        "tokens": page_tokens,
         "stub": build_stub(turn),
     }
     if kind is not None:

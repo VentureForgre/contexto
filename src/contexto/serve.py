@@ -118,8 +118,10 @@ the port while the service is down receives whatever a client then sends, the to
 from __future__ import annotations
 
 import errno
+import hashlib
 import hmac
 import http.client
+import io
 import json
 import os
 import signal
@@ -129,15 +131,18 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from contexto import __version__, servecontract
+from contexto import mcp as mcp_module
 from contexto.canonical import loads_bounded
+from contexto.dialects import dialect_for as registry_dialect_for
 from contexto.hints import FORWARDED, HINT_HEADERS_KEY, HINT_MARKER_KEY, STRIPPED
 from contexto.launcher import (
     CLAUDE_SESSION_HEADER,
@@ -166,7 +171,6 @@ from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
 from contexto.paths import contexto_home, mcp_env
 from contexto.private import open_private, private_dir, write_all, write_atomic, write_new
 from contexto.proxy import (
-    COUNT_TOKENS_PATH,
     LISTEN_HOST,
     MAX_DECODED_BODY_BYTES,
     MESSAGES_PATH,
@@ -179,14 +183,25 @@ from contexto.proxy import (
     _parse_content_encodings,
     classify_path,
     decode_request_body,
+    is_local_origin,
+    normalize_allowed_host,
     utc_now,
 )
+from contexto.rewrite import keyed as rewrite_keyed
 from contexto.servecontract import (
+    ACTIVE_PATH,
+    CONTEXTO_SESSION_HEADER,
+    CONTEXTO_WORKDIR_HEADER,
+    DEFAULT_PROVIDER_UPSTREAMS,
     HEALTH_PATH,
     LOCAL_PREFIX,
     LOCK_FILE,
     MAX_LOCAL_BODY_BYTES,
     MAX_TOOL_USE_ID_CHARS,
+    MAX_WORKDIR_BYTES,
+    MCP_PATH,
+    MCP_SESSION_HEADER,
+    PROVIDER_NAMES,
     RESOLVE_PATH,
     RESOLVE_UNKNOWN,
     STATE_FILE,
@@ -194,16 +209,19 @@ from contexto.servecontract import (
     TOKEN_PATTERN,
     ServeFileError,
     base_url,
+    decode_workdir_segment,
     hold_lock,
     is_loopback,
     local_target,
+    mcp_url,
     read_state,
-    requested_tool_use,
+    requested_resolve,
     resolve_found,
     running_state,
     service_running,
 )
-from contexto.store import SessionStore, redact
+from contexto.stats import count_pages as count_store_pages
+from contexto.store import LockFileDamagedError, SessionStore, redact
 from contexto.store.prune import SessionLiveError, SessionNotFoundError, remove_session
 from contexto.upstream import (
     CloudProvider,
@@ -327,6 +345,14 @@ def mcp_config_payload(home: Path) -> dict[str, Any]:
         "command": sys.executable,
         "args": ["-P", "-m", "contexto", "mcp", "--serve"],
         "env": mcp_env(home),
+    }}}
+
+
+def mcp_http_config_payload(port: int, token: str, session: str | None = None) -> dict[str, Any]:
+    """A Streamable HTTP MCP config pointing directly at ``contexto serve``'s ``/<token>/mcp``."""
+    return {"mcpServers": {MCP_SERVER_NAME: {
+        "type": "http",
+        "url": mcp_url(port, token, session),
     }}}
 
 
@@ -462,7 +488,10 @@ def build_session_proxy(upstream: Upstream, log: Any, transform: Callable[..., A
                         observe_usage: Callable[..., Any] | None, *, observe_thinking: bool,
                         affinity_key: str | None,
                         on_tool_calls: Callable[[tuple[str, ...]], None] | None = None,
-                        strip_hint_headers: bool = True) -> ContextoProxy:
+                        strip_hint_headers: bool = True,
+                        allowed_hosts: Iterable[str] = (),
+                        allow_local_origin: bool = False,
+                        transform_lock: threading.Lock | None = None) -> ContextoProxy:
     """The one place a session's proxy is built. It is never started: the service's handler uses it as
     its ``owner`` for a request of that session (transform, lock, usage callback, tool-call hook, log,
     upstream). A ``ContextoProxy`` option that every ``serve`` session should have is passed here:
@@ -471,7 +500,166 @@ def build_session_proxy(upstream: Upstream, log: Any, transform: Callable[..., A
     return ContextoProxy(upstream.url, log, transform, observe_usage=observe_usage,
                          observe_thinking=observe_thinking, upstream_source=upstream.source,
                          affinity_key=affinity_key, on_tool_calls=on_tool_calls,
-                         strip_hint_headers=strip_hint_headers)
+                         strip_hint_headers=strip_hint_headers, allowed_hosts=allowed_hosts,
+                         allow_local_origin=allow_local_origin, transform_lock=transform_lock)
+
+
+# Pluggable session routing & URL prefix parsing ------------------------------------------------------
+
+_PROVIDER_BY_DIALECT = {
+    "anthropic": "anthropic",
+    "responses": "openai",
+    "chat_completions": "openai",
+    "gemini": "gemini",
+}
+_CLI_BY_DIALECT = {
+    "anthropic": "claude",
+    "responses": "codex",
+    "chat_completions": "openai",
+    "gemini": "gemini",
+}
+_INDEXED_CLIS = ("claude", "codex", "openai", "gemini", "serve")
+_INTERNAL_HEADERS = frozenset({CONTEXTO_SESSION_HEADER.lower(), CONTEXTO_WORKDIR_HEADER.lower()})
+
+
+def _validate_workdir(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or "\x00" in text or len(text.encode("utf-8", "replace")) > MAX_WORKDIR_BYTES:
+        return None
+    return text if os.path.isabs(text) and os.path.isdir(text) else None
+
+
+def strip_route_prefixes(raw_target: str) -> tuple[str, str | None, str | None, str | None]:
+    """Parse and strip Contexto routing prefixes after ``/<token>``:
+    ``/s/<session_id>``, ``/w/<encoded_workdir>``, and ``/<provider>`` (``anthropic``, ``openai``,
+    ``gemini``), in any order. Returns ``(clean_target, url_session, url_workdir, url_provider)``
+    with the original query string preserved."""
+    path_part, sep, query = raw_target.partition("?")
+    segments = [seg for seg in path_part.lstrip("/").split("/")] if path_part != "/" else []
+    url_session: str | None = None
+    url_workdir: str | None = None
+    url_provider: str | None = None
+    seen_workdir = False
+    idx = 0
+    while idx < len(segments):
+        seg = segments[idx]
+        if seg == "s" and url_session is None and idx + 1 < len(segments):
+            url_session = segments[idx + 1]
+            idx += 2
+            continue
+        if seg == "w" and not seen_workdir and idx + 1 < len(segments):
+            seen_workdir = True
+            url_workdir = _validate_workdir(decode_workdir_segment(segments[idx + 1]))
+            idx += 2
+            continue
+        if seg in PROVIDER_NAMES and url_provider is None:
+            url_provider = seg
+            idx += 1
+            continue
+        break
+    rest = "/" + "/".join(segments[idx:])
+    clean = f"{rest}?{query}" if sep else rest
+    return clean, url_session, url_workdir, url_provider
+
+
+@dataclass(frozen=True)
+class RouteContext:
+    """Inputs inspected by each pluggable session router."""
+
+    method: str
+    path: str
+    headers: Any  # email.message.Message / HTTPMessage
+    request: Any
+    dialect: Any
+    url_session: str | None = None
+    url_workdir: str | None = None
+    provider: str | None = None
+
+
+@dataclass(frozen=True)
+class RouteMatch:
+    """Result of a pluggable session router."""
+
+    session_key: str
+    parent: str | None = None
+
+
+SessionRouter = Callable[[RouteContext], RouteMatch | None]
+
+
+def route_by_url_session(ctx: RouteContext) -> RouteMatch | None:
+    """Priority 1: explicit URL segment ``/<token>/s/<session_id>/...``."""
+    if ctx.url_session is None:
+        return None
+    if not CLI_SESSION_ID.fullmatch(ctx.url_session):
+        raise _Unrouted("invalid_session_id")
+    return RouteMatch(ctx.url_session)
+
+
+def route_by_headers_and_body(ctx: RouteContext) -> RouteMatch | None:
+    """Priority 2: client headers and request body fields:
+    - ``X-Contexto-Session`` header
+    - Claude Code ``X-Claude-Code-Session-Id`` + ``metadata.user_id.session_id`` / ``parent_session_id``
+    - Codex ``session-id`` / ``session_id`` header and ``prompt_cache_key`` body field."""
+    explicit = ctx.headers.get_all(CONTEXTO_SESSION_HEADER) or []
+    if len(explicit) > 1 or (explicit and not CLI_SESSION_ID.fullmatch(explicit[0])):
+        raise _Unrouted("invalid_session_id")
+    if explicit:
+        return RouteMatch(explicit[0])
+
+    given = ctx.headers.get_all(CLAUDE_SESSION_HEADER) or []
+    if len(given) > 1 or (given and not CLI_SESSION_ID.fullmatch(given[0])):
+        raise _Unrouted("invalid_session_id")
+    header_id = given[0] if given else None
+    body_id, parent = body_session(ctx.request)
+    if header_id is not None and body_id is not None and header_id != body_id:
+        raise _Unrouted("session_id_mismatch")
+    claude_id = header_id or body_id
+    if claude_id is not None:
+        return RouteMatch(claude_id, parent)
+
+    codex_headers = (ctx.headers.get_all("session-id") or []) + (ctx.headers.get_all("session_id") or [])
+    if len(codex_headers) > 1:
+        raise _Unrouted("invalid_session_id")
+    if codex_headers:
+        if not CLI_SESSION_ID.fullmatch(codex_headers[0]):
+            raise _Unrouted("invalid_session_id")
+        return RouteMatch(codex_headers[0])
+
+    if isinstance(ctx.request, dict):
+        cache_key = ctx.request.get("prompt_cache_key")
+        if isinstance(cache_key, str) and cache_key:
+            if CLI_SESSION_ID.fullmatch(cache_key):
+                return RouteMatch(cache_key)
+            hashed = hashlib.sha256(cache_key.encode("utf-8", "replace")).hexdigest()[:32]
+            return RouteMatch(f"pck-{hashed}")
+    return None
+
+
+def route_by_content_fingerprint(ctx: RouteContext) -> RouteMatch | None:
+    """Priority 3: deterministic content-prefix fingerprint fallback (``conversation_key``) for
+    stateless SDK / Chat Completions / Gemini / Responses clients without an explicit session id.
+    Claude Code CLI requests (``User-Agent: claude-cli/...``) on Anthropic Messages are excluded so
+    a missing Claude Code session id is still reported as ``no_session_id`` (D70)."""
+    if ctx.dialect is None or not isinstance(ctx.request, dict):
+        return None
+    user_agent = (ctx.headers.get("User-Agent") or "").strip().lower()
+    if ctx.dialect.name == "anthropic" and user_agent.startswith("claude-cli/"):
+        return None
+    key = rewrite_keyed(ctx.dialect, ctx.request)
+    _, _, digest = key.partition(":")
+    if not digest:
+        return None
+    return RouteMatch("fp_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32])
+
+
+DEFAULT_SESSION_ROUTERS: tuple[SessionRouter, ...] = (
+    route_by_url_session,
+    route_by_headers_and_body,
+    route_by_content_fingerprint,
+)
 
 
 def body_session(request: Any) -> tuple[str | None, str | None]:
@@ -528,11 +716,12 @@ class ServedIndex:
                     continue
                 self._read[name] = stamp
                 try:
-                    served = SessionStore.open_existing(self.home, name).cli_sessions("claude")
+                    existing = SessionStore.open_existing(self.home, name)
+                    for cli_name in _INDEXED_CLIS:
+                        for key, seen_at in existing.cli_sessions(cli_name).items():
+                            self._offer(key, seen_at, name)
                 except Exception:  # a session that cannot be read is skipped: the lookup never fails a request
                     continue
-                for key, seen_at in served.items():
-                    self._offer(key, seen_at, name)
 
     def _offer(self, key: str, seen_at: float, name: str) -> None:
         known = self._last.get(key)
@@ -550,18 +739,52 @@ class ServedIndex:
 
 
 class _Session:
-    """One open Contexto session: its store, and the unstarted proxy that owns its requests."""
+    """One open Contexto session: its store, and the unstarted proxy (or per-upstream proxies sharing
+    its engine and lock) that owns its requests."""
 
     def __init__(self, session_id: str, store: Any, proxy: ContextoProxy, recorder: RouteRecorder,
-                 now: float) -> None:
+                 now: float, *, notices: Any = None, observe_usage: Any = None,
+                 observe_thinking: bool = False, strip_hint_headers: bool = True,
+                 on_tool_calls: Callable[[tuple[str, ...]], None] | None = None,
+                 allowed_hosts: frozenset[str] = frozenset(), allow_local_origin: bool = False,
+                 workdir: str | None = None) -> None:
         self.session_id = session_id
         self.store = store
         self.proxy = proxy
+        self.proxies: dict[str, ContextoProxy] = {}
+        self._proxy_lock = threading.Lock()
+        self._notices = notices
+        self._observe_usage = observe_usage
+        self._observe_thinking = observe_thinking
+        self._strip_hint_headers = strip_hint_headers
+        self._on_tool_calls = on_tool_calls
+        self._allowed_hosts = allowed_hosts
+        self._allow_local_origin = allow_local_origin
+        self._workdir = workdir
         self.recorder = recorder
-        self.keys: set[str] = set()  # the Claude Code session ids routed here
+        self.keys: set[str] = set()  # the client session keys routed here
         self.leases = 0  # requests routed here and not yet finished
         self.last_used = now
         self.requests = 0
+
+    def proxy_for(self, upstream: Upstream) -> ContextoProxy:
+        """Return a proxy for ``upstream`` sharing this session's engine, transform_lock, and store."""
+        key = upstream.url
+        with self._proxy_lock:
+            existing = self.proxies.get(key)
+            if existing is not None:
+                return existing
+            created = build_session_proxy(
+                upstream, self._notices or self.proxy.session_log, self.recorder, self._observe_usage,
+                observe_thinking=self._observe_thinking,
+                affinity_key=session_affinity_key(self.store, upstream.url),
+                on_tool_calls=self._on_tool_calls,
+                strip_hint_headers=self._strip_hint_headers,
+                allowed_hosts=self._allowed_hosts,
+                allow_local_origin=self._allow_local_origin,
+                transform_lock=self.proxy.transform_lock)
+            self.proxies[key] = created
+            return created
 
 
 class _Unrouted(Exception):
@@ -587,11 +810,16 @@ class ServeService:
                  engine_factory: Callable[..., Any] = build_engine,
                  clock: Callable[[], float] = time.monotonic, reaper: bool = True,
                  cap_wait_s: float = CAP_WAIT_S, unchecked_deadline_s: float = UNCHECKED_DEADLINE_S,
-                 max_unchecked: int = MAX_UNCHECKED_CONNECTIONS, forward_hint_headers: bool = False) -> None:
+                 max_unchecked: int = MAX_UNCHECKED_CONNECTIONS, forward_hint_headers: bool = False,
+                 upstreams: dict[str, Upstream] | None = None,
+                 allowed_hosts: Iterable[str] = (),
+                 allow_local_origin: bool = False,
+                 routers: Sequence[SessionRouter] | None = None) -> None:
         if not TOKEN_PATTERN.fullmatch(token):
             raise ValueError("not a serve token")
         self.home = Path(home)
         self.upstream = upstream
+        self.upstreams: dict[str, Upstream] = dict(upstreams or {})
         self.token = token
         self.token_bytes = token.encode("ascii")
         self.config = dict(config) if config else {"bound": DEFAULT_BOUND}
@@ -599,6 +827,9 @@ class ServeService:
         # D70: the printed settings turn Claude Code's gateway hint headers on for the engine; the six
         # gated ones are removed before anything is forwarded unless --forward-hint-headers asks for them.
         self.forward_hint_headers = forward_hint_headers
+        self.allowed_hosts: frozenset[str] = frozenset(normalize_allowed_host(h) for h in allowed_hosts)
+        self.allow_local_origin = bool(allow_local_origin)
+        self.routers: tuple[SessionRouter, ...] = tuple(routers) if routers is not None else DEFAULT_SESSION_ROUTERS
         self.max_sessions = max_sessions
         self.idle_s = idle_s
         self.stderr = stderr or sys.stderr
@@ -611,7 +842,11 @@ class ServeService:
         self.log = ServeLog(self.home, token)
         # Requests that belong to no session: forwarded with the identity transform, logged in serve.log.
         self.passthrough = ContextoProxy(upstream.url, self.log, upstream_source=upstream.source,
-                                         strip_hint_headers=not forward_hint_headers)
+                                         strip_hint_headers=not forward_hint_headers,
+                                         allowed_hosts=self.allowed_hosts,
+                                         allow_local_origin=self.allow_local_origin)
+        # Additional passthrough proxies keyed by upstream URL (never by provider name).
+        self.passthroughs: dict[str, ContextoProxy] = {}
         self.port = 0
         self._lock = threading.Lock()  # the registry: held to look up or change it, never across I/O
         self._freed = threading.Condition(self._lock)  # notified when a session's last request finishes
@@ -740,12 +975,19 @@ class ServeService:
             in_flight = self._in_flight
         with self._lock:
             sessions = list(self._sessions.values())
+            extra_passthroughs = list(self.passthroughs.values())
             self._sessions.clear()
             self._routes.clear()
+            self.passthroughs.clear()
             self._freed.notify_all()
         for session in sessions:
             self._close(session, "shutdown")
         self.passthrough.stop()
+        for extra in extra_passthroughs:
+            try:
+                extra.stop()
+            except Exception:
+                pass
         with self._unchecked_changed:
             self._unchecked.clear()
             self._vouched.clear()
@@ -975,6 +1217,82 @@ class ServeService:
         if ambiguous:
             self.log.log({"event": "tool_use_ambiguous", "count": ambiguous})
 
+    def upstream_for(self, provider: str | None, dialect: Any = None) -> Upstream:
+        """Select the upstream for a request: explicit URL provider prefix, else dialect's provider
+        when explicitly configured, else the service's default ``self.upstream``."""
+        if provider is not None:
+            if provider in self.upstreams:
+                return self.upstreams[provider]
+            if provider == "anthropic":
+                return self.upstream
+            return Upstream(DEFAULT_PROVIDER_UPSTREAMS[provider], f"default:{provider}")
+        if dialect is not None:
+            mapped = _PROVIDER_BY_DIALECT.get(dialect.name)
+            if mapped and mapped in self.upstreams:
+                return self.upstreams[mapped]
+        return self.upstream
+
+    def passthrough_for(self, provider: str | None, dialect: Any = None) -> ContextoProxy:
+        """The passthrough proxy for an unrouted request. Always resolves through
+        ``upstream_for`` first and caches extra proxies by upstream URL under ``self._lock``."""
+        upstream = self.upstream_for(provider, dialect)
+        if upstream.url == self.upstream.url:
+            return self.passthrough
+        with self._lock:
+            cached = self.passthroughs.get(upstream.url)
+            if cached is None:
+                cached = ContextoProxy(upstream.url, self.log, upstream_source=upstream.source,
+                                       strip_hint_headers=not self.forward_hint_headers,
+                                       allowed_hosts=self.allowed_hosts,
+                                       allow_local_origin=self.allow_local_origin)
+                self.passthroughs[upstream.url] = cached
+            return cached
+
+    def resolve_session_key(self, key: str) -> str | None:
+        """Resolve either a client routing key (URL/header/Claude/Codex/fingerprint key) or an
+        existing Contexto session id to its Contexto session id, or None when unknown."""
+        with self._lock:
+            if key in self._sessions:
+                return key
+            mapped = self._routes.get(key)
+            if mapped is not None:
+                return mapped
+        found = self._last_served(key)
+        if found is not None:
+            return found
+        # Direct Contexto session id on disk (must be an existing real directory)
+        try:
+            from contexto.paths import session_dir
+            from contexto.store import refuse_symlinked_session
+
+            path = session_dir(self.home, key)
+            refuse_symlinked_session(path)
+            if path.is_dir():
+                return key
+        except (ValueError, OSError):
+            pass
+        return None
+
+    def active_session_ids(self) -> list[str]:
+        """Contexto session ids currently open in the service."""
+        with self._lock:
+            return list(self._sessions)
+
+    def acquire_store(self, session_id: str) -> tuple[Any, bool]:
+        """Return ``(store, borrowed)`` for an existing session id: when open in the service, reuse
+        its live store (``borrowed=True``); otherwise open it from disk with ``create=False``
+        (``borrowed=False``, caller must call ``store.release()``)."""
+        with self._lock:
+            live = self._sessions.get(session_id)
+            if live is not None:
+                live.leases += 1
+                live.last_used = self.clock()
+                return live, True
+        from contexto.commands.mcp import ExistingSessions
+
+        store = ExistingSessions(self.home, None).open(session_id)
+        return store, False
+
     def resolve(self, tool_use_id: str) -> str | None:
         """The Contexto session a tool-use id was issued in; None when unknown or ambiguous."""
         with self._tool_lock:
@@ -1034,19 +1352,27 @@ class ServeService:
         return self._served.lookup(key)
 
     def acquire(self, cli_session: str, parent: str | None = None, *, create: bool,
-                messages: bool = True) -> _Session | None:
-        """The open session for a request of Claude Code session ``cli_session``, leased until
+                messages: bool = True, workdir: str | None = None, cli: str = "claude") -> _Session | None:
+        """The open session for a request of client session ``cli_session``, leased until
         ``release``. Opens it at first sight (see the module docstring); ``create`` allows a new
         session when none served the id. None when there is no session and none may be made;
         ``_Unrouted`` when one cannot be opened. The id the request was routed by is recorded in the
         session's store."""
         key = self.route_key(cli_session, parent, messages=messages)
-        session = self._acquire(key, create)
-        if session is not None and session.recorder.note(key):
-            self._served.note(key, session.session_id, time.time())
+        session = self._acquire(key, create, workdir=workdir, cli=cli)
+        if session is not None:
+            if workdir is not None and workdir != session._workdir:
+                try:
+                    session.store.set_workdir(workdir)
+                    session._workdir = workdir
+                except Exception:
+                    pass
+            if session.recorder.note(key):
+                self._served.note(key, session.session_id, time.time())
         return session
 
-    def _acquire(self, key: str, create: bool) -> _Session | None:
+    def _acquire(self, key: str, create: bool, *, workdir: str | None = None,
+                 cli: str = "claude") -> _Session | None:
         # The wait at the cap is measured from here, so a request queued behind others of its id, each
         # of which waited at the cap holding the id's guard, has no wait of its own left.
         cap_deadline = time.monotonic() + self.cap_wait_s
@@ -1082,7 +1408,7 @@ class ServeService:
                 if not reserved:
                     raise _Unrouted("stopping" if self._stopping else "session_cap")
                 try:
-                    session = self._open(session_id, created)
+                    session = self._open(session_id, created, workdir=workdir, cli=cli)
                 except Exception as exc:
                     with self._lock:
                         self._opening -= 1
@@ -1113,10 +1439,11 @@ class ServeService:
         session.leases += 1
         session.last_used = self.clock()
 
-    def release(self, session: _Session) -> None:
+    def release(self, session: _Session, *, count_request: bool = True) -> None:
         with self._lock:
             session.leases -= 1
-            session.requests += 1
+            if count_request:
+                session.requests += 1
             session.last_used = self.clock()
             if not session.leases:
                 self._freed.notify_all()
@@ -1177,30 +1504,40 @@ class ServeService:
                 self._shown.popitem(last=False)
             return shown
 
-    def _open(self, session_id: str, created: bool) -> _Session:
+    def _open(self, session_id: str, created: bool, *, workdir: str | None = None,
+              cli: str = "claude") -> _Session:
         """Open the store and build its engine and proxy, as ``launcher.start_proxy`` does for a launch.
-        No working directory is recorded (see the module docstring). A session the service makes is
-        kept out of project memory (D69): the service routes by session id and cannot know the client's
-        directory, so it records ``project_memory: false`` before the engine reads it, and a later
-        ``contexto run claude --resume <id>`` never turns it back on. When this fails for a session
-        being made, the directory it made is removed again."""
+        When ``workdir`` is given (via ``X-Contexto-Workdir`` or ``/w/<encoded>/``), it is recorded on
+        the store so staleness checks and project memory work just like ``contexto run``; without a
+        workdir, a new session records ``project_memory: false`` (D69/D70)."""
         store = None
         try:
             store = SessionStore(self.home, session_id)
-            if created:
+            if workdir is not None:
+                store.set_workdir(workdir)
+            elif created:
                 store.set_project_memory(False)
             transform, observe_usage, engine_name = self.engine_factory(store, self.config)
-            recorder = RouteRecorder(transform, store)
+            recorder = RouteRecorder(transform, store, cli=cli)
             notices = SessionNotices(store, self.stderr, session_id, self._notices(session_id))
+            on_calls = lambda tool_call_ids: self.register_tool_calls(tool_call_ids, session_id)  # noqa: E731
             proxy = build_session_proxy(
                 self.upstream, notices, recorder, observe_usage, observe_thinking=self.observe_thinking,
                 affinity_key=session_affinity_key(store, self.upstream.url),
-                on_tool_calls=lambda tool_call_ids: self.register_tool_calls(tool_call_ids, session_id),
-                strip_hint_headers=not self.forward_hint_headers)
-            store.log({"event": "serve_open", "cli": "claude", "session": session_id, "created": created,
-                       "config": self.config, "engine": engine_name, "upstream_source": self.upstream.source,
-                       "observe_thinking": self.observe_thinking,
-                       "affinity_header": proxy.affinity_header is not None})
+                on_tool_calls=on_calls,
+                strip_hint_headers=not self.forward_hint_headers,
+                allowed_hosts=self.allowed_hosts,
+                allow_local_origin=self.allow_local_origin)
+            pages = count_store_pages(store.pages_dir)
+            open_event: dict[str, Any] = {
+                "event": "serve_open", "cli": cli, "session": session_id, "created": created,
+                "config": self.config, "engine": engine_name, "upstream_source": self.upstream.source,
+                "observe_thinking": self.observe_thinking,
+                "affinity_header": proxy.affinity_header is not None,
+            }
+            if pages is not None:
+                open_event["pages"] = pages
+            store.log(open_event)
         except BaseException:
             if store is not None:
                 store.release()
@@ -1210,7 +1547,11 @@ class ServeService:
                 except (SessionLiveError, SessionNotFoundError, ValueError, OSError):
                     pass
             raise
-        return _Session(session_id, store, proxy, recorder, self.clock())
+        return _Session(session_id, store, proxy, recorder, self.clock(), notices=notices,
+                        observe_usage=observe_usage, observe_thinking=self.observe_thinking,
+                        strip_hint_headers=not self.forward_hint_headers, on_tool_calls=on_calls,
+                        allowed_hosts=self.allowed_hosts, allow_local_origin=self.allow_local_origin,
+                        workdir=workdir)
 
     def _discard(self, session: _Session, created: bool) -> None:
         """With the session's guard held: a session opened by a request that lost the race with
@@ -1245,10 +1586,26 @@ class ServeService:
     def _finish(self, session: _Session, reason: str) -> None:
         """With the session's guard held: the exit-time work that applies (the missing-tools report,
         the recorder's last-seen times), a log line in both logs, and the store's lock released."""
+        def _stop_proxies() -> None:
+            session.proxy.stop()
+            with session._proxy_lock:
+                extras = list(session.proxies.values())
+                session.proxies.clear()
+            for extra in extras:
+                try:
+                    extra.stop()
+                except Exception:
+                    pass
+
+        def _log_close() -> None:
+            close_event: dict[str, Any] = {"event": "serve_close", "reason": reason, "requests": session.requests}
+            pages = count_store_pages(session.store.pages_dir)
+            if pages is not None:
+                close_event["pages"] = pages
+            session.store.log(close_event)
+
         for step in (lambda: report_missing_tools(session.proxy), session.recorder.flush,
-                     session.proxy.stop,
-                     lambda: session.store.log({"event": "serve_close", "reason": reason,
-                                                "requests": session.requests})):
+                     _stop_proxies, _log_close):
             try:
                 step()
             except Exception:
@@ -1388,6 +1745,35 @@ class _ServeHandler(_Handler):
                 service._in_flight -= 1
                 service._idle.notify_all()
 
+    def _host_allowed(self, host_value: str) -> bool:
+        """Accept loopback hosts plus any opt-in ``--allow-host`` configured on the service."""
+        lower = host_value.strip().lower()
+        from contexto.proxy import LOCAL_HOST_HEADER, _host_without_port
+
+        if LOCAL_HOST_HEADER.fullmatch(lower):
+            return True
+        allowed = self.service.allowed_hosts
+        if not allowed:
+            return False
+        host_only = _host_without_port(lower)
+        if host_only != lower:
+            port_part = lower[len(host_only):]
+            if not (port_part.startswith(":") and port_part[1:].isdigit() and 1 <= len(port_part) - 1 <= 5):
+                return False
+        return host_only in allowed
+
+    def _refusal(self) -> str | None:
+        origins = self.headers.get_all("Origin") or []
+        if len(origins) > 1:
+            return "origin"
+        if len(origins) == 1:
+            if not (self.service.allow_local_origin and is_local_origin(origins[0], self.service.allowed_hosts)):
+                return "origin"
+        hosts = self.headers.get_all("Host") or []
+        if len(hosts) != 1 or not self._host_allowed(hosts[0]):
+            return "host"
+        return None
+
     def _serve(self) -> None:
         service = self.service
         self._body: bytes | ValueError | None = None  # the request body, read once
@@ -1406,6 +1792,7 @@ class _ServeHandler(_Handler):
             self._trusted = True
         self._passed = True
         self._drop_token_headers()
+        self.path, url_session, url_workdir, url_provider = strip_route_prefixes(self.path)
         path_only = self.path.split("?", 1)[0]
         if service._stopping:
             return self._refuse_stopping(path_only)
@@ -1414,21 +1801,38 @@ class _ServeHandler(_Handler):
         if path_only == LOCAL_PREFIX or path_only.startswith(LOCAL_PREFIX + "/"):
             self._local(path_only)
             return
+        if path_only == MCP_PATH:
+            self._mcp(url_session)
+            return
+        _, canonical_path = classify_path(path_only) if self.command == "POST" else (None, None)
+        dialect = registry_dialect_for(canonical_path or path_only)
         session: _Session | None = None
         try:
-            session = self._route(path_only)
+            session = self._route(path_only, dialect=dialect, url_session=url_session,
+                                  url_workdir=url_workdir, provider=url_provider)
         except _Unrouted as unrouted:
             if unrouted.reason == "stopping":
                 return self._refuse_stopping(path_only)
             service.unrouted(unrouted.reason, self.command, path_only)
         except Exception as exc:  # routing must never cost the client its request: forward it unchanged
             service.unrouted("route_error", self.command, path_only, type(exc).__name__)
-        self.owner = session.proxy if session is not None else service.passthrough
+        # Strip Contexto-internal routing headers before forwarding upstream
+        self._drop_internal_headers()
+        upstream = service.upstream_for(url_provider, dialect)
+        if session is not None:
+            self.owner = (session.proxy if upstream.url == service.upstream.url else session.proxy_for(upstream))
+        else:
+            self.owner = service.passthrough_for(url_provider, dialect)
         try:
             self._handle_counted()
         finally:
             if session is not None:
                 service.release(session)
+
+    def _drop_internal_headers(self) -> None:
+        names = [name for name in self.headers if name.lower() in _INTERNAL_HEADERS]
+        for name in names:
+            del self.headers[name]
 
     def _refuse_stopping(self, path_only: str) -> None:
         """A request that passed the checks after ``stop`` began: not routed or forwarded, answered with
@@ -1536,19 +1940,19 @@ class _ServeHandler(_Handler):
             return self._parsed[1]
         return super()._parse(body)
 
-    def _route(self, path_only: str) -> _Session | None:
-        """The session this request belongs to (leased), or None for a request that has none. Raises
-        ``_Unrouted`` for a request that could have had one and cannot: it names a session it cannot
-        have, or it is a ``/v1/messages`` that names none."""
-        api, canonical = classify_path(path_only) if self.command == "POST" else (None, None)
-        if api != "messages" or canonical not in (MESSAGES_PATH, COUNT_TOKENS_PATH):
+    def _route(self, path_only: str, *, dialect: Any = None, url_session: str | None = None,
+               url_workdir: str | None = None, provider: str | None = None) -> _Session | None:
+        """The session this request belongs to (leased), or None for a request that has none. Runs the
+        service's pluggable session routing chain (explicit URL segment -> client headers/body ->
+        deterministic content-prefix fingerprint)."""
+        _, canonical = classify_path(path_only) if self.command == "POST" else (None, None)
+        effective_path = canonical or path_only
+        if dialect is None:
+            dialect = registry_dialect_for(effective_path)
+        if self.command != "POST" or dialect is None:
             return None
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
             return None  # _Handler refuses it
-        given = self.headers.get_all(CLAUDE_SESSION_HEADER) or []
-        if len(given) > 1 or (given and not CLI_SESSION_ID.fullmatch(given[0])):
-            raise _Unrouted("invalid_session_id")
-        header_id = given[0] if given else None
         try:
             body = self._read_body()
         except ValueError:
@@ -1566,43 +1970,238 @@ class _ServeHandler(_Handler):
             self._parsed, request = (body, exc), None
         else:
             self._parsed = (body, request)
-        body_id, parent = body_session(request)
-        if header_id is not None and body_id is not None and header_id != body_id:
-            raise _Unrouted("session_id_mismatch")
-        cli_session = header_id or body_id
-        messages = canonical == MESSAGES_PATH
-        if cli_session is None:
-            if messages:
+        ctx = RouteContext(method=self.command, path=effective_path, headers=self.headers, request=request,
+                           dialect=dialect, url_session=url_session, url_workdir=url_workdir, provider=provider)
+        match: RouteMatch | None = None
+        for router in self.service.routers:
+            match = router(ctx)
+            if match is not None:
+                break
+        is_generation = not dialect.is_count_endpoint(effective_path)
+        if match is None:
+            if is_generation and effective_path == MESSAGES_PATH:
                 raise _Unrouted("no_session_id")
             return None
-        session = self.service.acquire(cli_session, parent, create=messages and isinstance(request, dict),
-                                       messages=messages)
+        header_workdir = _validate_workdir(self.headers.get(CONTEXTO_WORKDIR_HEADER))
+        workdir = header_workdir or url_workdir
+        cli_name = _CLI_BY_DIALECT.get(dialect.name, "serve")
+        session = self.service.acquire(match.session_key, match.parent,
+                                       create=is_generation and isinstance(request, dict),
+                                       messages=is_generation, workdir=workdir, cli=cli_name)
         if session is None:
             raise _Unrouted("no_session")
         return session
 
-    # Local endpoints
+    # Local endpoints & Streamable HTTP MCP
+
+    def _cors_headers(self) -> dict[str, str]:
+        origins = self.headers.get_all("Origin") or []
+        if (len(origins) == 1 and self.service.allow_local_origin
+                and is_local_origin(origins[0], self.service.allowed_hosts)):
+            return {
+                "Access-Control-Allow-Origin": origins[0],
+                "Access-Control-Allow-Methods": "POST, GET, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": f"Content-Type, Accept, {CONTEXTO_SESSION_HEADER}, "
+                                                f"{MCP_SESSION_HEADER}",
+                "Vary": "Origin",
+            }
+        return {}
 
     def _local(self, path_only: str) -> None:
         service = self.service
+        cors = self._cors_headers()
+        if self.command == "OPTIONS" and cors:
+            return self._empty(204, cors)
         body = self._local_body()
         if body is None:
             return
         if path_only == HEALTH_PATH:
             if self.command != "GET":
-                return self._json(405, {"error": "method_not_allowed"})
-            return self._json(200, service.health())
+                return self._json(405, {"error": "method_not_allowed"}, extra_headers=cors)
+            return self._json(200, service.health(), extra_headers=cors)
+        if path_only == ACTIVE_PATH:
+            if self.command != "GET":
+                return self._json(405, {"error": "method_not_allowed"}, extra_headers=cors)
+            active = service.active_session_ids()
+            if len(active) == 1:
+                return self._json(200, resolve_found(active[0]), extra_headers=cors)
+            if not active:
+                return self._json(404, {"error": "no_active_session"}, extra_headers=cors)
+            return self._json(409, {"error": "ambiguous_active_session", "count": len(active)}, extra_headers=cors)
         if path_only == RESOLVE_PATH:
             if self.command != "POST":
-                return self._json(405, {"error": "method_not_allowed"})
-            tool_use_id = requested_tool_use(body)
-            if tool_use_id is None:
-                return self._json(400, {"error": "invalid_request"})
-            session_id = service.resolve(tool_use_id)
+                return self._json(405, {"error": "method_not_allowed"}, extra_headers=cors)
+            tool_use_id, session_key = requested_resolve(body)
+            if tool_use_id is None and session_key is None:
+                return self._json(400, {"error": "invalid_request"}, extra_headers=cors)
+            session_id = (service.resolve(tool_use_id) if tool_use_id is not None
+                          else service.resolve_session_key(session_key or ""))
             if session_id is None:
-                return self._json(404, RESOLVE_UNKNOWN)
-            return self._json(200, resolve_found(session_id))
-        return self._json(404, {"error": "not_found"})
+                return self._json(404, RESOLVE_UNKNOWN, extra_headers=cors)
+            return self._json(200, resolve_found(session_id), extra_headers=cors)
+        return self._json(404, {"error": "not_found"}, extra_headers=cors)
+
+    def _mcp(self, url_session: str | None) -> None:
+        """Streamable HTTP MCP endpoint at ``/<token>/mcp`` and ``/<token>/s/<session_id>/mcp``.
+        Speaks JSON-RPC 2.0 (``initialize``, ``server/discover``, ``ping``, ``tools/list``,
+        ``tools/call``, notifications) directly against the service's session stores, with session
+        binding via URL path, ``X-Contexto-Session`` / ``Mcp-Session-Id`` header, tool-use id,
+        explicit argument, or unambiguous single active session."""
+        cors = self._cors_headers()
+        if self.command == "OPTIONS":
+            return self._empty(204, cors) if cors else self._json(405, {"error": "method_not_allowed"})
+        if self.command == "DELETE":
+            return self._empty(204, cors)
+        if self.command != "POST":
+            return self._json(405, {"error": "method_not_allowed"}, extra_headers=cors)
+        body = self._local_body()
+        if body is None:
+            return
+        try:
+            payload = loads_bounded(body)
+        except ValueError:
+            return self._json(200, mcp_module._error(None, mcp_module.PARSE_ERROR, "Parse error"),
+                              extra_headers=cors)
+        header_session = (self.headers.get(CONTEXTO_SESSION_HEADER)
+                          or self.headers.get(MCP_SESSION_HEADER) or None)
+        bound_key = url_session or header_session
+        if bound_key is not None and not CLI_SESSION_ID.fullmatch(bound_key):
+            return self._json(400, {"error": "invalid_session_id"}, extra_headers=cors)
+
+        def handle_one(msg: Any) -> dict[str, Any] | None:
+            return self._mcp_dispatch(msg, bound_key)
+
+        extra_headers = dict(cors)
+        if bound_key is not None:
+            resolved = self.service.resolve_session_key(bound_key)
+            extra_headers[MCP_SESSION_HEADER] = resolved or bound_key
+
+        if isinstance(payload, list):
+            if not payload:
+                return self._json(200, mcp_module._error(None, mcp_module.INVALID_REQUEST, "Invalid request"),
+                                  extra_headers=extra_headers)
+            replies = [reply for item in payload if (reply := handle_one(item)) is not None]
+            if not replies:
+                return self._empty(202, extra_headers)
+            return self._json(200, replies, extra_headers=extra_headers)
+        reply = handle_one(payload)
+        if reply is None:
+            return self._empty(202, extra_headers)
+        return self._json(200, reply, extra_headers=extra_headers)
+
+    def _mcp_dispatch(self, message: Any, bound_key: str | None) -> dict[str, Any] | None:
+        """Run one JSON-RPC message through Contexto's MCP ``Server``."""
+        stateless = mcp_module.Server(None, io.StringIO(), io.StringIO(), project_tools=False)  # type: ignore[arg-type]
+        stateless.listed = True  # avoid recording on None store
+        if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
+                or not isinstance(message.get("method"), str)
+                or not mcp_module._valid_id(message.get("id"))):
+            return stateless.handle(message)
+        if message["method"] != "tools/call":
+            return stateless.handle(message)
+        params = message.get("params")
+        params = {} if params is None else params
+        if (not isinstance(params, dict) or not isinstance(params.get("name"), str)
+                or params["name"] not in mcp_module._TOOL_NAMES):
+            return stateless.handle(message)
+        meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+        requested = meta.get(mcp_module.META_VERSION)
+        modern = False
+        if requested is not None:
+            is_modern_ver = (
+                requested in mcp_module.MODERN_VERSIONS
+                or (mcp_module._is_version_date(requested) and requested >= mcp_module.MODERN_VERSIONS[0])
+            )
+            is_legacy_ver = requested in mcp_module.LEGACY_VERSIONS
+            if not is_modern_ver and not is_legacy_ver:
+                return stateless.handle(message)
+            modern = is_modern_ver
+        is_notification = "id" not in message
+
+        def _wrap_result(res: dict[str, Any]) -> dict[str, Any] | None:
+            if is_notification:
+                return None
+            if modern:
+                res = {"resultType": "complete", **res}
+            return {"jsonrpc": "2.0", "id": message.get("id"), "result": res}
+
+        session_id, cleaned_params, error_reply = self._mcp_resolve_session(params, bound_key)
+        if error_reply is not None:
+            return _wrap_result(error_reply)
+        assert session_id is not None
+        live_or_store = None
+        borrowed = False
+        try:
+            live_or_store, borrowed = self.service.acquire_store(session_id)
+            store = live_or_store.store if borrowed else live_or_store
+            server = mcp_module.Server(store, io.StringIO(), io.StringIO(), project_tools=False)
+            server._record_listed()
+            call_msg = {**message, "params": cleaned_params}
+            return server.handle(call_msg)
+        except LockFileDamagedError as exc:
+            damaged = mcp_module.Server(mcp_module.UnopenedStore(session_id, exc),
+                                        io.StringIO(), io.StringIO(), project_tools=False)
+            return damaged.handle({**message, "params": cleaned_params})
+        except mcp_module.SessionUnavailable as exc:
+            tool_name = params.get("name", "contexto")
+            return _wrap_result(mcp_module._tool_error(
+                mcp_module.SESSION_UNOPENED.format(tool=tool_name, session=session_id, reason=exc.reason)))
+        finally:
+            if live_or_store is not None:
+                if borrowed:
+                    self.service.release(live_or_store, count_request=False)
+                else:
+                    try:
+                        live_or_store.release()
+                    except Exception:
+                        pass
+
+    def _mcp_resolve_session(self, params: dict[str, Any],
+                             bound_key: str | None) -> tuple[str | None, dict[str, Any], dict[str, Any] | None]:
+        """Resolve which Contexto session a Streamable HTTP MCP ``tools/call`` targets."""
+        tool_name = params.get("name", "contexto")
+        cleaned = params
+        if bound_key is not None:
+            sid = self.service.resolve_session_key(bound_key)
+            if sid is not None:
+                return sid, cleaned, None
+            return None, cleaned, mcp_module._tool_error(
+                f"{tool_name} was not run: no session found for {bound_key!r}.")
+        meta = params.get("_meta")
+        if isinstance(meta, dict):
+            tool_use_id = meta.get(mcp_module.META_TOOL_USE)
+            if isinstance(tool_use_id, str) and 0 < len(tool_use_id) <= MAX_TOOL_USE_ID_CHARS:
+                sid = self.service.resolve(tool_use_id)
+                if sid is not None:
+                    return sid, cleaned, None
+                return None, cleaned, mcp_module._tool_error(
+                    f"{tool_name} was not run: unknown tool_use_id.")
+            explicit_meta = meta.get("contexto/session") or meta.get(CONTEXTO_SESSION_HEADER)
+            if isinstance(explicit_meta, str) and explicit_meta:
+                sid = self.service.resolve_session_key(explicit_meta)
+                if sid is not None:
+                    return sid, cleaned, None
+                return None, cleaned, mcp_module._tool_error(
+                    f"{tool_name} was not run: no session found for {explicit_meta!r}.")
+        args = params.get("arguments")
+        if isinstance(args, dict):
+            candidate = args.get("contexto_session")
+            if isinstance(candidate, str) and candidate:
+                sid = self.service.resolve_session_key(candidate)
+                if sid is not None:
+                    trimmed = {k: v for k, v in args.items() if k != "contexto_session"}
+                    return sid, {**params, "arguments": trimmed}, None
+                return None, cleaned, mcp_module._tool_error(
+                    f"{tool_name} was not run: no session found for {candidate!r}.")
+        active = self.service.active_session_ids()
+        if len(active) == 1:
+            return active[0], cleaned, None
+        if len(active) > 1:
+            return None, cleaned, mcp_module._tool_error(
+                mcp_module.AMBIGUOUS_ACTIVE.format(tool=tool_name, reason=f"{len(active)} sessions are open"))
+        return None, cleaned, mcp_module._tool_error(
+            f"{tool_name} was not run: no active session in contexto serve. Bind one via "
+            f"/<token>/s/<session_id>/mcp or {CONTEXTO_SESSION_HEADER}.")
 
     def _local_body(self) -> bytes | None:
         """A local endpoint's body, at most ``MAX_LOCAL_BODY_BYTES``; None after answering 413 or 400."""
@@ -1622,15 +2221,27 @@ class _ServeHandler(_Handler):
         self.close_connection = True
         return None
 
-    def _json(self, status: int, payload: dict[str, Any]) -> None:
+    def _json(self, status: int, payload: Any, *, extra_headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload).encode()
         try:
             self.send_response_only(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            for name, value in (extra_headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
+        except OSError:
+            self.close_connection = True
+
+    def _empty(self, status: int, extra_headers: dict[str, str] | None = None) -> None:
+        try:
+            self.send_response_only(status)
+            self.send_header("Content-Length", "0")
+            for name, value in (extra_headers or {}).items():
+                self.send_header(name, value)
+            self.end_headers()
         except OSError:
             self.close_connection = True
 
@@ -1711,6 +2322,12 @@ def print_mcp_config(home: Path, stdout) -> int:
     except LaunchError as exc:
         raise ServeError(str(exc), exc.code) from None
     print(json.dumps(mcp_config_payload(home), indent=2), file=stdout)
+    return 0
+
+
+def print_mcp_http_config(args: Any, home: Path, stdout) -> int:
+    token = ensure_token(home)
+    print(json.dumps(mcp_http_config_payload(_chosen_port(args, home), token), indent=2), file=stdout)
     return 0
 
 
@@ -1806,11 +2423,30 @@ def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
     port = DEFAULT_PORT if args.port is None else args.port
     check_upstream_loop(upstream, port, token)  # first: a malformed URL's error can quote part of it
     check_upstream_url(upstream)
+    provider_upstreams: dict[str, Upstream] = {}
+    for prov_name, attr in (("anthropic", "anthropic_upstream"), ("openai", "openai_upstream"),
+                            ("gemini", "gemini_upstream")):
+        raw_url = getattr(args, attr, None)
+        if raw_url:
+            prov_up = Upstream(raw_url, f"flag:{prov_name}")
+            check_upstream_loop(prov_up, port, token)
+            check_upstream_url(prov_up)
+            provider_upstreams[prov_name] = prov_up
+    allowed_hosts = getattr(args, "allow_host", None) or []
+    for host in allowed_hosts:
+        try:
+            normalize_allowed_host(host)
+        except ValueError as exc:
+            raise ServeError(f"invalid --allow-host {host!r}: {exc}", EXIT_USAGE) from None
+    allow_local_origin = bool(getattr(args, "allow_local_origin", False))
     try:
         service = ServeService(home, upstream, token, config=engine_config(options),
                                observe_thinking=options.observe_thinking, max_sessions=args.max_sessions,
                                idle_s=args.idle_minutes * 60, stderr=stderr,
-                               forward_hint_headers=args.forward_hint_headers)
+                               forward_hint_headers=args.forward_hint_headers,
+                               upstreams=provider_upstreams,
+                               allowed_hosts=allowed_hosts,
+                               allow_local_origin=allow_local_origin)
     except ValueError as exc:
         raise ServeError(f"invalid upstream (from {upstream.source}): {exc}", EXIT_USAGE) from None
     try:
@@ -1821,6 +2457,8 @@ def _serve(args: Any, home: Path, stderr, signals: _StopSignals) -> int:
         raise ServeError(f"port {port} on {LISTEN_HOST} is in use; stop what holds it, or pass --port N") from None
     try:
         check_upstream_loop(upstream, port, token)  # a port the system picked (--port 0)
+        for prov_up in provider_upstreams.values():
+            check_upstream_loop(prov_up, port, token)
         print(f"contexto serve: listening on {LISTEN_HOST}:{port} (bound {options.bound:,}, upstream "
               f"{upstream.source})", file=stderr, flush=True)
         if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: no project base URL (D52)
@@ -1851,6 +2489,8 @@ def run(args: Any, *, stdout=None, stderr=None) -> int:
             return print_settings(args, home, stdout, stderr)
         if args.print_mcp_config:
             return print_mcp_config(home, stdout)
+        if getattr(args, "print_mcp_http_config", False):
+            return print_mcp_http_config(args, home, stdout)
         if args.rotate_token:
             return rotate(home, stdout)
         if args.status:

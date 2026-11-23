@@ -42,8 +42,20 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--port", type=_port, default=None,
                         help=f"port on 127.0.0.1 (default {DEFAULT_PORT}; 0 picks a free port)")
     parser.add_argument("--upstream", default=None,
-                        help="upstream base URL (default: what Claude Code would use from this directory; "
+                        help="default upstream base URL (default: what Claude Code would use from this directory; "
                              "required once that is this service's own URL)")
+    parser.add_argument("--anthropic-upstream", default=None,
+                        help="explicit upstream base URL for Anthropic Messages requests and /<token>/anthropic/...")
+    parser.add_argument("--openai-upstream", default=None,
+                        help="explicit upstream base URL for OpenAI Chat Completions / Responses requests and "
+                             "/<token>/openai/...")
+    parser.add_argument("--gemini-upstream", default=None,
+                        help="explicit upstream base URL for Google Gemini requests and /<token>/gemini/...")
+    parser.add_argument("--allow-host", action="append", default=[], metavar="HOST",
+                        help="allow an extra Host header value (for example host.docker.internal); repeatable")
+    parser.add_argument("--allow-local-origin", action="store_true",
+                        help="allow token-authenticated requests carrying a local/webview Origin header "
+                             "(vscode-webview://, localhost, 127.0.0.1, or an --allow-host)")
     parser.add_argument("--bound", type=int, default=DEFAULT_BOUND,
                         help=f"upstream prompt bound in tokens, for every session (default {DEFAULT_BOUND:,}; "
                              f"above {BOUND_GUARD:,} needs --allow-large-bound)")
@@ -77,6 +89,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     modes.add_argument("--print-mcp-config", action="store_true",
                        help="print an MCP config JSON that starts Contexto's MCP server for a client, and exit; "
                             "it holds no token")
+    modes.add_argument("--print-mcp-http-config", action="store_true",
+                       help="print a Streamable HTTP MCP config JSON pointing at /<token>/mcp, and exit; "
+                            "it holds the token")
     modes.add_argument("--rotate-token", action="store_true",
                        help="replace the token and exit; a running service must be restarted and every client "
                             "given the new URL")

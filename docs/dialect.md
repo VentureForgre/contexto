@@ -67,9 +67,12 @@ declares them. `ResponsesDialect` overrides every one of them.
 | Member | Kind | `ResponsesDialect` overrides it |
 |---|---|---|
 | `name` | attribute | yes |
+| `api_name` | attribute | yes |
 | `field` | attribute | yes |
 | `media_floor` | attribute | yes |
 | `in_turn` | attribute | yes |
+| `matches_endpoint` | method | yes |
+| `is_count_endpoint` | method | yes |
 | `is_context_block` | method | yes |
 | `is_turn_start` | method | yes |
 | `is_assistant` | method | yes |
@@ -86,6 +89,8 @@ declares them. `ResponsesDialect` overrides every one of them.
 | `estimate_items` | method | yes |
 | `lead_count` | method | yes |
 | `usage_tokens` | method | yes |
+| `output_tokens` | method | yes |
+| `prepare_upstream` | method | yes |
 | `judges_session_start` | method | yes |
 | `session_start_seen` | method | yes |
 | `session_start_version` | property | yes |
@@ -116,6 +121,27 @@ It must be unique among dialects and must not change between releases.
   takes the non-Anthropic branch in the engine: no Claude Code session tracking (D50), no early
   close of side rooms and no first prompt recorded for a side room (D40). `ToolCheck.observe` returns
   no events for a name outside `toolcheck.DIALECTS`, and `cliversions.DIALECT_CLI` has no CLI for it.
+
+### `api_name`
+
+`api_name: str`. The proxy log's `api` label for requests handled by this dialect (`"messages"` for
+Anthropic, `"responses"` for Responses, `"chat_completions"` for OpenAI Chat Completions, `"gemini"`
+for Google Gemini).
+
+### `matches_endpoint`
+
+`matches_endpoint(self, endpoint: str) -> bool`
+
+Returns `True` when this dialect handles the request path `endpoint` (without query string). Used by
+the pluggable dialect registry (`contexto.dialects.dialect_for`).
+
+### `is_count_endpoint`
+
+`is_count_endpoint(self, endpoint: str) -> bool`
+
+Returns `True` when `endpoint` is a token-counting endpoint (such as `/v1/messages/count_tokens` or
+Gemini `:countTokens`) that gets the current epoch's transform with no rotation or side effects
+(rule 11).
 
 ### `field`
 
@@ -571,6 +597,22 @@ and nested dicts of numbers (`_numeric`).
 - Anthropic: `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`, a missing or
   null count as 0.
 - Responses: `input_tokens` alone, because "cached_tokens is a subset of input_tokens".
+
+### `output_tokens`
+
+`output_tokens(self, usage: dict) -> int`
+
+Returns the output token count from the response usage dict (`output_tokens` for Anthropic and
+Responses, `completion_tokens` for Chat Completions, `candidatesTokenCount + thoughtsTokenCount` for
+Gemini), used when publishing the response-time recall room.
+
+### `prepare_upstream`
+
+`prepare_upstream(self, request: dict) -> dict`
+
+Optional post-rewrite adjustment to the upstream request dict before serialization, without mutating
+`request`. Most dialects return `request` unchanged; `ChatCompletionsDialect` adds
+`stream_options.include_usage = True` on streaming requests when `include_usage` is not explicitly set.
 
 ### `judges_session_start`
 

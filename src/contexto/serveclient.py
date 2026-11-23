@@ -48,6 +48,7 @@ from pathlib import Path
 
 from contexto.canonical import loads_bounded
 from contexto.servecontract import (
+    ACTIVE_PATH,
     RESOLVE_PATH,
     SERVICE_HOST,
     UNKNOWN_TOOL_USE,  # also this module's kind for a 404 that outlasts the retries
@@ -58,6 +59,7 @@ from contexto.servecontract import (
     is_unknown,
     local_target,
     resolve_request,
+    resolve_session_request,
 )
 
 TIMEOUT_S = 2.0  # one try, in total: connect, send and read the whole answer (the service answers from memory)
@@ -70,6 +72,7 @@ MAX_ANSWER_BYTES = 65536
 NOT_RUNNING = "not_running"  # no service holds the lock, its files cannot be used, or nothing answers on the port
 TOKEN_REFUSED = "token_refused"  # 403
 UNEXPECTED_ANSWER = "unexpected_answer"  # any other answer: another version, or another program on the port
+AMBIGUOUS_SESSION = "ambiguous_session"  # multiple active sessions open in serve; caller must name one
 
 
 class ResolveError(Exception):
@@ -102,13 +105,11 @@ def _read_record(home: Path) -> tuple[int, int | None, str]:
         raise ResolveError(NOT_RUNNING, f"{exc.name} {exc.problem}") from None
 
 
-def _ask(port: int, token: str, tool_use_id: str, timeout: float) -> tuple[int, object]:
-    """One request, in at most ``timeout`` seconds in all: the status and the answer's JSON (None when
-    the body is not JSON or too long). The socket timeout bounds each step; a timer shuts the socket at
-    the deadline, which ends a read however slowly the answer arrives."""
+def _send_local(port: int, token: str, method: str, path: str, body: bytes | None,
+                timeout: float) -> tuple[int, object]:
+    """Send one local request to ``contexto serve`` bounded by ``timeout`` seconds total."""
     import http.client  # here, not at the top: `contexto mcp --session` imports this module and never asks
 
-    body = resolve_request(tool_use_id)
     conn = http.client.HTTPConnection(SERVICE_HOST, port, timeout=timeout)
     expired = threading.Event()
     guard = threading.Lock()
@@ -127,10 +128,12 @@ def _ask(port: int, token: str, tool_use_id: str, timeout: float) -> tuple[int, 
     timer.daemon = True
     timer.start()
     late = ResolveError(NOT_RUNNING, f"no answer from port {port} within {timeout:g} s")
+    headers = {"Host": f"{SERVICE_HOST}:{port}", "Connection": "close"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        headers["Content-Length"] = str(len(body))
     try:
-        conn.request("POST", local_target(token, RESOLVE_PATH), body=body,
-                     headers={"Host": f"{SERVICE_HOST}:{port}", "Content-Type": "application/json",
-                              "Content-Length": str(len(body)), "Connection": "close"})
+        conn.request(method, local_target(token, path), body=body, headers=headers)
         response = conn.getresponse()
         raw = response.read(MAX_ANSWER_BYTES + 1)
         status = response.status
@@ -154,6 +157,47 @@ def _ask(port: int, token: str, tool_use_id: str, timeout: float) -> tuple[int, 
         return status, loads_bounded(raw)
     except ValueError:
         return status, None
+
+
+def _ask(port: int, token: str, tool_use_id: str, timeout: float) -> tuple[int, object]:
+    """One request, in at most ``timeout`` seconds in all: the status and the answer's JSON (None when
+    the body is not JSON or too long). The socket timeout bounds each step; a timer shuts the socket at
+    the deadline, which ends a read however slowly the answer arrives."""
+    return _send_local(port, token, "POST", RESOLVE_PATH, resolve_request(tool_use_id), timeout)
+
+
+def resolve_session(home: Path, session_key: str, *, timeout: float = TIMEOUT_S) -> str:
+    """Resolve an explicit client session key or Contexto session id via the running service."""
+    port, _, token = _read_record(home)
+    status, answer = _send_local(port, token, "POST", RESOLVE_PATH, resolve_session_request(session_key), timeout)
+    if status == 200:
+        session = found_session(answer)
+        if session is not None:
+            return session
+        raise ResolveError(UNEXPECTED_ANSWER, "a 200 answer that names no session")
+    if status == 403:
+        raise ResolveError(TOKEN_REFUSED, "the service answered 403")
+    if status == 404:
+        raise ResolveError(UNKNOWN_TOOL_USE, "the service has no session for that key")
+    raise ResolveError(UNEXPECTED_ANSWER, f"status {status}")
+
+
+def resolve_active(home: Path, *, timeout: float = TIMEOUT_S) -> str | None:
+    """Return the single active session open in ``contexto serve``, None when none is open or the
+    service does not expose ``/contexto/active``, or raise ``ResolveError(AMBIGUOUS_SESSION)`` when
+    multiple sessions are open."""
+    try:
+        port, _, token = _read_record(home)
+        status, answer = _send_local(port, token, "GET", ACTIVE_PATH, None, timeout)
+    except ResolveError:
+        return None
+    if status == 200:
+        return found_session(answer)
+    if status == 409 and isinstance(answer, dict) and answer.get("error") == "ambiguous_active_session":
+        count = answer.get("count")
+        detail = f"{count} sessions are open" if isinstance(count, int) else "multiple sessions are open"
+        raise ResolveError(AMBIGUOUS_SESSION, detail)
+    return None
 
 
 def resolve(home: Path, tool_use_id: str, *, clock: Callable[[], float] = time.monotonic,

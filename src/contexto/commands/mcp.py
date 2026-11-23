@@ -186,7 +186,18 @@ def serve_server(home: Path, search_cache: int | None, stdout: IO[str], stderr: 
     def resolve(tool_use_id: str) -> str:
         return serveclient.resolve(home, tool_use_id, clock=clock, sleep=sleep)
 
+    def resolve_session(session_key: str) -> str:
+        return serveclient.resolve_session(home, session_key)
+
+    def resolve_active() -> str | None:
+        return serveclient.resolve_active(home)
+
     environ = os.environ if environ is None else environ
     user_home = Path(environ["HOME"]) if environ.get("HOME") else Path.home()
+    default_session = (environ.get("X_CONTEXTO_SESSION") or environ.get("X-Contexto-Session")
+                       or environ.get("CONTEXTO_SESSION") or None)
+    claude_code = bool(environ.get("CLAUDE_CODE_SESSION_ID"))
     return ServeServer(resolve, ExistingSessions(home, search_cache), stdout, stderr,
-                       provider=provider_note(environ, cwd=cwd or Path.cwd(), home=user_home))
+                       provider=provider_note(environ, cwd=cwd or Path.cwd(), home=user_home),
+                       resolve_session=resolve_session, resolve_active=resolve_active,
+                       default_session=default_session, claude_code=claude_code)
