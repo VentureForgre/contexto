@@ -65,6 +65,8 @@ IMAGE_MIN_TOKENS = 64  # a tiny image is never priced near 0, as a few patches w
 IMAGE_FLOOR_MAX_EDGE = 1_568  # the older models' downscaling: the lowest cost an image can have
 IMAGE_FLOOR_MAX_TOKENS = 1_568
 IMAGE_FLOOR_SHARE = 0.95  # measured costs ran up to 3% under the formula (2,694 for 2,765)
+OPENAI_LOW_DETAIL_IMAGE_TOKENS = 85  # OpenAI Responses/Chat Completions fixed cost for detail="low"
+EWMA_DECAY = 0.85  # exponential decay factor per observation so recent token density dominates
 # PDFs (D60): the API sends each page as its text plus an image of the page. Anthropic documents 1,500 to
 # 3,000 text tokens a page; a 3-page PDF measured 4,748 tokens (1,583 a page). A page is allowed the top
 # of that range plus an image at the older 1,568-token limit, so a dense page (small-font code or tables)
@@ -92,8 +94,14 @@ JPEG_MAX_MARKERS = 256
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
 _JPEG_FILL = re.compile(rb"\xff+")
 _NOT_BASE64 = re.compile(r"[^A-Za-z0-9+/]")
-_PDF_PAGES: OrderedDict[tuple[int, int], PdfCount] = OrderedDict()  # (length, hash) of base64 data -> count
+_PDF_PAGES: OrderedDict[tuple[int, bytes], PdfCount] = OrderedDict()  # (length, sha256) of base64 data -> count
 _PDF_PAGES_LOCK = threading.Lock()  # the proxy fills the cache outside its transform lock (prime_media)
+
+
+def _content_digest(data: str | bytes) -> tuple[int, bytes]:
+    """(length, SHA-256 digest) key for content-addressed media caches."""
+    raw = data.encode("utf-8", "surrogatepass") if isinstance(data, str) else data
+    return len(data), hashlib.sha256(raw).digest()
 
 
 class _SmallestFirst:
@@ -266,12 +274,18 @@ def image_size(head: bytes) -> tuple[int, int] | None:
         if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
             chunk = head[12:16]
             if chunk == b"VP8 ":  # lossy: 14-bit sizes after the frame tag and start code
+                if len(head) < 30:
+                    return None
                 width, height = struct.unpack("<HH", head[26:30])
                 return width & 0x3FFF, height & 0x3FFF
-            if chunk == b"VP8L":  # lossless: 14-bit sizes minus one, after the signature byte
+            if chunk == b"VP8L":  # lossless: 14-bit sizes minus one, after the 0x2f signature byte
+                if len(head) < 25 or head[20] != 0x2F:
+                    return None
                 bits = int.from_bytes(head[21:25], "little")
                 return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
             if chunk == b"VP8X":  # extended: 24-bit canvas sizes minus one
+                if len(head) < 30:
+                    return None
                 return int.from_bytes(head[24:27], "little") + 1, int.from_bytes(head[27:30], "little") + 1
             return None
         if head[:2] == b"\xff\xd8":
@@ -317,7 +331,19 @@ def image_tokens(width: int, height: int, *, max_edge: int = IMAGE_MAX_EDGE, max
     return min(max_tokens, max(min_tokens, tokens))
 
 
+def _is_low_detail_image(block: dict) -> bool:
+    """OpenAI Responses/Chat Completions ``input_image`` with ``detail: "low"`` costs a fixed 85 tokens."""
+    if block.get("type") != "input_image":
+        return False
+    detail = block.get("detail")
+    if detail is None and isinstance(block.get("image_url"), dict):
+        detail = block["image_url"].get("detail")
+    return isinstance(detail, str) and detail.strip().lower() == "low"
+
+
 def _image_cost(block: dict) -> tuple[int, int]:
+    if _is_low_detail_image(block):
+        return OPENAI_LOW_DETAIL_IMAGE_TOKENS, math.floor(OPENAI_LOW_DETAIL_IMAGE_TOKENS * IMAGE_FLOOR_SHARE)
     data = _base64_payload(block)
     size = None
     if data is not None:
@@ -340,15 +366,14 @@ def pdf_page_count(data: str) -> PdfCount:
     """Pages of a base64 PDF (``contexto.pdfpages``): certain, or ``PDF_MAX_PAGES``. Never raises. Cached
     by content (least recently used dropped), since the engine estimates a history many times per request
     and the same PDF on every later request."""
-    key = (len(data), hash(data))
+    if len(data) > PDF_MAX_BASE64:  # never parsed or hashed, so it does not wait for the parse lock
+        return UNCERTAIN
+    key = _content_digest(data)
     with _PDF_PAGES_LOCK:
         result = _PDF_PAGES.get(key)
         if result is not None:
             _PDF_PAGES.move_to_end(key)
             return result
-    if len(data) > PDF_MAX_BASE64:  # never parsed, so it does not wait for the parse lock
-        _cache_count(key, UNCERTAIN)
-        return UNCERTAIN
     with _PDF_PARSING.hold(len(data)):  # cached before release, so a PDF is parsed once however many wait
         with _PDF_PAGES_LOCK:
             result = _PDF_PAGES.get(key)  # counted while this thread waited
@@ -362,7 +387,7 @@ def pdf_page_count(data: str) -> PdfCount:
     return result
 
 
-def _cache_count(key: tuple[int, int], result: PdfCount) -> None:
+def _cache_count(key: tuple[int, bytes], result: PdfCount) -> None:
     with _PDF_PAGES_LOCK:
         _PDF_PAGES[key] = result
         _PDF_PAGES.move_to_end(key)
@@ -449,11 +474,11 @@ def prime_media(value: Any) -> None:
 
 def media_keys(blocks: list[dict]) -> tuple:
     """A content key per media block (from ``split_media``), in order: two requests with equal keys carry
-    the same media (D48). Base64 data is keyed by its length and hash, any other source by its JSON."""
+    the same media (D48). Base64 data is keyed by its length and SHA-256, any other source by its JSON."""
     keys = []
     for block in blocks:
         data = _base64_payload(block)
-        keys.append((len(data), hash(data)) if data is not None else hash(canonical_bytes(block)))
+        keys.append(_content_digest(data) if data is not None else _content_digest(canonical_bytes(block)))
     return tuple(keys)
 
 
@@ -522,11 +547,22 @@ def message_bytes(messages: list[dict[str, Any]]) -> tuple[int, int]:
     return text, tool
 
 
-def estimate_message_tokens(messages: list[dict[str, Any]], bytes_per_token: float | None = None) -> int:
-    text, tool, media = measure_messages(messages)
+def _effective_tool_ratio(bytes_per_token: float | None, tool_bytes_per_token: float | None) -> float:
+    """Ratio for dense tool output: a measured tool ratio if available, otherwise never looser than
+    ``TOOL_RESULT_BYTES_PER_TOKEN`` (1.5) even after a prose turn measures a higher ratio."""
+    if tool_bytes_per_token:
+        return tool_bytes_per_token
     if bytes_per_token:
-        return _tokens(text + tool, bytes_per_token) + media
-    return _tokens(text, TEXT_BYTES_PER_TOKEN) + _tokens(tool, TOOL_RESULT_BYTES_PER_TOKEN) + media
+        return min(TOOL_RESULT_BYTES_PER_TOKEN, bytes_per_token)
+    return TOOL_RESULT_BYTES_PER_TOKEN
+
+
+def estimate_message_tokens(messages: list[dict[str, Any]], bytes_per_token: float | None = None,
+                            *, tool_bytes_per_token: float | None = None) -> int:
+    text, tool, media = measure_messages(messages)
+    text_ratio = bytes_per_token or TEXT_BYTES_PER_TOKEN
+    tool_ratio = _effective_tool_ratio(bytes_per_token, tool_bytes_per_token)
+    return _tokens(text, text_ratio) + _tokens(tool, tool_ratio) + media
 
 
 def estimate_value_tokens(value: Any, bytes_per_token: float | None = None) -> int:
@@ -541,41 +577,86 @@ def is_tool_output(item: Any) -> bool:
     return isinstance(item, dict) and isinstance(item.get("type"), str) and item["type"].endswith("_output")
 
 
-def estimate_item_tokens(items: list[Any], bytes_per_token: float | None = None) -> int:
-    """A Responses item list as ``estimate_value_tokens`` prices it, except that before a ratio is measured
-    a tool's output item counts at the tool-output seed, as a ``tool_result`` block does (D61)."""
-    outputs = [item for item in items if is_tool_output(item)] if not bytes_per_token else []
+def measure_item_tool_bytes(items: list[Any]) -> int:
+    """Media-stripped canonical JSON bytes of Responses tool-output items."""
+    outputs = [item for item in items if is_tool_output(item)]
+    return len(canonical_bytes(split_media(outputs)[0])) if outputs else 0
+
+
+def estimate_item_tokens(items: list[Any], bytes_per_token: float | None = None,
+                         *, tool_bytes_per_token: float | None = None) -> int:
+    """A Responses item list as ``estimate_value_tokens`` prices it, keeping tool outputs at their
+    separate dense ratio (D61) instead of letting a prose ratio overwrite the 1.5 seed."""
+    outputs = [item for item in items if is_tool_output(item)]
     if not outputs:
         return estimate_value_tokens(items, bytes_per_token)
+    tool_ratio = _effective_tool_ratio(bytes_per_token, tool_bytes_per_token)
     rest = [item for item in items if not is_tool_output(item)]
-    return ((estimate_value_tokens(rest) if rest else 0)
-            + estimate_value_tokens(outputs, TOOL_RESULT_BYTES_PER_TOKEN))
+    return ((estimate_value_tokens(rest, bytes_per_token) if rest else 0)
+            + estimate_value_tokens(outputs, tool_ratio))
 
 
 class TokenEstimator:
-    """Per-session estimator: the defaults until real usage arrives, then the measured ratio."""
+    """Per-session estimator with EWMA decay and separate prose vs dense ``tool_result`` ratios.
 
-    def __init__(self) -> None:
-        self.total_bytes = 0
-        self.total_tokens = 0
+    Before a tool-specific ratio is observed, ``tool_result`` content stays bounded by at most
+    ``TOOL_RESULT_BYTES_PER_TOKEN`` (1.5 bytes/token) so a prose Turn 1 never loosens the dense
+    tool-output seed. Each ``observe`` call decays earlier totals by ``decay`` (EWMA), so a session
+    that shifts from prose to dense code/JSON adapts promptly instead of being anchored by old turns.
+    """
+
+    def __init__(self, decay: float = EWMA_DECAY) -> None:
+        if not 0.0 < decay <= 1.0:
+            raise ValueError("decay must be in (0, 1]")
+        self.decay = decay
+        self.total_bytes: float = 0.0
+        self.total_tokens: float = 0.0
+        self.tool_bytes: float = 0.0
+        self.tool_tokens: float = 0.0
 
     @property
     def measured_bytes_per_token(self) -> float | None:
-        """Cumulative ratio over every observed request, or None before the first."""
+        """EWMA ratio over observed prose/request usage, or None before the first observation."""
         return self.total_bytes / self.total_tokens if self.total_tokens else None
 
-    def observe(self, request_bytes: int, input_tokens: int) -> None:
-        """Add a request's byte size and its real input tokens (uncached, cache read, and cache write),
-        both without the request's media (D48)."""
-        if request_bytes > 0 and input_tokens > 0:
-            self.total_bytes += request_bytes
-            self.total_tokens += input_tokens
+    @property
+    def measured_tool_bytes_per_token(self) -> float | None:
+        """EWMA ratio over observed tool-result usage, or None until tool output is observed."""
+        return self.tool_bytes / self.tool_tokens if self.tool_tokens else None
+
+    @property
+    def tool_bytes_per_token(self) -> float:
+        """Active bytes-per-token ratio for dense tool output."""
+        return _effective_tool_ratio(self.measured_bytes_per_token, self.measured_tool_bytes_per_token)
+
+    def observe(self, request_bytes: int, input_tokens: int | float, *, tool_result: bool = False) -> None:
+        """Record a request's byte size and real input tokens (without media, D48) using EWMA decay.
+        Set ``tool_result=True`` to update the separate tool-result ratio."""
+        if request_bytes <= 0 or input_tokens <= 0:
+            return
+        if tool_result:
+            if self.tool_tokens:
+                self.tool_bytes = self.tool_bytes * self.decay + request_bytes
+                self.tool_tokens = self.tool_tokens * self.decay + input_tokens
+            else:
+                self.tool_bytes = float(request_bytes)
+                self.tool_tokens = float(input_tokens)
+            return
+        if self.total_tokens:
+            self.total_bytes = self.total_bytes * self.decay + request_bytes
+            self.total_tokens = self.total_tokens * self.decay + input_tokens
+        else:
+            self.total_bytes = float(request_bytes)
+            self.total_tokens = float(input_tokens)
 
     def estimate(self, data: str | bytes, *, tool_result: bool = False) -> int:
-        return estimate_tokens(data, tool_result=tool_result, bytes_per_token=self.measured_bytes_per_token)
+        ratio = self.tool_bytes_per_token if tool_result else self.measured_bytes_per_token
+        return estimate_tokens(data, tool_result=tool_result, bytes_per_token=ratio)
 
     def estimate_messages(self, messages: list[dict[str, Any]]) -> int:
-        return estimate_message_tokens(messages, self.measured_bytes_per_token)
+        return estimate_message_tokens(messages, self.measured_bytes_per_token,
+                                       tool_bytes_per_token=self.measured_tool_bytes_per_token)
 
     def estimate_items(self, items: list[Any]) -> int:
-        return estimate_item_tokens(items, self.measured_bytes_per_token)
+        return estimate_item_tokens(items, self.measured_bytes_per_token,
+                                    tool_bytes_per_token=self.measured_tool_bytes_per_token)

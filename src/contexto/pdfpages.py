@@ -11,7 +11,7 @@ of the object numbers whose ``/Type`` is ``/Page`` in any version together with 
 (each number once), and the tree as a renderer walks it (every ``/Kids`` entry that reaches a page, each
 time it is listed); any node's ``/Count`` may raise that, never stand in for a part that was not read.
 Anything else counts as ``PDF_MAX_PAGES``, the only value that is always safe: a cycle in the tree, an object
-stream not inflated (a bound, another filter, a predictor, damaged data), a stream whose end is not where
+stream not inflated (a bound, another filter, an unsupported predictor, damaged data), a stream whose end is not where
 its ``/Length`` says, ``N G obj`` inside a stream body, string or comment (a ``/Length`` that lies long, or
 an object a reader would find by its offset), a token the lexer cannot read, an indirect value whose
 target was not read, a bound passed, or no pages in a file that has objects.
@@ -56,7 +56,7 @@ PDF_MAX_DEPTH = 64  # arrays and dictionaries inside one another
 PDF_LENGTH_CANDIDATES = 8  # integer objects tried for an indirect /Length
 # Keys the count reads; a dictionary keeps only these, so memory follows the page tree, not the content.
 _KEPT = frozenset({b"Type", b"Count", b"Kids", b"Pages", b"Length", b"N", b"First", b"Filter", b"DecodeParms",
-                   b"Predictor"})
+                   b"Predictor", b"Columns", b"Colors", b"BitsPerComponent"})
 _TREE_KEYS = (b"Type", b"Kids", b"Count", b"Pages")  # an object with one of these is recorded for the count
 
 _WHITESPACE = b"\x00\t\n\x0c\r "
@@ -702,6 +702,62 @@ class _Reader:
                         values.append(found[1])
         return self.integers.get(number, [])
 
+    def _unpredict_png(self, data: bytes, row_bytes: int, bpp: int) -> bytes:
+        """Reverse RFC 2083 PNG predictors (PDF /Predictor 10..15): one filter tag byte (0..4)
+        followed by ``row_bytes`` filtered bytes per row."""
+        stride = row_bytes + 1
+        if len(data) % stride != 0:
+            raise _Uncertain
+        rows = len(data) // stride
+        if not rows:
+            return b""
+        out = bytearray(rows * row_bytes)
+        out_mv = memoryview(out)
+        in_mv = memoryview(data)
+        prev: bytes | memoryview = bytes(row_bytes)
+        step_cost = max(1, stride // 64)
+        try:
+            for r in range(rows):
+                if r % 64 == 0:
+                    self.spend(min(64, rows - r) * step_cost)
+                base = r * stride
+                ftype = data[base]
+                row = in_mv[base + 1:base + stride]
+                dst = r * row_bytes
+                if ftype == 0:  # None
+                    out[dst:dst + row_bytes] = row
+                elif ftype == 1:  # Sub
+                    for i in range(row_bytes):
+                        left = out[dst + i - bpp] if i >= bpp else 0
+                        out[dst + i] = (row[i] + left) & 0xFF
+                elif ftype == 2:  # Up
+                    for i in range(row_bytes):
+                        out[dst + i] = (row[i] + prev[i]) & 0xFF
+                elif ftype == 3:  # Average
+                    for i in range(row_bytes):
+                        left = out[dst + i - bpp] if i >= bpp else 0
+                        out[dst + i] = (row[i] + ((left + prev[i]) >> 1)) & 0xFF
+                elif ftype == 4:  # Paeth
+                    for i in range(row_bytes):
+                        a = out[dst + i - bpp] if i >= bpp else 0
+                        b = prev[i]
+                        c = prev[i - bpp] if i >= bpp else 0
+                        p = a + b - c
+                        pa = p - a if p >= a else a - p
+                        pb = p - b if p >= b else b - p
+                        pc = p - c if p >= c else c - p
+                        pr = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+                        out[dst + i] = (row[i] + pr) & 0xFF
+                else:
+                    raise _Uncertain
+                prev = out_mv[dst:dst + row_bytes]
+        finally:
+            if isinstance(prev, memoryview):
+                prev.release()
+            out_mv.release()
+            in_mv.release()
+        return bytes(out)
+
     def object_stream(self, dictionary: dict, start: int, end: int) -> None:
         """Inflate an object stream and read its objects by its offset table."""
         filters = self.resolve(dictionary.get(b"Filter"))
@@ -712,10 +768,33 @@ class _Reader:
         if isinstance(parameters, list):
             parameters = [self.resolve(p) for p in parameters]
             parameters = parameters[0] if len(parameters) == 1 else parameters
-        if isinstance(parameters, dict) and self.resolve(parameters.get(b"Predictor", 1)) not in (1, None):
-            raise _Uncertain
         if parameters is not None and not isinstance(parameters, dict):
             raise _Uncertain
+        predictor: Any = self.resolve(parameters.get(b"Predictor", 1)) if isinstance(parameters, dict) else 1
+        if predictor is None:
+            predictor = 1
+        if type(predictor) is not int or (predictor != 1 and not 10 <= predictor <= 15):
+            raise _Uncertain
+        png_params: tuple[int, int] | None = None
+        if 10 <= predictor <= 15:
+            if filters != b"FlateDecode":
+                raise _Uncertain
+            assert isinstance(parameters, dict)
+            columns = self.resolve(parameters.get(b"Columns", 1))
+            colors = self.resolve(parameters.get(b"Colors", 1))
+            bpc = self.resolve(parameters.get(b"BitsPerComponent", 8))
+            columns = 1 if columns is None else columns
+            colors = 1 if colors is None else colors
+            bpc = 8 if bpc is None else bpc
+            if (type(columns) is not int or columns < 1
+                    or type(colors) is not int or not 1 <= colors <= 256
+                    or type(bpc) is not int or bpc not in (1, 2, 4, 8, 16)):
+                raise _Uncertain
+            bpp = max(1, (colors * bpc + 7) // 8)
+            row_bytes = (columns * colors * bpc + 7) // 8
+            if not 1 <= row_bytes <= PDF_STREAM_OUTPUT:
+                raise _Uncertain
+            png_params = (row_bytes, bpp)
         room = min(PDF_STREAM_OUTPUT, self.room)
         if room <= 0:
             raise _Uncertain  # zlib reads a max_length of 0 as no limit: the budget is spent
@@ -734,6 +813,8 @@ class _Reader:
         else:
             raise _Uncertain
         self.room -= len(data)
+        if png_params is not None:
+            data = self._unpredict_png(data, *png_params)
         count, first = self.resolve(dictionary.get(b"N")), self.resolve(dictionary.get(b"First"))
         if type(count) is not int or type(first) is not int or not 0 <= first <= len(data) or count < 0:
             raise _Uncertain

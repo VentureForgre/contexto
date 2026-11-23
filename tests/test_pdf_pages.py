@@ -1283,7 +1283,7 @@ def test_prime_fills_the_cache(field):
     item = {"role": "user", "content": [block]} if field == "messages" else {"type": "message", "role": "user",
                                                                              "content": [block]}
     RewriteEngine(MemoryStore(key=b"k" * 32), config=Config()).prime({"model": "m", field: [item]})
-    assert tokens._PDF_PAGES[(len(data), hash(data))] == (2, True)
+    assert tokens._PDF_PAGES[tokens._content_digest(data)] == (2, True)
 
 
 def test_priming_never_raises():
@@ -1327,3 +1327,106 @@ def test_a_request_with_300_pdfs_parses_each_once(monkeypatch):
     for _ in range(3):
         estimate_message_tokens(messages)
     assert len(calls) == 300
+
+
+def _png_predict_encode(raw: bytes, columns: int, *, filter_fn, colors: int = 1, bpc: int = 8) -> bytes:
+    """Apply RFC 2083 PNG prediction encoding to ``raw`` (padded to a multiple of row_bytes)."""
+    bpp = max(1, (colors * bpc + 7) // 8)
+    row_bytes = (columns * colors * bpc + 7) // 8
+    pad = (-len(raw)) % row_bytes
+    padded = raw + b" " * pad
+    prev = bytes(row_bytes)
+    out = bytearray()
+    for r in range(len(padded) // row_bytes):
+        row = padded[r * row_bytes:(r + 1) * row_bytes]
+        ftype = filter_fn(r)
+        out.append(ftype)
+        if ftype == 0:
+            out.extend(row)
+        elif ftype == 1:
+            for i in range(row_bytes):
+                left = row[i - bpp] if i >= bpp else 0
+                out.append((row[i] - left) & 0xFF)
+        elif ftype == 2:
+            for i in range(row_bytes):
+                out.append((row[i] - prev[i]) & 0xFF)
+        elif ftype == 3:
+            for i in range(row_bytes):
+                left = row[i - bpp] if i >= bpp else 0
+                out.append((row[i] - ((left + prev[i]) >> 1)) & 0xFF)
+        elif ftype == 4:
+            for i in range(row_bytes):
+                a = row[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pr = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+                out.append((row[i] - pr) & 0xFF)
+        prev = row
+    return bytes(out)
+
+
+def _png_predicted_objstm_pdf(pages: int, *, predictor: int, columns: int, filter_fn,
+                              colors: int = 1, bpc: int = 8) -> bytes:
+    page = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
+    kids = b" ".join(b"%d 0 R" % (10 + i) for i in range(pages))
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Count %d /Kids [ %s ] >>" % (pages, kids),
+        **{10 + i: page for i in range(pages)},
+    }
+    table, data = [], b""
+    for n, val in objects.items():
+        table.append(b"%d %d" % (n, len(data)))
+        data += val + b"\n"
+    header = b" ".join(table) + b"\n"
+    encoded = _png_predict_encode(header + data, columns, filter_fn=filter_fn, colors=colors, bpc=bpc)
+    packed = zlib.compress(encoded)
+    parms = b"<< /Predictor %d /Columns %d /Colors %d /BitsPerComponent %d >>" % (predictor, columns, colors, bpc)
+    stream = (b"5 0 obj << /Type /ObjStm /N %d /First %d /Filter /FlateDecode /DecodeParms %s /Length %d >>\nstream\n"
+              % (len(objects), len(header), parms, len(packed)) + packed + b"\nendstream\nendobj\n")
+    return b"%PDF-1.7\n" + stream + b"trailer << /Root 1 0 R >>\n%%EOF\n"
+
+
+@pytest.mark.parametrize(("predictor", "filter_fn"), [
+    (10, lambda r: 0),  # PNG None
+    (11, lambda r: 1),  # PNG Sub
+    (12, lambda r: 2),  # PNG Up (Chrome/Quartz/qpdf/LibreOffice default)
+    (13, lambda r: 3),  # PNG Average
+    (14, lambda r: 4),  # PNG Paeth
+    (15, lambda r: r % 5),  # PNG Optimum (all 5 filter types mixed per row)
+], ids=["none-10", "sub-11", "up-12", "avg-13", "paeth-14", "optimum-15"])
+def test_png_predicted_object_streams_count_exact_pages(predictor, filter_fn):
+    raw = _png_predicted_objstm_pdf(17, predictor=predictor, columns=12, filter_fn=filter_fn)
+    assert count_pages(raw) == (17, True)
+
+
+def test_png_predictor_supports_multibyte_bpp_and_indirect_decode_parms():
+    # Colors=3, BitsPerComponent=8 -> bpp=3
+    raw = _png_predicted_objstm_pdf(9, predictor=15, columns=5, filter_fn=lambda r: r % 5, colors=3, bpc=8)
+    assert count_pages(raw) == (9, True)
+    # Indirect /DecodeParms and /Columns
+    raw_ind = raw.replace(b"/Columns 5", b"/Columns 99 0 R") + b"99 0 obj 5 endobj\n"
+    assert count_pages(raw_ind) == (9, True)
+
+
+def test_unsupported_or_corrupt_predictors_stay_uncertain():
+    # TIFF Predictor 2 is unsupported -> uncertain
+    valid = _png_predicted_objstm_pdf(3, predictor=12, columns=8, filter_fn=lambda r: 2)
+    assert count_pages(valid.replace(b"/Predictor 12", b"/Predictor 2")) == (PDF_MAX_PAGES, False)
+    # Invalid filter byte (9) inside PNG-predicted stream -> uncertain
+    bad_filter = _png_predicted_objstm_pdf(3, predictor=12, columns=8, filter_fn=lambda r: 0)
+    # Replace compressed stream with a row whose filter tag is 9
+    bad_payload = zlib.compress(b"\x09" + b" " * 8)
+    bad = (b"%%PDF-1.7\n5 0 obj << /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode "
+           b"/DecodeParms << /Predictor 12 /Columns 8 >> /Length %d >>\nstream\n" % len(bad_payload)
+           + bad_payload + b"\nendstream\nendobj\n")
+    assert count_pages(bad) == (PDF_MAX_PAGES, False)
+    # Row length not divisible by (row_bytes + 1) -> uncertain
+    trunc_payload = zlib.compress(b"\x00abcd")
+    trunc = (b"%%PDF-1.7\n5 0 obj << /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode "
+             b"/DecodeParms << /Predictor 12 /Columns 8 >> /Length %d >>\nstream\n" % len(trunc_payload)
+             + trunc_payload + b"\nendstream\nendobj\n")
+    assert count_pages(trunc) == (PDF_MAX_PAGES, False)
+    assert count_pages(bad_filter) == (3, True)

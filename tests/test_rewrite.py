@@ -1924,7 +1924,10 @@ def test_the_ratio_restore_waits_for_a_request_on_the_recorded_model():
     _, _, events = engine(request(conversation("main", 3), model=OPUS), {}, MESSAGES)
     assert events[0] == {"event": "sizing_restored", "bytes_per_token": 3.0, "weight_tokens": 10_000}
     assert engine.restored == events[0]
-    assert engine.estimator.measured_bytes_per_token == (side_bytes + 30_000) / (90 + 10_000)
+    from contexto.tokens import EWMA_DECAY
+    assert engine.estimator.measured_bytes_per_token == pytest.approx(
+        (side_bytes * EWMA_DECAY + 30_000) / (90 * EWMA_DECAY + 10_000)
+    )
     _, _, later = engine(request(conversation("main", 3), model=OPUS), {}, MESSAGES)
     assert not any(e["event"].startswith("sizing_") for e in later)
 

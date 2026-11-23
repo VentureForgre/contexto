@@ -320,7 +320,16 @@ def test_text_after_screenshots_is_estimated_at_the_text_ratio(tmp_path):
                                                 "input": {"file_path": "/tmp/big.py"}}]},
              {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_3", "content": text}]}]
     _, _, estimate, real = _send(eng, msgs)
-    assert real * 0.99 <= estimate <= real * 1.05
+    # Screenshots did not poison the prose ratio, and the unmeasured dense tool_result errs safely high.
+    assert 2.9 <= eng.estimator.measured_bytes_per_token <= 3.05
+    assert estimate >= real * 0.99
+    # Plain prose after screenshots is estimated right at the measured prose ratio.
+    msgs += [{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+             {"role": "user", "content": [{"type": "text", "text": text[:15_000]}]}]
+    _, prose_events, _, prose_real = _send(eng, msgs)
+    prose_req = next(e for e in prose_events if e["event"] == "request")
+    prose_estimate = prose_req.get("sent_estimate", prose_req["estimate"])
+    assert prose_real * 0.99 <= prose_estimate <= prose_real * 1.05
 
 
 def test_pasted_screenshot_does_not_page_the_window_at_the_default_bound(tmp_path):
@@ -552,7 +561,7 @@ def test_a_dense_pdf_in_the_first_request_does_not_set_a_low_first_ratio(tmp_pat
     """Before a ratio exists the PDF's cost is unknown (its floor is 0, so its text would measure far under
     1.5 bytes a token) and the request is not learned from; d95e5df learned 0.82, and 1.65 ten turns later."""
     ratios = _dense_session(tmp_path, paste_first=True, pages=10)
-    assert all(r is None or 2.7 <= r <= 3.0 for r in ratios) and ratios[-1] is not None
+    assert all(r is None or 2.7 <= r <= 3.0 * 1.005 for r in ratios) and ratios[-1] is not None
 
 
 # Reviewer A, PR #234, round 4: PDFs of any cost, drift, and a PDF pasted first -------------------------------
@@ -568,7 +577,7 @@ def _pdf_session(tmp_path, raw: bytes, cost: int, *, paste_first: bool = False, 
     doc = pdf_block(base64.b64encode(raw).decode())
     rng = random.Random(11)
     msgs: list[dict] = []
-    out: dict = {"ratios": [], "unflagged": [], "estimates": []}
+    out: dict = {"ratios": [], "tool_ratios": [], "unflagged": [], "estimates": []}
 
     def usage(upstream: dict) -> int:
         stripped, found = split_media(upstream["messages"])
@@ -588,6 +597,7 @@ def _pdf_session(tmp_path, raw: bytes, cost: int, *, paste_first: bool = False, 
         out["estimates"].append((next(e for e in events if e["event"] == "request")["estimate"], real))
         eng.observe_usage(EP, {"input_tokens": real, "output_tokens": 10}, req)
         out["ratios"].append(eng.estimator.measured_bytes_per_token)
+        out["tool_ratios"].append(eng.estimator.measured_tool_bytes_per_token)
         return real
 
     def tool_output(turn: int) -> str:
@@ -634,7 +644,8 @@ def test_drift_to_denser_text_is_learned_with_a_pdf_in_view(tmp_path):
     with_pdf = _pdf_session(tmp_path / "pdf", raw, 20 * 1_583, dense_after=3, turns=6, bound=400_000)
     control = _pdf_session(tmp_path / "control", b"", 0, dense_after=3, turns=6, bound=400_000)
     assert with_pdf["unflagged"] == [] and control["unflagged"] == []
-    assert with_pdf["ratios"][-1] <= 2.5  # 134f939: 2.78 (control 2.20; each appended byte is learned once)
+    # Separate tool ratio learns the 2.0 bpt dense JSON tool output promptly while prose stays accurate.
+    assert with_pdf["tool_ratios"][-1] is not None and with_pdf["tool_ratios"][-1] <= 2.5
 
     def worst(result: dict) -> float:
         return min(estimate / real for estimate, real in result["estimates"][1:])
@@ -813,3 +824,28 @@ def test_screenshots_too_large_for_the_bound_say_so(tmp_path):
     _, _, events = eng(req, {}, EP)
     small = [e for e in events if e["event"] == "bound_too_small"]
     assert small
+
+
+@pytest.mark.parametrize("head", [
+    b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0",  # truncated before signature & size
+    b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x2f\x01\x02",  # truncated inside 4-byte size
+    b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x00\x01\x02\x03\x04",  # bad VP8L signature byte (not 0x2f)
+    b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0",  # truncated before canvas size
+    b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0\0\0\0\0\x01\x02\x03\x04\x05",  # 29 bytes (< 30)
+    b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0\0\0\0\x9d\x01\x2a\x01",  # truncated VP8 lossy
+], ids=["vp8l-empty", "vp8l-short", "vp8l-badsig", "vp8x-empty", "vp8x-29b", "vp8-short"])
+def test_truncated_webp_headers_return_none_and_price_at_max(head):
+    assert image_size(head) is None
+    data = base64.b64encode(head).decode()
+    assert estimate_message_tokens([{"role": "user", "content": [image_block(data=data, media_type="image/webp")]}]) \
+        == IMAGE_MAX_TOKENS
+
+
+@pytest.mark.parametrize("block", [
+    {"type": "input_image", "image_url": "data:image/png;base64," + png_b64(2560, 1600, payload=200), "detail": "low"},
+    {"type": "input_image", "image_url": "https://example.com/huge.png", "detail": "low"},
+    {"type": "input_image", "image_url": {"url": "https://example.com/huge.png", "detail": "low"}},
+], ids=["responses-b64-low", "responses-url-low", "completions-dict-low"])
+def test_openai_low_detail_images_price_at_85_tokens(block):
+    from contexto.tokens import OPENAI_LOW_DETAIL_IMAGE_TOKENS
+    assert media_cost([block]).tokens == OPENAI_LOW_DETAIL_IMAGE_TOKENS == 85

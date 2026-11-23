@@ -1,3 +1,4 @@
+import errno
 import os
 import stat
 import subprocess
@@ -90,3 +91,80 @@ def test_concurrent_first_use_agrees_on_one_complete_key(tmp_path):
     keys = {p.communicate(timeout=60)[0].strip() for p in procs}
     assert all(p.returncode == 0 for p in procs)
     assert len(keys) == 1 and len(keys.pop()) == 64
+
+
+def test_private_dir_refuses_symlinks_without_chmodding_target(tmp_path):
+    from contexto.private import private_dir
+
+    target = tmp_path / "target"
+    target.mkdir()
+    os.chmod(target, 0o755)
+    link = tmp_path / "sessions"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(NotADirectoryError):
+        private_dir(link, narrow=True)
+    assert mode(target) == 0o755
+
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "nowhere")
+    with pytest.raises(NotADirectoryError):
+        private_dir(dangling, narrow=True)
+    with pytest.raises(NotADirectoryError):
+        private_dir(dangling, narrow=False)
+    assert not (tmp_path / "nowhere").exists()
+
+    # User-chosen home (narrow=False) may be a symlink to an existing directory and is not chmodded.
+    assert private_dir(link, narrow=False) == link
+    assert mode(target) == 0o755
+
+
+@pytest.mark.parametrize("err", [errno.EPERM, errno.EOPNOTSUPP], ids=["EPERM", "EOPNOTSUPP"])
+def test_write_new_falls_back_safely_when_hard_link_is_unsupported(tmp_path, monkeypatch, err):
+    from contexto.private import write_new
+
+    def no_link(src, dst):
+        raise OSError(err, "hard links unsupported", str(src), None, str(dst))
+
+    monkeypatch.setattr(os, "link", no_link)
+    target = tmp_path / "page.json"
+    assert write_new(target, b'{"ok":1}') is True
+    assert target.read_bytes() == b'{"ok":1}' and mode(target) == 0o600
+    assert list(tmp_path.iterdir()) == [target]  # temp file cleaned up
+
+    # Existing file is never overwritten.
+    assert write_new(target, b'{"ok":2}') is False
+    assert target.read_bytes() == b'{"ok":1}'
+
+    # Existing or dangling symlink is never followed or replaced.
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"original")
+    sym = tmp_path / "sym.json"
+    sym.symlink_to(outside)
+    assert write_new(sym, b"overwrite") is False
+    assert outside.read_bytes() == b"original"
+
+    dangling = tmp_path / "dangling.json"
+    dangling.symlink_to(tmp_path / "missing.txt")
+    assert write_new(dangling, b"created") is False
+    assert not (tmp_path / "missing.txt").exists()
+
+
+def test_write_new_fallback_cleans_up_partial_file_on_write_failure(tmp_path, monkeypatch):
+    from contexto import private as private_mod
+
+    monkeypatch.setattr(os, "link", lambda src, dst: (_ for _ in ()).throw(OSError(errno.EPERM, "no link")))
+    real_write_all = private_mod.write_all
+    calls = 0
+
+    def fail_second(fd, data):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError(errno.ENOSPC, "disk full")
+        real_write_all(fd, data)
+
+    monkeypatch.setattr(private_mod, "write_all", fail_second)
+    target = tmp_path / "partial.json"
+    with pytest.raises(OSError):
+        private_mod.write_new(target, b"hello")
+    assert not target.exists() and list(tmp_path.iterdir()) == []
