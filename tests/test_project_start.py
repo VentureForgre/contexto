@@ -212,10 +212,13 @@ def digest(run: list[tuple]) -> str:
 # Again with D63 (PR #274), recorded from D63 merged with main 293b3478, the commit before D69, and the
 # same from the merge: D63's paging inside the script's tool loops changes the Claude Code requests and
 # its config field both records; the Codex requests are main's, byte for byte.
+# Again after D71: Config.window_fraction moved to 0.25 and Config gained stable_prefix,
+# cache_ttl_seconds and cold_cache_fraction, updating the Codex rotation window and both epoch records
+# (Claude Code's requests stayed byte-for-byte identical).
 BEFORE_D69 = {MESSAGES: ("f3ce67fee80060c63749d3016bf6ee1f7c1706cdb56c7175c643fe76e452c7a8",
-                         "7b7bed49ae2ddd199bbd502f5bd4a2bbd3450d307dec51c75694b2321e08686a"),
-              RESPONSES: ("4c7ae60ad65681f5c86c390789ca93f6a899d0dc76f2c20c129cae0e650135f7",
-                          "5009bfb3c9945449db2f1c40daabb23f6c90024a1e91954066777ac556d58bf3")}
+                         "4dba8fc4935175c4b7be0f779b05e2daa7ab3c4e5dbf30acdb1c3f689c6f7df2"),
+              RESPONSES: ("12f81069915093a2adb79dabd7286405ed6163728cc9d1d71394d639c2e4d651",
+                          "564da66aef225fd608ee614e68e99abc0fae3b8c48097ad243a0cef0f6392a0e")}
 STORES = ("memory", "no_project", "nothing_carried", "memory_off")
 
 
