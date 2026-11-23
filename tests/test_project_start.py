@@ -212,13 +212,16 @@ def digest(run: list[tuple]) -> str:
 # Again with D63 (PR #274), recorded from D63 merged with main 293b3478, the commit before D69, and the
 # same from the merge: D63's paging inside the script's tool loops changes the Claude Code requests and
 # its config field both records; the Codex requests are main's, byte for byte.
+# Again after D71: Config.window_fraction moved to 0.25 and Config gained stable_prefix,
+# cache_ttl_seconds and cold_cache_fraction, updating the Codex rotation window and both epoch records
+# (Claude Code's requests stayed byte-for-byte identical).
 # Again with TokenEstimator EWMA + separate prose vs dense tool_result ratios: Turn 1 prose no longer
 # overwrites the 1.5 tool seed, changing the first tool round's pre-measurement estimate and subsequent
 # EWMA-decayed estimates; all four nothing-carried store kinds remain byte-for-byte identical.
 BEFORE_D69 = {MESSAGES: ("fa987af6a66c3fca29a4df85eb46e92cc51e1d19f732123875264282ccedc141",
-                         "7b7bed49ae2ddd199bbd502f5bd4a2bbd3450d307dec51c75694b2321e08686a"),
-              RESPONSES: ("211474f2bb1e3351fa3b8223632b5a458c5f0bfc1892ac29d07311f79bc70c28",
-                          "f0db37296fb624564964d63362555b1ab84c966242f660e9d0d60749db2f5a78")}
+                         "4dba8fc4935175c4b7be0f779b05e2daa7ab3c4e5dbf30acdb1c3f689c6f7df2"),
+              RESPONSES: ("d9e7269bdef69fb34fa6ad2a147cde26f0862a4d4c5663cc45f12382e5fe0dfa",
+                          "0f4c14284a3cb78863a7adb177266f5f51d464d0a0ac3ee4b586480075b61bf3")}
 STORES = ("memory", "no_project", "nothing_carried", "memory_off")
 
 

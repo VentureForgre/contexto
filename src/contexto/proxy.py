@@ -1265,10 +1265,11 @@ class ContextoProxy:
         self._ssl_lock = threading.Lock()
         self._ssl_context: ssl.SSLContext | None = None
         self._pool = _UpstreamPool()
-        self._observe_sig_cache: tuple[ObserveUsage | None, bool, bool] = (
+        self._observe_sig_cache: tuple[ObserveUsage | None, bool, bool, bool] = (
             observe_usage,
             _takes_keyword(observe_usage, "tool_calls"),
             _takes_keyword(observe_usage, "tool_call_ids"),
+            _takes_keyword(observe_usage, "headers"),
         )
         self.last_epoch: Any = None  # the engine's epoch from its last successful transform
         self._in_flight = 0  # requests being handled; idle keep-alive connections are not counted
@@ -1804,7 +1805,7 @@ class _Handler(BaseHTTPRequestHandler):
                 # Packet A2e: the returned events go on this request's entry, logged once with it.
                 usage_events = self._observe_usage(entry["path"], reader.usage, original,
                                                    hold.client_calls if hold is not None else reader.tool_calls(),
-                                                   tuple(reader.call_ids))
+                                                   tuple(reader.call_ids), headers)
                 if usage_events:
                     entry["usage_events"] = [_scalar_summary(e) for e in usage_events]
                     entry["over_bound"] = bool(entry.get("over_bound")) or any(bool(e.get("over_bound"))
@@ -2036,21 +2037,25 @@ class _Handler(BaseHTTPRequestHandler):
                         "endpoint": endpoint, "epoch": self.owner.last_epoch})
 
     def _observe_usage(self, endpoint: str, usage: dict[str, Any], original: dict[str, Any],
-                       tool_calls: bool | None = None, tool_call_ids: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+                       tool_calls: bool | None = None, tool_call_ids: tuple[str, ...] = (),
+                       headers: HeaderList | Headers | None = None) -> list[dict[str, Any]]:
         """Run the usage callback; return the dict events it reports (anything else is ignored)."""
         callback = self.owner.observe_usage
         if callback is None:
             return []
-        cached_cb, takes_tool_calls, takes_tool_call_ids = self.owner._observe_sig_cache
+        cached_cb, takes_tool_calls, takes_tool_call_ids, takes_headers = self.owner._observe_sig_cache
         if callback is not cached_cb:
             takes_tool_calls = _takes_keyword(callback, "tool_calls")
             takes_tool_call_ids = _takes_keyword(callback, "tool_call_ids")
-            self.owner._observe_sig_cache = (callback, takes_tool_calls, takes_tool_call_ids)
+            takes_headers = _takes_keyword(callback, "headers")
+            self.owner._observe_sig_cache = (callback, takes_tool_calls, takes_tool_call_ids, takes_headers)
         extra: dict[str, Any] = {}
         if takes_tool_calls:  # D40
             extra["tool_calls"] = tool_calls
         if takes_tool_call_ids:
             extra["tool_call_ids"] = tool_call_ids
+        if headers is not None and takes_headers:
+            extra["headers"] = _headers_to_dict(headers)
         usage_copy = dict(usage)
         try:
             with self.owner.transform_lock:

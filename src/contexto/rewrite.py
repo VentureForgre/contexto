@@ -58,7 +58,7 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
   ``F`` and ``W`` appear in these events.
 - A second rotation condition (packet A12, contract PR #115): at a turn start, when the recall room
   the request-time publish would give the new turn (``bound - estimate - headroom_floor``) is below
-  ``min_turn_room`` (default 12,000), the engine rotates with the window target ``0.5 * (W -
+  ``min_turn_room`` (default 12,000), the engine rotates with the window target ``window_fraction * (W -
   min_turn_room)`` (minimal window as the fallback), reason ``min_turn_room``, but only if that
   restores at least ``min_turn_room``; when the size trigger fires too, the room target is used when it
   restores the room, so the next turn does not rotate again. A turn that still starts below
@@ -89,8 +89,9 @@ Terms and readings agreed with manager-1 (2026-10-16), each covered by a test:
 - History matching (rule 10) hashes canonical JSON with every ``cache_control`` removed and a single
   text block normalised to a plain string. A mismatch inside the retained window resynchronises from
   the longest matching prefix; a mismatch in paged turns starts a new epoch at the current turn start
-  with everything before it paged. In that forced epoch an in-flight tool loop keeps its thinking
-  (only messages before the turn start count as existing), and the full history is never sent.
+  with everything before it paged. In that forced epoch thinking is stripped across the request
+  (``strip_upto = len(messages)``) because dropping paged turns changes the prefix before any in-flight
+  thinking blocks, and the full history is never sent.
   Within one engine call each message is hashed once and the request's turn starts are found once
   (``request_scope``), since the input is never mutated.
 - ``count_tokens`` (rule 11) gets the current epoch's transform with no side effects.
@@ -154,6 +155,7 @@ import posixpath
 import re
 import secrets
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -216,6 +218,22 @@ TOOL_TEXT_RATIO_RANGE = (0.5, 8.0)  # dense tool output can run below 1.5 bytes 
 # known to this share of its usage (estimate minus floor), so the first ratio errs low by at most about this.
 MEDIA_FIRST_UNCERTAINTY = 0.1
 RESTORED_RATIO_RANGE = (1.0, 6.0)  # bytes per token a restore accepts; outside it the seed is safer (A2e)
+MAX_BREAKPOINTS = 4  # Anthropic Messages API max blocks marked cache_control per request
+MAX_SIDE_STATES = 64  # max non-main conversation states retained in RewriteEngine
+SIDE_STATE_TTL_S = 900.0  # evict idle/stale non-main conversation states after 15 minutes
+CACHE_TTL_1H_SECONDS = 3600.0  # Anthropic 1h ephemeral cache TTL
+# Immutable session-start context block kinds that stay identical across rotations when placed ahead of
+# the mutable rotating preamble (4.x Messages requests where # Environment, CLAUDE.md, skills sit in M[0]).
+STABLE_CARRIED_KINDS = frozenset({
+    "environment",
+    "model",
+    "agent_types",
+    "mcp_instructions",
+    "skills",
+    "instructions",
+    "attribution",
+    "deferred_tools",
+})
 
 
 class Measured(NamedTuple):
@@ -256,7 +274,9 @@ class Store(Protocol):
 @dataclass(frozen=True)
 class Config:
     bound: int = 150_000
-    window_fraction: float = 0.5  # rule 4: retained window target as a share of the window budget W
+    # Rule 4: retained window target as a share of the window budget W. Tuned to 0.25 (A28 replay
+    # research + inturn.BATCH_FRACTION) for longer cache-warm epochs and smaller cache rewrites.
+    window_fraction: float = 0.25
     headroom_floor: int = 25_000
     # A12 (contract PR #115; 12,000 per intake/m2-min-room-12k): a turn's minimum recall room
     min_turn_room: int = 12_000
@@ -278,6 +298,13 @@ class Config:
     # D63 (rule 5): page inside a running turn so the bound holds in a tool loop (contexto.inturn). A record
     # written before it has no such setting and still resumes (resume_state).
     in_turn_paging: bool = True
+    # Place immutable session-start carried blocks (# Environment, CLAUDE.md, skills, ...) before the
+    # mutable rotating preamble with a cache_control breakpoint between them.
+    stable_prefix: bool = True
+    # Anthropic prompt-cache TTL (seconds) for opportunistic cold-cache rotation (0 disables).
+    cache_ttl_seconds: float = 300.0
+    # Window occupancy share above which an already-cold Anthropic cache rotates opportunistically.
+    cold_cache_fraction: float = 0.6
 
 
 @dataclass(frozen=True)
@@ -375,7 +402,15 @@ def _anthropic_is_turn_start(message: dict) -> bool:
     blocks = _blocks(message)
     if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks):
         return False
-    return any(isinstance(b, dict) and not is_context_block(b) for b in blocks)
+    for b in blocks:
+        if not isinstance(b, dict) or is_context_block(b):
+            continue
+        if b.get("type") == "text":
+            text = b.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+        return True
+    return False
 
 
 def turn_starts(messages: list[dict]) -> list[int]:
@@ -1166,8 +1201,8 @@ def strip_carried(messages: list[dict], start: int, end: int) -> list[dict]:
             continue
         if is_system_like(m) and classify_system(messages, i) != HOOK_OUTPUT:
             continue
-        start = is_turn_start(m)
-        carried = _carried_at(m, start) if start or _is_tool_round(m) else set()
+        turn_start = is_turn_start(m)
+        carried = _carried_at(m, turn_start) if turn_start or _is_tool_round(m) else set()
         if carried:
             m = {**m, "content": [b for j, b in enumerate(_blocks(m)) if j not in carried]}
         out.append(m)
@@ -1210,11 +1245,229 @@ def _with_reminder(message: dict, reminder: str) -> dict:
     return {**message, "content": [*blocks, {"type": "text", "text": reminder}]}
 
 
+def _count_blocks_bp(blocks: Any) -> int:
+    """Count ``cache_control`` markers in a block list (including nested ``tool_result.content``)."""
+    if not isinstance(blocks, list):
+        return 0
+    found = 0
+    for block in blocks:
+        if isinstance(block, dict):
+            found += "cache_control" in block
+            if block.get("type") == "tool_result":
+                found += _count_blocks_bp(block.get("content"))
+    return found
+
+
+def _count_message_bp(message: Any) -> int:
+    return _count_blocks_bp(message.get("content")) if isinstance(message, dict) else 0
+
+
+def _block_cc_ttl(block: Any) -> str | None:
+    if isinstance(block, dict):
+        cc = block.get("cache_control")
+        if isinstance(cc, dict):
+            ttl = cc.get("ttl")
+            return ttl if isinstance(ttl, str) else "5m"
+    return None
+
+
+def _blocks_have_1h(blocks: Any, start: int = 0) -> bool:
+    if not isinstance(blocks, list):
+        return False
+    for block in blocks[start:]:
+        if not isinstance(block, dict):
+            continue
+        if _block_cc_ttl(block) == "1h":
+            return True
+        if block.get("type") == "tool_result" and _blocks_have_1h(block.get("content")):
+            return True
+    return False
+
+
+def _suffix_has_1h(messages: list[dict], msg_idx: int, block_idx: int | None = None,
+                   top_1h: bool = False) -> bool:
+    """Whether any breakpoint strictly after ``(msg_idx, block_idx)`` carries ``ttl: '1h'``."""
+    if top_1h:
+        return True
+    if block_idx is not None and _blocks_have_1h(messages[msg_idx].get("content"), block_idx + 1):
+        return True
+    return any(_blocks_have_1h(m.get("content")) for m in messages[msg_idx + 1:])
+
+
+def _bp_cc(messages: list[dict], msg_idx: int, block_idx: int | None = None,
+           top_1h: bool = False) -> dict:
+    """TTL-safe ``cache_control`` dict for a breakpoint at ``(msg_idx, block_idx)``.
+
+    Defaults to 5m ephemeral (1.25x write cost); uses ``ttl: '1h'`` only when a later block in
+    ``messages`` or top-level ``cache_control`` already carries ``1h`` (Anthropic requires
+    non-increasing TTLs: 1h before 5m, never 1h after 5m)."""
+    if _suffix_has_1h(messages, msg_idx, block_idx, top_1h=top_1h):
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
+
+
+def _request_cache_control(request: dict | None) -> dict | None:
+    """Any ``cache_control`` dict in ``request`` (top-level, ``messages``, ``tools``, or ``system``), or None."""
+    if not isinstance(request, dict):
+        return None
+    top = request.get("cache_control")
+    if isinstance(top, dict):
+        return dict(top)
+    for message in request.get("messages") or ():
+        found = inturn._message_cache_control(message)
+        if found is not None:
+            return found
+    for section in (request.get("tools"), request.get("system")):
+        if isinstance(section, list):
+            for block in section:
+                if isinstance(block, dict) and isinstance(block.get("cache_control"), dict):
+                    return dict(block["cache_control"])
+    return None
+
+
+def _effective_cache_ttl(request: dict, config: Config) -> float:
+    """Effective prompt-cache TTL in seconds for ``request``'s conversation prefix.
+
+    Checks ``messages`` and top-level ``cache_control`` first so mixed-TTL requests (1h on
+    ``tools``/``system`` and 5m on ``messages``) use the messages' 5m TTL rather than suppressing
+    cold-cache rotation for an hour. Falls back to ``tools``/``system`` only when no message-level
+    or top-level ``cache_control`` is present."""
+    if config.cache_ttl_seconds <= 0:
+        return 0.0
+    msg_ttls: list[str] = []
+    top = request.get("cache_control")
+    if isinstance(top, dict):
+        ttl = top.get("ttl")
+        msg_ttls.append(ttl if isinstance(ttl, str) else "5m")
+    for message in request.get("messages") or ():
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                t = _block_cc_ttl(block)
+                if t is not None:
+                    msg_ttls.append(t)
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    inner = block.get("content")
+                    if isinstance(inner, list):
+                        for ib in inner:
+                            it = _block_cc_ttl(ib)
+                            if it is not None:
+                                msg_ttls.append(it)
+    if msg_ttls:
+        if all(t == "1h" for t in msg_ttls):
+            return max(config.cache_ttl_seconds, CACHE_TTL_1H_SECONDS)
+        return config.cache_ttl_seconds
+    for section in (request.get("tools"), request.get("system")):
+        if isinstance(section, list):
+            for block in section:
+                if _block_cc_ttl(block) == "1h":
+                    return max(config.cache_ttl_seconds, CACHE_TTL_1H_SECONDS)
+    return config.cache_ttl_seconds
+
+
+def _with_block_cc(message: dict, block_index: int, cc: dict) -> dict | None:
+    """Return a copy of ``message`` with ``cache_control`` added to ``content[block_index]``, or None."""
+    content = message.get("content")
+    if not isinstance(content, list) or not 0 <= block_index < len(content):
+        return None
+    block = content[block_index]
+    if not inturn._is_cacheable_block(block) or "cache_control" in block:
+        return None
+    blocks = list(content)
+    blocks[block_index] = {**block, "cache_control": dict(cc)}
+    return {**message, "content": blocks}
+
+
+def _apply_anthropic_breakpoints(request: dict, result: list[dict], messages: list[dict], sent: list[dict],
+                                 state: EpochState, orig_to_result: dict[int, int], first_idx: int | None,
+                                 stable_end_idx: int | None, preamble_idx: int | None, prefix_end_idx: int | None,
+                                 sys_result_idxs: list[int]) -> list[dict]:
+    """Actively manage Anthropic ``cache_control`` breakpoints while respecting ``MAX_BREAKPOINTS`` (4):
+    1. Between immutable session-start carried blocks and the mutable rotating preamble (when ``k > 0``).
+    2. After the stable epoch prefix when ``k > 0`` so mid-turn edits never bust head/carried/preamble.
+    3. At ``p - 1`` before in-turn stubbing at index ``p`` so ``M[k..p)`` stays a 0.1x cache read."""
+    if _request_cache_control(request) is None or not result:
+        return result
+    top_cc = request.get("cache_control")
+    top_1h = isinstance(top_cc, dict) and top_cc.get("ttl") == "1h"
+    head_bp = (int(isinstance(top_cc, dict)) + _count_blocks_bp(request.get("tools"))
+               + _count_blocks_bp(request.get("system")))
+    msg_bp = sum(_count_message_bp(m) for m in result)
+    remaining = max(0, MAX_BREAKPOINTS - head_bp - msg_bp)
+    if remaining <= 0:
+        return result
+    out = list(result)
+    # 1. Cross-rotation immutable prefix breakpoint on stable_blocks[-1].
+    if state.k > 0 and first_idx is not None and stable_end_idx is not None and remaining > 0:
+        cc = _bp_cc(out, first_idx, stable_end_idx, top_1h=top_1h)
+        marked = _with_block_cc(out[first_idx], stable_end_idx, cc)
+        if marked is not None:
+            out[first_idx] = marked
+            remaining -= 1
+    # 2. Stable epoch-prefix breakpoint when k > 0 (so mid-turn edits never bust head/carried/preamble).
+    if state.k > 0 and first_idx is not None and remaining > 0:
+        first_has_fold = any(s == state.k for s, _, _ in state.inturn.folds)
+        sys_has_bp = any(_count_message_bp(out[i]) > 0 for i in sys_result_idxs)
+        if stable_end_idx is not None:
+            if preamble_idx is not None:
+                cc = _bp_cc(out, first_idx, preamble_idx, top_1h=top_1h)
+                marked = _with_block_cc(out[first_idx], preamble_idx, cc)
+                if marked is not None:
+                    out[first_idx] = marked
+                    remaining -= 1
+        elif not (sys_has_bp and not first_has_fold):
+            target_block = preamble_idx if preamble_idx is not None else prefix_end_idx
+            first_blocks = out[first_idx].get("content")
+            prefix_has_bp = (isinstance(first_blocks, list) and prefix_end_idx is not None
+                             and _count_blocks_bp(first_blocks[:prefix_end_idx + 1]) > 0)
+            if target_block is not None and not prefix_has_bp:
+                cc = _bp_cc(out, first_idx, target_block, top_1h=top_1h)
+                marked = _with_block_cc(out[first_idx], target_block, cc)
+                if marked is not None:
+                    out[first_idx] = marked
+                    remaining -= 1
+            elif not prefix_has_bp and not sys_has_bp:
+                for sys_idx in reversed(sys_result_idxs):
+                    cc = _bp_cc(out, sys_idx, top_1h=top_1h)
+                    marked = inturn._with_cache_control(out[sys_idx], cc)
+                    if marked is not None:
+                        out[sys_idx] = marked
+                        remaining -= 1
+                        break
+    # 3. In-turn stub boundary breakpoint at p - 1 so M[k..p) stays a 0.1x cache read.
+    if state.inturn.stubs and remaining > 0:
+        p = state.inturn.stub_bp
+        if not (state.k < p < len(messages)):
+            p = min((i for i, _, _ in state.inturn.stubs if i > state.k and i < len(sent)
+                     and sent[i] is not inturn.FOLDED), default=0)
+        if p > state.k:
+            for orig_i in range(p - 1, state.k - 1, -1):
+                r_idx = orig_to_result.get(orig_i)
+                if r_idx is None:
+                    continue
+                if _count_message_bp(out[r_idx]) > 0:
+                    break
+                cc = _bp_cc(out, r_idx, top_1h=top_1h)
+                marked = inturn._with_cache_control(out[r_idx], cc)
+                if marked is not None:
+                    out[r_idx] = marked
+                    remaining -= 1
+                    break
+    return out
+
+
+_REQUEST: ContextVar[dict | None] = ContextVar("contexto_rewrite_request", default=None)
+
+
 def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
+    request = _REQUEST.get()
     d = _dialect()
     sent = inturn.view(messages, state, d)  # rule 5: the epoch's stubs and folds; the list itself without any
     edits = state.inturn
     out = []
+    orig_to_out: dict[int, int] = {}
     for i in range(state.k, len(messages)):
         m = sent[i]
         if m is inturn.FOLDED:
@@ -1222,6 +1475,7 @@ def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
         if i < state.strip_upto or (edits.strips and inturn.strips_thinking(edits, i)):
             m = strip_thinking(m)
         if m is not None:  # a dialect may drop an item entirely (Responses reasoning items)
+            orig_to_out[i] = len(out)
             out.append(m)
     if state.k == 0 and state.start_text:
         # D69 (rule 19): before the first rotation there is no preamble, so the carried records go ahead of
@@ -1231,15 +1485,57 @@ def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
         if start is not None:
             out[start] = d.merge_first(out[start], [], state.start_text)
     if state.k == 0 or not out:
+        if d is ANTHROPIC and request is not None and edits.stubs and out:
+            return _apply_anthropic_breakpoints(request, out, messages, sent, state, orig_to_out,
+                                                None, None, None, None, [])
         return out
     lead = list(messages[: d.lead_count(messages)])  # items before the first turn start stay first
-    blocks, systems = carried_content(messages, state.k, state.paged_carried)
-    systems = [m for m in systems if not any(m is x for x in lead)]
+    carried_entries = carried_blocks(messages, state.k, state.paged_carried)
+    sys_indexes, _ = carried_systems(messages, state.k, state.paged_carried)
+    systems = [messages[i] for i in sys_indexes if not any(messages[i] is x for x in lead)]
     knobs = _knobs()
-    if knobs.preamble_first:  # the preamble ahead of the carried context blocks
-        first = d.merge_first(d.merge_first(out[0], blocks, ""), [], preamble(state))
+    pre = preamble(state)
+    stable_end_idx: int | None = None
+    preamble_idx: int | None = None
+    prefix_end_idx: int | None = None
+    if d is ANTHROPIC:
+        starts = turn_starts(messages)
+        first_start = starts[0] if starts and starts[0] < state.k else None
+        if knobs.stable_prefix and first_start is not None:
+            stable_blocks = [b for i, _, b in carried_entries
+                             if i == first_start and context_block_kind(b) in STABLE_CARRIED_KINDS]
+            dynamic_blocks = [b for i, _, b in carried_entries
+                              if not (i == first_start and context_block_kind(b) in STABLE_CARRIED_KINDS)]
+        else:
+            stable_blocks = []
+            dynamic_blocks = [b for _, _, b in carried_entries]
+        head_blocks: list[dict] = []
+        if stable_blocks:
+            head_blocks.extend(stable_blocks)
+            stable_end_idx = len(head_blocks) - 1
+        if knobs.preamble_first:
+            if pre:
+                preamble_idx = len(head_blocks)
+                head_blocks.append({"type": "text", "text": pre})
+            head_blocks.extend(dynamic_blocks)
+        else:
+            head_blocks.extend(dynamic_blocks)
+            if pre:
+                preamble_idx = len(head_blocks)
+                head_blocks.append({"type": "text", "text": pre})
+        if head_blocks:
+            prefix_end_idx = len(head_blocks) - 1
+        own = out[0].get("content")
+        own_blocks = [{"type": "text", "text": own}] if isinstance(own, str) else list(own)
+        first = {**out[0], "content": head_blocks + own_blocks}
     else:
-        first = d.merge_first(out[0], blocks, preamble(state))
+        blocks = [b for _, _, b in carried_entries]
+        if knobs.preamble_first:  # the preamble ahead of the carried context blocks
+            first = d.merge_first(d.merge_first(out[0], blocks, ""), [], pre)
+        else:
+            first = d.merge_first(out[0], blocks, pre)
+    first_idx = len(lead)
+    sys_result_idxs = list(range(first_idx + 1, first_idx + 1 + len(systems)))
     result = [*lead, first, *systems, *out[1:]]
     if knobs.turn_reminder and d is ANTHROPIC:
         # Every retained turn start carries the reminder, so the newest one ends the window. A
@@ -1248,6 +1544,14 @@ def transform_messages(messages: list[dict], state: EpochState) -> list[dict]:
         # the prefix stays byte-identical within an epoch (cache cost: the reminder's tokens per
         # retained turn, not a moving tail). Messages API only; other dialects ignore it.
         result = [_with_reminder(m, knobs.turn_reminder) if is_turn_start(m) else m for m in result]
+    if d is ANTHROPIC and request is not None:
+        orig_to_result = {
+            orig_i: (first_idx if out_i == 0 else first_idx + 1 + len(systems) + (out_i - 1))
+            for orig_i, out_i in orig_to_out.items()
+        }
+        result = _apply_anthropic_breakpoints(request, result, messages, sent, state, orig_to_result,
+                                              first_idx, stable_end_idx, preamble_idx, prefix_end_idx,
+                                              sys_result_idxs)
     return result
 
 
@@ -1459,6 +1763,11 @@ def matching_prefix(hashes: tuple[str, ...], messages: list[dict]) -> int:
 
 # The engine --------------------------------------------------------------------------------------
 
+# Whether Anthropic's prompt cache has expired since the previous response (set per request by
+# RewriteEngine / rewrite so guarded_rotation / rotate_at_turn_start keep their original signatures).
+_CACHE_COLD: ContextVar[bool] = ContextVar("contexto_rewrite_cache_cold", default=False)
+
+
 def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: int, state: EpochState,
                          store: Store, config: Config, estimator: TokenEstimator, events: list[dict]) -> EpochState:
     """Rules 3, 4, and 6 at a turn start: rotate, rotate to the minimal window, or do nothing. May raise
@@ -1467,13 +1776,18 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
     Two conditions (contract PR #115): the size trigger (the estimate passes ``bound - headroom``) and,
     packet A12, the room condition: the recall room the request-time publish would give the new turn,
     ``bound - estimate - headroom_floor``, is below ``min_turn_room``. A rotation for the room sizes its
-    window target as ``0.5 * (W - min_turn_room)`` (minimal window as the fallback) and fires only if it
-    would restore at least ``min_turn_room``; otherwise there is no rotation for the room and
+    window target as ``window_fraction * (W - min_turn_room)`` (minimal window as the fallback) and fires
+    only if it would restore at least ``min_turn_room``; otherwise there is no rotation for the room and
     ``turn_room_low`` is logged once per epoch, so a small bound does not rotate on every turn.
+
+    Cache-TTL-aware rotation: when ``_CACHE_COLD`` is True (Anthropic's prompt cache has expired since the
+    previous response) and window occupancy exceeds ``cold_cache_fraction * W``, rotate opportunistically
+    now (reason ``cache_cold``) if it actually pages turns, avoiding busting a hot cache turns later.
 
     Rule 6: a head change always starts a new epoch here, since the cached prefix is lost anyway, sized
     like a size rotation (D49): the minimal window and ``bound_too_small`` when ``W`` cannot hold the
     newest complete turn, and the room target when it restores the room."""
+    cache_cold = _CACHE_COLD.get()
     trigger = estimate > config.bound - headroom(state, config)
     room_low = config.bound - estimate - config.headroom_floor < config.min_turn_room
     if state.head_changed or trigger or room_low:
@@ -1557,6 +1871,17 @@ def rotate_at_turn_start(request: dict, messages: list[dict], n: int, estimate: 
                                "best_room": room, "min_turn_room": config.min_turn_room})
                 state = replace(state, turn_room_low_epoch=state.epoch)
         state = publish_window(store, replace(state, window_budget=w), estimator, window_model_name(request))
+    elif (cache_cold and 0 < config.cold_cache_fraction < 1 and len(turn_starts(messages)) >= 2
+          and estimate > int(config.cold_cache_fraction * (config.bound - headroom(state, config)))):
+        f = fixed_overhead(request, messages, state, store, config, estimator)
+        w = config.bound - headroom(state, config) - f
+        if w > 0 and window_tokens(messages, estimator, state.k) > int(config.cold_cache_fraction * w):
+            target = int(config.window_fraction * w)
+            k = choose_k(messages, state, target, estimator)
+            if k > state.k:
+                state = new_epoch(messages, request, state, store, config, estimator, k, n, events,
+                                  "cache_cold", sizing=(f, w))
+                state = publish_window(store, replace(state, window_budget=w), estimator, window_model_name(request))
     return state
 
 
@@ -1926,7 +2251,11 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
     # turn start it goes with bound_too_small, or means the rotation's sizing did not hold.
     over = sent_estimate > config.bound
 
-    upstream = {**request, field_name: transform_messages(messages, state)}
+    req_token = _REQUEST.set(request)
+    try:
+        upstream = {**request, field_name: transform_messages(messages, state)}
+    finally:
+        _REQUEST.reset(req_token)
     sent = len(canonical_bytes(upstream))
     sent_items = upstream[field_name]
     if state.head_tokens is None and state.k == 0:  # rule 4 may measure the head from this request's usage
@@ -1986,15 +2315,17 @@ def names_of(events: list[dict]) -> list[str]:
 
 def rewrite(request: dict, state: EpochState | None, store: Store, config: Config,
             estimator: TokenEstimator, dialect: Dialect | None = None,
-            start_text: str = "") -> tuple[dict, EpochState, list[dict]]:
+            start_text: str = "", *, cache_cold: bool = False) -> tuple[dict, EpochState, list[dict]]:
     """Return (upstream_request, new_state, events) for one request (``/v1/messages`` by default;
     pass ``dialect`` for another API). ``start_text`` (D69) is kept by a state created here; a state
     that exists keeps its own."""
     token = _DIALECT.set(dialect or ANTHROPIC)
+    cold_token = _CACHE_COLD.set(cache_cold)
     try:
-        with request_scope(request.get(_dialect().field)):
+        with recall_knobs(config), request_scope(request.get(_dialect().field)):
             return _rewrite(request, state, store, config, estimator, start_text)
     finally:
+        _CACHE_COLD.reset(cold_token)
         _DIALECT.reset(token)
 
 
@@ -2014,21 +2345,18 @@ def _rewrite(request: dict, state: EpochState | None, store: Store, config: Conf
     if match < previous_n:
         if match < state.k:
             # Paged turns changed (for example a local compaction): page everything before the
-            # current turn start, keep an in-flight turn's thinking, never send the full history.
+            # current turn start and strip every existing message's thinking (strip_upto=n) so no
+            # in-flight thinking block survives behind a mutated prefix on enforcing models.
             starts = turn_starts(messages)
             current = starts[-1] if starts else 0
-            # Known limitation (reviewer-2): an in-flight tool loop keeps its thinking although the prefix
-            # before it changed; on an enforcing account those blocks are invalid.
-            inflight = any(isinstance(b, dict) and b.get("type") in THINKING_TYPES
-                           for m in messages[current:] for b in _blocks(m))
             events.append({"event": "resync", "epoch": state.epoch, "kind": "paged_changed",
                            "matched": match, "previous_messages": previous_n, "messages": n,
-                           "inflight_thinking_kept": inflight})
+                           "inflight_thinking_kept": False})
             # D63: the in-turn edits name positions in the history that changed; none of them stands.
             fresh = replace(state, k=0, turns_paged=state.turns_paged, inturn=inturn.EMPTY)
             calls, attempt = StoreCalls(store), []
             try:
-                resynced = new_epoch(messages, request, fresh, calls, config, estimator, current, current, attempt,
+                resynced = new_epoch(messages, request, fresh, calls, config, estimator, current, n, attempt,
                                      "paged_changed")
             except STORE_FAILURES as error:
                 # Rule 14: the changed turns cannot be paged and no earlier transform covers them.
@@ -2074,7 +2402,11 @@ def count_tokens_view(request: dict, state: EpochState | None, dialect: Dialect 
         edited = inturn.extent(state.inturn)
         if edited and matching_prefix(state.hashes, messages) < min(edited, len(state.hashes)):
             return request  # D63: nor the messages the in-turn edits name
-        return {**request, field_name: transform_messages(messages, state)}
+        req_token = _REQUEST.set(request)
+        try:
+            return {**request, field_name: transform_messages(messages, state)}
+        finally:
+            _REQUEST.reset(req_token)
     finally:
         _DIALECT.reset(token)
 
@@ -2131,12 +2463,52 @@ def retained_entries(messages: list[dict], k: int, dialect: Dialect) -> list[dic
     return entries
 
 
-def keyed(dialect: Dialect, request: dict) -> str:
+def _header(headers: dict[str, str] | None, name: str) -> str | None:
+    """First non-empty string value matching ``name`` (case-insensitive) in ``headers``, or None."""
+    if not headers:
+        return None
+    target = name.lower()
+    return next((v for k, v in headers.items() if k.lower() == target and isinstance(v, str) and v), None)
+
+
+def _scoped_key(dialect: Dialect, base: str, tag: str, value: str) -> str:
+    """Derive a fixed-length ``<dialect>:<64-hex>`` key scoped by ``tag`` and ``value``.
+
+    Satisfies ``store._CONVERSATION`` and ``store.check_room_id()`` (short, strictly ASCII printable)
+    without writing raw header or session identifiers into ``epoch.json`` or ``meta.json``."""
+    digest = hashlib.sha256(f"{base}|{tag}|{value}".encode()).hexdigest()
+    return f"{dialect.name}:{digest}"
+
+
+def keyed(dialect: Dialect, request: dict, headers: dict[str, str] | None = None, *,
+          endpoint: str | None = None) -> str:
+    """Engine conversation key for ``request`` (and optional ``headers``).
+
+    On Anthropic Messages requests, incorporates ``X-Claude-Code-Agent-Id`` (isolating forked and
+    parallel twin subagents from main and from each other), ``parent_session_id`` (isolating
+    teammates), and ``x-claude-code-request-class`` for side classes (except on ``count_tokens``,
+    which Claude Code marks ``auxiliary`` for main) into a hashed ``anthropic:<64-hex>`` key.
+    Main and compaction requests keep the plain ``anthropic:<hash>`` key for epoch-record and
+    trusted-conversation compatibility."""
     token = _DIALECT.set(dialect)
     try:
-        return f"{dialect.name}:{conversation_key(request)}"
+        base = f"{dialect.name}:{conversation_key(request)}"
     finally:
         _DIALECT.reset(token)
+    if dialect.name != "anthropic":
+        return base
+    hdrs = headers or {}
+    agent_id = _header(hdrs, CLAUDE_CODE_AGENT_HEADER)
+    if agent_id:
+        return _scoped_key(dialect, base, "agent", agent_id)
+    session = claude_code_session(request, hdrs)
+    if session and session.parent:
+        return _scoped_key(dialect, base, "parent", f"{session.parent}|{session.id}")
+    if hdrs and endpoint != COUNT_TOKENS:
+        request_class = gateway_hints(hdrs).request_class
+        if request_class in SIDE_CLASSES:
+            return _scoped_key(dialect, base, "class", request_class)
+    return base
 
 
 CLAUDE_CODE_SESSION_HEADER = "x-claude-code-session-id"
@@ -2172,14 +2544,14 @@ def claude_code_session(request: dict, headers: dict[str, str]) -> ClaudeCodeSes
     except ValueError:  # not JSON, or nested deeper than MAX_JSON_DEPTH (D45): no session id from it
         parsed = None
     fields = parsed if isinstance(parsed, dict) else {}
-    found = next((v for k, v in headers.items() if k.lower() == CLAUDE_CODE_SESSION_HEADER), None)
-    session = found if isinstance(found, str) and found else fields.get("session_id")
+    found = _header(headers, CLAUDE_CODE_SESSION_HEADER)
+    session = found if found else fields.get("session_id")
     if not isinstance(session, str) or not session:
         return None
     parent = fields.get("parent_session_id")
-    agent = next((v for k, v in headers.items() if k.lower() == "user-agent"), None)
+    agent = _header(headers, "user-agent")
     match = _CLAUDE_CODE_ENTRYPOINT.match(agent) if isinstance(agent, str) else None
-    agent_id = next((v for k, v in headers.items() if k.lower() == CLAUDE_CODE_AGENT_HEADER), None)
+    agent_id = _header(headers, CLAUDE_CODE_AGENT_HEADER)
     return ClaudeCodeSession(session, parent if isinstance(parent, str) and parent else None,
                              match.group(1) if match else None, bool(agent_id))
 
@@ -2205,7 +2577,7 @@ def compaction_summary(messages: list[dict]) -> bool:
     text = content if isinstance(content, str) else None
     for block in content if isinstance(content, list) else ():
         text = block.get("text") if isinstance(block, dict) and block.get("type") == "text" else None
-        if not isinstance(text, str) or not text.startswith("<system-reminder>"):
+        if not isinstance(text, str) or not text.lstrip().startswith(CONTEXT_TAG):
             break
     return isinstance(text, str) and text.startswith(CLAUDE_CODE_COMPACTION_SUMMARY + "\n")
 
@@ -2475,10 +2847,15 @@ def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dia
     if record.get("model") != model:
         return None, "model_changed"
     recorded = record.get("config")
-    if isinstance(recorded, dict) and "in_turn_paging" not in recorded:
-        # D63: a record written before in-turn paging has no such setting and no in-turn edits, so it
-        # resumes under either value; every other setting must match.
-        recorded = {**recorded, "in_turn_paging": config.in_turn_paging}
+    if isinstance(recorded, dict):
+        # Records written before optional settings were added keep their pre-feature semantics:
+        # stable_prefix was False before D71 (never silently reorder messages[0] on a resumed record,
+        # which would break thinking prefix binding), while non-layout settings default from config.
+        if "stable_prefix" not in recorded:
+            recorded = {**recorded, "stable_prefix": False}
+        for setting in ("in_turn_paging", "cache_ttl_seconds", "cold_cache_fraction"):
+            if setting not in recorded:
+                recorded = {**recorded, setting: getattr(config, setting)}
     if recorded != asdict(config):
         return None, "settings_changed"
     if record.get("preamble_sha256") != preamble_sha256(config, record["pinned_text"], record["index_text"]):
@@ -2596,9 +2973,134 @@ class RewriteEngine:
             self._trusted_before = frozenset()
         self._listed: set[str] = set()  # the keys this engine wrote to that list (or tried to), once each
         self._trust_events: list[dict] = []  # a failed list write's event, for the request that made it
+        # Per-conversation monotonic timestamps for side-state eviction and TTL-aware cache rotation.
+        self._last_activity: dict[str, float] = {}
+        self._last_response_monotonic: dict[str, float] = {}
+        # Bounded maps so observe_usage() callers that omit headers still resolve the right scoped key.
+        self._request_keys: OrderedDict[int, tuple[str, tuple[int, str], str]] = OrderedDict()
+        self._base_keys: OrderedDict[tuple[str, tuple[int, str]], str] = OrderedDict()
 
     # The engine never mutates the request it is given (the proxy then skips its defensive copy).
     preserves_input: ClassVar[bool] = True
+
+    def _monotonic(self) -> float:
+        clock = getattr(self.store, "clock", None)
+        return clock() if callable(clock) and clock is not time.time else time.monotonic()
+
+    def _ensure_epoch_record(self) -> None:
+        if self._record_read:
+            return
+        self._record_read = True
+        reader = getattr(self.store, "epoch_record", None)
+        try:
+            self._record = reader() if callable(reader) else None
+        except Exception:  # the store could not read it; never a reason to fail the request
+            self._record, self._record_reason = None, "unreadable"
+
+    def _resolve_key(self, dialect: Dialect, request: dict, headers: dict[str, str] | None,
+                     endpoint: str | None = None) -> str:
+        """Resolve the engine state key for ``request`` and ``headers``.
+
+        In addition to ``keyed()``'s agent/parent/class scoping, if a plain Anthropic request carries a
+        Claude Code session id different from the session that already owns ``base`` (e.g. ``/clear``
+        followed by the same opening prompt), or if its session-scoped key is already active or
+        recorded in ``epoch.json``, return the hashed session-scoped key."""
+        key = keyed(dialect, request, headers, endpoint=endpoint)
+        if dialect.name == "anthropic":
+            token = _DIALECT.set(dialect)
+            try:
+                base = f"{dialect.name}:{conversation_key(request)}"
+            finally:
+                _DIALECT.reset(token)
+            if key == base:
+                session = claude_code_session(request, headers or {})
+                if session:
+                    scoped = _scoped_key(dialect, base, "session", session.id)
+                    if scoped in self.states or scoped in self._cli_sessions:
+                        return scoped
+                    if endpoint != COUNT_TOKENS:
+                        self._ensure_epoch_record()
+                        if isinstance(self._record, dict) and self._record.get("conversation") == scoped:
+                            return scoped
+                    existing = self._cli_sessions.get(base)
+                    if existing and existing.id != session.id:
+                        return scoped
+        return key
+
+    def _remember_key(self, dialect: Dialect, request: dict, key: str) -> None:
+        token = _DIALECT.set(dialect)
+        try:
+            base = f"{dialect.name}:{conversation_key(request)}"
+            identity = usage_identity(request.get(dialect.field) or [])
+        finally:
+            _DIALECT.reset(token)
+        req_id = id(request)
+        self._request_keys[req_id] = (base, identity, key)
+        self._request_keys.move_to_end(req_id)
+        while len(self._request_keys) > 128:
+            self._request_keys.popitem(last=False)
+        self._base_keys[(base, identity)] = key
+        self._base_keys.move_to_end((base, identity))
+        while len(self._base_keys) > 128:
+            self._base_keys.popitem(last=False)
+
+    def _lookup_usage_key(self, dialect: Dialect, request: dict, headers: dict[str, str] | None) -> str:
+        if headers is not None:
+            return self._resolve_key(dialect, request, headers, endpoint=None)
+        token = _DIALECT.set(dialect)
+        try:
+            base = f"{dialect.name}:{conversation_key(request)}"
+            identity = usage_identity(request.get(dialect.field) or [])
+        finally:
+            _DIALECT.reset(token)
+        hit = self._request_keys.get(id(request))
+        if hit is not None and hit[0] == base and hit[1] == identity and hit[2] in self.states:
+            return hit[2]
+        by_base = self._base_keys.get((base, identity))
+        if by_base is not None and by_base in self.states:
+            return by_base
+        return keyed(dialect, request)
+
+    def _drop_conversation(self, key: str) -> None:
+        self.states.pop(key, None)
+        self._turn_starts.pop(key, None)
+        self._cli_sessions.pop(key, None)
+        self._judged.discard(key)
+        self._compacted.discard(key)
+        self._classes.pop(key, None)
+        self._idle.pop(key, None)
+        self._turn_numbers.pop(key, None)
+        self._trusted.discard(key)
+        self._agent_header.pop(key, None)
+        self._last_activity.pop(key, None)
+        self._last_response_monotonic.pop(key, None)
+
+    def _evict_side_states(self, now: float, active: str | None = None) -> None:
+        """Evict stale/finished non-main conversation entries so ``self.states`` and auxiliary dicts stay
+        bounded across long sessions with many side requests or subagents."""
+        if self._side_rooms:
+            wall = self._now()
+            self._side_rooms = {r: v for r, v in self._side_rooms.items() if side_room_live(v.at, wall)}
+        protected: set[str] = set()
+        if self._main is not None:
+            protected.add(self._main)
+        if active is not None:
+            protected.add(active)
+        protected.update(self._session_mains.values())
+        protected.update(room.owner for room in self._side_rooms.values())
+        candidates = [k for k in self.states if k not in protected]
+        if not candidates:
+            return
+        # 1. Evict any non-protected entry inactive for at least SIDE_STATE_TTL_S.
+        expired = [k for k in candidates if now - self._last_activity.get(k, now) >= SIDE_STATE_TTL_S]
+        for k in expired:
+            self._drop_conversation(k)
+        # 2. Enforce MAX_SIDE_STATES cap on remaining non-protected entries (idle/finished oldest first).
+        remaining = [k for k in self.states if k not in protected]
+        if len(remaining) > MAX_SIDE_STATES:
+            remaining.sort(key=lambda k: (not self._idle.get(k, False), self._last_activity.get(k, 0.0)))
+            for k in remaining[: len(remaining) - MAX_SIDE_STATES]:
+                self._drop_conversation(k)
 
     def __call__(self, request: dict, headers: dict[str, str],
                  endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
@@ -2610,11 +3112,14 @@ class RewriteEngine:
         dialect = dialect_for(endpoint)
         if dialect is None:
             return request, headers, []
-        key = keyed(dialect, request)
+        key = self._resolve_key(dialect, request, headers, endpoint=endpoint)
         state = self.states.get(key)
         if endpoint == COUNT_TOKENS:  # never publishes a room, here or on usage (contract PR #89, 6ffc22b)
             epoch = state.epoch if state else 0
             return count_tokens_view(request, state), headers, [{"event": "count_tokens", "epoch": epoch}]
+        now = self._monotonic()
+        self._last_activity[key] = now
+        self._evict_side_states(now, active=key)
         restore = self._restore(window_model_name(request)) if self._restore_pending else None
         resumed: list[dict] = []
         from_record = False
@@ -2646,14 +3151,21 @@ class RewriteEngine:
             resumed.extend(started)
         elif state is not None and main and state.k == 0 and state.start_text:
             state = self._refresh_start_text(state, request, dialect, from_record, resumed)
+        cache_cold = False
+        if dialect.name == "anthropic":
+            ttl = _effective_cache_ttl(request, self.config)
+            last_resp = self._last_response_monotonic.get(key)
+            if ttl > 0 and last_resp is not None and (now - last_resp) >= ttl:
+                cache_cold = True
         owner = _WINDOW_OWNER.set(main)
         turn = inturn.TURN.set(None if main else self._turn_numbers.get(self._main))
         try:
             upstream, self.states[key], events = rewrite(request, state, self.store, self.config, self.estimator,
-                                                         dialect, start_text)
+                                                         dialect, start_text, cache_cold=cache_cold)
         finally:
             inturn.TURN.reset(turn)
             _WINDOW_OWNER.reset(owner)
+        self._remember_key(dialect, request, key)
         self._turn_numbers[key] = inturn.current_turn(request.get(dialect.field) or [], self.states[key], dialect)
         events[0:0] = resumed
         # The CLI's own request (rewrite() leaves it unchanged); the engine's request event stays last.
@@ -2928,9 +3440,11 @@ class RewriteEngine:
             return state
         events.append({"event": "start_text_changed", "epoch": state.epoch,
                        "tokens": self.estimator.estimate(text) if text else 0})
-        # The incremental estimate adds only new messages to the previous request's real input, which
-        # held the old text: this request takes the full estimate, so a text that grew is counted.
-        return replace(state, start_text=text, last_input_tokens=None)
+        # Mutating messages[0]'s start_text invalidates every prior message's thinking prefix binding,
+        # and invalidates the incremental estimate and media-difference anchor from the previous request.
+        new_strip = max(state.strip_upto, len(request.get(dialect.field) or []))
+        return replace(state, start_text=text, last_input_tokens=None, last_measured=None, strip_upto=new_strip,
+                       inturn=inturn.after_epoch(state.inturn, state.k, new_strip))
 
     def _start_text(self) -> tuple[str, list[dict]]:
         """D69 (rule 19): the records the session carries from its project's earlier sessions
@@ -2984,13 +3498,7 @@ class RewriteEngine:
     def _resume(self, key: str, request: dict, dialect: Dialect) -> tuple[EpochState | None, list[dict]]:
         """Rule 16: at the first request of a conversation new to this engine, resume the recorded epoch
         if the record is this conversation's and every check holds. The store is read once."""
-        if not self._record_read:
-            self._record_read = True
-            reader = getattr(self.store, "epoch_record", None)
-            try:
-                self._record = reader() if callable(reader) else None
-            except Exception:  # the store could not read it; never a reason to fail the request
-                self._record, self._record_reason = None, "unreadable"
+        self._ensure_epoch_record()
         if self._record is None:
             self._record_consumed = True
             return None, [{"event": "epoch_not_resumed", "epoch": 0, "reason": self._record_reason}]
@@ -3027,6 +3535,9 @@ class RewriteEngine:
         if reclassified:
             # D33: a record written before D32 and D33 can have paged a message this version never
             # pages; it is carried again from this request on (one cache write), and the count says so.
+            # Advance strip_upto so no thinking block survives after the changed carried systems.
+            new_strip = max(state.strip_upto, len(messages))
+            state = replace(state, strip_upto=new_strip, inturn=inturn.after_epoch(state.inturn, state.k, new_strip))
             events.append({"event": "carried_reclassified", "epoch": state.epoch, "count": reclassified})
         return state, events
 
@@ -3058,6 +3569,10 @@ class RewriteEngine:
         state = self.states[key]
         writer = getattr(self.store, "set_epoch", None)
         if state.degraded or not callable(writer):
+            return
+        session = self._cli_sessions.get(key)
+        if (self._agent_header.get(key) or self._classes.get(key) in SIDE_CLASSES
+                or (session is not None and (session.agent or session.parent is not None))):
             return
         messages = request.get(dialect.field) or []
         token = _DIALECT.set(dialect)
@@ -3349,14 +3864,14 @@ class RewriteEngine:
                 prime_media(request.get(field_name))
 
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
-                      tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
+                      tool_call_ids: tuple[str, ...] = (), headers: dict[str, str] | None = None) -> list[dict]:
         dialect = dialect_for(endpoint)
         # preamble() must see the same knobs as the request did
         with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
-            return self._observe_usage(endpoint, usage, request, tool_calls, tool_call_ids)
+            return self._observe_usage(endpoint, usage, request, tool_calls, tool_call_ids, headers)
 
     def _observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
-                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
+                       tool_call_ids: tuple[str, ...] = (), headers: dict[str, str] | None = None) -> list[dict]:
         """Feed a response's real usage back (a transformed endpoint; never ``count_tokens``). Returns the
         content-free events it raised (packet A2b; contract rule 3 as amended by PR #44). The proxy writes
         them on that request's log entry (``usage_events``), the one place they are logged (A2e,
@@ -3387,10 +3902,12 @@ class RewriteEngine:
         dialect = dialect_for(endpoint)
         if dialect is None or endpoint == COUNT_TOKENS:
             return []
-        key = keyed(dialect, request)
+        key = self._lookup_usage_key(dialect, request, headers)
         state = self.states.get(key)
         if state is None:
             return []
+        now = self._monotonic()
+        self._last_activity[key] = now
         token = _DIALECT.set(dialect)
         try:
             identity = usage_identity(request.get(dialect.field) or [])
@@ -3409,6 +3926,7 @@ class RewriteEngine:
         real = usage_tokens(usage, dialect)
         if real <= 0:  # no input count: read as an input of 0, it measured the head as 0 (D49 amended)
             return []
+        self._last_response_monotonic[key] = now
         events: list[dict] = []
         estimate = None
         before_costs = state.document_costs
@@ -3487,4 +4005,5 @@ class RewriteEngine:
             # D63 (Reviewer A at 26cba5ad, finding 2): a cost lost on a restart sent the next request over
             # the bound, so the record keeps it from the usage that measured it.
             self._write_epoch(key, request, dialect, events, measured=True)
+        self._evict_side_states(now, active=None if self._idle.get(key, False) else key)
         return events

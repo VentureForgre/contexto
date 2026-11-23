@@ -75,6 +75,10 @@ PDF_PAGE_TOKENS = 3_000 + IMAGE_FLOOR_MAX_TOKENS
 PDF_TYPICAL_PAGE_TOKENS = 1_583  # the measured page, for telling the allowance from the bound (D60)
 # What D60 counts a PDF at when its pages are not certain: the API's maximum, so it is never estimated low.
 UNCERTAIN_DOCUMENT_TOKENS = PDF_MAX_PAGES * PDF_PAGE_TOKENS
+# Conservative byte floor for an unmeasured uncertain PDF: even a heavy scanned PDF rarely packs more
+# than ~30-50 bytes per token, so 20 bytes/token keeps small/normal uncounted PDFs (20-200 KB) readable
+# once for usage measurement while preventing a multi-MB uncounted PDF from silently counting as 0 tokens.
+UNCERTAIN_PDF_FLOOR_BYTES_PER_TOKEN = 20
 PDF_MAX_BASE64 = 32 << 20  # base64 characters a PDF is decoded from: the API's request limit
 # PDFs whose counts are kept, least recently used dropped first; an entry is a key and a 2-tuple (under
 # 300 bytes), so this costs at most about 19 MB, and no request holds enough PDFs to cycle it.
@@ -441,6 +445,44 @@ def measured_documents(value: Any, costs: Any) -> tuple[int, int]:
         else:
             over += UNCERTAIN_DOCUMENT_TOKENS - cost
     return over, unmeasured
+
+
+def base64_decoded_size(data: str) -> int:
+    """Decoded byte length of base64 ``data`` without decoding the payload."""
+    if not data:
+        return 0
+    ws = data.count("\n") + data.count("\r") + data.count(" ") + data.count("\t")
+    eff = len(data) - ws
+    if eff <= 0:
+        return 0
+    tail = data.rstrip()
+    pad = 2 if tail.endswith("==") else 1 if tail.endswith("=") else 0
+    return max(0, (eff // 4) * 3 - pad) if eff % 4 == 0 else (eff * 3) // 4
+
+
+def uncertain_document_floor(value: Any, costs: Any) -> tuple[int, int, int]:
+    """For unmeasured uncertain documents in ``value`` (not in ``costs``): ``(count, floor_tokens,
+    oversized)``. A base64 PDF whose pages could not be counted still has a conservative byte-based
+    token floor (capped at ``UNCERTAIN_DOCUMENT_TOKENS``); one exceeding ``PDF_MAX_BASE64`` counts at
+    ``UNCERTAIN_DOCUMENT_TOKENS`` and increments ``oversized``."""
+    count = floor = oversized = 0
+    for block in split_media(value)[1]:
+        if _media_kind(block) != "document" or _document_count(block).counted:
+            continue
+        key = document_key(block)
+        if costs and key in costs:
+            continue
+        count += 1
+        data = _base64_payload(block)
+        if data is None:
+            continue
+        if len(data) > PDF_MAX_BASE64:
+            floor += UNCERTAIN_DOCUMENT_TOKENS
+            oversized += 1
+        else:
+            decoded = base64_decoded_size(data)
+            floor += min(UNCERTAIN_DOCUMENT_TOKENS, decoded // UNCERTAIN_PDF_FLOOR_BYTES_PER_TOKEN)
+    return count, floor, oversized
 
 
 def pdf_allowance(value: Any) -> tuple[int, int]:
