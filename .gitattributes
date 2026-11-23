@@ -1,0 +1,3 @@
+# Keep PDF fixtures byte-exact on Windows checkouts (core.autocrlf=true would otherwise rewrite
+# LF to CRLF in uncompressed ASCII-only PDFs and shift their xref offsets).
+*.pdf binary

@@ -97,7 +97,11 @@ class NotRegularFileError(OSError):
 def _open_nofollow(path: Path, flags: int, mode: int = 0o777) -> int:
     """``os.open`` with ``O_NOFOLLOW``; a symlink at ``path``, or a directory opened for writing, is refused
     as ``NotRegularFileError``, so every caller treats it as it treats a FIFO there (D58)."""
-    if O_NOFOLLOW == 0 and os.path.islink(path):
+    if O_NOFOLLOW == 0 and is_link_or_junction(path):
+        # Match POSIX open(O_CREAT | O_EXCL | O_NOFOLLOW): an existing symlink (live or dangling)
+        # raises FileExistsError rather than ELOOP, and never creates the dangling symlink's target.
+        if (flags & (os.O_CREAT | os.O_EXCL)) == (os.O_CREAT | os.O_EXCL):
+            raise FileExistsError(errno.EEXIST, "file exists", str(path))
         raise NotRegularFileError(f"{path} is a symlink")
     try:
         return os.open(path, flags | O_NOFOLLOW | O_BINARY, mode)
@@ -320,6 +324,22 @@ def _write_new_excl(path: Path, data: bytes) -> bool:
         raise
 
 
+def _replace_atomic(src: Path, dst: Path) -> None:
+    """Rename ``src`` over ``dst`` atomically, retrying briefly on Windows when a concurrent reader
+    transiently holds ``dst`` open (WinError 5 / 32)."""
+    if not IS_WINDOWS:
+        os.replace(src, dst)
+        return
+    for attempt in range(25):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == 24:
+                raise
+            time.sleep(min(0.001 * (attempt + 1), 0.02))
+
+
 def write_atomic(path: Path, data: bytes) -> None:
     """Replace ``path`` with a private (0600) file holding exactly ``data``: written and fsynced to a
     temporary file, renamed into place, and the parent directory fsynced so a reader sees the old or
@@ -334,7 +354,7 @@ def write_atomic(path: Path, data: bytes) -> None:
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.replace(tmp, path)
+        _replace_atomic(tmp, path)
     except BaseException:
         _discard(tmp)
         raise

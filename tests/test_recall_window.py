@@ -104,6 +104,10 @@ def test_concurrent_writers_keep_both_fields_and_readers_never_see_a_partial_fil
         while not stop.is_set():
             try:
                 json.loads((store.dir / "meta.json").read_text())
+            except PermissionError:
+                # Windows lockless read_text() can momentarily collide with MoveFileExW during replace.
+                if sys.platform != "win32":
+                    raise
             except ValueError as e:
                 bad.append(e)
 

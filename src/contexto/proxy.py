@@ -128,7 +128,7 @@ UPSTREAM_POOL_MAX_IDLE = 8  # idle keep-alive upstream connections kept per prox
 UPSTREAM_POOL_IDLE_TTL_S = 30.0  # evict pooled upstream connections idle longer than this
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE"})
 _STALE_POOL_ERRORS = (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
-                      http.client.CannotSendRequest)
+                      ConnectionAbortedError, http.client.CannotSendRequest)
 _HEX_CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
@@ -1473,7 +1473,7 @@ class _Handler(BaseHTTPRequestHandler):
     def handle_one_request(self) -> None:
         try:
             super().handle_one_request()
-        except (ConnectionResetError, BrokenPipeError):
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
             self.close_connection = True  # a client dropping an idle keep-alive connection
 
     def do_GET(self) -> None:
@@ -1834,7 +1834,7 @@ class _Handler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     owner.log(entry)
                     return
-                if phase == "send" and isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+                if phase == "send" and isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
                     early = self._early_response(conn)
                     if early is not None:
                         response = early
@@ -2024,7 +2024,7 @@ class _Handler(BaseHTTPRequestHandler):
             entry["error"] = f"relay: {type(exc.__cause__).__name__}"
             self.close_connection = True
             relay_ok = False
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             if not delivered_end:
                 entry["client_aborted"] = True
             self.close_connection = True

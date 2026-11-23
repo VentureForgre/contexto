@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import signal
 import socket
@@ -724,3 +725,74 @@ def test_serve_make_room_skips_nonblocking_peek_on_reading_socket_without_msg_do
     finally:
         s1.close()
         s2.close()
+
+
+def test_private_open_nofollow_excl_on_symlink_when_o_nofollow_is_zero(monkeypatch, tmp_path):
+    """When O_NOFOLLOW == 0 (Windows), O_CREAT | O_EXCL on a live or dangling symlink raises FileExistsError
+    (matching POSIX open(2)) so _write_new_excl returns False without following or creating the target."""
+    from contexto import private as private_mod
+
+    monkeypatch.setattr(private_mod, "O_NOFOLLOW", 0)
+    monkeypatch.setattr(os, "link", lambda src, dst: (_ for _ in ()).throw(OSError(errno.EPERM, "no link")))
+
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"original")
+    sym = tmp_path / "sym.json"
+    try:
+        sym.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks require elevated privileges on this host")
+
+    assert private_mod.write_new(sym, b"overwrite") is False
+    assert outside.read_bytes() == b"original"
+
+    dangling = tmp_path / "dangling.json"
+    dangling.symlink_to(tmp_path / "missing.txt")
+    assert private_mod.write_new(dangling, b"created") is False
+    assert not (tmp_path / "missing.txt").exists()
+
+    # Non-exclusive open still refuses the symlink as NotRegularFileError.
+    with pytest.raises(private_mod.NotRegularFileError):
+        private_mod.open_regular(sym)
+
+
+def test_write_atomic_retries_permission_error_on_simulated_windows(monkeypatch, tmp_path):
+    """On Windows, os.replace can transiently raise PermissionError when a reader holds dst open."""
+    from contexto import private as private_mod
+
+    monkeypatch.setattr(private_mod, "IS_WINDOWS", True)
+    monkeypatch.setattr(private_mod.time, "sleep", lambda _: None)
+
+    real_replace = os.replace
+    attempts = 0
+
+    def flaky_replace(src, dst):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 4:
+            raise PermissionError("sharing violation")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(private_mod.os, "replace", flaky_replace)
+    target = tmp_path / "meta.json"
+    target.write_bytes(b'{"v":1}')
+    private_mod.write_atomic(target, b'{"v":2}')
+    assert attempts == 4
+    assert target.read_bytes() == b'{"v":2}'
+    assert list(tmp_path.iterdir()) == [target]
+
+    # Exhausting retries propagates PermissionError and removes the temporary file.
+    def always_denied(src, dst):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(private_mod.os, "replace", always_denied)
+    with pytest.raises(PermissionError):
+        private_mod.write_atomic(target, b'{"v":3}')
+    assert target.read_bytes() == b'{"v":2}'
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_proxy_stale_pool_errors_include_connection_aborted():
+    from contexto import proxy as proxy_mod
+
+    assert ConnectionAbortedError in proxy_mod._STALE_POOL_ERRORS
