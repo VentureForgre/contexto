@@ -102,8 +102,8 @@ def reference_rank(entries, query):
 
 
 def server(tmp_path, budget):
-    """The MCP server's store: another process, so its own catalog, with ``budget`` bytes of text."""
-    store = SessionStore(tmp_path, "s1")
+    """The MCP server's store exercising the PageCatalog fallback cache with ``budget`` bytes of text."""
+    store = SessionStore(tmp_path, "s1", use_fts=False)
     store.set_search_cache(budget)
     return store
 

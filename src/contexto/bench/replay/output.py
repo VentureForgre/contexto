@@ -215,8 +215,11 @@ FALLBACK_UNCOUNTED = ("The search tool's approximate fallback, which this replay
 # session, not measurements this command makes or checks; the replay tests check each of them against the run
 # (check_the_pinned_fallback_sentence_holds_in_the_run), so a change to the proxy that alters them fails there.
 FALLBACK_EMPTY = 18  # rule queries the strict search finds nothing for
-FALLBACK_ANSWERED = 1  # of those, the queries whose tool reply holds approximate matches
+FALLBACK_ANSWERED = 3  # of those, the queries whose tool reply holds approximate matches
 FALLBACK_PROBE, FALLBACK_CLASS = "q_r_02", "paraphrase"
+# D63: the other answered queries, of this class, show only a page of an earlier probe turn, which a later
+# probe turn's tool loop paged (in-turn paging) and which holds no plant.
+FALLBACK_OTHER_CLASS = "toolloop"
 TOOL_LOOP_NOTE = ("Every request of a turn, the rounds of a tool loop included, is plotted at that turn's history "
                   "length, so a turn with a tool loop (the file reads of the toolloop turn, the searches of a probe "
                   "turn) shows as a vertical run of points.")
@@ -227,7 +230,8 @@ def pinned_fallback(code: Any = str) -> str:
     return (f"On the pinned session the tool's fallback answers {FALLBACK_ANSWERED} of the {FALLBACK_EMPTY} queries "
             f"the strict search finds nothing for: for {code(FALLBACK_PROBE)} ({code(FALLBACK_CLASS)}) its reply "
             "shows the plant's line on the second of the three pages it shows in detail, beside two of the "
-            "service's decoy lines.")
+            f"service's decoy lines; for the other {FALLBACK_ANSWERED - 1} ({code(FALLBACK_OTHER_CLASS)} probes) it "
+            "shows only a page of an earlier probe turn, which holds no plant.")
 
 
 def _reach_table(totals: dict[str, Any]) -> list[tuple[str, ...]]:

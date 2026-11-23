@@ -120,6 +120,8 @@ is never a line of its own: look for it inside a `request` line.
 | [`side_room_expired`](#side_room_expired) | store | own line | normal |
 | [`project_session_skipped`](#project_session_skipped) | store | own line | problem |
 | [`project_unavailable`](#project_unavailable) | store | own line | problem |
+| [`meta_corrupt`](#meta_corrupt) | store | own line | problem |
+| [`sessions_auto_pruned`](#sessions_auto_pruned) | store | own line | normal |
 
 ## The log
 
@@ -1922,3 +1924,22 @@ do not apply. The session's own records are read as usual. A store opened read-o
 it.
 
 - `error`: the exception's class name.
+
+### `meta_corrupt`
+
+Writer: store. Where: own line. Kind: problem.
+
+A mutating write to `meta.json` found that the file exists but is not valid UTF-8 JSON or not a
+JSON object. The store refused to overwrite it with an empty object so recorded metadata (`workdir`,
+`project`, `main_records`, `forgotten`, `project_memory`) is never silently wiped.
+
+- `error`: the exception's class name.
+
+### `sessions_auto_pruned`
+
+Writer: store. Where: own line. Kind: normal.
+
+Automatic session retention pruning (`CONTEXTO_RETENTION_MAX_AGE` or `CONTEXTO_RETENTION_KEEP`)
+removed one or more inactive sessions when opening this session.
+
+- `count`: how many sessions were removed.

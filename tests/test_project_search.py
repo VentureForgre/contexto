@@ -836,11 +836,12 @@ def test_the_text_held_for_earlier_sessions_counts_against_the_one_search_budget
         earlier(home, f"e{i:03d}0000", root, i,
                 *[f"needle {j} of session {i} " + f"filler-{i}-{j} " * 200 for j in range(6)])
     cur = new_session(home, "cur", root, 100)
+    cur._use_fts = False  # exercises the PageCatalog shared budget path
     pages(cur, *[f"needle {j} here " + f"own-{j} " * 200 for j in range(6)])
     cur.release()
     replies, unlimited = [], 0
     for budget in (None, 40_000, 20_000, 6_000, 0):
-        store = SessionStore(home, "cur")  # the MCP server's store: its own catalogs
+        store = SessionStore(home, "cur", use_fts=False)  # exercises the PageCatalog shared budget path
         store.set_search_cache(budget)
         server = serve(store)
         for _ in range(2):
@@ -862,6 +863,7 @@ def test_the_current_sessions_text_has_the_first_claim_on_the_search_budget(home
         earlier(home, f"e{i:03d}0000", root, i,
                 *[f"needle {j} of session {i} " + f"filler-{i}-{j} " * 200 for j in range(6)])
     cur = new_session(home, "cur", root, 100)
+    cur._use_fts = False  # exercises the PageCatalog shared budget path
     pages(cur, *[f"needle {j} here " + f"own-{j} " * 200 for j in range(6)])
     budget = 40_000  # holds the current session's text as it is, and most of the earlier sessions'
     cur.set_search_cache(budget)

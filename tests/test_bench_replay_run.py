@@ -489,18 +489,28 @@ def check_the_pinned_fallback_sentence_holds_in_the_run(run):
     assert len(approximate) == output.FALLBACK_ANSWERED, said
     (probe, call), = [(p, c) for p, c in approximate if p.id == output.FALLBACK_PROBE]
     assert probe.cls == output.FALLBACK_CLASS, said
+    for other, other_call in approximate:  # D63: the others show only a page of an earlier probe turn
+        if other is probe:
+            continue
+        shown = list(dict.fromkeys(hit["page_id"] for hit in other_call["returned"] if "page_id" in hit))
+        pages_of = [SessionStore.open_existing(out / "store", "bench-replay-20261016").get_page(p) for p in shown]
+        assert other.cls == output.FALLBACK_OTHER_CLASS and other.id in {r["id"] for r in empty}, said
+        assert all(p["turn"] >= script.n_content and other.statements[0] not in json.dumps(p["messages"])
+                   for p in pages_of), said
     assert probe.id in {r["id"] for r in empty}, said
-    pages = list(dict.fromkeys(hit["page_id"] for hit in call["returned"]))
+    pages = list(dict.fromkeys(hit["page_id"] for hit in call["returned"] if "page_id" in hit))
     store = SessionStore.open_existing(out / "store", "bench-replay-20261016")
     texts = [json.dumps(store.get_page(page)["messages"]) for page in pages]
     holding = [i for i, text in enumerate(texts) if probe.statements[0] in text]
     assert len(pages) == 3 and holding == [1], said  # the plant's page is the second of three
-    assert [hit["page_id"] for hit in call["returned"]].count(pages[1]) == 3, said  # its line and two others
+    returned_pages = [hit["page_id"] for hit in call["returned"] if "page_id" in hit]
+    assert returned_pages.count(pages[1]) == 3, said  # its line and two others
     assert sum(old in texts[1] for old in probe.older) == 2, said  # the two decoys beside it
     assert output.pinned_fallback() == (
-        "On the pinned session the tool's fallback answers 1 of the 18 queries the strict search finds nothing for: "
+        "On the pinned session the tool's fallback answers 3 of the 18 queries the strict search finds nothing for: "
         "for q_r_02 (paraphrase) its reply shows the plant's line on the second of the three pages it shows in "
-        "detail, beside two of the service's decoy lines.")
+        "detail, beside two of the service's decoy lines; for the other 2 (toolloop probes) it shows only a page "
+        "of an earlier probe turn, which holds no plant.")
 
 
 def check_the_chart_of_a_replay_names_each_basis_once(run):

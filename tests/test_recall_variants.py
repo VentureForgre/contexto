@@ -74,7 +74,8 @@ def test_names_in_prose_are_never_listed_and_keys_with_digits_are_not_either():
             "Action item AI-93532 is done.\nrelease v2.13.0 of payments-api shipped\n"
             "the canary region for ledger-edge is west-lo2")
     assert salient_identifiers([text]) == []  # nothing here is in key position
-    assert salient_identifiers(["AI-93532=done s3-bucket=on cache.ttl=short"]) == ["cache.ttl"]
+    # Ticket/opaque IDs (AI-93532) stay filtered, while technical identifiers with digits (s3-bucket) are kept.
+    assert salient_identifiers(["AI-93532=done s3-bucket=on cache.ttl=short"]) == ["s3-bucket", "cache.ttl"]
 
 
 def test_no_answer_of_the_acceptance_script_reaches_the_index():
