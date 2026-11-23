@@ -132,7 +132,7 @@ figures (`85k`, `1.9M`); the peak is printed exactly.
 Each heading is a key of `contexto stats --json`. The text output shows the same values.
 
 A **model request** is a log line with `event: request`, `method: POST`, and a path of `/v1/messages`,
-`/responses` or `/v1/responses`. `count_tokens` requests and everything else the CLI sends through
+`/responses` or `/v1/responses`, or a `websocket_turn` line on `/responses` or `/v1/responses`. `count_tokens` requests and everything else the CLI sends through
 the proxy (Claude Code's `HEAD /api/hello`) are not model requests. Requests of every conversation
 count, the main one and side ones (subagents, Claude Code's title and topic requests), unless a
 number says otherwise.

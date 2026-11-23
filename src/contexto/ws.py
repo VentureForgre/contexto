@@ -527,7 +527,8 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
         for name, value in up_headers:
             if name.lower() not in drop:
                 handler.send_header(name, value)
-        handler.send_header("Content-Length", str(len(body)))
+        if status not in (204, 304) and not (100 <= status < 200):
+            handler.send_header("Content-Length", str(len(body)))
         handler.end_headers()
         if body:
             handler.wfile.write(body)
@@ -711,7 +712,6 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
             nonlocal clean_close
             if opcode == OP_CLOSE:
                 clean_close = True
-                client_close_seen.set()
                 code = parse_close_code(payload)
                 with state_lock:
                     if session_info["close_code"] is None:
@@ -720,6 +720,9 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
                 send_upstream(encode_frame(opcode, payload, mask=os.urandom(4)))
             except OSError:
                 pass
+            finally:
+                if opcode == OP_CLOSE:
+                    client_close_seen.set()
 
         try:
             while not closed.is_set():
@@ -815,13 +818,13 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
             nonlocal clean_close
             if opcode == OP_CLOSE:
                 clean_close = True
-                upstream_close_seen.set()
                 code = parse_close_code(payload)
                 with state_lock:
                     if session_info["close_code"] is None:
                         session_info["close_code"] = code
+                    has_pending = bool(held) or bool(pending)
                 # Observe usage and log any in-progress turn BEFORE flushing held tool calls and OP_CLOSE.
-                if held or pending:
+                if has_pending:
                     to_flush = finish_turn()
                     for frame in to_flush:
                         try:
@@ -832,6 +835,9 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
                 send_client(encode_frame(opcode, payload))
             except OSError:
                 pass
+            finally:
+                if opcode == OP_CLOSE:
+                    upstream_close_seen.set()
 
         try:
             while not closed.is_set():
