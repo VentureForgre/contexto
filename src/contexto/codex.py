@@ -846,6 +846,8 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
         # Kept under the Contexto session directory so Codex's rollouts stay resumable; only the
         # config (which names the helper command) and symlinks to user assets are removed on exit.
         codex_home = Path(codex_home_dir)
+        if is_link_or_junction(codex_home):
+            raise CodexLaunchError(f"session codex-home {str(codex_home)!r} is a symlink")
         codex_home.mkdir(mode=0o700, parents=True, exist_ok=True)
         keep = True
     else:
@@ -858,14 +860,16 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     user_config, cfg_note = ({}, None) if same_home else _load_user_config(user_home)
     if cfg_note:
         notes.append(cfg_note)
+    if is_link_or_junction(codex_home):
+        raise CodexLaunchError(f"session codex-home {str(codex_home)!r} is a symlink")
     config = codex_home / "config.toml"
     linked: list[Path] = []
+    config_created = False
     try:
-        if is_link_or_junction(codex_home):
-            raise CodexLaunchError(f"session codex-home {str(codex_home)!r} is a symlink")
         chmod_private(codex_home, 0o700)
         config.unlink(missing_ok=True)  # a stale config or broken symlink from an interrupted run
         fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, 0o600)
+        config_created = True
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(api_key_config(proxy_url, helper, session_id, contexto_home, base_env,
                                    env_key=env_key, supports_websockets=supports_websockets,
@@ -876,7 +880,8 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
             if link.is_symlink():
                 link.unlink(missing_ok=True)
         if keep:
-            config.unlink(missing_ok=True)
+            if config_created:
+                config.unlink(missing_ok=True)
         else:
             shutil.rmtree(codex_home, ignore_errors=True)
         raise

@@ -796,3 +796,46 @@ def test_proxy_stale_pool_errors_include_connection_aborted():
     from contexto import proxy as proxy_mod
 
     assert ConnectionAbortedError in proxy_mod._STALE_POOL_ERRORS
+
+
+def test_plan_codex_refused_symlink_or_junction_never_unlinks_target_config(monkeypatch, tmp_path):
+    """Refusing a symlink or NTFS junction codex_home_dir must never traverse it to unlink target/config.toml."""
+    target = tmp_path / "real-codex"
+    target.mkdir()
+    real_cfg = target / "config.toml"
+    real_cfg.write_text('model = "keep-me"\n', encoding="utf-8")
+
+    # 1. Real symlink (skipped only if host disallows unprivileged symlinks)
+    link_home = tmp_path / "link-codex-home"
+    try:
+        link_home.symlink_to(target, target_is_directory=True)
+    except OSError:
+        link_home = None
+    if link_home is not None:
+        with pytest.raises(codex.CodexLaunchError, match="symlink"):
+            codex.plan_codex(
+                [], "http://127.0.0.1:1", "S_SYM",
+                env={"OPENAI_API_KEY": "sk-test"},
+                cwd=tmp_path, home=tmp_path, codex_home_dir=link_home,
+            )
+        assert real_cfg.read_text(encoding="utf-8") == 'model = "keep-me"\n'
+
+        # Dangling symlink raises CodexLaunchError cleanly instead of FileExistsError.
+        dangling = tmp_path / "dangling-codex-home"
+        dangling.symlink_to(tmp_path / "nonexistent-dir", target_is_directory=True)
+        with pytest.raises(codex.CodexLaunchError, match="symlink"):
+            codex.plan_codex(
+                [], "http://127.0.0.1:1", "S_DANG",
+                env={"OPENAI_API_KEY": "sk-test"},
+                cwd=tmp_path, home=tmp_path, codex_home_dir=dangling,
+            )
+
+    # 2. Simulated Windows NTFS junction (works on every host even without symlink privilege)
+    monkeypatch.setattr(codex, "is_link_or_junction", lambda p: Path(p) == target)
+    with pytest.raises(codex.CodexLaunchError, match="symlink"):
+        codex.plan_codex(
+            [], "http://127.0.0.1:1", "S_JUNC",
+            env={"OPENAI_API_KEY": "sk-test"},
+            cwd=tmp_path, home=tmp_path, codex_home_dir=target,
+        )
+    assert real_cfg.read_text(encoding="utf-8") == 'model = "keep-me"\n'
