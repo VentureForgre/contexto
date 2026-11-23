@@ -588,8 +588,8 @@ The proxy is listening.
 
 - `port`: the port on 127.0.0.1.
 - `upstream_source`: where the upstream URL came from, never the URL: `flag`, `settings:<file kind>`,
-  `env` or `default` for Claude Code; `codex-flag`, `codex-env`, `chatgpt-default`, `openai-env` or
-  `claude-<source>+/v1` for Codex.
+  `env`, `config` or `default` for Claude Code; `codex-flag`, `codex-env`, `codex-config`,
+  `chatgpt-default`, `openai-env` or `claude-<source>+/v1` for Codex.
 - `observe_thinking`: whether `--observe-thinking` is on.
 - `pages`: the page files in the session's store when the proxy started. Absent when the pages
   directory could not be listed. `contexto stats` takes a run's pages added from it and the `pages`
@@ -1620,7 +1620,8 @@ The proxy is up and the CLI is about to start.
   so they are sent upstream), or `off` (you turned them off).
 - `statusline`: Claude Code only: whether the launch added Contexto's status line (D64,
   [statusline.md](statusline.md)): `added`, or why not: `off:flag` (`--no-statusline`), `off:env`
-  (`CONTEXTO_NO_STATUSLINE`), `own:<kind>` (a settings file has a `statusLine`),
+  (`CONTEXTO_NO_STATUSLINE`), `off:config` (`statusline = false` in `config.toml`), `own:<kind>` (a
+  settings file has a `statusLine`),
   `unreadable:<kind>` (a settings file could not be read as a JSON object), `hooks_off:<kind>` (a
   settings file sets `disableAllHooks`), `managed_hooks_only`, `unsafe_path` (the command would hold
   `${`) or `error` (deciding failed). `<kind>` is the highest-ranking such file: `managed`,

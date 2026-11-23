@@ -7,7 +7,7 @@ and earlier the same day (D63: in-turn paging, the replay harness PR #268 and th
 merged and not released, recorded in the docs PR #295), (D70: `contexto serve` for clients Contexto
 does not launch, PRs #271, #272, #275, #277, #293 and #294, merged and not released), and (D66: the
 benchmark `contexto bench`, PRs #255, #262, #264, #269, #273, #289 and #286, recorded in the docs PR
-#282). Before that, 2026-11-13 (D69, project memory: PR #279, the first of its two pull requests,
+#282). Before that, 2026-11-13 (D69, project memory: PR #279 and PR #287, both merged on `main`,
 unreleased), and 2026-11-12 (v0.5.24: the 2026-11-05 QA run and the fix round, PRs #232 to #250, D48
 to D61, live acceptance run #4, deleting the v0.1.0 to v0.4.0 releases, D62, and the README rewrite,
 D68). Decisions taken and still open, with reasons:
@@ -35,10 +35,11 @@ compaction never fires, and accuracy equals full context.
   `contexto run codex` with no trust check, and no Host or Origin check on the proxy). The fix round
   (PRs #232 to #250, D48 to D61, v0.5.9 to v0.5.24) fixed all of them, each PR with two reviewer
   agents; details under "QA run and fix round" below.
-- Project memory (D69, PR #279, unreleased, the first of two pull requests): a new session starts
+- Project memory (D69, PR #279 and PR #287, both merged on `main`, unreleased): a new session starts
   with the open obligations and active decisions the main conversation pinned in earlier sessions of
   the same project (the git repository it started in, a linked worktree or submodule being its own,
-  else the directory). A record counts as the main conversation's when the proxy sees Contexto's pin
+  else the directory), and can search and recall across earlier sessions of the project on request
+  (`scope: "project"`, `session`, `--project`, `--from`). A record counts as the main conversation's when the proxy sees Contexto's pin
   call and the server's success reply in that conversation's own history. The model sees the
   records as escaped literals under a heading that calls them records from an earlier session, not
   instructions, inside the 6,000-token pin budget. Closures and replacements made in the main
@@ -846,12 +847,12 @@ Still open:
   connection for every request (914 in one short run); on an HTTPS upstream each also pays a TCP
   connect, a TLS handshake and about 2.5 ms to build the SSL context (the handshake cost not
   measured).
-- D66 follow-ups: the reviewers' lows were fixed in #286; what they left on purpose is in
-  [#291](https://github.com/VentureForgre/contexto/issues/291) (a restated question that is not
-  word for word still overrides an answer; the replay's signal window after it ends; refusals for
-  hand-damaged scripts; the journal line not synced to disk; a zoomed chart panel; the search-reach
-  note under a chart that plots no search; a reach column on the `contexto_search` tool's own
-  reply, not built). Also the owner's minimum live run (above, under
+- D66 follow-ups: the reviewers' lows were fixed in #286; the replay signal window around output
+  writes and hand-damaged script refusals (`Script.read`) are fixed on `main`; what remains in
+  [#291](https://github.com/VentureForgre/contexto/issues/291) is a restated question that is not
+  word for word overriding an answer (scoring change), the journal line not synced to disk, a zoomed
+  chart panel, the search-reach note under a chart that plots no search, and a reach column on the
+  `contexto_search` tool's own reply (not built). Also the owner's minimum live run (above, under
   "Benchmark (D66)"), which would also confirm the plain arm's 33,000-token reserve live.
 - A head denser than the 3.5 text seed is estimated low until the first usage, on Codex and Claude
   alike, so tool-loop requests can still go over the bound unflagged when no response carries an
@@ -864,26 +865,24 @@ Still open:
   one multi-word query at 3,000 pages sized like real turns).
 - D70, `contexto serve`: not confirmed in an IDE, the desktop app, the TypeScript SDK, the GitHub
   Action, a claude.ai (OAuth) login or on Linux with a real client (steps in `docs/serve.md`).
-  `contexto stats` on a session the service made shows its requests and faults but no bound, CLI
-  or run count. `contexto run codex` does not apply the serve-upstream refusal that
+  `contexto stats` on a session the service made now reads its `cli`, `bound`, and run count from
+  `serve_open` / `serve_close`. `contexto run codex` does not apply the serve-upstream refusal that
   `contexto run claude` and `contexto doctor` do. A base path is not yet encoded exactly as Claude
   Code sends it in three small cases: `|`, `[` and `]` are percent-encoded where Claude Code sends
   them as they are, a backslash goes out as `%5C` where Claude Code turns it into `/`, and a `..`
   segment is sent as written where Claude Code removes it. Out of scope: listening beyond loopback,
   several users, Chat Completions, Bedrock and Vertex request paths, other agents.
-- D64, left open (each checked on `main` at 26663b16): `commands/run.py`'s `register()` imports
-  `contexto.codex` catching only `ImportError`, so a codex module that is broken, not missing, makes
-  every command fail; the resume command printed at exit keeps `--no-project-memory` but drops
-  `--no-statusline` and `--quiet`; the status line's own settings reader is not D70's
-  `read_settings_file` (they disagree only in the safe direction: it may leave its line off); a
-  clock stepped back by more than the gap between a launch's `proxy_start` and a conversation's
-  first request hides a user script's line for that run; the cloud-provider refusal says "in any of
-  these places" with no list of them (#271's text, D70's to change); a settings file that holds
-  `NaN` and names a switch, even at `"0"`, refuses a launch Claude Code would allow (accepted: it
-  only adds refusals). Not built: a status line for Codex, which has no such setting. Unconfirmed:
-  interactive Claude Code for the provider switches, `/statusline` writing the user's settings,
-  managed settings, whether a custom status line hides Claude Code's footer hints, Claude Code
-  other than 2.1.318 and 2.1.322, Linux except CI.
+- D64, left open: a clock stepped back by more than the gap between a launch's `proxy_start` and a
+  conversation's first request hides a user script's line for that run; the cloud-provider refusal
+  says "in any of these places" with no list of them (#271's text, D70's to change); a settings file
+  that holds `NaN` and names a switch, even at `"0"`, refuses a launch Claude Code would allow
+  (accepted: it only adds refusals). (`commands/run.py`'s `codex` import guard, keeping
+  `--no-statusline` and `--quiet` in the printed resume command, and aligning
+  `statusline.read_settings` with D70's `read_settings_file` are fixed on `main`.) Not built: a
+  status line for Codex, which has no such setting. Unconfirmed: interactive Claude Code for the
+  provider switches, `/statusline` writing the user's settings, managed settings, whether a custom
+  status line hides Claude Code's footer hints, Claude Code other than 2.1.318 and 2.1.322, Linux
+  except CI.
 - D63 follow-ups, not started: in-turn paging for Codex (implementing `contexto.inturn.MessagesInTurn`'s
   methods for Responses items, so `ResponsesDialect.in_turn` is no longer None); a stable engine
   `cache_control` breakpoint after the paged prefix (the API allows 4 and Claude Code uses 3), which
@@ -915,16 +914,11 @@ D64 (seeing Contexto work): merged in PRs #257, #258, #263, #276, #261, #283 and
 recorded in `docs/DECISIONS.md`. Left: the open items listed under "Open follow-ups", and a release,
 which is the maintainer's call.
 
-D69 (project memory): the first pull request, #279 (carry-over, rule 19, the off switch, the start
-line, `contexto project show|forget`), is merged, unreleased. The second, search and recall
-across a project's earlier sessions (`scope: "project"`, `session`, `--project`, `--from`) with the
-zero-spend measurements, is pull request #287 (branch `claude/d69-search-pr2`, on main at 65f33e4f):
-both reviewers approved, and B2's round-2 notes are fixed on the branch (an earlier session's stub
-row escapes `\n`, a search lets go of each session's page records once their rows are made, an
-earlier page's recall opens with a block that says whose page it is, and the docs state what
-"created before" rests on). After the rebase onto D63 (#274) the tool-list golden is main's at
-65f33e4f, the replies fixture is re-recorded with the pages-held path, and the measurement's first
-session runs 70 turns so it still rotates three times; D69's measured numbers are re-run. Not merged.
+D69 (project memory): both pull requests are merged on `main`, unreleased. The first, #279
+(carry-over, rule 19, the off switch, the start line, `contexto project show|forget`), and the
+second, #287 (search and recall across a project's earlier sessions: `scope: "project"`, `session`,
+`--project`, `--from`, with the zero-spend measurements; merged at `152499e6`), are both on `main`.
+Left: D69's live check under "Needs the owner".
 
 D63 (in-turn paging): merged (#268, #274), unreleased. Left: its live check (under "Needs the
 owner") and its follow-ups above.
@@ -1033,7 +1027,7 @@ Needs the owner:
   claude-opus-5-5 they were not reported here; the one Opus series on 2026-10-15 also reported none,
   with crossing unknown. 1,159,358 tokens.
 
-## Known limitations (v0.5.24)
+## Known limitations (v0.5.24 and unreleased main)
 
 - Claude acceptance ran on two models, claude-haiku-5-5 (Claude Code 2.1.301 and 2.1.318) and
   claude-opus-5-5 (2.1.302, with a `mcp__contexto` allow rule before D44), at one bound (150,000)

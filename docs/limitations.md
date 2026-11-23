@@ -65,5 +65,38 @@ has the short list; this is the full one.
   estimates it, and a very dense start of the conversation (JSON, code, non-English text) is
   estimated low. If the upstream never reports counts, tool-loop requests can go over the bound
   without a log entry.
-- **Codex ChatGPT login mode** is tested only with synthetic credentials.
+- **Codex ChatGPT login mode** is tested only with synthetic credentials. In ChatGPT login mode,
+  rate-limit, usage and remote-MCP calls go to `chatgpt.com` directly outside the proxy; by default
+  Codex also connects to `chatgpt.com` (analytics) and `github.com` (plugin sync) unless disabled
+  with `-c analytics.enabled=false` and `-c features.plugins=false`. Interactive Codex launches
+  pass `--no-daemon` (from Codex 0.156.0 on), so `codex agents` is refused unless `--remote` is
+  given.
+- **Project memory (on `main`).** Only records the proxy saw the main conversation pin are carried
+  across sessions of the same project. Pins made before v0.6.0, pins whose reply never reaches a
+  later main request, Codex code-mode pins, and verified facts are not carried. Pruning the session
+  that closed a record brings the record back; each git worktree and submodule is its own project;
+  and no live model call has yet checked how models act on carried records
+  ([Project memory](project-memory.md)).
+- **`contexto serve` (on `main`).** Loopback-only, single-user, and Claude Code's Messages API
+  only (Codex `/responses`, Chat Completions, and Bedrock/Vertex paths are forwarded unchanged).
+  Not yet confirmed live inside an IDE extension, the desktop app, the TypeScript SDK, a GitHub
+  Action, a claude.ai OAuth login, or on Linux with a real client ([Serve](serve.md)).
+- **Main conversation tracking and resume.** Main follows Claude Code's session id (measured on
+  2.1.302 to 2.1.318); two interactive Claude Codes on one proxy are not supported.
+  `contexto run claude --resume` without an id opens Claude Code's picker and starts a new Contexto
+  session; `--fork-session` shares the original Contexto session unless `--session NEW` is passed;
+  Codex resumes only with `contexto run --session <id> codex resume --last`.
+- **Untrusted repositories and managed settings.** In `-p` mode Claude Code has no folder-trust
+  prompt, so a repository's `.claude/settings.json` `ANTHROPIC_BASE_URL` wins unless pinned with
+  `--upstream`. Organization-managed settings outrank `--settings`, so a managed `ANTHROPIC_BASE_URL`
+  can bypass the proxy (`contexto doctor` warns when managed settings are present).
+- **Proxy framing and deep JSON.** The proxy refuses non-loopback `Host` headers (e.g.
+  `host.docker.internal` from a container—use a port forward to `localhost`) and `Origin` headers.
+  Requests nested past 512 levels are forwarded untransformed (`request_too_deep`); the Messages
+  API itself refuses nesting past 127 levels.
+- **Nested memory on Claude 4.x model ids.** On 4.x model ids, nested `CLAUDE.md`, `CLAUDE.local.md`
+  and `.claude/rules/*.md` arrive inside `Read` tool results and are paged with their turn rather
+  than carried (on 5.x model ids they are carried).
+- **Signals.** `SIGKILL` of the launcher leaves no `exit` event; if the watchdog is killed too, the
+  temporary directory (holding no secrets) remains in `$TMPDIR`.
 - **Windows** is not supported.

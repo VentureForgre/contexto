@@ -17,6 +17,8 @@ contexto: run of session 7f3a9c2e41d84b0c9a6f0e1d2c3b4a59 ended after 6h12m
   paged out   212 pages in 9 rotations this run; the session has 215 pages on disk, about 1.9M tokens (an estimate made when each was paged)
   recall      51 calls (14 recall, 31 search, 6 pin); about 85k tokens charged to the recall room (a budget charge that runs high, not a count of what was read); 2 obligations open
   cache       91% of input tokens read from cache (measured)
+  tokens      18.4M input, 42k output (measured); about 260k input tokens saved (estimated)
+  cost        ~$4.12 USD (estimated from published prices)
   compaction  none seen: Claude Code did not compact the main conversation
 contexto: resume this conversation through Contexto with: contexto run --session 7f3a... claude --resume ...
 ```
@@ -98,7 +100,9 @@ Contexto stats for session 7f3a9c2e41d84b0c9a6f0e1d2c3b4a59: the whole session (
   paged out   215 pages on disk, about 1.9M tokens (an estimate made when each was paged); 11 rotations
   recall      51 calls (14 recall, 31 search, 6 pin); about 85k tokens charged to the recall room (a budget charge that runs high, not a count of what was read); 2 obligations open
   cache       91% of input tokens read from cache (measured)
-  bytes       the CLI sent 1.2 GiB, Contexto forwarded 310.0 MiB (25%)
+  tokens      18.4M input, 42k output (measured); about 260k input tokens saved (estimated)
+  cost        ~$4.12 USD (estimated from published prices)
+  bytes       the CLI sent 1.2 GiB, Contexto forwarded 310.0 MiB (25%, saved 918.8 MiB)
   compaction  none seen: Claude Code did not compact the main conversation
   faults      none
 ```
@@ -114,10 +118,12 @@ figures (`85k`, `1.9M`); the peak is printed exactly.
 
 - **Measured** means the API reported it in a response's `usage`, or it is a byte count or an event
   count the proxy made itself.
-- **Estimate** means Contexto computed it from bytes. Three numbers are estimates and say so:
-  the tokens kept on disk (`pages.tokens_estimate`), the peak prompt when the API reported no usage
-  (`prompt.peak_source` is then `estimate`), and the largest request the API reported no usage for
-  (`prompt.peak_estimate_without_usage`).
+- **Estimate** means Contexto computed it from bytes or published vendor price tables. These
+  numbers are estimates and say so: the tokens kept on disk (`pages.tokens_estimate`), the peak
+  prompt when the API reported no usage (`prompt.peak_source` is then `estimate`), the largest
+  request the API reported no usage for (`prompt.peak_estimate_without_usage`), the input tokens
+  saved (`tokens.saved_estimate`, derived from `bytes.saved`), and estimated USD spend
+  (`cost.estimated_usd`, priced from `prices.json` at published per-token rates).
 - **A charge** is neither. `tools.recall.charged_tokens` and the like are what the tools' replies
   were charged against a turn's recall room: a budget figure that is high on purpose (below). It is
   not a count of the tokens the model read, and it does not compare with the estimate of the pages
@@ -144,12 +150,12 @@ number says otherwise.
 | `version` | The version of this JSON shape, `1`. It is raised only when a documented key changes meaning or is removed. Keys may be added without raising it. |
 | `session` | The session id. |
 | `scope` | `session` (the whole log) or `last_run` (`--last-run`, and the exit summary). |
-| `runs` | Proxy starts in the whole log: one per `contexto run` or `contexto proxy`. A run is the log from the lines its launch wrote while opening the session, through its proxy start, to its `exit` line (to the next proxy start for a run that was killed, and for `contexto proxy`, which writes no `exit`). |
-| `cli` | `claude` or `codex`, from the latest `launch` line; `null` when the log has none. |
-| `bound` | The bound in tokens: the latest `launch` line's, else one carried by an `over_bound` or `bound_too_small` event in scope, else `null`. A session resumed with another `--bound` shows the latest. |
+| `runs` | Proxy or service starts in the whole log: one per `proxy_start` (`contexto run` / `contexto proxy`) or `serve_open` (`contexto serve`). A run is the log from the lines its launch wrote while opening the session, through its `proxy_start` / `serve_open`, to its `exit` / `serve_close` line (or to the next start for a run that was killed). |
+| `cli` | `claude` or `codex`, from the latest `launch` or `serve_open` line; `null` when the log has none. |
+| `bound` | The bound in tokens: the latest `launch` or `serve_open` line's, else one carried by an `over_bound` or `bound_too_small` event in scope, else `null`. A session resumed with another `--bound` shows the latest. |
 | `started`, `ended` | The first and last timestamp in scope, as logged (UTC). A `ts` that is not a time is not used. |
 | `span_seconds` | `ended` minus `started`. It is the span of the log, not time spent working: two 5-second runs three days apart span 72 hours. |
-| `run_seconds` | The time in runs: each run's first line to its last, added up. `null` when the log has no proxy start. For the last run it equals `span_seconds`. |
+| `run_seconds` | The time in runs: each run's first line to its last, added up. `null` when the log has no `proxy_start` or `serve_open`. For the last run it equals `span_seconds`. |
 | `log.missing` | `true` when the session has no readable `log.jsonl` (absent, or not a regular file). |
 | `log.lines` | Non-empty lines read: the whole log, or for the last run its own lines (the lines before it are searched for run starts, not parsed). `log.unreadable_lines` and `log.ignored_values` cover the same lines. |
 | `log.unreadable_lines` | Lines that are not a JSON object: a line cut short by a full disk, or damage. They are skipped, so the numbers may be low; the text output says so. |
@@ -273,6 +279,34 @@ When only some requests reported the field, the text says how many the share cov
 `70% of input tokens read from cache (measured, over the 1 of 3 requests with usage that reported a
 cache field)`.
 
+### `tokens`
+
+Measured input, output and cache token totals across `requests.with_usage`, plus an estimate of
+input tokens saved by Contexto.
+
+| Key | Meaning |
+|---|---|
+| `tokens.input` | Total measured input tokens across all model requests with usage. |
+| `tokens.output` | Total measured `output_tokens` across all model requests with usage. |
+| `tokens.cache_read` | Total measured cache-read input tokens. |
+| `tokens.cache_write` | Total measured cache-creation input tokens. |
+| `tokens.saved_estimate` | Estimated input tokens saved across requests (`bytes.saved / 3.5`), 0 when no bytes were saved. |
+
+### `cost`
+
+Estimated USD spend computed per model request from the published prices in
+`src/contexto/bench/data/prices.json`. Unknown or unrecorded models are counted as unpriced rather
+than raising an error.
+
+| Key | Meaning |
+|---|---|
+| `cost.currency` | Always `"USD"`. |
+| `cost.estimated_usd` | Estimated total spend in USD over `cost.priced_requests`, or `null` when no request had a priced model. |
+| `cost.priced_requests` | Model requests with usage whose model was matched in the price table. |
+| `cost.unpriced_requests` | Model requests with usage whose model was missing or unknown. |
+| `cost.unpriced_models` | Sorted unique unknown model ids encountered. |
+| `cost.by_model` | Map from model id (or `"unknown"`) to `{requests, input_tokens, output_tokens, estimated_usd}`. |
+
 ### `bytes`
 
 Measured by the proxy, over model requests.
@@ -282,6 +316,8 @@ Measured by the proxy, over model requests.
 | `bytes.cli_sent` | The sum of the request bodies the CLI sent (decoded, if the CLI compressed them). |
 | `bytes.forwarded` | The sum of the bodies Contexto sent upstream. |
 | `bytes.forwarded_share` | `forwarded / cli_sent`, or `null`. |
+| `bytes.saved` | `max(0, cli_sent - forwarded)`, bytes Contexto kept off the wire. |
+| `bytes.saved_share` | `saved / cli_sent`, or `null`. |
 | `bytes.largest_cli_request`, `bytes.largest_forwarded_request` | The largest single body on each side. |
 
 The CLI resends its whole history with each request, so `cli_sent` grows with the square of the

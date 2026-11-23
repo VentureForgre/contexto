@@ -1,16 +1,20 @@
-"""``contexto doctor [--json]``: check that ``contexto run`` can work from this directory (D64).
+"""``contexto doctor [--live] [--json]``: check that ``contexto run`` can work from this directory (D64).
 
 One line per check, marked ``[ok]``, ``[warn]``, ``[FAIL]`` or ``[skip]``, printed when that check is
 done; a warning or a failure is followed by one line saying what to do. The checks, in order:
 
 - ``python``: this interpreter is 3.12 or later.
 - ``claude``, ``codex``: the CLI is on PATH, its ``--version`` (read as ``contexto run`` reads it,
-  ``contexto.cliversions.installed_version``), and whether that version is in ``TESTED_VERSIONS``.
+  ``contexto.cliversions.installed_version``), and whether that version is in ``TESTED_VERSIONS``. When
+  one CLI is usable and the other is simply not installed on PATH, the uninstalled optional CLI is
+  reported as ``[skip]`` so a clean single-CLI install reports 0 warnings.
+- ``config``: optional ``$CONTEXTO_HOME/config.toml`` syntax and validation (``contexto.config``).
 - ``settings``: the Claude Code settings files ``contexto run`` reads from this directory, and Claude
   Code's managed settings file, each read by ``contexto.upstream.read_settings_file`` as the launcher
   reads it. One that is there and cannot be used (``SettingsFile.problem``: not a regular file, too
   large, not valid JSON, an ``env`` that is not an object) is named by its scope with what is wrong:
-  nothing is taken from it, and it can make the ``provider`` check fail.
+  nothing is taken from it, and it can make the ``provider`` check fail. Also warns when
+  ``managed-settings.json`` exists or sets ``ANTHROPIC_BASE_URL``.
 - ``claude-upstream``, ``codex-upstream``: the upstream ``contexto run`` would use from this directory
   and what set it (``contexto.upstream.resolve_upstream``; for Codex
   ``contexto.codex.codex_upstream_with_source`` in API-key mode, its default). Only the URL's origin is
@@ -24,15 +28,21 @@ done; a warning or a failure is followed by one line saying what to do. The chec
   Claude Code's ``apiKeyHelper``, a project's only in a folder Claude Code trusts (D52).
 - ``store``: the store home is one ``contexto run`` can use: it can be written or created, sessions can
   be made in it, and ``contexto run claude`` does not refuse its path (``check_store``).
+- ``serve``: ``contexto serve`` status, lock, and token/state file permissions (0600) when configured.
+- ``statusline``: whether ``contexto run claude`` will add Contexto's status line or skip it.
 - ``mcp``: the MCP server starts as the launcher starts it and lists Contexto's tools.
 - ``provider``: ``contexto run claude`` would not refuse to launch because Claude Code may send its
   model requests to a cloud provider, past the proxy (D70): the launcher's own check, with the same
   arguments (``contexto.launcher.check_cloud_provider``, ``contexto.upstream.cloud_provider``).
+- ``live-upstream`` (only with ``--live``): lightweight network probe to verify upstream reachability,
+  TLS, and (for trusted upstreams) auth.
 
 What doctor never does:
 
-- It makes no network request. It reports the upstream and does not contact it. The only processes
-  it starts are ``claude --version``, ``codex --version`` and Contexto's own MCP server on stdio.
+- By default it makes no network request. It reports the upstream and does not contact it unless
+  ``--live`` is passed. Even with ``--live``, credentials are never sent to an untrusted project
+  upstream or a non-OpenAI Codex gateway. The only processes plain doctor starts are ``claude --version``,
+  ``codex --version`` and Contexto's own MCP server on stdio.
 - It never runs a key helper. A helper is the user's command, with whatever side effects it has, and
   Codex's rule for a project's helper (D52, D54) exists so that one from an untrusted folder is not
   run unasked. It says where a helper is configured and that it was not run.
@@ -49,7 +59,8 @@ home ``contexto run`` cannot use, an MCP server that does not start and list exa
 a cloud-provider switch that is on or a settings file that may turn one on (``contexto run claude``
 refuses to launch, exit 2), and a check that cannot be made at all (no working directory, no home
 directory, no temporary directory: ``Fault``). Everything else is a warning: an untested or unreadable
-CLI version, one of the two CLIs missing, a settings file that cannot be used, no key found (a login
+CLI version, a CLI on PATH that cannot start (an uninstalled optional CLI is skipped when the other
+CLI is usable), a settings file that cannot be used, no key found (a login
 the CLI holds also works), no upstream or key helper for Codex (a flag to ``contexto run`` can supply
 either), a setting skipped as untrusted, and a store home that is read-only while its ``sessions``
 directory can be used. A check that does not apply because its CLI is missing is skipped.
@@ -65,11 +76,14 @@ done, and nothing when the run is stopped first; docs/doctor.md lists each check
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import shlex
 import shutil
 import signal
+import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -86,6 +100,7 @@ from contexto.canonical import has_lone_surrogate
 from contexto.cliversions import CLI_NAMES, REPORT_URL, TESTED_VERSIONS, installed_version, is_tested, tested_list
 from contexto.cliversions import _kill_group as kill_group
 from contexto.cliversions import start_failure as cannot_start
+from contexto.config import ConfigError, FileConfig, load_config
 from contexto.launcher import (
     CLI_INSTALL,
     LaunchError,
@@ -99,8 +114,28 @@ from contexto.launcher import (
 )
 from contexto.mcp import LEGACY_VERSIONS as MCP_PROTOCOL_VERSIONS
 from contexto.mcp import SERVER_NAME, TOOLS
-from contexto.paths import contexto_home
-from contexto.platform_compat import available_signals, is_owned_by_current_user_or_root, new_process_group_kwargs
+from contexto.paths import config_path, contexto_home
+from contexto.platform_compat import (
+    available_signals,
+    has_group_or_other_perms,
+    is_link_or_junction,
+    is_owned_by_current_user,
+    is_owned_by_current_user_or_root,
+    new_process_group_kwargs,
+)
+from contexto.servecontract import (
+    LOCK_FILE,
+    STATE_FILE,
+    TOKEN_FILE,
+    ServeFileError,
+    read_state,
+    read_token,
+    running_state,
+    service_running,
+)
+from contexto.statusline import NO_STATUSLINE_ENV, launch_status_line
+from contexto.statusline import opted_out as statusline_opted_out
+from contexto.statusline import skip_notice as statusline_skip_notice
 from contexto.store import SessionStore
 from contexto.upstream import (
     BASE_URL_KEY,
@@ -110,7 +145,9 @@ from contexto.upstream import (
     KEY_HELPER_KEY,
     KIND_FILES,
     MANAGED_KIND,
+    PROJECT_KINDS,
     SettingsFiles,
+    Upstream,
     active_cloud_provider,
     claude_env_value,
     claude_key_helper,
@@ -118,9 +155,11 @@ from contexto.upstream import (
     claude_settings_order,
     cloud_provider,
     cloud_provider_note,
+    folder_trusted,
     managed_settings_path,
     resolve_provider_upstream,
     resolve_upstream,
+    settings_env,
     untrusted_note,
 )
 
@@ -133,6 +172,7 @@ MINIMUM_PYTHON = (3, 12)
 # How Claude Code can be given a credential without a login: read by name only, never shown.
 CLAUDE_KEY_VARIABLES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 MCP_TIMEOUT_S = 10.0  # the whole exchange; the real server answers in a fraction of a second
+LIVE_TIMEOUT_S = 5.0  # per-upstream timeout for optional `contexto doctor --live`
 MCP_SESSION = "doctor"
 MCP_ERROR_CHARS = 200  # of the server's last stderr line, shown when it fails
 
@@ -167,6 +207,7 @@ class Context:
     def __init__(self, env: Mapping[str, str], cwd: Path | None = None, home: Path | None = None) -> None:
         self.env, self._cwd, self._home = env, cwd, home
         self.files = SettingsFiles()
+        self.config: FileConfig = FileConfig()
 
     @property
     def cwd(self) -> Path:
@@ -194,13 +235,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "doctor", help="check that Contexto can run here: the CLIs, the upstream, keys, the store, the MCP server",
         description="Check what `contexto run` needs from this directory: Python, the claude and codex CLIs and "
-                    "their versions, the Claude Code settings files, the upstream and where it comes from, "
-                    "whether a key or key helper is configured, the store home, the MCP server, and variables "
-                    "that would make Claude Code bypass the proxy. Makes no network request, runs no key "
-                    "helper, and prints no key.",
+                    "their versions, config.toml, the Claude Code settings files, the upstream and where it comes "
+                    "from, whether a key or key helper is configured, the store home, `contexto serve` status/"
+                    "permissions, statusline, the MCP server, and variables that would make Claude Code bypass "
+                    "the proxy. Makes no network request unless --live is passed, runs no key helper, and prints "
+                    "no key.",
         epilog="Exit codes: 0 no check failed (warnings allowed); 1 a check failed; 130 Ctrl+C; 143 or 129 "
                "SIGTERM or SIGHUP. Details: docs/doctor.md.")
     parser.add_argument("--json", action="store_true", help="print the results as JSON (shape in docs/doctor.md)")
+    parser.add_argument("--live", action="store_true",
+                        help="verify upstream reachability, TLS, and auth over the network "
+                             "(default doctor makes no network request)")
     parser.set_defaults(func=run)
 
 
@@ -209,11 +254,12 @@ def run(args: argparse.Namespace) -> int:
     hangs for its 3 s, an MCP server for its 10 s) is not 16 s of silence. JSON: one object, after the
     last check, and none when the run is stopped."""
     checks: list[Check] = []
+    live = bool(getattr(args, "live", False))
     try:
         with termination_raises():
             if not args.json:
                 print(f"{header()}\n", flush=True)
-            for check in iter_checks():
+            for check in iter_checks(live=live):
                 checks.append(check)
                 if not args.json:
                     print(render_check(check), flush=True)
@@ -299,12 +345,27 @@ def read_version(path: str, env: Mapping[str, str]) -> tuple[str | None, str | N
     return installed_version(path, env=env, spawn_guard=signals_held)
 
 
-def run_checks(context: Context | None = None) -> list[Check]:
+def run_checks(context: Context | None = None, *, live: bool = False) -> list[Check]:
     """Every check, in the documented order (``iter_checks``)."""
-    return list(iter_checks(context))
+    return list(iter_checks(context, live=live))
 
 
-def iter_checks(context: Context | None = None) -> Iterator[Check]:
+def _optional_cli_not_installed(check: Check) -> bool:
+    """Whether ``check`` is a CLI that is simply not installed on PATH (not a broken executable or
+    missing codex support), so when the other CLI is ready it is reported as skipped rather than a warning."""
+    cli = check.details.get("cli")
+    return (check.status == WARN and check.details.get("error") == "not_found"
+            and isinstance(cli, str) and cli in CLI_INSTALL and CLI_INSTALL[cli][1] in check.summary)
+
+
+def _mark_optional_skip(check: Check) -> None:
+    cli = check.details["cli"]
+    check.status = SKIP
+    check.summary = f"{CLI_NAMES[cli]}: not installed (optional; only `contexto run {cli}` needs it)"
+    check.action = None
+
+
+def iter_checks(context: Context | None = None, *, live: bool = False) -> Iterator[Check]:
     """Each check as it finishes, in the documented order. A check that raises is reported as failed
     (``guarded``): doctor must not die of the fault it is there to find. A CLI's line is held back only
     while it could still change: with neither CLI usable both fail, so an unusable ``claude`` waits for
@@ -322,12 +383,17 @@ def iter_checks(context: Context | None = None) -> Iterator[Check]:
             check, usable[cli] = without_codex_support(check), False
         on_path[cli] = check.details.get("path") is not None
         clis.append(check)
-        if any(usable.values()):  # one CLI is enough, so no line changes from here on
+        if any(usable.values()):  # one CLI is enough, so an uninstalled optional CLI is skipped, not warned
+            for pending in clis[shown:]:
+                if _optional_cli_not_installed(pending):
+                    _mark_optional_skip(pending)
             yield from clis[shown:]
             shown = len(clis)
     if not any(usable.values()):
         require_one_cli(clis)
     yield from clis[shown:]
+    # Read config.toml before upstream checks so upstreams reflect config.toml defaults when present.
+    yield guarded("config", "Config file", lambda: check_config(ctx))
     yield guarded("settings", "Claude Code settings", lambda: check_settings(ctx))
     per_cli: list[tuple[str, str, str, Callable[[], Check]]] = [
         ("claude-upstream", "claude", "Claude Code upstream", lambda: check_claude_upstream(ctx)),
@@ -343,6 +409,9 @@ def iter_checks(context: Context | None = None) -> Iterator[Check]:
         else:
             yield skipped(check_id, label, f"{cli} is not on PATH or cannot be run")
     yield guarded("store", "Store home", lambda: check_store(ctx.env, claude=usable["claude"]))
+    yield guarded("serve", "Serve", lambda: check_serve(ctx.env))
+    yield (guarded("statusline", "Status line", lambda: check_statusline(ctx)) if usable["claude"]
+           else skipped("statusline", "Status line", "claude is not on PATH or cannot be run"))
     yield guarded("mcp", "MCP server", lambda: check_mcp(ctx.env, ctx.cwd))
     # The launcher stops before this check only when `shutil.which` finds no `claude` (missing, not
     # executable, a broken symlink or a directory); one that is there but cannot start still meets the
@@ -350,6 +419,8 @@ def iter_checks(context: Context | None = None) -> Iterator[Check]:
     # `claude` line above (PR #258 round 6).
     yield (guarded("provider", "Cloud provider", lambda: check_provider(ctx)) if on_path["claude"]
            else skipped("provider", "Cloud provider", "claude is not on PATH or not executable"))
+    if live:
+        yield guarded("live-upstream", "Live upstream", lambda: check_live_upstream(ctx, usable=usable))
 
 
 def guarded(check_id: str, label: str, check: Callable[[], Check]) -> Check:
@@ -516,18 +587,43 @@ def source_text(source: str, env: Mapping[str, str] | None = None) -> str:
     return f"the env block of {settings_file(source.removeprefix('settings:'), env)}"
 
 
+def check_config(ctx: Context) -> Check:
+    """Validate optional ``$CONTEXTO_HOME/config.toml`` syntax and values without printing secrets."""
+    try:
+        path = config_path(env=ctx.env)
+    except (RuntimeError, OSError):
+        return Check("config", SKIP, "Config file: not checked, store home cannot be located")
+    try:
+        cfg = load_config(env=ctx.env)
+    except ConfigError as exc:
+        msg = str(exc).removeprefix(f"invalid config file {path}: ")
+        return Check("config", FAIL, f"Config file {path}: {msg}",
+                     f"Fix or remove {path} so contexto can start",
+                     {"path": str(path), "exists": True, "error": msg})
+    ctx.config = cfg
+    if not cfg.exists:
+        return Check("config", PASS, f"Config file: none at {path} (using built-in defaults)",
+                     details={"path": str(path), "exists": False, "settings": 0})
+    count = cfg.key_count()
+    return Check("config", PASS, f"Config file: read {path} ({count} setting{'' if count == 1 else 's'})",
+                 details={"path": str(path), "exists": True, "settings": count})
+
+
 def check_settings(ctx: Context) -> Check:
     """Each settings file ``contexto run claude`` reads from this directory: those of
     ``claude_settings_order``, then the managed settings file, which the cloud-provider check also reads
     (D70). Each is read, absent, or there and unusable, as ``contexto.upstream.read_settings_file``
     finds it, through the same ``SettingsFiles`` as the checks below. An unusable one is a warning that
     names it by scope and says what is wrong (``SettingsFile.problem``): nothing is taken from it, and
-    one that may turn on a cloud provider makes the ``provider`` check fail. A file that does not exist,
-    a directory, and one this user cannot open are absent: Claude Code cannot read them either."""
+    one that may turn on a cloud provider makes the ``provider`` check fail. A managed settings file
+    that exists is also warned about because managed settings outrank ``--settings`` and can bypass the
+    proxy (especially if it sets ``ANTHROPIC_BASE_URL``)."""
     files: list[dict[str, str]] = []
     wrong: list[str] = []
     may_switch = False
     read: list[str] = []
+    managed_present = False
+    managed_base_url = False
     paths = list(claude_settings_order(ctx.cwd, ctx.home, ctx.env))
     managed = managed_settings_path()
     if managed is not None:
@@ -542,15 +638,34 @@ def check_settings(ctx: Context) -> Check:
         elif found.data is not None:
             files.append({"kind": kind, "state": "read"})
             read.append(name)
+            if kind == MANAGED_KIND:
+                managed_present = True
+                if (settings_env(found.data, BASE_URL_KEY) or "").strip():
+                    managed_base_url = True
         else:
             files.append({"kind": kind, "state": "absent"})
-    details = {"files": files}
+    details: dict[str, Any] = {"files": files}
+    if managed_present:
+        details["managed_present"] = True
+        details["managed_sets_base_url"] = managed_base_url
     if wrong:
         step = "Fix or remove it: Contexto takes nothing from it (an upstream, a key helper)"
         if may_switch:
             step += (", and `contexto run claude` refuses to launch while it may turn on a cloud provider "
                      "(see the provider check)")
         return Check("settings", WARN, f"Claude Code settings: {'; '.join(wrong)}", step, details)
+    if managed_base_url:
+        return Check(
+            "settings", WARN,
+            f"Claude Code settings: read {' and '.join(read)}; managed settings set {BASE_URL_KEY}",
+            f"Organization-managed settings outrank `contexto run`'s --settings, so a managed {BASE_URL_KEY} "
+            "can make Claude Code bypass Contexto's proxy", details)
+    if managed_present:
+        return Check(
+            "settings", WARN,
+            f"Claude Code settings: read {' and '.join(read)} (managed settings outrank --settings)",
+            "Verify managed-settings.json does not set ANTHROPIC_BASE_URL or hook policies that bypass Contexto",
+            details)
     if read:
         return Check("settings", PASS, f"Claude Code settings: read {' and '.join(read)}", details=details)
     return Check("settings", PASS, "Claude Code settings: no settings file here or for this user", details=details)
@@ -588,6 +703,8 @@ def base_url_place(source: str, env: Mapping[str, str]) -> str:
     """Where Claude Code's upstream comes from, by ``contexto.upstream.Upstream.source``."""
     if source == "default":
         return f"the default: nothing sets {BASE_URL_KEY}"
+    if source == "config":
+        return "upstream in config.toml"
     return f"{BASE_URL_KEY} in {source_text(source, env)}"
 
 
@@ -605,7 +722,8 @@ def check_claude_upstream(ctx: Context) -> Check:
                          {"origin": None, "source": None, "provider": provider_key})
         place = f"{upstream.base_url_key} ({upstream.source})"
     else:
-        upstream = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+        upstream = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files,
+                                    config_upstream=ctx.config.upstream)
         place = base_url_place(upstream.source, ctx.env)
     details: dict[str, Any] = {"origin": url_origin(upstream.url), "source": upstream.source}
     if upstream.provider:
@@ -639,6 +757,8 @@ def codex_upstream_place(source: str, claude_source: str, env: Mapping[str, str]
     from contexto.codex import OPENAI_API_KEY_ENV, UPSTREAM_ENV  # here, not at import: see check_codex_upstream
     if source == "codex-env":
         return f"{UPSTREAM_ENV} in the environment"
+    if source == "codex-config":
+        return "codex_upstream in config.toml"
     if source == "openai-env":
         return f"{OPENAI_API_KEY_ENV} in the environment (OpenAI default)"
     if source.startswith("claude-"):
@@ -654,14 +774,16 @@ def check_codex_upstream(ctx: Context) -> Check:
     from contexto.codex import API_KEY_MODE, OPENAI_UPSTREAM, UPSTREAM_ENV, CodexLaunchError, codex_upstream_with_source
     from contexto.servecontract import names_service
 
-    claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files)
+    claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files,
+                              config_upstream=ctx.config.upstream)
     untrusted = (untrusted_note(f"env.{BASE_URL_KEY}", claude.ignored, "Pass --codex-upstream", ctx.env)
                  if claude.ignored else None)
     details: dict[str, Any] = {"origin": None, "source": None}
     if claude.ignored:
         details["ignored"] = list(claude.ignored)
     try:
-        target, source = codex_upstream_with_source(API_KEY_MODE, None, dict(ctx.env), claude.url, claude.source)
+        target, source = codex_upstream_with_source(API_KEY_MODE, None, dict(ctx.env), claude.url, claude.source,
+                                                    config_upstream=ctx.config.codex_upstream)
     except CodexLaunchError as exc:  # names a host at most, never the URL
         summary, _, remedy = str(exc).partition(". ")
         summary = summary.removeprefix("no upstream for Codex: ")
@@ -745,9 +867,11 @@ def check_codex_key(ctx: Context) -> Check:
         return Check("codex-key", WARN, f"Codex key helper: {KEY_HELPER_ENV} is set and blank, and `contexto run "
                      "codex` refuses a blank helper", f"Unset {KEY_HELPER_ENV} or set it to a command, or pass "
                      "--codex-key-helper to contexto run", {**details, "error": "blank"})
-    claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files)
+    claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files,
+                              config_upstream=ctx.config.upstream)
     try:
-        _, up_source = codex_upstream_with_source(API_KEY_MODE, None, dict(ctx.env), claude.url, claude.source)
+        _, up_source = codex_upstream_with_source(API_KEY_MODE, None, dict(ctx.env), claude.url, claude.source,
+                                                  config_upstream=ctx.config.codex_upstream)
     except CodexLaunchError:
         up_source = ""
     if up_source == "openai-env" and ctx.env.get(OPENAI_API_KEY_ENV, "").strip():
@@ -1027,3 +1151,281 @@ def check_provider(ctx: Context) -> Check:
                "unread": [{"source": place, "problem": problem} for place, problem in found.unread]}
     return Check("provider", FAIL, f"{note}: `contexto run claude` refuses to launch (exit 2)",
                  message.removeprefix(f"{note}. ") or None, details)
+
+
+# Serve, statusline, and optional --live upstream checks -----------------------------------------------
+
+
+def _check_private_serve_file(path: Path, name: str) -> str | None:
+    """Check owner/mode/regularity of ``serve.lock`` without following symlinks."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"{name} cannot be inspected ({type(exc).__name__})"
+    if stat.S_ISLNK(st.st_mode) or is_link_or_junction(path):
+        return f"{name} is a symlink"
+    if not stat.S_ISREG(st.st_mode):
+        return f"{name} is not a regular file"
+    if not is_owned_by_current_user(st):
+        return f"{name} belongs to another user"
+    if has_group_or_other_perms(st):
+        return f"{name} has mode {stat.S_IMODE(st.st_mode):04o} (must be 0600)"
+    return None
+
+
+def check_serve(env: Mapping[str, str]) -> Check:
+    """Check ``contexto serve`` status, lock, and token/state file permissions when configured."""
+    try:
+        home = contexto_home(env)
+    except (RuntimeError, OSError):
+        return skipped("serve", "Serve", "store home cannot be located")
+    present = [name for name in (TOKEN_FILE, LOCK_FILE, STATE_FILE) if os.path.lexists(home / name)]
+    if not present:
+        return Check("serve", SKIP, "Serve: not configured in this store home",
+                     details={"configured": False, "running": False})
+    problems: list[str] = []
+    if TOKEN_FILE in present:
+        try:
+            read_token(home)
+        except ServeFileError as exc:
+            problems.append(str(exc))
+    if LOCK_FILE in present:
+        lock_problem = _check_private_serve_file(home / LOCK_FILE, LOCK_FILE)
+        if lock_problem:
+            problems.append(lock_problem)
+    running = service_running(home)
+    state = None
+    if STATE_FILE in present:
+        try:
+            state = read_state(home)
+        except ServeFileError as exc:
+            problems.append(str(exc))
+    details: dict[str, Any] = {"configured": True, "running": running, "files": present}
+    if running:
+        live_state = running_state(home)
+        if live_state:
+            details["port"] = live_state["port"]
+            details["pid"] = live_state["pid"]
+    if problems:
+        details["problems"] = problems
+        return Check("serve", WARN, f"Serve: {'; '.join(problems)}",
+                     f"Fix permissions with `chmod 600` under {home}, or run `contexto serve --rotate-token`",
+                     details)
+    if running and state is not None:
+        pid = f" (pid {state['pid']})" if state.get("pid") is not None else ""
+        return Check("serve", PASS,
+                     f"Serve: running on 127.0.0.1:{state['port']}{pid}; file permissions ok (0600)",
+                     details=details)
+    if running:
+        return Check("serve", PASS, f"Serve: lock held ({LOCK_FILE}); starting or stopping", details=details)
+    if state is not None:
+        pid = f"pid {state['pid']}, " if state.get("pid") is not None else ""
+        return Check("serve", WARN,
+                     f"Serve: not running, but stale {STATE_FILE} remains ({pid}port {state['port']})",
+                     f"Remove stale {home / STATE_FILE} or restart `contexto serve`", details)
+    return Check("serve", PASS, "Serve: configured (not running); file permissions ok (0600)", details=details)
+
+
+def check_statusline(ctx: Context) -> Check:
+    """Check whether ``contexto run claude`` will install Contexto's status line or skip it."""
+    try:
+        home = contexto_home(ctx.env)
+    except (RuntimeError, OSError):
+        return skipped("statusline", "Status line", "store home cannot be located")
+    if (ctx.env.get(NO_STATUSLINE_ENV) or "").strip():
+        enabled = not statusline_opted_out(ctx.env)
+        off_source = "env" if not enabled else None
+    elif ctx.config.statusline is not None:
+        enabled = ctx.config.statusline
+        off_source = "config" if not enabled else None
+    else:
+        enabled = True
+        off_source = None
+    _, note = launch_status_line("doctor", home, ctx.cwd, enabled=enabled, env=ctx.env,
+                                 user_home=ctx.home, off_source=off_source)
+    details: dict[str, Any] = {"state": note}
+    if note == "added":
+        return Check("statusline", PASS, "Status line: Contexto's status line will be added in Claude Code",
+                     details=details)
+    if note.startswith("off:"):
+        return Check("statusline", SKIP, f"Status line: turned off ({note.removeprefix('off:')})", details=details)
+    notice = statusline_skip_notice(note) or f"status line skipped ({note})"
+    if note.startswith("own:"):
+        return Check("statusline", PASS, f"Status line: {notice}", details=details)
+    return Check("statusline", WARN, f"Status line: {notice}",
+                 "Fix the settings file or run `contexto statusline` from your own status line script", details)
+
+
+def _safe_http_value(value: str) -> bool:
+    """Whether ``value`` is valid HTTP header/target text (Latin-1, no CR/LF/NUL/control chars/surrogates)."""
+    if has_lone_surrogate(value):
+        return False
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        return False
+    try:
+        value.encode("latin-1")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _probe_http(url: str, *, headers: dict[str, str], path_suffix: str,
+                timeout: float = LIVE_TIMEOUT_S) -> dict[str, Any]:
+    """Lightweight reachability/TLS/auth probe against one upstream URL. Never returns secrets."""
+    parts = urlsplit(url)
+    origin = url_origin(url)
+    is_https = parts.scheme == "https"
+    host = parts.hostname or ""
+    port = parts.port or (443 if is_https else 80)
+    base_path = parts.path.rstrip("/")
+    target = (base_path + path_suffix) if not base_path.endswith(path_suffix) else base_path
+    if not target.startswith("/"):
+        target = "/" + target
+    if not _safe_http_value(target):
+        return {"origin": origin, "reachable": False, "tls": "unchecked" if is_https else "none",
+                "status": None, "auth": "unchecked", "error": "invalid target path"}
+    safe_headers = {k: v for k, v in headers.items() if _safe_http_value(k) and _safe_http_value(v)}
+    conn: http.client.HTTPConnection | None = None
+    try:
+        if is_https:
+            conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=ssl.create_default_context())
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("GET", target, headers={"User-Agent": f"contexto-doctor/{__version__}",
+                                             "Connection": "close", **safe_headers})
+        resp = conn.getresponse()
+        status = resp.status
+        tls = "ok" if is_https else "none"
+        has_auth = any(k.lower() in ("x-api-key", "authorization") for k in safe_headers)
+        if 200 <= status < 300:
+            auth = "ok" if has_auth else "unchecked"
+            return {"origin": origin, "reachable": True, "tls": tls, "status": status, "auth": auth, "error": None}
+        if status in (401, 403):
+            auth = "rejected" if has_auth else "unchecked"
+            return {"origin": origin, "reachable": True, "tls": tls, "status": status, "auth": auth, "error": None}
+        return {"origin": origin, "reachable": True, "tls": tls, "status": status, "auth": "unchecked", "error": None}
+    except ssl.SSLError as exc:
+        return {"origin": origin, "reachable": False, "tls": "failed", "status": None, "auth": "unchecked",
+                "error": f"TLS error ({type(exc).__name__})"}
+    except (OSError, http.client.HTTPException, ValueError, UnicodeError) as exc:
+        return {"origin": origin, "reachable": False, "tls": "unchecked" if is_https else "none",
+                "status": None, "auth": "unchecked", "error": getattr(exc, "strerror", None) or type(exc).__name__}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+def _claude_probe_headers(ctx: Context) -> dict[str, str]:
+    headers = {"anthropic-version": "2023-06-01"}
+    api_key = claude_env_value("ANTHROPIC_API_KEY", env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+    if api_key.value and api_key.value.strip():
+        headers["x-api-key"] = api_key.value.strip()
+        return headers
+    auth_tok = claude_env_value("ANTHROPIC_AUTH_TOKEN", env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+    if auth_tok.value and auth_tok.value.strip():
+        headers["Authorization"] = f"Bearer {auth_tok.value.strip()}"
+    return headers
+
+
+def _probe_allowed(up: Upstream, ctx: Context) -> bool:
+    """Whether ``up`` is a valid non-service http(s) URL that ``contexto doctor --live`` may contact."""
+    if not url_origin(up.url):
+        return False
+    try:
+        check_upstream(up)
+    except LaunchError:
+        return False
+    try:
+        home = contexto_home(ctx.env)
+    except (RuntimeError, OSError):
+        home = None
+    if home is not None:
+        try:
+            check_not_service(up, home, "contexto doctor --live")
+        except LaunchError:
+            return False
+    return True
+
+
+def _is_openai_host(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").rstrip(".").lower()
+    return host == "openai.com" or host.endswith(".openai.com")
+
+
+def check_live_upstream(ctx: Context, *, usable: Mapping[str, bool],
+                        timeout: float = LIVE_TIMEOUT_S) -> Check:
+    """Optional ``--live`` check: contact resolved upstream(s) to verify reachability, TLS, and auth.
+    Never sends credentials to an untrusted project upstream (D52) or a non-OpenAI Codex gateway, and
+    never probes an invalid URL or ``contexto serve``."""
+    probes: list[dict[str, Any]] = []
+    if usable.get("claude"):
+        provider_key, _ = active_cloud_provider(env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+        up: Upstream | None
+        if provider_key is not None:
+            try:
+                up = resolve_provider_upstream(provider_key, None, env=ctx.env, cwd=ctx.cwd, home=ctx.home,
+                                               files=ctx.files)
+            except ValueError:
+                up = None
+        else:
+            up = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files,
+                                  config_upstream=ctx.config.upstream)
+        if up is not None and _probe_allowed(up, ctx):
+            if up.provider is not None:
+                res = _probe_http(up.url, headers={}, path_suffix="", timeout=timeout)
+            else:
+                from_project = up.source.removeprefix("settings:") in PROJECT_KINDS
+                untrusted = from_project and not folder_trusted(ctx.cwd, ctx.home, ctx.env)
+                headers = {"anthropic-version": "2023-06-01"} if untrusted else _claude_probe_headers(ctx)
+                res = _probe_http(up.url, headers=headers, path_suffix="/v1/models", timeout=timeout)
+                if untrusted and res["auth"] == "unchecked":
+                    res["auth"] = "skipped_untrusted"
+            probes.append({"cli": "claude", **res})
+    if usable.get("codex"):
+        from contexto.codex import API_KEY_MODE, CodexLaunchError, codex_upstream_with_source
+
+        claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files,
+                                  config_upstream=ctx.config.upstream)
+        try:
+            target, source = codex_upstream_with_source(API_KEY_MODE, None, dict(ctx.env), claude.url, claude.source,
+                                                        config_upstream=ctx.config.codex_upstream)
+        except CodexLaunchError:
+            target, source = None, ""
+        if target and _probe_allowed(Upstream(target, source), ctx):
+            codex_headers: dict[str, str] = {}
+            openai_key = (ctx.env.get("OPENAI_API_KEY") or "").strip()
+            if openai_key and _is_openai_host(target):
+                codex_headers["Authorization"] = f"Bearer {openai_key}"
+            res = _probe_http(target, headers=codex_headers, path_suffix="/models", timeout=timeout)
+            probes.append({"cli": "codex", **res})
+    if not probes:
+        return Check("live-upstream", SKIP, "Live upstream: no usable upstream URL to probe", details={"probes": []})
+    failures = [p for p in probes if not p["reachable"]]
+    warnings = [p for p in probes if p["reachable"] and (p["auth"] == "rejected" or (p["status"] or 0) >= 500)]
+    parts = []
+    for p in probes:
+        if not p["reachable"]:
+            parts.append(f"{p['cli']} {p['origin']} unreachable ({p['error']})")
+        elif p["auth"] == "rejected":
+            parts.append(f"{p['cli']} {p['origin']} reachable (HTTP {p['status']}, auth rejected)")
+        elif (p["status"] or 0) >= 500:
+            parts.append(f"{p['cli']} {p['origin']} reachable (HTTP {p['status']})")
+        else:
+            tls_note = ", TLS ok" if p["tls"] == "ok" else ""
+            auth_note = (", auth ok" if p["auth"] == "ok" else
+                         ", auth skipped (untrusted project)" if p["auth"] == "skipped_untrusted" else "")
+            parts.append(f"{p['cli']} {p['origin']} reachable (HTTP {p['status']}{tls_note}{auth_note})")
+    summary = "Live upstream: " + "; ".join(parts)
+    details = {"probes": probes}
+    if failures:
+        return Check("live-upstream", FAIL, summary,
+                     "Check network connectivity, DNS, TLS certificates, or your upstream URL", details)
+    if warnings:
+        return Check("live-upstream", WARN, summary,
+                     "Check your API key/auth token or upstream server health", details)
+    return Check("live-upstream", PASS, summary, details=details)

@@ -139,7 +139,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from contexto.canonical import JSONTooDeepError, has_lone_surrogate, loads_bounded
+from contexto.cliversions import check_disabled as version_check_disabled
 from contexto.cliversions import launch_check
+from contexto.config import FileConfig
 from contexto.hints import HINT_HEADERS_KEY, HINT_MARKER_KEY, HINT_STATES, OFF, STRIPPED, hint_headers_state
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
 from contexto.mcp import TOOLS as MCP_TOOLS
@@ -155,8 +157,10 @@ from contexto.platform_compat import (
 )
 from contexto.private import affinity_salt, open_private, private_dir
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
-from contexto.stats import fault_notices, log_unwritable_message, print_exit_summary, quiet_from_env
-from contexto.statusline import launch_status_line
+from contexto.stats import QUIET_ENV, fault_notices, log_unwritable_message, print_exit_summary, quiet_from_env
+from contexto.statusline import NO_STATUSLINE_ENV, launch_status_line
+from contexto.statusline import opted_out as statusline_opted_out
+from contexto.statusline import skip_notice as statusline_skip_notice
 from contexto.store import LIVE_LOCK, SessionStore
 from contexto.store.pinned import render_carried
 from contexto.store.project import project_root, read_meta, recorded_root
@@ -208,7 +212,9 @@ WATCHDOG_EXITED = b"exited\n"  # the child was reaped: its pid may be reused
 # after the CLI's name). The codex options are not listed: they only apply before 'codex'.
 RUN_OPTIONS = {"--bound": True, "--allow-large-bound": False, "--window-fraction": True, "--headroom-floor": True,
                "--session": True, "--upstream": True, "--observe-thinking": False, "--no-version-check": False,
-               "--quiet": False, "--no-statusline": False, "--no-project-memory": False, "--no-in-turn-paging": False}
+               "--version-check": False, "--quiet": False, "--no-quiet": False, "--no-statusline": False,
+               "--statusline": False, "--no-project-memory": False, "--project-memory": False,
+               "--no-in-turn-paging": False, "--in-turn-paging": False}
 ENV_VALUE_SHOWN = 40  # characters of an unrecognised variable's value quoted on stderr
 # D63: set to 0, false, off or no to turn in-turn paging off, like --no-in-turn-paging.
 IN_TURN_PAGING_ENV = "CONTEXTO_IN_TURN_PAGING"
@@ -291,6 +297,11 @@ class LaunchOptions:
     statusline: bool = True  # D64: add Contexto's status line when the user has none (contexto.statusline)
     project_memory: bool = True  # False: --no-project-memory (D69)
     in_turn_paging: bool = True  # D63: page inside a running turn (rule 5)
+    config_upstream: str | None = None  # optional upstream default from config.toml
+    statusline_source: str | None = None  # "flag", "env", "config", "cli", or None
+    project_memory_explicit: bool = False  # True when CLI explicitly set --project-memory / --no-project-memory
+    project_memory_source: str | None = None  # "cli", "env", "config", or None
+    version_check_explicit: bool = False  # True when CLI explicitly set --version-check / --no-version-check
 
 
 def _validate_settings_object(data: Any, label: str) -> dict[str, Any]:
@@ -548,6 +559,7 @@ def check_cloud_provider(cwd: Path, env: Mapping[str, str] | None = None, *, hom
 
 def claude_launch_settings(explicit_upstream: str | None, cwd: Path, env: Mapping[str, str] | None = None, *,
                            home: Path | None = None, managed: Path | None = None,
+                           config_upstream: str | None = None,
                            extra_settings: dict[str, Any] | None = None,
                            files: SettingsFiles | None = None) -> tuple[Upstream, str]:
     """Everything ``contexto run claude`` takes from Claude Code's settings files (and any user
@@ -567,7 +579,7 @@ def claude_launch_settings(explicit_upstream: str | None, cwd: Path, env: Mappin
             raise LaunchError(str(exc), EXIT_USAGE) from None
     else:
         upstream = resolve_upstream(explicit_upstream, env=env, cwd=cwd, home=home, files=files,
-                                    extra_settings=extra_settings)
+                                    config_upstream=config_upstream, extra_settings=extra_settings)
     return upstream, hint_headers_state(env=env, cwd=cwd, home=home, files=files, managed=managed,
                                         extra_settings=extra_settings)
 
@@ -1103,6 +1115,10 @@ def resume_command(options: LaunchOptions, session_id: str, cli_session: str) ->
         args.append("--observe-thinking")
     if not options.version_check:
         args.append("--no-version-check")
+    if options.quiet:
+        args.append("--quiet")
+    if not options.statusline:
+        args.append("--no-statusline")
     if not options.project_memory:
         args.append("--no-project-memory")
     if not options.in_turn_paging:
@@ -1126,16 +1142,22 @@ def open_session(home: Path, session_id: str, workdir: Path) -> Any:
 
 
 def project_memory_wanted(options: LaunchOptions, stderr=None, env: dict[str, str] | None = None) -> bool:
-    """Whether this launch asks for project memory (D69): not with ``--no-project-memory``, and not with
-    ``CONTEXTO_PROJECT_MEMORY`` (``contexto.paths.project_memory_env``) set to an off value. A value of
-    the variable Contexto does not know gets one line on stderr naming the ones it does, and changes
-    nothing. Shared by claude and codex."""
+    """Whether this launch asks for project memory (D69): explicit CLI flag wins, else
+    ``CONTEXTO_PROJECT_MEMORY`` (``contexto.paths.project_memory_env``), else ``config.toml``, else on.
+    A value of the variable Contexto does not know gets one line on stderr naming the ones it does, and
+    changes nothing. Shared by claude and codex."""
+    if options.project_memory_explicit or options.project_memory_source == "cli":
+        return options.project_memory
     on, unknown = project_memory_env(env)
     if unknown is not None:
         shown = unknown if len(unknown) <= ENV_VALUE_SHOWN else unknown[:ENV_VALUE_SHOWN] + "..."
         print(f"contexto: {PROJECT_MEMORY_ENV}={shown!r} is not a value Contexto knows and is ignored: 0, false, "
               f"off or no turns project memory off; 1, true, on, yes or unset leaves it on",
               file=stderr or sys.stderr, flush=True)
+        return options.project_memory
+    active = env if env is not None else os.environ
+    if options.project_memory_source == "config" and (active.get(PROJECT_MEMORY_ENV) or "").strip():
+        return on
     return options.project_memory and on
 
 
@@ -1471,17 +1493,95 @@ def run_claude(options: LaunchOptions, *, stderr=None) -> int:
             return 128 + exc.signum
 
 
-def options_from_args(args: Any) -> LaunchOptions:
-    """LaunchOptions from the ``contexto run`` argparse namespace (also used by contexto.codex)."""
+def _cli_bool(args: Any, true_attr: str, false_attr: str) -> bool | None:
+    """Explicit CLI boolean choice from paired flags (None when neither flag was passed)."""
+    if getattr(args, true_attr, False):
+        return True
+    if getattr(args, false_attr, False):
+        return False
+    return None
+
+
+def _resolve_bool(cli_value: bool | None, env_set: bool, env_value: bool, config_value: bool | None,
+                  default: bool) -> bool:
+    """Precedence: explicit CLI > explicit env > config.toml > built-in default."""
+    if cli_value is not None:
+        return cli_value
+    if env_set:
+        return env_value
+    if config_value is not None:
+        return config_value
+    return default
+
+
+def options_from_args(args: Any, *, config: FileConfig | None = None,
+                      env: Mapping[str, str] | None = None) -> LaunchOptions:
+    """LaunchOptions from the ``contexto run`` argparse namespace (also used by contexto.codex).
+    Precedence: explicit CLI flags > environment variables > ``config.toml`` > built-in defaults."""
+    active_env = os.environ if env is None else env
+    cfg = config if config is not None else FileConfig()
+
+    bound_arg = getattr(args, "bound", None)
+    bound = bound_arg if bound_arg is not None else (cfg.bound if cfg.bound is not None else DEFAULT_BOUND)
+
+    allow_large = bool(getattr(args, "allow_large_bound", False)) or bool(cfg.allow_large_bound or False)
+
+    wf_arg = getattr(args, "window_fraction", None)
+    window_fraction = wf_arg if wf_arg is not None else cfg.window_fraction
+
+    hf_arg = getattr(args, "headroom_floor", None)
+    headroom_floor = hf_arg if hf_arg is not None else cfg.headroom_floor
+
+    observe_thinking = bool(getattr(args, "observe_thinking", False)) or bool(cfg.observe_thinking or False)
+
+    vc_cli = _cli_bool(args, "version_check_on", "no_version_check")
+    vc_env_set = bool((active_env.get("CONTEXTO_NO_VERSION_CHECK") or "").strip())
+    version_check = _resolve_bool(vc_cli, vc_env_set, not version_check_disabled(active_env), cfg.version_check, True)
+
+    q_cli = _cli_bool(args, "quiet", "quiet_off")
+    q_env_set = bool((active_env.get(QUIET_ENV) or "").strip())
+    quiet = _resolve_bool(q_cli, q_env_set, quiet_from_env(active_env), cfg.quiet, False)
+
+    sl_cli = _cli_bool(args, "statusline_on", "no_statusline")
+    sl_env_set = bool((active_env.get(NO_STATUSLINE_ENV) or "").strip())
+    if sl_cli is not None:
+        statusline = sl_cli
+        statusline_source = "flag" if not statusline else "cli"
+    elif sl_env_set:
+        statusline = not statusline_opted_out(active_env)
+        statusline_source = "env" if not statusline else None
+    elif cfg.statusline is not None:
+        statusline = cfg.statusline
+        statusline_source = "config" if not statusline else None
+    else:
+        statusline = True
+        statusline_source = None
+
+    pm_cli = _cli_bool(args, "project_memory_on", "no_project_memory")
+    pm_env_set = bool((active_env.get(PROJECT_MEMORY_ENV) or "").strip())
+    pm_env_on, pm_env_unknown = project_memory_env(dict(active_env)) if pm_env_set else (True, None)
+    if pm_cli is not None:
+        project_memory, pm_source = pm_cli, "cli"
+    elif pm_env_set and pm_env_unknown is None:
+        project_memory, pm_source = pm_env_on, "env"
+    elif cfg.project_memory is not None:
+        project_memory, pm_source = cfg.project_memory, "config"
+    else:
+        project_memory, pm_source = True, None
+
+    itp_cli = _cli_bool(args, "in_turn_paging_on", "no_in_turn_paging")
+    itp_env_set = bool((active_env.get(IN_TURN_PAGING_ENV) or "").strip())
+    in_turn = _resolve_bool(itp_cli, itp_env_set, in_turn_paging(False, dict(active_env)), cfg.in_turn_paging, True)
+
     return LaunchOptions(
-        claude_args=list(getattr(args, "cli_args", None) or []), bound=args.bound, session_id=args.session,
-        upstream=args.upstream, observe_thinking=args.observe_thinking, allow_large_bound=args.allow_large_bound,
-        window_fraction=args.window_fraction, headroom_floor=args.headroom_floor,
-        version_check=not getattr(args, "no_version_check", False),
-        quiet=bool(getattr(args, "quiet", False)) or quiet_from_env(),
-        statusline=not getattr(args, "no_statusline", False),
-        project_memory=not getattr(args, "no_project_memory", False),
-        in_turn_paging=in_turn_paging(getattr(args, "no_in_turn_paging", False)))
+        claude_args=list(getattr(args, "cli_args", None) or []), bound=bound, session_id=args.session,
+        upstream=args.upstream, observe_thinking=observe_thinking, allow_large_bound=allow_large,
+        window_fraction=window_fraction, headroom_floor=headroom_floor,
+        version_check=version_check, quiet=quiet, statusline=statusline,
+        project_memory=project_memory, in_turn_paging=in_turn,
+        config_upstream=cfg.upstream, statusline_source=statusline_source,
+        project_memory_explicit=pm_cli is not None, project_memory_source=pm_source,
+        version_check_explicit=vc_cli is not None)
 
 
 def check_options(options: LaunchOptions) -> None:
@@ -1557,7 +1657,8 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
 
 
 def check_cli_version(cli: str, binary: str, store: Any, *, enabled: bool = True, stderr=None,
-                      installed: tuple[str | None, str | None] | None = None) -> bool:
+                      installed: tuple[str | None, str | None] | None = None,
+                      explicit: bool = False) -> bool:
     """D38: log the installed CLI's version (``<binary> --version``, a few seconds at most) and print one
     warning line when Contexto was not tested with it. Never raises; a CLI whose version cannot be read
     is logged, not warned about. Returns False only when the user pressed Ctrl+C during the check: the
@@ -1565,7 +1666,8 @@ def check_cli_version(cli: str, binary: str, store: Any, *, enabled: bool = True
     without a traceback. Shared by claude and codex; ``installed`` is a version already read (D59)."""
     out = stderr or sys.stderr
     try:
-        event, warning = launch_check(cli, binary, enabled=enabled, installed=installed)
+        env = {k: v for k, v in os.environ.items() if k != "CONTEXTO_NO_VERSION_CHECK"} if explicit else None
+        event, warning = launch_check(cli, binary, enabled=enabled, env=env, installed=installed)
     except KeyboardInterrupt:  # the check killed its --version process group before this
         event, warning = {"event": "cli_version_check", "cli": cli, "error": "interrupted"}, None
     try:
@@ -1685,7 +1787,9 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         return run_child([claude, *options.claude_args], stderr=stderr)
     # D70: the provider check, the upstream, the hint header state and OAuth check, from one read of each file.
     settings_files = SettingsFiles()
-    upstream, hint_headers = claude_launch_settings(options.upstream, Path.cwd(), extra_settings=user_settings,
+    upstream, hint_headers = claude_launch_settings(options.upstream, Path.cwd(),
+                                                    config_upstream=options.config_upstream,
+                                                    extra_settings=user_settings,
                                                     files=settings_files)
     check_not_service(upstream, contexto_home(), "contexto run claude")
     check_upstream(upstream)
@@ -1717,11 +1821,12 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         tmp = Path(tempfile.mkdtemp(prefix="contexto-run-"))  # mode 0700, removed on exit
         watchdog = Watchdog.start(tmp, store)
         # D64: a statusLine only when it cannot replace one of the user's; the note says which it was.
-        status_line, status_note = launch_status_line(session_id, home, Path.cwd(), enabled=options.statusline)
+        status_line, status_note = launch_status_line(session_id, home, Path.cwd(), enabled=options.statusline,
+                                                      off_source=options.statusline_source)
         merged_settings, user_had_statusline = merge_settings(
             user_settings, settings_payload(proxy.url, hint_headers, base_url_key=upstream.base_url_key), status_line
         )
-        if user_had_statusline:
+        if user_had_statusline and not status_note.startswith("off:"):
             status_note = "user_flag"
         settings = write_private_json(tmp, "settings.json", merged_settings)
         mcp = write_private_json(tmp, "mcp.json", mcp_payload(session_id, home))
@@ -1732,11 +1837,15 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
                    "hint_headers": hint_headers, "statusline": status_note})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
+        skip_msg = statusline_skip_notice(status_note)
+        if skip_msg and (not options.quiet or status_note.startswith(("unreadable:", "error", "unsafe_path"))):
+            print(f"contexto: {skip_msg}", file=stderr, flush=True)
         oauth_note = _oauth_guidance_line(upstream, Path.cwd(), user_settings, files=settings_files)
         if oauth_note:
             print(f"contexto: {oauth_note}", file=stderr, flush=True)
         project_memory_notice(store, stderr, engine_pin_budget(config))  # D69: what it carries, or nothing
-        if not check_cli_version("claude", claude, store, enabled=options.version_check, stderr=stderr):
+        if not check_cli_version("claude", claude, store, enabled=options.version_check, stderr=stderr,
+                                 explicit=options.version_check_explicit):
             code = EXIT_INTERRUPTED
             return code
         warning = start_warning(options.bound, options.headroom_floor, assumed_overhead())

@@ -8,6 +8,7 @@ import os
 import plistlib
 import stat
 import subprocess
+import sys
 
 import pytest
 
@@ -55,7 +56,8 @@ def test_launchd_plist_generation_and_install_uninstall(tmp_path):
     )
     assert target == user_home / "Library" / "LaunchAgents" / daemon.LAUNCHD_FILENAME
     assert target.exists()
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert any(c[:2] == ["launchctl", "bootstrap"] for c in cmds)
 
     code, msg = daemon.start_daemon(platform="darwin", home_dir=user_home, runner=_fake_runner(ran), uid=501)
@@ -80,7 +82,8 @@ def test_systemd_unit_generation_and_install_uninstall(tmp_path):
     unit = daemon.systemd_unit(home, argv)
     assert "[Unit]" in unit and "[Service]" in unit and "[Install]" in unit
     assert '"/opt/py 3/python"' in unit
-    assert f'Environment="CONTEXTO_HOME={home}"' in unit
+    escaped_home = str(home).replace("\\", "\\\\")
+    assert f'Environment="CONTEXTO_HOME={escaped_home}"' in unit
     assert "Restart=on-failure" in unit
 
     ran: list[list[str]] = []
@@ -90,7 +93,9 @@ def test_systemd_unit_generation_and_install_uninstall(tmp_path):
         start_now=True, runner=_fake_runner(ran),
     )
     assert target == xdg / "systemd" / "user" / daemon.SYSTEMD_UNIT_NAME
-    assert target.exists() and stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert target.exists()
+    if sys.platform != "win32":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert ["systemctl", "--user", "daemon-reload"] in cmds
     assert ["systemctl", "--user", "enable", "--now", daemon.SYSTEMD_UNIT_NAME] in cmds
 
@@ -111,6 +116,7 @@ def test_daemon_cli_install_no_start_and_status(tmp_path, monkeypatch, capsys):
     user_home.mkdir()
     monkeypatch.setenv("CONTEXTO_HOME", str(home))
     monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("USERPROFILE", str(user_home))
     assert cli.main(["daemon", "install", "--platform", "darwin", "--no-start", "--port", "7845"]) == 0
     out = capsys.readouterr().out
     assert "installed" in out
@@ -142,7 +148,8 @@ def test_setup_claude_ide_preserves_existing_and_undo_restores_exact_bytes(tmp_p
     assert updated["theme"] == "dark" and updated["env"]["KEEP"] == "yes"
     assert updated["env"]["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:7837/{token}"
     assert "mcp__contexto__contexto_search" in updated["permissions"]["allow"]
-    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        assert stat.S_IMODE(settings_path.stat().st_mode) == 0o600
     assert "contexto" in json.loads(claude_json_path.read_text())["mcpServers"]
 
     # Idempotent re-run at a different port preserves the original pre-Contexto backup!
@@ -153,7 +160,8 @@ def test_setup_claude_ide_preserves_existing_and_undo_restores_exact_bytes(tmp_p
     undo_notes = setup.undo_target("claude-ide", home=home)
     assert len(undo_notes) == 2
     assert settings_path.read_text() == original_settings
-    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o644
+    if sys.platform != "win32":
+        assert stat.S_IMODE(settings_path.stat().st_mode) == 0o644
     assert not claude_json_path.exists()
     with pytest.raises(setup.SetupError, match="no setup backup"):
         setup.undo_target("claude-ide", home=home)
@@ -191,7 +199,9 @@ def test_setup_and_undo_for_opencode_codex_and_cursor(tmp_path, target):
     setup.setup_target(target, home=home, port=7837, user_home=user_home, env=env)
     token = ensure_token(home)
     after = cfg.read_text()
-    assert token in after and stat.S_IMODE(cfg.stat().st_mode) == 0o600
+    assert token in after
+    if sys.platform != "win32":
+        assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
     if target == "opencode":
         parsed = json.loads(after)
         assert parsed["model"] == "claude-sonnet-4"
@@ -240,6 +250,7 @@ def test_setup_cli_roundtrip(tmp_path, monkeypatch, capsys):
     user_home.mkdir()
     monkeypatch.setenv("CONTEXTO_HOME", str(home))
     monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("USERPROFILE", str(user_home))
     assert cli.main(["setup", "cursor", "--port", "7855"]) == 0
     assert (user_home / ".cursor" / "mcp.json").exists()
     assert cli.main(["setup", "cursor", "--undo"]) == 0
@@ -253,7 +264,8 @@ def test_daemon_rejects_control_chars_escapes_dollar_and_propagates_errors(tmp_p
     unit = daemon.systemd_unit(home, argv)
     # ExecStart doubles $, Environment keeps $ literal
     assert '"http://127.0.0.1:4000/$$var"' in unit
-    assert f"Environment=CONTEXTO_HOME={home}" in unit or f'Environment="CONTEXTO_HOME={home}"' in unit
+    escaped_home = str(home).replace("\\", "\\\\")
+    assert f"Environment=CONTEXTO_HOME={escaped_home}" in unit or f'Environment="CONTEXTO_HOME={escaped_home}"' in unit
     assert "$$val" not in unit
 
     # Directive injection via newline is rejected

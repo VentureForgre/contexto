@@ -44,14 +44,16 @@ def test_sessions_list_text_and_json_most_recent_first(home, capsys):
     code, out, _ = run(capsys, "sessions", "list")
     assert code == 0
     lines = out.splitlines()
-    assert lines[0].split() == ["ID", "CREATED", "PAGES", "RECORDS", "LAST", "ACTIVITY", "SIZE"]
+    assert lines[0].split() == ["ID", "CLI", "CREATED", "PAGES", "RECORDS", "PEAK", "FAULTS",
+                                "LAST", "ACTIVITY", "SIZE"]
     assert [ln.split()[0] for ln in lines[1:-1]] == ["newer", "older"]
     assert lines[-1].startswith("Total: ") and lines[-1].endswith(" in 2 sessions")
     code, out, _ = run(capsys, "sessions", "list", "--json")
     data = json.loads(out)
     assert [d["id"] for d in data] == ["newer", "older"]
     assert data[0]["pages"] == 1 and data[0]["records"] == 2 and data[1]["records"] == 0
-    assert set(data[0]) == {"id", "created", "pages", "records", "last_activity", "size_bytes"}
+    assert set(data[0]) == {"id", "cli", "created", "pages", "records", "peak_tokens", "faults",
+                            "last_activity", "size_bytes"}
     assert data[0]["size_bytes"] > 0
 
 
@@ -296,3 +298,22 @@ def test_mcp_home_option_is_expanded_and_absolute(tmp_path, monkeypatch, value):
     assert cli.main(["mcp", "--session", "s1", f"--home={value}"]) == 0
     assert seen["dir"] == expected / "sessions" / "s1" and seen["dir"].is_absolute()
     assert not (tmp_path / "~").exists() and not (tmp_path / "ignored").exists()
+
+
+def test_sessions_list_displays_cli_peak_tokens_and_fault_badge(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    s = SessionStore(home, "obs1")
+    (s.dir / "log.jsonl").write_text(
+        json.dumps({"ts": "2026-10-01T12:00:00Z", "event": "launch", "cli": "claude",
+                    "config": {"bound": 150_000}}) + "\n"
+        + json.dumps({"ts": "2026-10-01T12:00:01Z", "event": "request", "method": "POST", "path": "/v1/messages",
+                      "status": 200, "transform_events": [{"event": "request", "main": True}],
+                      "usage": {"input_tokens": 12_000, "cache_read_input_tokens": 30_000}}) + "\n"
+        + json.dumps({"ts": "2026-10-01T12:00:02Z", "event": "proxy_error", "error": "boom"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONTEXTO_HOME", str(home))
+    assert cli.main(["sessions", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "CLI" in out and "PEAK" in out and "FAULTS" in out
+    assert "obs1" in out and "claude" in out and "42,000" in out and "!1" in out

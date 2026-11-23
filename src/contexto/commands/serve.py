@@ -56,7 +56,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--allow-local-origin", action="store_true",
                         help="allow token-authenticated requests carrying a local/webview Origin header "
                              "(vscode-webview://, localhost, 127.0.0.1, or an --allow-host)")
-    parser.add_argument("--bound", type=int, default=DEFAULT_BOUND,
+    parser.add_argument("--bound", type=int, default=None,
                         help=f"upstream prompt bound in tokens, for every session (default {DEFAULT_BOUND:,}; "
                              f"above {BOUND_GUARD:,} needs --allow-large-bound)")
     parser.add_argument("--allow-large-bound", action="store_true",
@@ -69,13 +69,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--observe-thinking", action="store_true",
                         help="add the thinking-binding beta so dropped thinking is reported and logged "
                              "(changes the request: one extra anthropic-beta flag)")
-    parser.add_argument("--no-in-turn-paging", action="store_true",
-                        help="do not page inside a running turn: a tool loop that outgrows the bound is sent "
-                             "whole, as before v0.6.0 (also CONTEXTO_IN_TURN_PAGING=0)")
-    parser.add_argument("--max-sessions", type=int, default=DEFAULT_MAX_SESSIONS,
+    itp = parser.add_mutually_exclusive_group()
+    itp.add_argument("--no-in-turn-paging", action="store_true",
+                     help="do not page inside a running turn: a tool loop that outgrows the bound is sent "
+                          "whole, as before v0.6.0 (also CONTEXTO_IN_TURN_PAGING=0)")
+    itp.add_argument("--in-turn-paging", dest="in_turn_paging_on", action="store_true",
+                     help=argparse.SUPPRESS)
+    parser.add_argument("--max-sessions", type=int, default=None,
                         help=f"sessions open at once (default {DEFAULT_MAX_SESSIONS}); the least recently used "
                              "one is closed to make room, and reopened by its next request")
-    parser.add_argument("--idle-minutes", type=float, default=DEFAULT_IDLE_MINUTES,
+    parser.add_argument("--idle-minutes", type=float, default=None,
                         help=f"close a session idle this long (default {DEFAULT_IDLE_MINUTES:g}); its next "
                              "request reopens it")
     parser.add_argument("--forward-hint-headers", action="store_true",

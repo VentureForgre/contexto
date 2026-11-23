@@ -12,8 +12,9 @@ install it and how to start it.
   `/clear`, `/resume` and `/compact`.
 - [codex.md](codex.md): `contexto run codex` in API-key mode: the key helper, the Codex upstream,
   and the `CODEX_HOME` Contexto sets up.
-- [run-reference.md](run-reference.md): the options of `contexto run`, what the launcher does,
-  `contexto proxy`, the environment variables, and the supported upstreams.
+- [run-reference.md](run-reference.md): the options of `contexto run`, `$CONTEXTO_HOME/config.toml`
+  defaults, what the launcher does, `contexto proxy`, the environment variables, and the supported
+  upstreams.
 - [serve.md](serve.md): `contexto serve`, the engine as a local service for clients Contexto does
   not launch (IDE extensions, the desktop app, the Agent SDK, CI): the token, client settings,
   routing, the files it writes, its limits, and recipes for the Agent SDK, the VS Code extension
@@ -21,7 +22,7 @@ install it and how to start it.
 - [cliproxyapi.md](cliproxyapi.md): running Contexto with a CLIProxyAPI instance as the upstream:
   setup, checks, and what was tested.
 - [sessions.md](sessions.md): how to tell that Contexto is working, what a session stores and
-  where, and the commands that inspect and remove sessions.
+  where, and the commands that inspect, tail (`contexto logs`), and remove sessions.
 - [events.md](events.md): every event in a session's `log.jsonl`: who writes it, where it appears,
   what it means, and its fields.
 - [stats.md](stats.md): the summary `contexto run` prints at exit and `contexto stats`: every

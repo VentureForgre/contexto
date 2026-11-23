@@ -169,6 +169,11 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     started = output.utc_now()
+    finished = started
+    written: list[Path] = []
+    differences: list[str] = []
+    failed: list[str] = []
+    data: dict[str, object] = {}
     try:
         with launcher.LaunchSignals() as signals:  # SIGTERM, SIGHUP and the rest unwind like Ctrl+C
             try:
@@ -183,6 +188,15 @@ def run(args: argparse.Namespace) -> int:
                 else:
                     with tempfile.TemporaryDirectory(prefix="contexto-bench-replay-") as scratch:
                         measured = session.replay(script, Path(scratch))
+                finished = output.utc_now()
+                differences = (trace.differences(pinned_trace["expected"], trace.expected(measured))
+                               if pinned_trace else [])
+                failed = output.failures(script, measured, differences)
+                manifest = output.manifest(script, turns, measured, __version__, pinned, started, finished)
+                rows = output.request_rows(script, measured)
+                data = output.results(script, manifest, rows, measured, pinned, differences, failed, recording)
+                if args.out is not None:
+                    written = output.write(args.out, script, manifest, rows, measured.reach, data)
             finally:
                 signals.disarm()
     except (KeyboardInterrupt, launcher.Terminated) as exc:
@@ -198,17 +212,10 @@ def run(args: argparse.Namespace) -> int:
     except (session.ReplayError, OSError) as exc:
         _error(f"the replay stopped: {exc}")
         return EXIT_FAILED
-    finished = output.utc_now()
 
-    differences = trace.differences(pinned_trace["expected"], trace.expected(measured)) if pinned_trace else []
-    failed = output.failures(script, measured, differences)
-    manifest = output.manifest(script, turns, measured, __version__, pinned, started, finished)
-    rows = output.request_rows(script, measured)
-    data = output.results(script, manifest, rows, measured, pinned, differences, failed, recording)
     print("\n".join(output.summary(script, data)))
     try:
         if args.out is not None:
-            written = output.write(args.out, script, manifest, rows, measured.reach, data)
             print(f"Written to {args.out}: " + ", ".join(str(p.relative_to(args.out)) for p in written)
                   + f"; the session's store is in store/ (session {measured.session_id}).")
         if recording and failed:

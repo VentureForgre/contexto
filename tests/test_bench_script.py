@@ -1032,3 +1032,43 @@ def test_score_never_counts_a_missing_answer_correct(spike):
     assert script.score([p], f"{p.id}: none")["correct"] == 1  # saying "none" is still right
     value = next(q for q in s.probes if q.kind == "value")
     assert script.score([value], "")["correct"] == 0
+
+
+def test_script_shape_rejects_case_clash_control_chars_unmatchable_decision_and_toolloop_mismatch(v2):
+    """D66 #291 follow-up checks in ``Script._check_shape``."""
+    import json
+
+    base_data = v2.to_dict()
+
+    # 1. Case-clashing file paths (keep the bench-files/ prefix so the case-clash check fires)
+    d1 = json.loads(json.dumps(base_data))
+    first_path = next(iter(d1["files"]))
+    prefix, name = first_path.split("/", 1)
+    d1["files"][f"{prefix}/{name.upper()}"] = "dup"
+    with pytest.raises(ValueError, match="clashes by case"):
+        Script.from_dict(d1)
+
+    # 2. Non-printable character in file path
+    d2 = json.loads(json.dumps(base_data))
+    d2["files"]["bench-files/bad\x07name.txt"] = "x"
+    with pytest.raises(ValueError, match="control character"):
+        Script.from_dict(d2)
+
+    # 3. Decision label that decision_reply_ok cannot match ('_' is stripped as markdown)
+    d3 = json.loads(json.dumps(base_data))
+    dec = d3["decisions"][0]
+    old_label, new_label = dec["label"], "BAD_LABEL"
+    dec["label"] = new_label
+    dec["reply"] = f"DECISION {new_label}: {dec['value']}"
+    d3["turns"][dec["turn"]] = d3["turns"][dec["turn"]].replace(f"DECISION {old_label}:", f"DECISION {new_label}:")
+    d3["turn_bytes"][dec["turn"]] = len(d3["turns"][dec["turn"]].encode("utf-8"))
+    with pytest.raises(ValueError, match="cannot be matched by the reply rule"):
+        Script.from_dict(d3)
+
+    # 4. Tool-loop turn whose text lists a different file set than reads
+    d4 = json.loads(json.dumps(base_data))
+    loop_idx = d4["kinds"].index("toolloop")
+    d4["turns"][loop_idx] = d4["turns"][loop_idx].replace(d4["reads"][0], "bench-files/other.txt", 1)
+    d4["turn_bytes"][loop_idx] = len(d4["turns"][loop_idx].encode("utf-8"))
+    with pytest.raises(ValueError, match="toolloop"):
+        Script.from_dict(d4)

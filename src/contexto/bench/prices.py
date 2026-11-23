@@ -45,7 +45,7 @@ INPUT_CLASSES = ("uncached", "cache_write", "cache_read")
 APPLIES_TO = ("whole_request", "excess")
 OUTPUT_RULES = ("request_row", "first_row")
 SHIPPED = "the price table shipped with contexto"
-_DATED = re.compile(r"-\d{8}$")
+_DATED = re.compile(r"(?:-\d{8}|-\d{4}-\d{2}-\d{2})$")
 
 
 class PriceError(ValueError):
@@ -138,15 +138,31 @@ def models(table: Mapping[str, Any]) -> list[str]:
     return list(table["models"])
 
 
-def resolve(model: str, table: Mapping[str, Any]) -> str:
-    """The table's name for ``model``: the name itself, or the name a dated snapshot id extends
-    (``claude-haiku-5-5-20261001`` is priced as ``claude-haiku-5-5``). ``PriceError`` lists the
-    known models when there is none."""
+def resolve_optional(model: str | None, table: Mapping[str, Any] | None = None) -> str | None:
+    """The table's name for ``model``, or None when ``model`` is missing or unpriced. Supports
+    Anthropic dated snapshots (``-YYYYMMDD``) and OpenAI dated snapshots (``-YYYY-MM-DD``)."""
+    if not isinstance(model, str) or not model:
+        return None
+    table = load() if table is None else table
     known = table["models"]
     if model in known:
         return model
-    if isinstance(model, str) and _DATED.search(model) and model[:-9] in known:
-        return model[:-9]
+    match = _DATED.search(model)
+    if match:
+        base = model[:match.start()]
+        if base in known:
+            return base
+    return None
+
+
+def resolve(model: str, table: Mapping[str, Any]) -> str:
+    """The table's name for ``model``: the name itself, or the name a dated snapshot id extends
+    (``claude-haiku-5-5-20261001`` is priced as ``claude-haiku-5-5``, ``gpt-4.1-2025-04-14`` as
+    ``gpt-4.1``). ``PriceError`` lists the known models when there is none."""
+    found = resolve_optional(model, table)
+    if found is not None:
+        return found
+    known = table["models"]
     raise PriceError(f"no price for model {model!r}: the price table has {', '.join(known)}. "
                      "Use --prices FILE to give a table that includes it.")
 
@@ -195,6 +211,17 @@ def request_cost(request: Mapping[str, Any], model: str, cache_ttl: str = "5m",
     output_row = rows[0] if rule.get("output") == "first_row" else _row_for(rows, size)
     total += request["output"] * output_row["output"]
     return total / 1_000_000
+
+
+def try_request_cost(request: Mapping[str, Any], model: str | None, cache_ttl: str = "5m",
+                     table: Mapping[str, Any] | None = None) -> float | None:
+    """Like ``request_cost``, but returns None instead of raising when ``model`` is unknown or
+    missing."""
+    table = load() if table is None else table
+    resolved = resolve_optional(model, table)
+    if resolved is None:
+        return None
+    return request_cost(request, resolved, cache_ttl, table)
 
 
 def cost(requests: Iterable[Mapping[str, Any]], model: str, cache_ttl: str = "5m",

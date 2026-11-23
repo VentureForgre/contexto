@@ -1444,3 +1444,37 @@ def test_a_refused_upstream_is_never_echoed(url):
     text = str(raised.value)
     assert text.startswith("invalid upstream (from settings:user): ")
     assert "S3CRET" not in text and "SECRET-TOKEN" not in text and "user:" not in text
+
+
+def test_resume_command_preserves_quiet_and_no_statusline():
+    opts = LaunchOptions(quiet=True, statusline=False)
+    cmd = launcher.resume_command(opts, "sess123", "claude-abc")
+    assert "--quiet" in cmd
+    assert "--no-statusline" in cmd
+    assert "--session sess123" in cmd
+    assert "claude --resume claude-abc" in cmd
+    default_cmd = launcher.resume_command(LaunchOptions(), "sess123", "claude-abc")
+    assert "--quiet" not in default_cmd and "--no-statusline" not in default_cmd
+
+
+def test_run_command_register_survives_broken_codex_import(monkeypatch):
+    """STATUS.md:874 — a broken contexto.codex import must not crash CLI registration."""
+    import argparse
+    import builtins
+
+    from contexto.commands import run as run_cmd
+
+    real_import = builtins.__import__
+
+    def broken(name, *args, **kwargs):
+        if name == "contexto.codex":
+            raise RuntimeError("simulated broken codex module")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "contexto.codex", raising=False)
+    monkeypatch.setattr(builtins, "__import__", broken)
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    run_cmd.register(sub)
+    parsed = parser.parse_args(["run", "claude"])
+    assert parsed.cli == "claude"

@@ -4,7 +4,7 @@
  "unit": "per million tokens",
  "source": "https://platform.claude.com/docs/en/about-claude/pricing",
  "accessed": "2026-11-12",
- "note": "Published prices from the \"Model pricing\" table of the source page, read on the access date. Not included: the batch discount, the US-only inference multiplier and fast mode, none of which applies to a default Claude Code run.",
+ "note": "Published prices from the vendor pricing pages. Not included: batch discounts, US-only inference multipliers, and fast mode. OpenAI models charge no cache-write surcharge, so cache_write_5m and cache_write_1h match the input rate.",
  "models": {
   "claude-haiku-5-5": {
    "source": "https://platform.claude.com/docs/en/about-claude/pricing",
@@ -43,6 +43,174 @@
     {"over_input_tokens": 0, "input": 8.00, "cache_write_5m": 10.00, "cache_write_1h": 16.00, "cache_read": 0.20, "output": 40.00}
    ],
    "note": "One row at every prompt size."
+  },
+  "claude-haiku-4-5": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 1.00, "cache_write_5m": 1.25, "cache_write_1h": 2.00, "cache_read": 0.10, "output": 5.00}
+   ],
+   "note": "One row at every prompt size."
+  },
+  "claude-sonnet-4": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 3.00, "cache_write_5m": 3.75, "cache_write_1h": 6.00, "cache_read": 0.30, "output": 15.00}
+   ],
+   "note": "Standard <=200k prompt pricing."
+  },
+  "claude-sonnet-4-5": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 3.00, "cache_write_5m": 3.75, "cache_write_1h": 6.00, "cache_read": 0.30, "output": 15.00}
+   ],
+   "note": "Standard <=200k prompt pricing."
+  },
+  "claude-sonnet-4-6": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 3.00, "cache_write_5m": 3.75, "cache_write_1h": 6.00, "cache_read": 0.30, "output": 15.00}
+   ],
+   "note": "Standard <=200k prompt pricing."
+  },
+  "claude-opus-4": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 15.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read": 1.50, "output": 75.00}
+   ],
+   "note": "One row at every prompt size."
+  },
+  "claude-opus-4-1": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 15.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read": 1.50, "output": 75.00}
+   ],
+   "note": "One row at every prompt size."
+  },
+  "claude-opus-4-5": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 5.00, "cache_write_5m": 6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "output": 25.00}
+   ],
+   "note": "One row at every prompt size."
+  },
+  "claude-opus-4-6": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 5.00, "cache_write_5m": 6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "output": 25.00}
+   ],
+   "note": "One row at every prompt size."
+  },
+  "claude-opus-4-7": {
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 5.00, "cache_write_5m": 6.25, "cache_write_1h": 10.00, "cache_read": 0.50, "output": 25.00}
+   ],
+   "note": "One row at every prompt size."
+  },
+  "gpt-4.1": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 2.00, "cache_write_5m": 2.00, "cache_write_1h": 2.00, "cache_read": 0.50, "output": 8.00}
+   ],
+   "note": "OpenAI Responses/API standard tier; no cache-write surcharge."
+  },
+  "gpt-4.1-mini": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 0.40, "cache_write_5m": 0.40, "cache_write_1h": 0.40, "cache_read": 0.10, "output": 1.60}
+   ],
+   "note": "OpenAI Responses/API standard tier; no cache-write surcharge."
+  },
+  "gpt-5": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 1.25, "cache_write_5m": 1.25, "cache_write_1h": 1.25, "cache_read": 0.125, "output": 10.00}
+   ],
+   "note": "OpenAI Responses/API standard tier; no cache-write surcharge."
+  },
+  "gpt-5-mini": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 0.25, "cache_write_5m": 0.25, "cache_write_1h": 0.25, "cache_read": 0.025, "output": 2.00}
+   ],
+   "note": "OpenAI Responses/API standard tier; no cache-write surcharge."
+  },
+  "gpt-5-codex": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 1.25, "cache_write_5m": 1.25, "cache_write_1h": 1.25, "cache_read": 0.125, "output": 10.00}
+   ],
+   "note": "OpenAI Codex standard tier; no cache-write surcharge."
+  },
+  "gpt-5.1-codex": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 1.25, "cache_write_5m": 1.25, "cache_write_1h": 1.25, "cache_read": 0.125, "output": 10.00}
+   ],
+   "note": "OpenAI Codex standard tier; no cache-write surcharge."
+  },
+  "gpt-5.2-codex": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 1.75, "cache_write_5m": 1.75, "cache_write_1h": 1.75, "cache_read": 0.175, "output": 14.00}
+   ],
+   "note": "OpenAI Codex standard tier; no cache-write surcharge."
+  },
+  "gpt-5.3-codex": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 1.75, "cache_write_5m": 1.75, "cache_write_1h": 1.75, "cache_read": 0.175, "output": 14.00}
+   ],
+   "note": "OpenAI Codex standard tier; no cache-write surcharge."
+  },
+  "gpt-5.4": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 2.50, "cache_write_5m": 2.50, "cache_write_1h": 2.50, "cache_read": 0.25, "output": 15.00}
+   ],
+   "note": "OpenAI Responses/API standard tier; no cache-write surcharge."
+  },
+  "o3": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 2.00, "cache_write_5m": 2.00, "cache_write_1h": 2.00, "cache_read": 0.50, "output": 8.00}
+   ],
+   "note": "OpenAI reasoning standard tier; no cache-write surcharge."
+  },
+  "o4-mini": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 1.10, "cache_write_5m": 1.10, "cache_write_1h": 1.10, "cache_read": 0.275, "output": 4.40}
+   ],
+   "note": "OpenAI reasoning standard tier; no cache-write surcharge."
+  },
+  "codex-mini-latest": {
+   "source": "https://openai.com/api/pricing/",
+   "accessed": "2026-11-22",
+   "rows": [
+    {"over_input_tokens": 0, "input": 1.50, "cache_write_5m": 1.50, "cache_write_1h": 1.50, "cache_read": 0.375, "output": 6.00}
+   ],
+   "note": "OpenAI Codex mini standard tier; no cache-write surcharge."
   }
  }
 }

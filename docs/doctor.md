@@ -6,7 +6,8 @@ line per check. Run it in the project where you would run `contexto run claude` 
 from that project's `.claude/` settings files.
 
 ```sh
-contexto doctor          # one line per check
+contexto doctor          # one line per check (zero network)
+contexto doctor --live   # also verify upstream reachability, TLS and auth over the network
 contexto doctor --json   # the same results as JSON
 ```
 
@@ -15,18 +16,20 @@ contexto doctor (contexto 0.5.24)
 
 [ok]   Python 3.13.2 (3.12 or later)
 [ok]   Claude Code 2.1.318 at /usr/local/bin/claude (a tested version)
-[warn] Codex: 'codex' not found on PATH. Install Codex: curl -fsSL https://chatgpt.com/codex/install.sh | sh (other ways: https://learn.chatgpt.com/docs/codex/cli). If it is installed, add its directory to PATH.
-       -> Only `contexto run codex` needs it
+[skip] Codex: not installed (optional; only `contexto run codex` needs it)
+[ok]   Config file: none at /home/me/.contexto/config.toml (using built-in defaults)
 [ok]   Claude Code settings: read ~/.claude/settings.json
 [ok]   Claude Code upstream: http://127.0.0.1:8317 (from ANTHROPIC_BASE_URL in the env block of ~/.claude/settings.json)
 [skip] Codex upstream: not checked, codex is not on PATH or cannot be run
 [ok]   Claude Code key: apiKeyHelper in ~/.claude/settings.json (not run); no value is read or shown
 [skip] Codex key helper: not checked, codex is not on PATH or cannot be run
 [ok]   Store home /home/me/.contexto is writable
+[skip] Serve: not configured in this store home
+[ok]   Status line: Contexto's status line will be added in Claude Code
 [ok]   MCP server started and listed its 5 tools
 [ok]   Cloud provider: no switch (CLAUDE_CODE_USE_BEDROCK and the like) is on, so Claude Code sends its requests through the proxy
 
-Ready: 8 passed, 1 warning, 2 skipped.
+Ready: 10 passed, 4 skipped.
 ```
 
 Each line starts with `[ok]`, `[warn]`, `[FAIL]` or `[skip]`, and is printed as soon as its check is
@@ -61,11 +64,13 @@ A check fails when `contexto run` could not work at all:
 
 - Python is older than 3.12.
 - Neither `claude` nor `codex` can be run. One of the two is enough.
+- `$CONTEXTO_HOME/config.toml` exists and has a syntax, type, or validation error.
 - An upstream is not an `http://` or `https://` URL. `contexto run` refuses to start with it.
 - The store home is one `contexto run` cannot use (see [`store`](#store)).
 - The MCP server does not start, or does not list exactly Contexto's five tools.
 - A cloud-provider switch is on, or a settings file that may turn one on cannot be read:
   `contexto run claude` refuses to launch (exit 2; see [`provider`](#provider)).
+- With `--live`, an upstream cannot be reached or fails TLS verification.
 - A check cannot be made at all: the working directory was deleted, there is no home directory, or
   no temporary directory can be created. The line names which, and what to set.
 
@@ -73,14 +78,19 @@ Everything else is a warning, because `contexto run` still starts, or a flag can
 missing:
 
 - a CLI version Contexto was not tested with, or a version that could not be read;
-- one of the two CLIs missing;
-- a settings file that is there and cannot be used;
+- one of the two CLIs on `PATH` that cannot be started (an uninstalled optional CLI is skipped when
+  the other CLI is ready, so a clean Claude-only install has 0 warnings);
+- a settings file that is there and cannot be used, or an organization-managed settings file
+  (`managed-settings.json`) that exists or sets `ANTHROPIC_BASE_URL`;
 - a store home that cannot be written while its `sessions` directory can be used;
+- a `contexto serve` token/lock/state file with unsafe permissions or a stale `serve.json`;
+- a status line skipped due to an unreadable settings file, `disableAllHooks`, or error;
 - no key found for Claude Code (a login Claude Code holds also works, and doctor does not look for
   one);
 - no upstream or no key helper for Codex (`--codex-upstream` and `--codex-key-helper` can supply
   them);
-- a project setting skipped because the folder is not trusted.
+- a project setting skipped because the folder is not trusted;
+- with `--live`, an upstream returning HTTP 401/403 (auth rejected) or 5xx.
 
 When a CLI is missing, the checks that only matter for that CLI are skipped, not warned about.
 `provider` is skipped only when `claude` is not on PATH or not executable (a broken symlink or a
@@ -90,11 +100,12 @@ check: the launcher reaches its refusal with it.
 
 ## What doctor never does
 
-- **No network request.** Doctor reports the upstream Contexto would use and does not contact it,
-  so it cannot tell you whether the upstream is reachable or the key is valid. The only processes it
-  starts are `claude --version` and `codex --version` (as `contexto run` does) and Contexto's own
-  MCP server, which it talks to over stdin and stdout. What `claude --version` and `codex --version`
-  do is up to those CLIs.
+- **No network request by default.** Plain `contexto doctor` reports the upstream Contexto would use
+  and does not contact it. Pass `--live` when you want doctor to make a lightweight network probe to
+  verify upstream reachability, TLS, and auth. The only processes plain doctor starts are
+  `claude --version` and `codex --version` (as `contexto run` does) and Contexto's own MCP server,
+  which it talks to over stdin and stdout. What `claude --version` and `codex --version` do is up to
+  those CLIs.
 - **No key helper is run.** A helper is your command and may have side effects, and for Codex a
   project's `apiKeyHelper` counts only in a folder Claude Code has recorded as trusted. Doctor says
   where a helper is configured and that it was not run, so it cannot tell you whether the helper
@@ -123,14 +134,21 @@ Whether the CLI is on `PATH`, its version from `<cli> --version`, and whether th
 Contexto was tested with (`TESTED_VERSIONS` in `src/contexto/cliversions.py`; see
 [cli-updates.md](cli-updates.md)). An untested version is a warning, as it is in `contexto run`.
 A file on `PATH` that is not executable, is a broken symlink, or cannot be started (for example a
-missing `#!` interpreter) counts as missing, and the line says which. When `codex` is not on `PATH`
-at all, the line gives Codex's install command (Claude Code's for `claude`), and the next step only
-says which command needs it.
+missing `#!` interpreter) counts as missing, and the line says which. When one CLI is usable and
+the other is simply not installed on `PATH`, the uninstalled optional CLI is marked `[skip]` (so a
+clean Claude-only install has 0 warnings). When neither CLI is usable, both checks fail and name
+their install commands once.
 
 A `codex` that starts while this build of Contexto lacks its Codex support (the `contexto.codex`
 module) is a warning, `…, but codex support is not installed in this build`, with the step to
 reinstall Contexto: `contexto run codex` says the same and exits 2. Codex then counts as missing,
 and its two checks are skipped with that reason.
+
+### `config`
+
+Reads and validates optional `$CONTEXTO_HOME/config.toml` (TOML syntax, supported keys, types, and
+ranges). Passes when absent (using built-in defaults) or valid; fails when invalid so typos or
+syntax errors are caught before `contexto run` or `contexto serve`.
 
 ### `settings`
 
@@ -138,8 +156,9 @@ The Claude Code settings files `contexto run claude` reads from this directory: 
 `.claude/settings.local.json`, this directory's `.claude/settings.local.json` and
 `.claude/settings.json`, `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`), and
 Claude Code's managed settings file (`/Library/Application Support/ClaudeCode/managed-settings.json`
-on macOS, `/etc/claude-code/managed-settings.json` on Linux), which only the
-[`provider`](#provider) check and the key check read. The line names the ones that were read. Each
+on macOS, `/etc/claude-code/managed-settings.json` on Linux). The line names the ones that were read.
+If `managed-settings.json` exists, doctor emits a warning because organization-managed settings
+outrank `contexto run`'s `--settings` — and warns specifically when it sets `ANTHROPIC_BASE_URL`. Each
 file is read as `contexto run claude` reads it, by the same reader, and the checks below use what
 it read.
 
@@ -177,16 +196,17 @@ letters from another alphabet appears in its `xn--` form, not as the name it may
 For Claude Code, first match wins: `env.ANTHROPIC_BASE_URL` in a Claude Code settings file (the
 main checkout's `.claude/settings.local.json`, then this directory's `.claude/settings.local.json`
 and `.claude/settings.json`, then `~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`
-when that variable is set), then `ANTHROPIC_BASE_URL` in the environment, then
-`https://api.anthropic.com`.
+when that variable is set), then `ANTHROPIC_BASE_URL` in the environment, then `upstream` in
+`config.toml`, then `https://api.anthropic.com`.
 
-For Codex in API-key mode (the default): `CONTEXTO_CODEX_UPSTREAM`, else Claude Code's non-Anthropic
-upstream plus `/v1`, else `https://api.openai.com/v1` (`openai-env`) when `OPENAI_API_KEY` is set in
-the environment and no `CONTEXTO_CODEX_KEY_HELPER` was specified. A project file's base URL counts
-for Codex only in a folder Claude Code has recorded as trusted. If Claude Code's upstream is
-Anthropic's API and `OPENAI_API_KEY` is not set (or a Codex key helper is set), Codex has no
-upstream and the check warns: pass `--codex-upstream`. Doctor does not check `--codex-auth chatgpt`,
-which uses the ChatGPT backend and Codex's own login.
+For Codex in API-key mode (the default): `CONTEXTO_CODEX_UPSTREAM`, else `codex_upstream` in
+`config.toml`, else Claude Code's non-Anthropic upstream plus `/v1`, else
+`https://api.openai.com/v1` (`openai-env`) when `OPENAI_API_KEY` is set in the environment and no
+`CONTEXTO_CODEX_KEY_HELPER` was specified. A project file's base URL counts for Codex only in a
+folder Claude Code has recorded as trusted. If Claude Code's upstream is Anthropic's API and
+`OPENAI_API_KEY` is not set (or a Codex key helper is set), Codex has no upstream and the check
+warns: pass `--codex-upstream`. Doctor does not check `--codex-auth chatgpt`, which uses the
+ChatGPT backend and Codex's own login.
 
 The base URL is not read from organization-managed Claude Code settings, here or by `contexto run`.
 
@@ -235,6 +255,20 @@ follows what the launcher does, and changes nothing:
   `contexto run` starts, and cannot create its lock file and salt file in the home.
 - A home whose path contains `${` fails when `claude` is installed: `contexto run claude` refuses
   it, because Claude Code would expand it in the MCP config. `contexto run codex` accepts it.
+
+### `serve`
+
+When `contexto serve` files (`serve.token`, `serve.lock`, or `serve.json`) exist in `$CONTEXTO_HOME`,
+checks whether the service is running, verifies 0600 regular-file permissions on each file, and
+warns if a stale `serve.json` remains without a running process. Skipped when `serve` is not
+configured in this store home.
+
+### `statusline`
+
+Checks whether `contexto run claude` will add Contexto's status line (`added`), skip it because
+you already have a `statusLine` (`own:<kind>`, passes), skip it because you turned it off
+(`off:env` or `off:config`, skipped), or warn because a settings file could not be read or hooks
+are disabled. Skipped when `claude` is not usable.
 
 ### `mcp`
 
@@ -300,15 +334,26 @@ endpoint and none to the proxy, as the other five did there. D70 measured the ot
 variable in the environment and then in a project settings file: every model request went through
 the proxy.
 
+### `live-upstream` (`--live` only)
+
+Only runs when `--live` is passed. Sends a lightweight `GET` request (`/v1/models` for Claude Code,
+`/models` for Codex) to each valid non-service upstream to verify reachability, TLS, and auth:
+
+- Credentials are never sent to an untrusted project upstream (D52); if the upstream comes from a
+  project settings file in an untrusted folder, doctor probes reachability without credentials and
+  notes `auth skipped (untrusted project)`.
+- For Codex, `OPENAI_API_KEY` is only sent when the upstream host is `openai.com` / `*.openai.com`.
+- Fails on unreachable host or TLS error; warns on HTTP 401/403 (auth rejected) or 5xx.
+
 ## What doctor does not check
 
-- Whether the upstream is reachable, the key is valid, or a key helper works: it makes no network
-  request and runs no helper.
+- Without `--live`, whether the upstream is reachable or the key is valid: plain `contexto doctor`
+  makes no network request. Key helpers are never run (with or without `--live`).
 - A login that Claude Code or Codex holds.
 - `--upstream`, `--codex-upstream`, `--codex-key-helper` and `--codex-auth chatgpt`: it reports what
   `contexto run` does without them.
-- Organization-managed Claude Code settings other than the managed settings file (a
-  device-management profile, a server), and the base URL in that file.
+- Organization-managed Claude Code settings delivered outside `managed-settings.json` (an MDM
+  profile or server-side console policy).
 - The type of every setting. Claude Code loads nothing from a settings file in which any setting has
   the wrong type. Contexto checks the `env` block's type only, so a file with another wrong-typed
   setting (for example `permissions` as a string) is read by doctor and `contexto run` though Claude
@@ -327,7 +372,7 @@ as the text form. Stopped before that (Ctrl+C, SIGTERM, SIGHUP), it prints nothi
   "schema": 1,
   "contexto": "0.5.24",
   "ok": true,
-  "summary": {"pass": 8, "warn": 1, "fail": 0, "skip": 2},
+  "summary": {"pass": 10, "warn": 0, "fail": 0, "skip": 4},
   "checks": [
     {
       "id": "claude",
@@ -349,26 +394,35 @@ as the text form. Stopped before that (Ctrl+C, SIGTERM, SIGHUP), it prints nothi
 - `schema` is `1`. It changes only if a field below is removed or changes meaning; new fields may
   be added without changing it.
 - `ok` is `true` when no check failed, which is when the exit code is 0.
-- `checks` always holds the eleven checks in this order: `python`, `claude`, `codex`, `settings`,
-  `claude-upstream`, `codex-upstream`, `claude-key`, `codex-key`, `store`, `mcp`, `provider`.
-- `status` is `pass`, `warn`, `fail` or `skip`.
+- `checks` holds the checks in this order: `python`, `claude`, `codex`, `config`, `settings`,
+  `claude-upstream`, `codex-upstream`, `claude-key`, `codex-key`, `store`, `serve`, `statusline`,
+  `mcp`, `provider` (plus `live-upstream` when `--live` is passed).
+- `status` is `pass`, `warn`, `fail` or `skip`. When one CLI is usable and the other is simply not
+  installed on `PATH`, the uninstalled optional CLI is reported as `skip` (0 warnings for a clean
+  Claude-only install).
 - `summary` is the line the text form prints. Its wording is for people and may change; read
   `status` and `details` in scripts.
 - `action` is the "what to do" line, a string for `warn` and `fail` and `null` otherwise.
 
-`details` by check. A skipped check has `{}`. A check that itself broke has `{"error": <type>}`,
-the exception's type. A check that could not be made has `{"error": <fault>}`, one of
-`no_working_directory`, `no_home_directory`, `no_store_home` and `no_temp_directory`.
+`details` by check. A skipped check has `{}` unless it reports structured skip metadata (`cli` for
+an uninstalled optional CLI, `configured`/`running` for `serve`, `state` for `statusline`, `probes`
+for `live-upstream`). A check that itself broke has `{"error": <type>}`, the exception's type. A
+check that could not be made has `{"error": <fault>}`, one of `no_working_directory`,
+`no_home_directory`, `no_store_home` and `no_temp_directory`.
 
 | Check | `details` |
 |---|---|
 | `python` | `version`, `executable` |
 | `claude`, `codex` | `cli`, `path` (or `null`), `version` (or `null`), `tested` (`true`, `false`, or `null` when the version is unknown), `tested_versions`; `error` when the CLI is missing (`not_found`), its version could not be read (`timeout`, `exit_<code>`, `unparsed`, or an error type), or, for `codex`, Contexto's Codex support is not installed (`codex_support_missing`) |
-| `settings` | `files`: one `{"kind", "state"}` for each file looked for, highest precedence first and the managed file last, where `kind` is `main-checkout-local`, `local`, `project`, `user` or `managed` and `state` is `read`, `absent` or `unusable`; an unusable file also has `problem`, what is wrong with it (the wording of the line). Never a path. |
-| `claude-upstream` | `origin` (`scheme://host[:port]`, or `null` when the URL is invalid), `source` (`default`, `env`, or `settings:<kind>` with kind `user`, `project`, `local` or `main-checkout-local`); `ignored` (the project file kinds skipped) when a base URL was skipped |
-| `codex-upstream` | `origin` and `source` (`codex-env`, `openai-env`, or `claude-<source>+/v1`), both `null` when there is none; `ignored` as above |
+| `config` | `path`, `exists`, `settings` (count of configured keys), or `error` when invalid |
+| `settings` | `files`: one `{"kind", "state"}` for each file looked for, highest precedence first and the managed file last, where `kind` is `main-checkout-local`, `local`, `project`, `user` or `managed` and `state` is `read`, `absent` or `unusable`; an unusable file also has `problem`, what is wrong with it (the wording of the line). When `managed-settings.json` is present, also `managed_present: true` and `managed_sets_base_url` (`true`/`false`). Never a path. |
+| `claude-upstream` | `origin` (`scheme://host[:port]`, or `null` when the URL is invalid), `source` (`default`, `config`, `env`, or `settings:<kind>` with kind `user`, `project`, `local` or `main-checkout-local`); `ignored` (the project file kinds skipped) when a base URL was skipped |
+| `codex-upstream` | `origin` and `source` (`codex-env`, `codex-config`, `openai-env`, or `claude-<source>+/v1`), both `null` when there is none; `ignored` as above |
 | `claude-key` | `found`: a list of `{"name", "source"}`, where `name` is a variable or `apiKeyHelper` and `source` is `env` or `settings:<kind>` (`managed` included). Never a value. |
 | `codex-key` | `name` (`CONTEXTO_CODEX_KEY_HELPER`, `OPENAI_API_KEY`, `apiKeyHelper`, or `null`), `source` (`env`, `settings:<kind>`, or `null`); `ignored` when a project's helper was skipped as untrusted; `error` (`blank`) when `CONTEXTO_CODEX_KEY_HELPER` holds only spaces |
 | `store` | `path`, `exists` |
+| `serve` | `configured`, `running`, `files` (when configured), plus `port`/`pid` when running and `problems` when permissions or state are invalid |
+| `statusline` | `state` (`added`, `off:env`, `off:config`, `own:<kind>`, `unreadable:<kind>`, `hooks_off:<kind>`, `managed_hooks_only`, `unsafe_path`, `error`) |
 | `mcp` | `tools` (the names listed, sorted), `missing`, `unexpected`, `seconds` (how long the check took) |
 | `provider` | `variables`: a list of `{"variable", "provider", "sources"}` for each switch that is on, where `sources` lists every place it is on (`env` or `settings:<kind>`); `unread`: a list of `{"source", "problem"}` for each settings file that could not be read and may turn a switch on. Both empty when the check passes. |
+| `live-upstream` | `probes`: list of `{"cli", "origin", "reachable", "tls", "status", "auth", "error"}` (`--live` only; never holds credentials) |

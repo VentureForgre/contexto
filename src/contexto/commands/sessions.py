@@ -8,7 +8,8 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from contexto.commands._common import EXIT_ERROR, EXIT_OK, EXIT_USAGE, SESSION_HELP, fail
+from contexto.commands._common import EXIT_ERROR, EXIT_OK, EXIT_USAGE, SESSION_HELP, fail, safe_text
+from contexto.config import ConfigError, load_config
 from contexto.paths import contexto_home, session_dir
 from contexto.store import SessionNotFoundError, SessionStore
 from contexto.store.prune import (
@@ -109,8 +110,11 @@ def run_list(args: argparse.Namespace) -> int:
         message = no_sessions_yet(home)  # not an error: an empty list is an answer (and `[]` with --json)
         print(f"{message[0].upper()}{message[1:]}.")
         return EXIT_OK
-    rows = [("ID", "CREATED", "PAGES", "RECORDS", "LAST ACTIVITY", "SIZE")]
-    rows += [(s.id, s.created, str(s.pages), "?" if s.records is None else str(s.records), s.last_activity,
+    rows = [("ID", "CLI", "CREATED", "PAGES", "RECORDS", "PEAK", "FAULTS", "LAST ACTIVITY", "SIZE")]
+    rows += [(s.id, safe_text(s.cli) if s.cli else "-", s.created, str(s.pages),
+              "?" if s.records is None else str(s.records),
+              "-" if s.peak_tokens is None else f"{s.peak_tokens:,}",
+              "-" if not s.faults else f"!{s.faults}", s.last_activity,
               human_size(s.size_bytes)) for s in sessions]
     _table(rows)
     print(f"Total: {human_size(sum(s.size_bytes for s in sessions))} in {_plural(len(sessions))}")
@@ -132,9 +136,24 @@ def _plural(n: int) -> str:
 
 
 def run_prune(args: argparse.Namespace) -> int:
-    if args.older_than is None and args.keep is None and args.session is None:
-        args.prune_parser.error("say which sessions: --older-than DURATION, --keep N, or --session ID")
     home = contexto_home()
+    older_than = args.older_than
+    keep = args.keep
+    if args.session is None:
+        try:
+            cfg = load_config(home)
+        except ConfigError as exc:
+            if args.json:
+                print(json.dumps({"error": str(exc)}, indent=2, sort_keys=True))
+            fail(str(exc))
+            return EXIT_USAGE
+        # Apply [retention] defaults only when no selection flag was passed on the CLI:
+        # combining a single CLI flag (e.g. --keep 5) with a config older_than would silently AND them.
+        if older_than is None and keep is None:
+            older_than = cfg.retention.older_than
+            keep = cfg.retention.keep
+    if older_than is None and keep is None and args.session is None:
+        args.prune_parser.error("say which sessions: --older-than DURATION, --keep N, or --session ID")
     now = time.time()
     try:
         check_home(home)
@@ -148,7 +167,7 @@ def run_prune(args: argparse.Namespace) -> int:
                 print(json.dumps({"error": message}, indent=2, sort_keys=True))
             fail(message)
             return EXIT_USAGE
-        chosen = select(home, older_than=args.older_than, keep=args.keep, session_id=args.session, now=now)
+        chosen = select(home, older_than=older_than, keep=keep, session_id=args.session, now=now)
     except (SessionNotFoundError, ValueError, OSError) as e:  # UnsafeSessionPathError is a ValueError
         if args.json:  # stdout stays parseable: a script reads {"error": ...} and the exit code
             print(json.dumps({"error": str(e)}, indent=2, sort_keys=True))

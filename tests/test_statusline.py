@@ -463,16 +463,20 @@ def test_a_session_reopened_for_another_conversation_does_not_serve_the_old_one(
     write_log(tmp_path, "aaaa11", [*launch(0), request(1, tokens=11_000),
                                    {"event": "note", "text": "proxy_start", "ts": "2027-01-15T09:00:00Z"}])
     assert statusline.run_started(tmp_path, "aaaa11") == 1_800_000_000.0
-    # A session `contexto serve` opened after the launch is the service's now: it shows nothing, rather than
-    # the last launch's bound under the service's requests (Reviewer B, PR #276 round 4).
+    # A session `contexto serve` opened is now supported: run_started uses serve_open's timestamp and
+    # quick_numbers picks up the service's bound from serve_open.config.bound.
     write_log(tmp_path, "aaaa11", [*launch(0), request(1, tokens=11_000),
-                                   {"event": "serve_open", "cli": "claude", "session": "aaaa11", "ts": ts(5)}])
-    assert statusline.run_started(tmp_path, "aaaa11") is None
-    assert statusline.serving_session(tmp_path, CLAUDE_ID) is None
+                                   {"event": "serve_open", "cli": "claude", "session": "aaaa11",
+                                    "config": {"bound": 120_000}, "ts": ts(5)},
+                                   request(6, tokens=22_000)])
+    assert statusline.run_started(tmp_path, "aaaa11") == 1_800_000_005.0
+    store.record_cli_session("claude", CLAUDE_ID, 1_800_000_006.0)
+    assert statusline.serving_session(tmp_path, CLAUDE_ID) == "aaaa11"
+    assert command(tmp_path, stdin=claude_stdin()).stdout == "ctx 22k/120k\n"
     write_log(tmp_path, "aaaa11", [{"event": "serve_open", "cli": "claude", "session": "aaaa11", "ts": ts(-9)},
                                    *launch(0), request(1, tokens=11_000)])  # a launch after the service: shown
     assert statusline.run_started(tmp_path, "aaaa11") == 1_800_000_000.0
-    # A log with no proxy start, or none that can be read, serves nothing.
+    # A log with no proxy start or serve_open, or none that can be read, serves nothing.
     write_log(tmp_path, "aaaa11", [request(1, tokens=11_000)])
     assert statusline.serving_session(tmp_path, CLAUDE_ID) is None
     del store
@@ -695,40 +699,44 @@ def test_hooks_turned_off_in_any_settings_file_means_no_status_line(tmp_path, sc
 
 
 @pytest.mark.parametrize("scope", sorted(SCOPES))
-@pytest.mark.parametrize("damage", ["malformed", "not_an_object", "not_utf8", "unreadable", "directory", "fifo",
-                                    "dangling_link", "too_deep", "too_large"])
+@pytest.mark.parametrize("damage", ["malformed", "fifo", "too_deep", "too_large", "nan_constant", "bad_env"])
 def test_a_settings_file_that_cannot_be_read_means_no_status_line(tmp_path, scope, damage):
-    """If in doubt, do not add it: a file Contexto cannot read may hold the user's status line."""
+    """If in doubt, do not add it: a file D70's ``read_settings_file`` flags as problematic may hold
+    the user's status line."""
     home, repo, cwd, managed = layout(tmp_path)
     path = SCOPES[scope](home, repo, cwd, managed)
     path.parent.mkdir(parents=True, exist_ok=True)
     if damage == "malformed":
         path.write_text('{"statusLine": {"type": "command", "command": "echo mine"},}')
-    elif damage == "not_an_object":
-        path.write_text('["statusLine"]')
     elif damage == "too_large":
         path.write_text(json.dumps({"padding": "x" * (statusline.SETTINGS_LIMIT + 1)}))
-    elif damage == "not_utf8":
-        path.write_bytes(b'{"model": "\xff\xfe"}')
-    elif damage == "unreadable":
-        if os.geteuid() == 0:
-            pytest.skip("root reads any file")
-        put(path, OWN).chmod(0)
-    elif damage == "directory":
-        path.mkdir()
     elif damage == "fifo":
         os.mkfifo(path)
-    elif damage == "dangling_link":
-        path.symlink_to(tmp_path / "gone.json")
     elif damage == "too_deep":
         path.write_text("[" * 100_000 + "]" * 100_000)
+    elif damage == "nan_constant":
+        path.write_text('{"x": NaN}')
+    elif damage == "bad_env":
+        path.write_text('{"env": "not-an-object"}')
     started = time.monotonic()
-    try:
-        assert decide(tmp_path, cwd, home, managed) == ({}, f"unreadable:{scope.removesuffix('-drop-in')}")
-    finally:
-        if damage == "unreadable":
-            path.chmod(0o600)
+    assert decide(tmp_path, cwd, home, managed) == ({}, f"unreadable:{scope.removesuffix('-drop-in')}")
     assert time.monotonic() - started < 5  # a FIFO is never waited on
+
+
+def test_read_settings_matches_d70_reader_for_bom_utf16_and_absent_cases(tmp_path):
+    """D70 alignment: UTF-8 BOM and UTF-16LE BOM files are read (so a statusLine inside one is
+    detected), while directories, dangling links, and non-object JSON set no statusLine."""
+    home, repo, cwd, managed = layout(tmp_path)
+    user = home / ".claude" / "settings.json"
+    user.write_bytes(b"\xef\xbb\xbf" + json.dumps(OWN).encode("utf-8"))
+    assert decide(tmp_path, cwd, home, managed) == ({}, "own:user")
+    user.write_bytes(b"\xff\xfe" + json.dumps(OWN).encode("utf-16-le"))
+    assert decide(tmp_path, cwd, home, managed) == ({}, "own:user")
+    user.write_text('["statusLine"]')  # non-object JSON sets nothing in Claude Code
+    assert decide(tmp_path, cwd, home, managed)[1] == "added"
+    user.unlink()
+    user.symlink_to(tmp_path / "gone.json")  # dangling link: absent to Claude Code too
+    assert decide(tmp_path, cwd, home, managed)[1] == "added"
 
 
 def test_a_symlinked_settings_file_is_read_through_the_link(tmp_path):
@@ -1087,3 +1095,57 @@ def test_the_version_comes_from_the_contexto_proxy_distribution_and_is_still_loo
     monkeypatch.setattr(importlib.metadata, "version", lambda name: asked.append(name) or "9.9.9")
     assert contexto.__version__ == "9.9.9" and asked == ["contexto-proxy"]
     assert contexto.version_line().startswith("contexto 9.9.9")
+
+
+def test_skip_notice_explains_why_statusline_was_skipped():
+    assert statusline.skip_notice("added") is None
+    assert statusline.skip_notice("off:flag") is None
+    assert statusline.skip_notice("off:env") is None
+    assert statusline.skip_notice("off:config") is None
+    own = statusline.skip_notice("own:user")
+    assert own is not None and "statusLine" in own and "contexto statusline" in own
+    bad = statusline.skip_notice("unreadable:project")
+    assert bad is not None and "could not be read" in bad
+    hooks = statusline.skip_notice("hooks_off:user")
+    assert hooks is not None and "disableAllHooks" in hooks
+    err = statusline.skip_notice("error")
+    assert err is not None and "skipped" in err and "error" in err
+
+
+def test_statusline_supports_serve_open_sessions(tmp_path):
+    """Sessions opened via ``contexto serve`` log ``serve_open`` instead of ``proxy_start``."""
+    sdir = tmp_path / "sessions" / "srv1"
+    sdir.mkdir(parents=True)
+    log = sdir / "log.jsonl"
+    log.write_text(
+        json.dumps({"event": "serve_open", "cli": "claude", "config": {"bound": 120_000}}) + "\n"
+        + json.dumps({"event": "request", "method": "POST", "path": "/v1/messages",
+                      "transform_events": [{"event": "request", "main": True}],
+                      "model": "claude-sonnet-4-6",
+                      "usage": {"input_tokens": 5_000, "cache_read_input_tokens": 15_000}}) + "\n",
+        encoding="utf-8",
+    )
+    nums = statusline.quick_numbers(sdir)
+    assert nums["bound"] == 120_000
+    assert nums["prompt"] == 20_000
+
+
+def test_run_claude_prints_stderr_notice_when_statusline_skipped_for_own_setting(env, upstream, tmp_path):
+    cwd = tmp_path / "work"
+    put(Path(env["HOME"]) / ".claude" / "settings.json", OWN)
+    done, _, launched = run(env, "--upstream", upstream, "--session", "s1", "claude", "-p", "hi", cwd=cwd)
+    assert done.returncode == 0, done.stderr
+    assert launched["statusline"].startswith("own:")
+    assert "status line skipped" in done.stderr
+
+
+def test_config_toml_statusline_false_records_off_config(env, upstream, tmp_path):
+    cwd = tmp_path / "work"
+    home = Path(env["CONTEXTO_HOME"])
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.toml").write_text("statusline = false\n", encoding="utf-8")
+    done, record, launched = run(env, "--upstream", upstream, "--session", "s1", "claude", "-p", "hi", cwd=cwd)
+    assert done.returncode == 0, done.stderr
+    assert "statusLine" not in record["settings"]
+    assert launched["statusline"] == "off:config"
+    assert "status line skipped" not in done.stderr

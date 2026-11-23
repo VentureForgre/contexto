@@ -54,7 +54,7 @@ from contexto.platform_compat import (
     read_fd_until,
     unlock_and_close,
 )
-from contexto.private import open_regular, read_regular
+from contexto.private import read_regular
 from contexto.stats import session_stats
 
 PREFIX = "ctx"
@@ -72,15 +72,15 @@ NO_STATUSLINE_ENV = "CONTEXTO_NO_STATUSLINE"
 SESSION_ENV = "CONTEXTO_SESSION"
 STDIN_WAIT_S = 0.5  # how long a pipe on stdin may stay silent before the command gives up on it
 STDIN_LIMIT = 1 << 20  # Claude Code's JSON is a few kilobytes
-SETTINGS_LIMIT = 8 << 20  # a settings file larger than this is not read, so it counts as unreadable
+SETTINGS_LIMIT = 4 << 20  # matches contexto.upstream.SETTINGS_FILE_LIMIT (D70)
 EXPANSION = "${"  # Claude Code expands ${VAR} in an MCP config (D55); ``launch_status_line`` has the rule
 _WIN_UNSAFE_CMD_CHARS = frozenset('\r\n"%!')  # characters cmd.exe expands or splits even inside quotes
 MANAGED_DIRS = {"darwin": "/Library/Application Support/ClaudeCode", "linux": "/etc/claude-code",
                 "win32": r"C:\ProgramData\ClaudeCode"}
-# A log line that holds a launch, a proxy start or a tool call contains one of these words; any other
+# A log line that holds a launch, a proxy/serve start or a tool call contains one of these words; any other
 # line that happens to contain one is parsed and then ignored. They are searched for one at a time with
-# ``bytes.find``: one regular expression for the three was 20 times slower over a 3 MB log.
-MARKED = (b"mcp_call", b"launch", b"proxy_start")
+# ``bytes.find``: one regular expression for the four was 20 times slower over a 3 MB log.
+MARKED = (b"mcp_call", b"launch", b"proxy_start", b"serve_open")
 
 
 # The line --------------------------------------------------------------------------------------------
@@ -232,7 +232,7 @@ def full_numbers(home: Path, session_id: str) -> dict[str, Any]:
     """The numbers from ``session_stats``, which reads the whole log. The cause of stopped paging is the
     newest store failure logged since paging stopped (to the second, as the log's times are written); a
     failure of an earlier run or an earlier stop is not named."""
-    out = session_stats(home, session_id, store=False)
+    out = session_stats(home, session_id, store=False, price=False)
     degraded = out["faults"]["degraded"]
     cause = None
     if degraded["now"] is True:
@@ -302,7 +302,7 @@ def quick_numbers(directory: Path) -> dict[str, Any] | None:
     except OSError:  # no log: a FIFO, directory or symlink in its place counts as none, as in stats
         return {"prompt": None, "prompt_source": None, "bound": None, "recalls": 0, "searches": 0,
                 "stopped": False, "cause": None}
-    marked = stats._Tally()
+    marked = stats._Tally(price=False)
     run_start = 0
     for start in _marked_lines(data):
         end = data.find(b"\n", start)
@@ -312,6 +312,9 @@ def quick_numbers(directory: Path) -> dict[str, Any] | None:
         name = event.get("event")
         if name == "proxy_start":
             run_start = start
+        elif name == "serve_open":
+            run_start = start
+            marked.line(event)
         elif name in ("launch", "mcp_call"):
             marked.line(event)
     if marked.bound is None:
@@ -331,12 +334,12 @@ def quick_numbers(directory: Path) -> dict[str, Any] | None:
             tail.append(event)
         if event.get("event") != "request":
             continue
-        one = stats._Tally()
+        one = stats._Tally(price=False)
         one.line(event)
         if prompt is None and one.last is not None:
             prompt = one.last
         anchored = anchored or (in_tail and one.seen_main)
-    engine = stats._Tally()
+    engine = stats._Tally(price=False)
     for event in reversed(tail):
         engine.line(event)
     return {"prompt": prompt[0] if prompt else None, "prompt_source": prompt[1] if prompt else None,
@@ -444,11 +447,9 @@ def _last_event(data: bytes, name: str) -> tuple[int, dict[str, Any]] | None:
 
 
 def run_started(home: Path, session_id: str) -> float | None:
-    """When the latest run of ``session_id`` started: its newest ``proxy_start`` line's time, in full (the
-    log writes UTC with microseconds). None when the log cannot be read, has no such line, or was opened
-    by ``contexto serve`` after it (a ``serve_open`` line): the status line covers a session only while a
-    ``contexto run`` launch serves it, and a session the service serves would show the last launch's
-    bound, not the service's (PR #276's review)."""
+    """When the latest run (or ``contexto serve`` open) of ``session_id`` started: the timestamp of
+    whichever ``proxy_start`` or ``serve_open`` line is newest in ``log.jsonl``. None when the log
+    cannot be read or has neither."""
     from datetime import UTC, datetime
 
     try:
@@ -456,10 +457,12 @@ def run_started(home: Path, session_id: str) -> float | None:
     except OSError:
         return None
     started, served = _last_event(data, "proxy_start"), _last_event(data, "serve_open")
-    if started is None or (served is not None and served[0] > started[0]):
+    candidates = [item for item in (started, served) if item is not None]
+    if not candidates:
         return None
+    latest = max(candidates, key=lambda item: item[0])
     try:
-        when = datetime.fromisoformat(str(started[1].get("ts", "")))
+        when = datetime.fromisoformat(str(latest[1].get("ts", "")))
     except ValueError:
         return None
     return (when if when.tzinfo else when.replace(tzinfo=UTC)).timestamp()
@@ -557,29 +560,21 @@ UNREADABLE = object()  # a settings file that exists and could not be read as a 
 
 
 def read_settings(path: Path) -> Any:
-    """The JSON object in the settings file at ``path``; None when there is no file; ``UNREADABLE`` when
-    something is there that cannot be read as one (permissions, a directory or FIFO, a dangling link,
-    not JSON, not an object, too large). An empty file is an empty object: whatever Claude Code makes
-    of it, it holds no status line. A symlink is followed, as Claude Code follows it; a FIFO is never
-    waited on."""
-    if not os.path.lexists(path):
-        return None
-    try:
-        fd = open_regular(path, follow=True)
-        try:
-            chunks, size = [], 0
-            while size <= SETTINGS_LIMIT and (chunk := os.read(fd, 1 << 20)):
-                chunks.append(chunk)
-                size += len(chunk)
-        finally:
-            os.close(fd)
-        data = b"".join(chunks)
-        if size > SETTINGS_LIMIT:
-            return UNREADABLE
-        found = json.loads(data) if data.strip() else {}
-    except (OSError, ValueError, RecursionError):
+    """The JSON object in the settings file at ``path``, read with D70's
+    ``contexto.upstream.read_settings_file`` so ``statusline`` agrees with ``contexto run`` and
+    ``contexto doctor`` (UTF-8 with or without BOM, UTF-16LE with BOM, >4300-digit ints, ``NaN``/
+    ``Infinity`` rejected, 4 MiB limit, FIFOs never blocked on). Returns None when the file is
+    absent or unreadable by Claude Code too (missing, directory, unreadable permissions, dangling
+    link), and ``UNREADABLE`` when a file is present with a problem (not a regular file, too large,
+    not valid JSON, non-object ``env``)."""
+    from contexto.upstream import read_settings_file
+
+    if path.name == "managed-settings.d":
         return UNREADABLE
-    return found if isinstance(found, dict) else UNREADABLE
+    found = read_settings_file(path)
+    if found.problem is not None:
+        return UNREADABLE
+    return found.data
 
 
 def own_status_line(paths: Sequence[str | os.PathLike[str]]) -> bool:
@@ -623,6 +618,8 @@ def settings_files(cwd: Path, user_home: Path, env: Mapping[str, str] | None,
             names = []
         except OSError:
             names = []
+            # Unreadable or non-directory drop-ins: handled via a sentinel path that read_settings
+            # reports as UNREADABLE when the directory itself cannot be inspected (unless absent).
             files.append(("managed", drop_ins))
         files += [("managed", drop_ins / name) for name in names]
     return files + claude_settings_order(cwd, user_home, env)
@@ -648,9 +645,33 @@ def opted_out(env: Mapping[str, str]) -> bool:
     return env.get(NO_STATUSLINE_ENV, "").strip().lower() not in ("", "0", "false", "no")
 
 
+def skip_notice(note: str) -> str | None:
+    """A concise one-line notice for stderr when ``launch_status_line`` skipped adding Contexto's
+    status line because of an existing ``statusLine``, hooks policy, unreadable settings, or an
+    error. Returns None when it was added or explicitly turned off by flag/env/config."""
+    if note == "added" or note.startswith("off:"):
+        return None
+    if note.startswith("own:"):
+        kind = note.removeprefix("own:")
+        return (f"status line skipped: existing statusLine in {kind} settings "
+                "(call `contexto statusline` from your own script)")
+    if note.startswith("unreadable:"):
+        kind = note.removeprefix("unreadable:")
+        return f"status line skipped: {kind} settings could not be read cleanly"
+    if note.startswith("hooks_off:"):
+        kind = note.removeprefix("hooks_off:")
+        return f"status line skipped: disableAllHooks is true in {kind} settings"
+    if note == "managed_hooks_only":
+        return "status line skipped: managed settings set allowManagedHooksOnly"
+    if note == "unsafe_path":
+        return "status line skipped: a path in the command contains '${'"
+    return f"status line skipped ({note})"
+
+
 def launch_status_line(session_id: str, home: Path, cwd: Path, *, enabled: bool = True,
                        env: Mapping[str, str] | None = None, user_home: Path | None = None,
-                       managed_dir: Path | None = None) -> tuple[dict[str, Any], str]:
+                       managed_dir: Path | None = None,
+                       off_source: str | None = None) -> tuple[dict[str, Any], str]:
     """What ``contexto run claude`` adds to its ``--settings`` for a status line, and a short note for the
     ``launch`` event: ``({"statusLine": {...}}, "added")``, or ``({}, reason)``.
 
@@ -658,7 +679,8 @@ def launch_status_line(session_id: str, home: Path, cwd: Path, *, enabled: bool 
     and user files, so adding one there would hide the user's own. It is added only when that cannot
     happen. The reasons, in the order they are checked:
 
-    - ``off:flag``, ``off:env``: ``contexto run --no-statusline``, ``CONTEXTO_NO_STATUSLINE``.
+    - ``off:flag``, ``off:env``, ``off:config``: ``contexto run --no-statusline``,
+      ``CONTEXTO_NO_STATUSLINE``, or ``statusline = false`` in ``config.toml``.
     - ``own:<kind>``: a settings file has a ``statusLine`` key, whatever its value. ``<kind>`` is the
       highest-ranking such file: ``managed``, ``main-checkout-local``, ``local``, ``project`` or ``user``.
     - ``unreadable:<kind>``: a settings file exists and could not be read as a JSON object, so it may
@@ -674,8 +696,8 @@ def launch_status_line(session_id: str, home: Path, cwd: Path, *, enabled: bool 
     try:
         env = os.environ if env is None else env
         if not enabled:
-            return {}, "off:flag"
-        if opted_out(env):
+            return {}, f"off:{off_source or 'flag'}"
+        if off_source != "cli" and opted_out(env):
             return {}, "off:env"
         files = settings_files(cwd, user_home or Path.home(), env,
                                managed_settings_dir() if managed_dir is None else managed_dir)
