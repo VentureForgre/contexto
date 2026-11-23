@@ -16,7 +16,7 @@ import argparse
 import os
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
@@ -26,18 +26,17 @@ if TYPE_CHECKING:
     from contexto.mcp import ServeServer
     from contexto.store import SessionStore
 
+_MCP_DESCRIPTION = (
+    "Serve contexto_recall, contexto_pin, contexto_close, contexto_state, and contexto_search "
+    "over stdio. Give exactly one of --session and --serve. With --session ID it serves that one existing "
+    "session; `contexto run` starts it this way for Claude Code and Codex. With --serve it serves the "
+    "sessions of a running `contexto serve`: each tool call goes to the session of the conversation that "
+    "made it, and fails with a message when that session cannot be found. Only protocol messages are "
+    "written to stdout."
+)
 
-def register(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser(
-        "mcp",
-        help="run the MCP server on stdio, for one session or for the service's sessions (the CLI spawns this)",
-        description="Serve contexto_recall, contexto_pin, contexto_close, contexto_state, and contexto_search "
-        "over stdio. Give exactly one of --session and --serve. With --session ID it serves that one existing "
-        "session; `contexto run` starts it this way for Claude Code and Codex. With --serve it serves the "
-        "sessions of a running `contexto serve`: each tool call goes to the session of the conversation that "
-        "made it, and fails with a message when that session cannot be found. Only protocol messages are "
-        "written to stdout.",
-    )
+
+def _configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--session", help="session id (the full id of an existing session; a prefix is refused)")
     mode.add_argument("--serve", action="store_true",
@@ -49,6 +48,22 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                         help="page text held in memory for search, in MB (default: $CONTEXTO_SEARCH_CACHE_MB, "
                         "else 64; 0 holds none). Pages beyond it are read from the store at each search.")
     parser.set_defaults(func=run)
+    return parser
+
+
+def register(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "mcp",
+        help="run the MCP server on stdio, for one session or for the service's sessions (the CLI spawns this)",
+        description=_MCP_DESCRIPTION,
+    )
+    _configure_parser(parser)
+
+
+def main(argv: Sequence[str]) -> int:
+    """Fast-path entry point for ``contexto mcp`` bypassing ``cli.build_parser()``."""
+    parser = _configure_parser(argparse.ArgumentParser(prog="contexto mcp", description=_MCP_DESCRIPTION))
+    return run(parser.parse_args(list(argv)))
 
 
 def _megabytes(value: str) -> int:

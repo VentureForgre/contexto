@@ -32,14 +32,14 @@ staleness was not checked, rather than presenting file-backed records as fresh.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from contexto.store.ledger import LedgerCorruptError, LedgerError
 from contexto.store.model import Record, Source, ValidationError
 from contexto.store.pinned import render_carried, render_pinned, render_state
 from contexto.store.recall import VARIANTS, check_variant, env_variant, opening_lines
-from contexto.store.state import State, derive
+from contexto.store.state import State, _file_sha256, _inside, derive
 
 if TYPE_CHECKING:
     from contexto.store.project import Carried, Project
@@ -105,12 +105,34 @@ class LedgerOps:
         except (ValidationError, LedgerError) as e:
             raise ValueError(str(e)) from e
 
+    def _resolve_file_provenance(self, item: Any) -> Any:
+        """Auto-compute sha256 for a file provenance dict when omitted and the file is readable under workdir."""
+        if not isinstance(item, dict) or item.get("type") != "file" or item.get("sha256") is not None:
+            return item
+        locator = item.get("locator")
+        if (not isinstance(locator, str) or not locator or "\\" in locator
+                or any(ord(c) < 32 or ord(c) == 127 for c in locator)
+                or PurePosixPath(locator).is_absolute()):
+            return item
+        workdir = getattr(self, "workdir", None)
+        root = workdir() if callable(workdir) else None
+        if root is None:
+            return item
+        path = _inside(Path(root), locator)
+        if path is None:
+            return item
+        digest = _file_sha256(path)
+        if digest is None:
+            return item
+        return {**item, "sha256": digest}
+
     def pin(self, kind: str, text: str, *, supersedes=(), epistemic: str = "reported", provenance=(),
             owner: str | None = None, topic: str | None = None, author: str = "model") -> str:
         sources = []
         for item in provenance or ():
+            resolved = self._resolve_file_provenance(item)
             try:
-                source = item if isinstance(item, Source) else Source.from_dict(item)
+                source = resolved if isinstance(resolved, Source) else Source.from_dict(resolved)
             except ValidationError as e:
                 raise ValueError(str(e)) from e
             if source.type == "page" and self.get_page(source.locator) is None:

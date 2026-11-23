@@ -52,15 +52,19 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import gzip
 import json
 import math
 import os
 import re
 import secrets
 import sys
+import threading
 import time
 import weakref
-from collections.abc import Callable, Iterable
+import zlib
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +72,7 @@ from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
 from contexto.private import (
     NotRegularFileError,
+    fsync_dir,
     open_private,
     private_dir,
     read_regular,
@@ -77,9 +82,16 @@ from contexto.private import (
     write_atomic,
     write_new,
 )
-from contexto.store.catalog import PageCatalog, load_page
+from contexto.store.catalog import PageCatalog, load_page, read_page_text
+from contexto.store.fts import FtsIndex
 from contexto.store.ledger import Ledger, LedgerCorruptError
-from contexto.store.pages import build_page, page_order, render_index, same_content
+from contexto.store.pages import (
+    build_page,
+    page_order,
+    redact_page_messages,
+    render_index,
+    same_content,
+)
 from contexto.store.project import (
     PAGE_DAMAGE,
     EarlierPages,
@@ -100,7 +112,23 @@ from contexto.store.records import LedgerOps
 from contexto.store.search import Approximate, rank, rank_approximate
 
 __all__ = ["SessionStore", "PageConflictError", "PageNotFoundError", "PageUnreadableError", "KeyFileError",
-           "LockFileDamagedError", "SessionNotFoundError", "redact"]
+           "LockFileDamagedError", "MetaCorruptError", "SessionNotFoundError", "redact"]
+
+COMPRESS_PAGES_ENV = "CONTEXTO_COMPRESS_PAGES"
+REDACT_SECRETS_ENV = "CONTEXTO_REDACT_SECRETS"
+SEARCH_FTS_ENV = "CONTEXTO_SEARCH_FTS"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    low = raw.strip().lower()
+    if low in ("1", "true", "yes", "on"):
+        return True
+    if low in ("0", "false", "no", "off", ""):
+        return False
+    return default
 
 _PAGE_ID = re.compile(r"pg_[0-9a-f]{16}")
 
@@ -612,6 +640,17 @@ class LockFileDamagedError(NotRegularFileError):
         super().__init__(f"{path} is damaged ({self.reason}); delete it, and Contexto makes a new one")
 
 
+class MetaCorruptError(RuntimeError, ValueError):
+    """``meta.json`` exists but is not valid UTF-8 JSON or not a JSON object; writers refuse to
+    silently overwrite it with ``{}`` (which would destroy workdir, project, main_records, forgotten,
+    and re-enable project_memory)."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"{path} is corrupt ({reason}); refusing to overwrite it")
+
+
 def redact(event: Any) -> Any:
     """Copy of ``event`` with credential-bearing keys replaced, at any depth.
 
@@ -626,8 +665,24 @@ def redact(event: Any) -> Any:
     return event
 
 
+def _release_store(live_fd: int, fts_box: list[Any]) -> None:
+    try:
+        os.close(live_fd)
+    except OSError:
+        pass
+    fts = fts_box[0] if fts_box else None
+    if fts is not None:
+        fts_box[0] = None
+        try:
+            fts.close()
+        except Exception:
+            pass
+
+
 class SessionStore(LedgerOps):
-    def __init__(self, home: Path, session_id: str, *, create: bool = True) -> None:
+    def __init__(self, home: Path, session_id: str, *, create: bool = True,
+                 compress_pages: bool | None = None, redact_secrets: bool | None = None,
+                 use_fts: bool | None = None) -> None:
         """Open session ``session_id`` under ``home``, making it when it does not exist. With ``create``
         false nothing is made: ``SessionNotFoundError`` when the session directory is missing or is
         removed while this open waits for its lock (``hold_live``)."""
@@ -638,6 +693,10 @@ class SessionStore(LedgerOps):
         self.clock: Callable[[], float] = time.time
         self.dir = session_dir(home, session_id)
         self.pages_dir = self.dir / "pages"
+        self._compress_pages = _env_flag(COMPRESS_PAGES_ENV, False) if compress_pages is None else bool(compress_pages)
+        self._redact_secrets = _env_flag(REDACT_SECRETS_ENV, False) if redact_secrets is None else bool(redact_secrets)
+        self._use_fts = _env_flag(SEARCH_FTS_ENV, True) if use_fts is None else bool(use_fts)
+        self._meta_lock_state = threading.local()
         # CONTEXTO_HOME is created 0700, but an existing one keeps the mode its user gave it (D55); a
         # home that is not a directory is refused before anything is changed. sessions/ and everything
         # under it is Contexto's own and is narrowed even when it exists.
@@ -650,7 +709,8 @@ class SessionStore(LedgerOps):
         # Creates the session directory and locks it before anything else is created in it, so prune
         # cannot remove it under us.
         live, pruned = hold_live(self.dir, create=create)
-        self.release = weakref.finalize(self, os.close, live)  # release(): drop the lock before collection
+        self._fts_box: list[Any] = [None]
+        self.release = weakref.finalize(self, _release_store, live, self._fts_box)  # drop lock + FTS on release/GC
         private_dir(self.pages_dir)
         removed = remove_stale_temps(self.dir) + remove_stale_temps(self.pages_dir)
         self._key_cache = self._load_key()
@@ -663,6 +723,35 @@ class SessionStore(LedgerOps):
             self.log({"event": "pruned_while_opening"})
             print(f"contexto: warning: session {session_id} was deleted by `contexto sessions prune` while "
                   "it was being opened; it starts empty", file=sys.stderr)
+        if create:
+            self._maybe_auto_prune()
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Exclude non-picklable runtime locks, SQLite handles, and in-memory caches when pickling."""
+        state = dict(self.__dict__)
+        for key in ("_meta_lock_state", "_fts_index", "_fts_box", "_page_catalog", "_earlier_pages"):
+            state.pop(key, None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._meta_lock_state = threading.local()
+        self._fts_box = [None]
+
+    def _maybe_auto_prune(self) -> None:
+        """Run optional retention pruning when ``CONTEXTO_RETENTION_MAX_AGE`` or ``CONTEXTO_RETENTION_KEEP``
+        is set; no-op when unset (default)."""
+        from contexto.store.prune import auto_prune, retention_policy
+
+        max_age, keep = retention_policy()
+        if max_age is None and keep is None:
+            return
+        pruned = auto_prune(self.home, max_age=max_age, keep=keep, exclude={self.session_id})
+        if pruned:
+            try:
+                self.log({"event": "sessions_auto_pruned", "count": len(pruned)})
+            except Exception:
+                pass
 
     def _repair_ledger(self) -> None:
         if not self.ledger.path.exists():
@@ -740,6 +829,12 @@ class SessionStore(LedgerOps):
         """The conversation keys ``add_trusted_conversation`` kept, oldest first."""
         kept = self._meta().get("trusted_conversations")
         return [x for x in kept if isinstance(x, str)] if isinstance(kept, list) else []
+
+    def has_project(self) -> bool:
+        """Whether this session belongs to a project with project memory enabled, determined from this
+        session's own ``meta.json`` without scanning ``$CONTEXTO_HOME/sessions/``."""
+        meta = self._meta()
+        return meta.get("project_memory") is not False and recorded_root(meta) is not None
 
     def project(self) -> Project | None:
         """This session's view of its project (D69, ``contexto.store.project``): its earlier sessions
@@ -825,13 +920,13 @@ class SessionStore(LedgerOps):
     def set_retained(self, epoch: int, k: int, turns: list[dict[str, Any]]) -> None:
         """Snapshot the retained window for search (contract PR #125, lane A's A14 calls this once per request).
 
-        Increments the session's persisted request sequence, then overwrites ``retained.json`` (0600,
-        atomic) stamped with it; the room publishes that follow carry the same stamp, and search uses
-        the snapshot only when the stamps match. If the increment cannot be persisted, the old
-        snapshot is removed, and in any case this store's rooms are stamped None until a later call
-        succeeds, so a previous request's snapshot can never match. If the snapshot write fails, the
-        sequence has moved on, so the old snapshot no longer matches (lane A logs ``retained_stale``).
-        Errors are raised for the caller to handle. Never logged; the index and stubs never read it.
+        Holds ``meta.lock`` across both the ``request_seq`` increment and the ``retained.json`` write so
+        concurrent writers can never stamp ``retained.json`` out of order. If the increment cannot be
+        persisted, the old snapshot is removed, and in any case this store's rooms are stamped None until
+        a later call succeeds, so a previous request's snapshot can never match. If the snapshot write
+        fails, the sequence has moved on, so the old snapshot no longer matches (lane A logs
+        ``retained_stale``). Errors are raised for the caller to handle. Never logged; the index and
+        stubs never read it.
         """
         entries = check_retained(epoch, k, turns)
         self._retained_stamp = None
@@ -842,43 +937,46 @@ class SessionStore(LedgerOps):
             seq["n"] = (current if isinstance(current, int) and not isinstance(current, bool) else 0) + 1
             return {"request_seq": seq["n"]}
 
-        try:
-            self._modify_meta(bump)
-        except OSError:
+        with self._meta_lock():
             try:
-                (self.dir / "retained.json").unlink(missing_ok=True)
+                self._modify_meta(bump)
             except OSError:
-                pass  # rooms stay stamped None in this store, so the old snapshot still cannot match
-            raise
-        self._retained_stamp = seq["n"]
-        try:
-            self._write_atomic(self.dir / "retained.json",
-                               canonical_bytes({"stamp": seq["n"], "epoch": epoch, "k": k, "entries": entries}))
-        except OSError:
-            try:  # defense in depth: no previous request's snapshot stays behind (reviewer-1, PR #128)
-                (self.dir / "retained.json").unlink(missing_ok=True)
+                try:
+                    (self.dir / "retained.json").unlink(missing_ok=True)
+                except OSError:
+                    pass  # rooms stay stamped None in this store, so the old snapshot still cannot match
+                raise
+            self._retained_stamp = seq["n"]
+            try:
+                self._write_atomic(self.dir / "retained.json",
+                                   canonical_bytes({"stamp": seq["n"], "epoch": epoch, "k": k, "entries": entries}))
             except OSError:
-                pass  # retained_current() still refuses it: its stamp is behind the persisted sequence
-            raise
+                try:  # defense in depth: no previous request's snapshot stays behind (reviewer-1, PR #128)
+                    (self.dir / "retained.json").unlink(missing_ok=True)
+                except OSError:
+                    pass  # retained_current() still refuses it: its stamp is behind the persisted sequence
+                raise
 
     def set_epoch(self, record: dict[str, Any]) -> None:
         """Save the main conversation's epoch record (rule 16, contract PR #176), for a restart to resume.
 
-        Writes ``epoch.json`` atomically at mode 0600 with ``version: 1``; never logged. The store
-        checks shape and version only (ValueError for a wrong one); the engine checks meaning when
-        it resumes. On a failed write the previous record is unlinked and the error is raised; if
-        the unlink fails too, that older record stays, which the contract accepts (the newest record
-        written is trusted, and rules 4 and 5 bound a resume with a smaller ``k``).
+        Writes ``epoch.json`` atomically at mode 0600 with ``version: 1`` under ``meta.lock`` so
+        concurrent writers serialize cleanly; never logged. The store checks shape and version only
+        (ValueError for a wrong one); the engine checks meaning when it resumes. On a failed write the
+        previous record is unlinked and the error is raised; if the unlink fails too, that older record
+        stays, which the contract accepts (the newest record written is trusted, and rules 4 and 5 bound
+        a resume with a smaller ``k``).
         """
         data = canonical_bytes(check_epoch(record))
-        try:
-            self._write_atomic(self.dir / "epoch.json", data)
-        except OSError:
+        with self._meta_lock():
             try:
-                (self.dir / "epoch.json").unlink(missing_ok=True)
+                self._write_atomic(self.dir / "epoch.json", data)
             except OSError:
-                pass
-            raise
+                try:
+                    (self.dir / "epoch.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
 
     def epoch_record(self) -> dict[str, Any] | None:
         """The saved epoch record, or None when there is none or it is unreadable, malformed, or of
@@ -915,35 +1013,83 @@ class SessionStore(LedgerOps):
         """(turn id, room tokens, tokens spent this turn); (None, None, 0) until the engine publishes."""
         return read_turn_room(self._meta())
 
+    @contextmanager
+    def _charge_lock(self) -> Iterator[None]:
+        """Serialize concurrent room chargers without blocking ``meta.lock`` writers during response formatting."""
+        path = self.dir / "charge.lock"
+        try:
+            lock = open_private(path, os.O_RDWR)
+        except NotRegularFileError as e:
+            raise LockFileDamagedError(path, e) from e
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(lock)
+
     def charge_turn_room(self, charge: Callable[[int | None], int]) -> dict[str, Any] | None:
-        """Charge this turn's room atomically: ``charge`` runs while meta.lock is held.
+        """Charge this turn's room atomically without holding ``meta.lock`` across ``charge`` (response
+        formatting).
 
-        See ``charge_rooms``. Parallel tool calls serialize here, so together they never spend
-        more than the smallest open room, and each charge counts against every live room (D40);
-        expired side rooms are dropped and each logs ``side_room_expired``. Returns the call's
-        content-free room summary (``limited_by``, ``side_rooms``, ``limiting_age_s``; see
-        ``charge_rooms``), or None when no room is open.
+        Concurrent chargers serialize on ``charge.lock`` so together they never spend more than the
+        smallest open room and each charge runs once; ``meta.lock`` is acquired only briefly to snapshot
+        the room before ``charge`` and again to commit the spend after ``charge``, so proxy metadata
+        writes (``set_window``, ``set_turn_room``, ``set_retained``, ``set_epoch``) are never blocked by
+        response formatting.
         """
-        now = self.clock()
-        summary: list[dict[str, Any]] = []
         expired: list[dict[str, Any]] = []
+        snap_summary: dict[str, Any] | None = None
 
-        def update(meta: dict[str, Any]) -> dict[str, Any] | None:
-            recorded = read_side_rooms(meta)
-            expired[:] = expired_side_room_events(recorded, now)
-            result = charge_rooms(read_turn_room(meta), live_side_rooms(recorded, now), charge, now)
-            if result is None:
-                return {"side_rooms": {}} if recorded else None  # every side room had expired
-            record, charged, info = result
-            summary.append(info)
-            updates: dict[str, Any] = {"side_rooms": side_rooms_record(charged)} if recorded else {}
-            if record is not None:
-                updates["turn_room"] = {**record, "seq": read_room_stamp(meta)}
-            return updates or None
+        with self._charge_lock():
+            now = self.clock()
+            # Step 1: brief meta.lock read to validate meta.lock/meta.json and snapshot remaining room.
+            with self._meta_lock():
+                snap = self._read_meta_strict()
+                snap_main = read_turn_room(snap)
+                snap_sides = live_side_rooms(read_side_rooms(snap), now)
+            turn_id, room_tokens, spent = snap_main
+            published = turn_id is not None and room_tokens is not None
+            tightest = min(snap_sides.items(), key=lambda kv: max(0, kv[1][0] - kv[1][1]), default=None)
+            side_left = max(0, tightest[1][0] - tightest[1][1]) if tightest else None
+            main_left = max(0, room_tokens - spent) if published else None
+            left = [x for x in (main_left, side_left) if x is not None]
+            remaining: int | None = min(left) if left else None
+            if remaining is not None:
+                limited_by = "main" if main_left is not None and main_left == remaining else "side"
+                snap_summary = {"limited_by": limited_by, "side_rooms": len(snap_sides)}
+                if limited_by == "side" and tightest is not None:
+                    snap_summary["limiting_age_s"] = max(0, int(now - tightest[1][2]))
 
-        self._modify_meta(update)
+            # Step 2: run response formatting / charge callback completely OUTSIDE meta.lock!
+            used = charge(remaining)
+            if remaining is not None:
+                if not isinstance(used, int) or isinstance(used, bool) or not 0 <= used <= remaining:
+                    raise ValueError(f"a turn-room charge must be between 0 and {remaining} tokens, not {used!r}")
+
+            # Step 3: brief meta.lock commit via _modify_meta.
+            def commit(meta: dict[str, Any]) -> dict[str, Any] | None:
+                recorded = read_side_rooms(meta)
+                expired[:] = expired_side_room_events(recorded, now)
+                live = live_side_rooms(recorded, now)
+                if remaining is None:
+                    return {"side_rooms": side_rooms_record(live)} if expired else None
+                if used == 0 and not expired:
+                    return None
+                updates: dict[str, Any] = {}
+                if recorded and (used > 0 or expired):
+                    updates["side_rooms"] = side_rooms_record(
+                        {r: (t, s + used, at) for r, (t, s, at) in live.items()}
+                    )
+                cur_turn_id, cur_room_tokens, cur_spent = read_turn_room(meta)
+                if used > 0 and cur_turn_id is not None and cur_room_tokens is not None:
+                    # Apply the charge to main without clamping by a newly arrived tighter side room.
+                    updates["turn_room"] = {"turn_id": cur_turn_id, "room_tokens": cur_room_tokens,
+                                            "spent_tokens": cur_spent + used, "seq": read_room_stamp(meta)}
+                return updates or None
+
+            self._modify_meta(commit)
         self._log_side_events(expired)
-        return summary[0] if summary else None
+        return snap_summary
 
     def _log_side_events(self, events: list[dict[str, Any]]) -> None:
         for event in events:
@@ -960,31 +1106,78 @@ class SessionStore(LedgerOps):
         """Merge ``updates`` into meta.json: writers serialize on meta.lock; readers never block."""
         self._modify_meta(lambda meta: updates)
 
-    def _modify_meta(self, change: Callable[[dict[str, Any]], dict[str, Any] | None]) -> None:
-        """Merge ``change(meta)`` into meta.json under meta.lock; None writes nothing.
-
-        The new file is written privately, fsynced, and renamed into place, so a concurrent reader
-        sees either the old or the new complete file, and no writer drops another writer's field.
-        """
+    @contextmanager
+    def _meta_lock(self) -> Iterator[None]:
+        """Re-entrant exclusive flock on ``meta.lock`` (per store instance, per thread)."""
+        state = self.__dict__.get("_meta_lock_state")
+        if state is None:
+            state = self.__dict__["_meta_lock_state"] = threading.local()
+        depth = getattr(state, "depth", 0)
+        if depth > 0:
+            state.depth = depth + 1
+            try:
+                yield
+            finally:
+                state.depth = depth
+            return
         try:
             lock = open_private(self.dir / "meta.lock", os.O_RDWR)
         except NotRegularFileError as e:  # a symlink, FIFO or directory in its place (D59)
             raise LockFileDamagedError(self.dir / "meta.lock", e) from e
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            meta = self._meta()
+            state.depth = 1
+            yield
+        finally:
+            state.depth = 0
+            os.close(lock)  # releases the flock
+
+    def _read_meta_strict(self) -> dict[str, Any]:
+        """Read ``meta.json`` for a mutating operation: distinguishes missing (``FileNotFoundError`` ->
+        ``{}``) from I/O errors (re-raised) and parse/shape corruption (logs ``meta_corrupt`` and raises
+        ``MetaCorruptError`` without overwriting the file)."""
+        path = self.dir / "meta.json"
+        try:
+            raw = read_regular_text(path)
+        except FileNotFoundError:
+            return {}
+        except UnicodeDecodeError as e:
+            self._log_meta_corrupt(type(e).__name__)
+            raise MetaCorruptError(path, "not valid UTF-8") from e
+        try:
+            meta = json.loads(raw)
+        except (ValueError, RecursionError) as e:
+            self._log_meta_corrupt(type(e).__name__)
+            raise MetaCorruptError(path, f"invalid JSON ({type(e).__name__})") from e
+        if not isinstance(meta, dict):
+            self._log_meta_corrupt("TypeError")
+            raise MetaCorruptError(path, "not a JSON object")
+        return meta
+
+    def _log_meta_corrupt(self, error: str) -> None:
+        try:
+            self.log({"event": "meta_corrupt", "error": error})
+        except Exception:
+            pass
+
+    def _modify_meta(self, change: Callable[[dict[str, Any]], dict[str, Any] | None]) -> None:
+        """Merge ``change(meta)`` into meta.json under meta.lock; None writes nothing.
+
+        Refuses to silently overwrite a corrupt or unreadable ``meta.json`` with ``{}``: only a
+        genuinely missing ``meta.json`` starts empty.
+        """
+        with self._meta_lock():
+            meta = self._read_meta_strict()
             updates = change(meta)
             if updates is None:
                 return
             meta.update(updates)
             write_atomic(self.dir / "meta.json", canonical_bytes(meta))
-        finally:
-            os.close(lock)  # releases the flock
 
     def _meta(self) -> dict[str, Any]:
         try:
             meta = json.loads(read_regular_text(self.dir / "meta.json"))
-        except (OSError, ValueError):  # missing, unreadable, not UTF-8, or not JSON: treat as unrecorded
+        except (OSError, ValueError, RecursionError):  # read-only view: treat unreadable/corrupt as unrecorded
             return {}
         return meta if isinstance(meta, dict) else {}
 
@@ -1059,6 +1252,10 @@ class SessionStore(LedgerOps):
         store._key_cache = None
         store.ledger = Ledger(path)
         store._read_only = True
+        store._compress_pages = _env_flag(COMPRESS_PAGES_ENV, False)
+        store._redact_secrets = _env_flag(REDACT_SECRETS_ENV, False)
+        store._use_fts = _env_flag(SEARCH_FTS_ENV, True)
+        store._meta_lock_state = threading.local()
         return store
 
     @property
@@ -1102,7 +1299,11 @@ class SessionStore(LedgerOps):
         ``{turn, messages}`` differ under the same id (contract PR #47), or when the stored file cannot be
         read as a page record with that id (rule 18).
         """
-        return self._write_pages(build_page(self._key, turn, first_turn + offset) for offset, turn in enumerate(turns))
+        redact_on = getattr(self, "_redact_secrets", False)
+        return self._write_pages(
+            build_page(self._key, redact_page_messages(turn) if redact_on else turn, first_turn + offset)
+            for offset, turn in enumerate(turns)
+        )
 
     def page_parts(self, parts: list[list[dict]], turn: int, kind: str,
                    seqs: list[int] | None = None, blocks: list[int] | None = None) -> list[str]:
@@ -1111,18 +1312,40 @@ class SessionStore(LedgerOps):
         its result; ``rounds``: tool rounds folded out of a running turn). ``seqs`` and ``blocks``: each
         page's message index and block index in the turn, for ordering. Ids, immutability and conflicts
         are ``page_out``'s; ``kind``, ``seqs`` and ``blocks`` are not part of the id."""
-        return self._write_pages(build_page(self._key, part, turn, kind, None if seqs is None else seqs[n],
-                                            None if blocks is None else blocks[n])
-                                 for n, part in enumerate(parts))
+        redact_on = getattr(self, "_redact_secrets", False)
+        return self._write_pages(
+            build_page(self._key, redact_page_messages(part) if redact_on else part, turn, kind,
+                       None if seqs is None else seqs[n], None if blocks is None else blocks[n])
+            for n, part in enumerate(parts)
+        )
+
+    def _existing_page_path(self, page_id: str) -> Path | None:
+        for suffix in (".json", ".json.gz"):
+            candidate = self.pages_dir / f"{page_id}{suffix}"
+            if os.path.lexists(candidate):
+                return candidate
+        return None
 
     def _write_pages(self, pages: Iterable[dict[str, Any]]) -> list[str]:
+        compress = getattr(self, "_compress_pages", False)
         ids = []
         for page in pages:
-            path = self.pages_dir / f"{page['id']}.json"
-            data = canonical_bytes(page)
-            if not write_new(path, data):
+            existing = self._existing_page_path(page["id"])
+            if existing is not None:
+                path = existing
+                created = False
+            else:
+                raw = canonical_bytes(page)
+                if compress:
+                    path = self.pages_dir / f"{page['id']}.json.gz"
+                    data = gzip.compress(raw, compresslevel=6, mtime=0)
+                else:
+                    path = self.pages_dir / f"{page['id']}.json"
+                    data = raw
+                created = write_new(path, data)
+            if not created:
                 try:
-                    stored = load_page(read_regular_text(path), page["id"])
+                    stored = load_page(read_page_text(path), page["id"])
                 except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
                     # Not a page record, or another id (rule 18): a conflict, which quarantines the
                     # file and pages the turn afresh (rule 14), rather than a page the index skips forever.
@@ -1135,23 +1358,58 @@ class SessionStore(LedgerOps):
             ids.append(page["id"])
         return ids
 
+    def archive_pages(self, *, min_age_turns: int = 0) -> int:
+        """Compress uncompressed ``.json`` pages into ``.json.gz`` atomically and remove the uncompressed
+        copy after ``fsync``; returns how many pages were compressed. Pages within ``min_age_turns`` of
+        the newest turn are left uncompressed."""
+        entries = self._catalog.entries()
+        if not entries:
+            return 0
+        newest_turn = max(e.turn for e in entries)
+        archived = 0
+        for entry in entries:
+            if newest_turn - entry.turn < min_age_turns:
+                continue
+            src = self.pages_dir / f"{entry.id}.json"
+            dst = self.pages_dir / f"{entry.id}.json.gz"
+            if not os.path.lexists(src):
+                continue
+            try:
+                raw = read_regular(src)
+                gz = gzip.compress(raw, compresslevel=6, mtime=0)
+                created = write_new(dst, gz)
+                if not created:
+                    # Never unlink src unless dst is already a valid regular gzip holding identical content.
+                    try:
+                        if gzip.decompress(read_regular(dst)) != raw:
+                            continue
+                    except (OSError, EOFError, ValueError, zlib.error):
+                        continue
+                os.unlink(src)
+                fsync_dir(self.pages_dir)
+                archived += 1
+            except OSError:
+                continue
+        return archived
+
     def quarantine_page(self, page_id: str) -> Path:
         """Move a stored page aside so the same id can be paged afresh (contract rule 14, PR #52).
 
-        ``pages/<id>.json`` is renamed atomically to ``quarantine/<id>.<UTC timestamp>.<suffix>.json``
-        (directory 0700, file 0600); its content is never changed or deleted. Returns the quarantine
-        path and logs ``page_quarantined`` with the page id and file name only. Idempotent: if the
-        page is no longer stored but was quarantined before, returns its most recent quarantine
-        path; if it was never stored, raises ``PageNotFoundError``. Concurrent calls move the file
-        once and all return that path.
+        ``pages/<id>.json`` (or ``.json.gz``) is renamed atomically to
+        ``quarantine/<id>.<UTC timestamp>.<suffix>.json`` (or ``.json.gz``) (directory 0700, file 0600);
+        its content is never changed or deleted. Returns the quarantine path and logs ``page_quarantined``
+        with the page id and file name only. Idempotent: if the page is no longer stored but was
+        quarantined before, returns its most recent quarantine path; if it was never stored, raises
+        ``PageNotFoundError``. Concurrent calls move the file once and all return that path.
         """
         check_page_id(page_id)
-        source = self.pages_dir / f"{page_id}.json"
+        source = self._existing_page_path(page_id) or (self.pages_dir / f"{page_id}.json")
+        ext = ".json.gz" if source.name.endswith(".json.gz") else ".json"
         quarantine = self.dir / "quarantine"
         private_dir(quarantine)
         now = time.time_ns()  # one reading, so names sort in call order across a second boundary
         stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now // 1_000_000_000)) + f"{now % 1_000_000_000:09d}Z"
-        target = quarantine / f"{page_id}.{stamp}.{secrets.token_hex(4)}.json"
+        target = quarantine / f"{page_id}.{stamp}.{secrets.token_hex(4)}{ext}"
         try:
             os.rename(source, target)  # atomic on one filesystem; the unique name never overwrites
         except FileNotFoundError:
@@ -1159,17 +1417,16 @@ class SessionStore(LedgerOps):
             if earlier is None:
                 raise PageNotFoundError(f"no stored or quarantined page {page_id}") from None
             return earlier
-        os.chmod(target, 0o600)
-        fd = os.open(quarantine, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        if not target.is_symlink() and target.is_file():
+            os.chmod(target, 0o600)
+        fsync_dir(quarantine)
+        fsync_dir(self.pages_dir)
         self.log({"event": "page_quarantined", "page_id": page_id, "path": f"quarantine/{target.name}"})
         return target
 
     def _quarantined(self, page_id: str) -> Path | None:
-        found = sorted((self.dir / "quarantine").glob(f"{page_id}.*.json"))
+        qdir = self.dir / "quarantine"
+        found = sorted([*qdir.glob(f"{page_id}.*.json"), *qdir.glob(f"{page_id}.*.json.gz")])
         return found[-1] if found else None
 
     @property
@@ -1180,6 +1437,21 @@ class SessionStore(LedgerOps):
             catalog = self.__dict__["_page_catalog"] = PageCatalog(self.pages_dir, self.log)
         return catalog
 
+    @property
+    def _fts(self) -> FtsIndex | None:
+        """Lazily created per-session SQLite FTS5 index, or None when FTS is disabled."""
+        if not getattr(self, "_use_fts", True):
+            return None
+        index = self.__dict__.get("_fts_index")
+        if index is None:
+            index = self.__dict__["_fts_index"] = FtsIndex(
+                self.dir, read_only=getattr(self, "_read_only", False)
+            )
+            fts_box = self.__dict__.get("_fts_box")
+            if fts_box is not None:
+                fts_box[0] = index
+        return index
+
     def set_search_cache(self, budget_bytes: int | None) -> None:
         """Hold at most ``budget_bytes`` of page text for search in this process (None: no limit; D39).
         Search results do not depend on it: a page whose text is not held is read again when searched.
@@ -1188,19 +1460,22 @@ class SessionStore(LedgerOps):
         self._trim_earlier()
 
     def get_page(self, page_id: str) -> dict[str, Any] | None:
-        """The page record for ``page_id``, or None if this store has no such page. Raises
-        ``PageUnreadableError``, after logging ``page_unreadable``, when the file cannot be read or is not
-        a page record (rule 18)."""
+        """The page record for ``page_id``, or None if this store has no such page. Supports both
+        ``.json`` and ``.json.gz`` pages. Raises ``PageUnreadableError``, after logging
+        ``page_unreadable``, when the file cannot be read or is not a page record (rule 18)."""
         if not isinstance(page_id, str) or not _PAGE_ID.fullmatch(page_id):  # any other id names no page (D58)
             return None
-        path = self.pages_dir / f"{page_id}.json"
-        try:
-            return load_page(read_regular_text(path), page_id)
-        except FileNotFoundError:
-            return None
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-            self.log({"event": "page_unreadable", "path": path.name, "error": str(e)})
-            raise PageUnreadableError(f"page {page_id} cannot be read", damaged=not isinstance(e, OSError)) from None
+        for suffix in (".json", ".json.gz"):
+            path = self.pages_dir / f"{page_id}{suffix}"
+            try:
+                return load_page(read_page_text(path), page_id)
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                self.log({"event": "page_unreadable", "path": path.name, "error": str(e)})
+                raise PageUnreadableError(f"page {page_id} cannot be read",
+                                          damaged=not isinstance(e, OSError)) from None
+        return None
 
     def page_ids(self) -> list[str]:
         """Every page id in this store, newest turn first."""
@@ -1212,11 +1487,40 @@ class SessionStore(LedgerOps):
         entries = sorted(self._catalog.entries(), key=lambda e: page_order(e.view), reverse=True)
         return [{"id": e.id, "turn": e.turn, "line": self._catalog.line(e, False)} for e in entries]
 
+    def _fts_read_page(self, file_name: str, sig: tuple[int, int, int] | None = None) -> dict[str, Any] | None:
+        """Read a page for FTS5 indexing through ``PageCatalog._read`` (logging unreadable files once).
+
+        Uses the already-listed ``sig`` so indexing N pages does O(N) stats instead of O(N^2).
+        """
+        catalog = self._catalog
+        if sig is not None:
+            with catalog._lock:
+                if catalog._unreadable.get(file_name) == sig:
+                    return None
+        page, damaged = catalog._read(self.pages_dir / file_name)
+        if page is None and damaged and sig is not None:
+            with catalog._lock:
+                catalog._unreadable[file_name] = sig
+        return page
+
     def search(self, query: str) -> list[str]:
-        """Ids of pages holding every word of ``query`` (case-insensitive, any order), best first (D34)."""
-        # A page removed while a search runs is left out whatever the budget: a held page would still be
-        # ranked, a page read from its file would not, so the search is run again on a new listing
-        # (D39, reviewer-1 on PR #215). Three tries, then the last result.
+        """Ids of pages holding every word of ``query`` (case-insensitive, any order), best first (D34).
+
+        Uses the lazily built, incrementally maintained SQLite FTS5 index when available, with automatic
+        fallback to ``PageCatalog`` scanning if SQLite/FTS5 is unavailable, damaged, or skipped."""
+        fts = self._fts
+        if fts is not None:
+            for _ in range(3):
+                with self._catalog._lock:
+                    listing = {n: sig for n, sig in self._catalog._listing().items()
+                               if self._catalog._unreadable.get(n) != sig}
+                found = fts.search(query, listing, lambda name, _l=listing: self._fts_read_page(name, _l.get(name)))
+                if found is None:
+                    break
+                if self._catalog.all_present(list(listing)):
+                    self._trim_earlier()
+                    return found
+        # Fallback: PageCatalog scan (also runs if SQLite/FTS5 is unavailable, damaged, or disabled).
         for _ in range(3):
             entries, fetch, names = self._catalog.search_entries()
             found = rank(entries, query, fetch)
@@ -1229,6 +1533,20 @@ class SessionStore(LedgerOps):
         """Pages holding part of ``query``, best first, each with the words it matched and how: what
         search falls back to when ``search`` finds no page (``contexto.store.search.rank_approximate``,
         D65). Empty when no page passes the floor."""
+        fts = self._fts
+        if fts is not None:
+            for _ in range(3):
+                with self._catalog._lock:
+                    listing = {n: sig for n, sig in self._catalog._listing().items()
+                               if self._catalog._unreadable.get(n) != sig}
+                found = fts.search_approximate(
+                    query, listing, lambda name, _l=listing: self._fts_read_page(name, _l.get(name))
+                )
+                if found is None:
+                    break
+                if self._catalog.all_present(list(listing)):
+                    self._trim_earlier()
+                    return found
         for _ in range(3):  # as ``search``: run again on a new listing when a page went meanwhile
             entries, fetch, names = self._catalog.search_entries()
             found = rank_approximate(entries, query, fetch)
@@ -1255,13 +1573,19 @@ class SessionStore(LedgerOps):
             earlier.trim()
 
     def search_earlier(self, query: str,
-                       view: Callable[[str, str, dict[str, Any]], Any] | None = None) -> EarlierSearch | None:
-        """Search the earlier sessions of this session's project (``EarlierPages.search``: the newest
-        50, the best 3 matches of each with one, its lines in view at its last request first, then its pages,
-        newest session first; each shown page as ``view`` makes it, when given); None when this session has no
-        project view. Strictly read-only in those sessions, and nothing about them is logged here."""
+                       view: Callable[[str, str, dict[str, Any]], Any] | None = None, *,
+                       approximate: bool = False,
+                       fallback_approximate: bool | None = None,
+                       approx_view: Callable[[str, str, dict[str, Any], Any, Any], Any] | None = None
+                       ) -> EarlierSearch | None:
+        """Search the earlier sessions of this session's project (``EarlierPages.search``); None when
+        this session has no project view. Strictly read-only in those sessions, and nothing about them
+        is logged here."""
         project = self.project()
-        return None if project is None else self._earlier.search(project, query, view)
+        if project is None:
+            return None
+        return self._earlier.search(project, query, view, approximate=approximate,
+                                    fallback_approximate=fallback_approximate, approx_view=approx_view)
 
     def earlier_session(self, session: str) -> EarlierSession:
         """The earlier session of this session's project that ``session`` names: its id, or its label or
@@ -1307,11 +1631,12 @@ class SessionStore(LedgerOps):
             return
         try:
             self._update_meta({"recall_variant": variant})
-        except OSError:
-            pass  # recording is a convenience; an unwritable meta.json must not break rendering
+        except (OSError, MetaCorruptError):
+            pass  # recording is a convenience; an unwritable/corrupt meta.json must not break rendering
 
     def log(self, event: dict) -> None:
-        """Append ``event`` (credentials redacted, ``ts`` added if absent) to ``log.jsonl`` as one line.
+        """Append ``event`` (credentials redacted, ``ts`` added if absent) to ``log.jsonl`` as one line,
+        serialized with an exclusive ``flock`` on ``log.jsonl``.
 
         A line an earlier write left without its newline (cut short by a full disk) is ended first, so
         this event is never joined to it (D58); the cut line stays unreadable and readers skip it."""
@@ -1320,6 +1645,7 @@ class SessionStore(LedgerOps):
         line = canonical_bytes(record) + b"\n"
         fd = open_private(self.dir / "log.jsonl", os.O_RDWR | os.O_APPEND)
         try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
             size = os.fstat(fd).st_size
             if size and os.pread(fd, 1, size - 1) != b"\n":
                 line = b"\n" + line

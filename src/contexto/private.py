@@ -179,16 +179,38 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def fsync_dir(path: Path) -> None:
+    """Flush directory entries of ``path`` to disk; ignores filesystems where directory fsync is unsupported."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        ignored = {errno.EINVAL, errno.EBADF, errno.EROFS}
+        for name in ("EOPNOTSUPP", "ENOTSUP"):
+            code = getattr(errno, name, None)
+            if code is not None:
+                ignored.add(code)
+        if e.errno not in ignored:
+            raise
+    finally:
+        os.close(fd)
+
+
 def write_new(path: Path, data: bytes) -> bool:
     """Atomically create ``path`` (0600) holding exactly ``data``; False if ``path`` already exists.
 
-    The data is written and fsynced to a private temporary file first and then hard-linked into
-    place, so a reader never sees a partial file and an existing file is never replaced. The
-    temporary file is removed whether or not the write succeeds (a full disk, say).
+    The data is written and fsynced to a private temporary file first, hard-linked into place, and
+    the parent directory is fsynced so a reader never sees a partial file and an existing file is
+    never replaced. The temporary file is removed whether or not the write succeeds (a full disk, say).
     """
     path = Path(path)
     tmp = temp_name(path)
     fd = open_private(tmp, os.O_WRONLY | os.O_EXCL)
+    created = False
     try:
         try:
             write_all(fd, data)
@@ -196,17 +218,21 @@ def write_new(path: Path, data: bytes) -> bool:
         finally:
             os.close(fd)
         os.link(tmp, path)
+        created = True
         return True
     except FileExistsError:
         return False
     finally:
         _discard(tmp)
+        if created:
+            fsync_dir(path.parent)
 
 
 def write_atomic(path: Path, data: bytes) -> None:
     """Replace ``path`` with a private (0600) file holding exactly ``data``: written and fsynced to a
-    temporary file, then renamed into place, so a reader sees the old or the new complete file. The
-    temporary file is removed when any step fails."""
+    temporary file, renamed into place, and the parent directory fsynced so a reader sees the old or
+    the new complete file and the rename survives a crash. The temporary file is removed when any
+    step fails."""
     path = Path(path)
     tmp = temp_name(path)
     fd = open_private(tmp, os.O_WRONLY | os.O_EXCL)
@@ -220,6 +246,7 @@ def write_atomic(path: Path, data: bytes) -> None:
     except BaseException:
         _discard(tmp)
         raise
+    fsync_dir(path.parent)
 
 
 def affinity_salt(home: Path) -> bytes:
