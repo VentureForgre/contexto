@@ -238,12 +238,15 @@ def test_structured_content_respects_request_meta_protocol_version():
 
 
 def test_max_line_chars_allows_exact_limit_plus_newline():
-    server = mcp.Server(MemoryStore(), io.StringIO(), io.StringIO())
+    out = io.StringIO()
+    server = mcp.Server(MemoryStore(), out, io.StringIO())
     payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})
     server.max_line_chars = len(payload)
-    # Exact limit plus CRLF or LF must succeed.
+    # Exact limit plus CRLF or LF must succeed both directly and via serve()/_iter_lines().
     assert server.handle_line(payload + "\n")["result"] == {}
     assert server.handle_line(payload + "\r\n")["result"] == {}
+    assert server.serve(io.StringIO(payload + "\r\n")) == 0
+    assert json.loads(out.getvalue().strip())["result"] == {}
     # One payload char over must be rejected.
     too_long = payload + " "
     assert server.handle_line(too_long + "\n")["error"]["code"] == mcp.INVALID_REQUEST

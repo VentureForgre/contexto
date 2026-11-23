@@ -62,6 +62,7 @@ import sys
 import threading
 import time
 import weakref
+import zlib
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -1365,7 +1366,7 @@ class SessionStore(LedgerOps):
                     try:
                         if gzip.decompress(read_regular(dst)) != raw:
                             continue
-                    except (OSError, EOFError, ValueError):
+                    except (OSError, EOFError, ValueError, zlib.error):
                         continue
                 os.unlink(src)
                 fsync_dir(self.pages_dir)

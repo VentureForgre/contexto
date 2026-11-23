@@ -39,6 +39,7 @@ import os
 import re
 import stat
 import time
+import zlib
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -823,7 +824,7 @@ def _page_tokens(path: Path, size: int) -> int | None:
         if path.name.endswith(".json.gz"):
             raw = gzip.decompress(raw)
         page = json.loads(raw)
-    except (OSError, ValueError, RecursionError, EOFError):
+    except (OSError, ValueError, RecursionError, EOFError, zlib.error):
         return None
     finally:
         os.close(fd)

@@ -389,7 +389,7 @@ class FtsIndex:
                         if not self._sync_locked(conn, listing, read_page):
                             return None
                         return self._run_strict(conn, q)
-                except _FtsCorruptError:
+                except (_FtsCorruptError, zlib.error):
                     self._reset_corrupt_locked()
                     if self.read_only or attempt == 1:
                         return None
@@ -491,7 +491,7 @@ class FtsIndex:
                             return _entries[i]._replace(text=zlib.decompress(got[0]))
 
                         return rank_approximate(entries, query, fetch)
-                except _FtsCorruptError:
+                except (_FtsCorruptError, zlib.error):
                     self._reset_corrupt_locked()
                     if self.read_only or attempt == 1:
                         return None

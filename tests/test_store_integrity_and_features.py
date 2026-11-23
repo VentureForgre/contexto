@@ -405,3 +405,27 @@ def test_stats_counts_and_totals_gzipped_pages(tmp_path):
     st = session_stats(tmp_path, "s-stats-gz")
     assert st["pages"]["count"] == 2
     assert st["pages"]["tokens_estimate"] == totals["tokens_estimate"]
+
+
+def test_corrupt_deflate_gzip_handled_cleanly_in_archive_and_stats(tmp_path):
+    from contexto.stats import page_totals, session_stats
+
+    store = SessionStore(tmp_path, "s-bad-deflate")
+    [p0, p1] = store.page_out([make_turn("turn zero"), make_turn("turn one")], 0)
+    # Valid 10-byte gzip header followed by invalid deflate stream triggers zlib.error (not OSError/ValueError).
+    bad_gz = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff\xff"
+    (store.pages_dir / f"{p0}.json.gz").write_bytes(bad_gz)
+
+    # archive_pages must skip p0 without crashing or unlinking p0.json.
+    assert store.archive_pages(min_age_turns=1) == 0
+    assert (store.pages_dir / f"{p0}.json").is_file()
+
+    # Now remove p0.json so stats reads the bad-deflate .json.gz directly: must count unreadable, never crash.
+    (store.pages_dir / f"{p0}.json").unlink()
+    totals = page_totals(store.pages_dir)
+    assert totals["count"] == 2
+    assert totals["unreadable"] == 1
+    assert totals["tokens_estimate"] > 0
+    st = session_stats(tmp_path, "s-bad-deflate")
+    assert st["pages"]["unreadable"] == 1
+    assert p1 != p0
