@@ -48,17 +48,24 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import stat
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 from contexto.canonical import loads_bounded
 
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 BASE_URL_KEY = "ANTHROPIC_BASE_URL"
+VERTEX_BASE_URL_KEY = "ANTHROPIC_VERTEX_BASE_URL"
+VERTEX_REGION_KEY = "CLOUD_ML_REGION"
+FOUNDRY_BASE_URL_KEY = "ANTHROPIC_FOUNDRY_BASE_URL"
+FOUNDRY_RESOURCE_KEY = "ANTHROPIC_FOUNDRY_RESOURCE"
+OAUTH_TOKEN_KEY = "CLAUDE_CODE_OAUTH_TOKEN"
 CONFIG_DIR_KEY = "CLAUDE_CONFIG_DIR"
 KEY_HELPER_KEY = "apiKeyHelper"
 CUSTOM_OAUTH_KEY = "CLAUDE_CODE_CUSTOM_OAUTH_URL"
@@ -73,13 +80,18 @@ MANAGED_SETTINGS_FILES = {"darwin": "/Library/Application Support/ClaudeCode/man
                           "linux": "/etc/claude-code/managed-settings.json"}
 PROVIDER_PREFIX = "CLAUDE_CODE_USE_"  # every cloud-provider switch (CLOUD_PROVIDER_KEYS) starts with it
 SETTINGS_FILE_LIMIT = 4 * 1024 * 1024  # bytes read from one settings file; real ones are a few kilobytes
+# Strict single DNS label for CLOUD_ML_REGION (e.g. us-east5, global) and ANTHROPIC_FOUNDRY_RESOURCE:
+# prevents URL/authority injection via '/', '@', '?', '#', ':', '.', whitespace, or control chars.
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
 
 @dataclass(frozen=True)
 class Upstream:
     url: str
-    source: str  # "flag", "settings:<kind>", "env", or "default"
+    source: str  # "flag", "flag:--settings", "settings:<kind>", "env", or "default"
     ignored: tuple[str, ...] = ()  # project kinds that set a base URL, skipped as untrusted (trusted_only)
+    base_url_key: str = BASE_URL_KEY  # the env var Contexto intercepts (ANTHROPIC_BASE_URL / Vertex / Foundry)
+    provider: str | None = None  # intercepted cloud-provider switch name, e.g. CLAUDE_CODE_USE_VERTEX, or None
 
 
 @dataclass(frozen=True)
@@ -320,7 +332,22 @@ class SettingsFile(NamedTuple):
     may_name_provider: bool = True
 
 
-def read_settings_file(path: Path) -> SettingsFile:
+def _has_nonfinite(value: object) -> bool:
+    """Whether ``value`` contains a NaN or infinite float (which JSON forbids and Claude Code rejects)."""
+    stack: list[object] = [value]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, float) and not math.isfinite(cur):
+            return True
+        if isinstance(cur, dict):
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return False
+
+
+def read_settings_file(path: Path, *, require_object: bool = False,
+                       reject_huge_int: bool = False) -> SettingsFile:
     """One Claude Code settings file, read with a bound.
 
     Opened without blocking and checked to be a regular file before a byte is read, so a FIFO or a
@@ -333,22 +360,10 @@ def read_settings_file(path: Path) -> SettingsFile:
     JavaScript's Infinity (``_json_int``), and ``NaN``, ``Infinity`` and ``-Infinity``, which are not
     JSON, make the file not valid JSON (``_json_constant``), so no setting is taken from it.
 
-    ``data`` is the file's JSON object. An empty or blank file, and a document that is not an object,
-    give an empty object: nothing can be set there. A file that does not exist, a directory, and a
-    file this user cannot open give ``SettingsFile(None, None)``: Claude Code runs as the same user
-    and cannot read them either. A file that is there and that Contexto did not read gives
-    ``problem``: it is not a regular file, it is larger than the limit, it cannot be read, or it is
-    not valid JSON (a syntax error, ``NaN``, a wide encoding Claude Code does not load, nested too
-    deep), or its ``env`` is there and is not an object (Claude Code 2.1.322 then loads nothing from
-    the file, spikes/m2/providers/README.md: not its ``apiKeyHelper`` either; only ``env``'s type is
-    checked here). Such a file is not evidence that a setting is off, since Claude Code may read it
-    differently; the cloud-provider guard refuses on it (``cloud_provider``) unless it was read whole,
-    is not valid JSON, and its text
-    could not name a switch (``may_name_provider``): Claude Code does not load a file with a comment,
-    a trailing comma or another syntax error (measured on 2.1.322, D70), or with ``NaN`` or an ``env``
-    that is not an object (spikes/m2/providers/README.md), so such a file turns no switch on. The NUL
-    byte in that rule is the backstop for wide files that still do not parse: UTF-16BE, UTF-16LE
-    without the mark, UTF-32, and UTF-16LE with the mark and a syntax error."""
+    When ``require_object=True``, non-empty JSON that does not decode to a JSON object returns
+    ``problem="is not a JSON object"`` instead of normalising to ``{}``. When ``reject_huge_int=True``,
+    oversized integers and non-finite floats are rejected rather than coerced to ``inf`` so re-serialising
+    a merged ``--settings`` file cannot emit ``Infinity``."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except (OSError, ValueError):  # missing, not permitted, a symlink loop, a name the system rejects
@@ -383,9 +398,17 @@ def read_settings_file(path: Path) -> SettingsFile:
             text = raw[2:len(raw) - len(raw) % 2].decode("utf-16-le", "surrogatepass")
         else:
             text = raw.decode("utf-8-sig", "replace")
-        data = loads_bounded(text, parse_int=_json_int, parse_constant=_json_constant) if text.strip() else {}
+        if text.strip():
+            parse_int = int if reject_huge_int else _json_int
+            data = loads_bounded(text, parse_int=parse_int, parse_constant=_json_constant)
+        else:
+            data = {}
     except (ValueError, RecursionError):  # UnicodeDecodeError and JSONTooDeepError are ValueErrors
         return SettingsFile(None, "is not valid JSON", _may_name_provider(raw))
+    if reject_huge_int and _has_nonfinite(data):
+        return SettingsFile(None, "is not valid JSON", False)
+    if require_object and not isinstance(data, dict):
+        return SettingsFile(None, "is not a JSON object", False)
     if isinstance(data, dict) and "env" in data and not isinstance(data["env"], dict):
         return SettingsFile(None, "has an env that is not a JSON object, so Claude Code loads nothing from it", False)
     return SettingsFile(data if isinstance(data, dict) else {}, None)
@@ -557,10 +580,12 @@ class EnvValue:
 
 def claude_env_value(name: str, *, env: Mapping[str, str] | None = None, cwd: Path | None = None,
                      home: Path | None = None, files: SettingsFiles | None = None, managed: Path | None = None,
-                     process_env: bool = True, skip: Callable[[dict], bool] | None = None) -> EnvValue:
+                     process_env: bool = True, skip: Callable[[dict], bool] | None = None,
+                     extra_settings: dict | None = None) -> EnvValue:
     """The value Claude Code would run with for the environment variable ``name``, launched from
     ``cwd`` with the process environment ``env``, as far as Contexto can tell: the managed settings
-    file's ``env`` block (``managed``, by default ``managed_settings_path``), else the first settings
+    file's ``env`` block (``managed``, by default ``managed_settings_path``), else ``extra_settings``
+    (a user ``--settings`` flag payload when provided), else the first settings
     file ``env`` block that sets it, in the order and under the trust rule ``contexto run claude`` uses
     for the base URL (``claude_setting``: a project file counts as ``claude -p`` reads it, with no
     trust record needed, and no project file counts while ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is
@@ -568,7 +593,7 @@ def claude_env_value(name: str, *, env: Mapping[str, str] | None = None, cwd: Pa
     (D70) with ``CLAUDE_CODE_USE_BEDROCK`` and ``CLAUDE_CODE_GATEWAY_HINT_HEADERS``: a settings file's
     value wins over the environment's in both directions, in the user file and in a project file, and
     a project file's wins over the user file's. That managed settings come first is from Claude Code's
-    documentation, not measured. A ``--settings`` file is not read. This is a prediction, good enough
+    documentation, not measured. This is a prediction, good enough
     to decide what to forward; the cloud-provider guard does not rely on it (``cloud_provider``).
 
     A settings file whose parsed JSON object ``skip`` accepts is read as not setting ``name``, so the
@@ -584,6 +609,10 @@ def claude_env_value(name: str, *, env: Mapping[str, str] | None = None, cwd: Pa
     value = read(managed_data) if managed_data is not None else None
     if value is not None:
         return EnvValue(name, value, f"settings:{MANAGED_KIND}")
+    if isinstance(extra_settings, dict):
+        flag_value = read(extra_settings)
+        if flag_value is not None:
+            return EnvValue(name, flag_value, "flag:--settings")
     found = claude_setting(read, cwd or Path.cwd(), home or Path.home(), env, files=files)
     if found.value is not None:
         return EnvValue(name, found.value, f"settings:{found.source}")
@@ -604,7 +633,19 @@ CLOUD_PROVIDER_KEYS = {"CLAUDE_CODE_USE_BEDROCK": "Amazon Bedrock", "CLAUDE_CODE
                        "CLAUDE_CODE_USE_MANTLE": "Amazon Bedrock (Mantle)",
                        "CLAUDE_CODE_USE_ANTHROPIC_AWS": "Claude Platform on AWS",
                        "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "Claude Platform on Google Cloud"}
+# Cloud providers Contexto intercepts directly via their own base-URL env var, because both carry
+# standard Anthropic Messages JSON payloads (measured on Claude Code 2.1.328: Vertex sends
+# /projects/.../publishers/anthropic/models/<model>:streamRawPredict|:rawPredict and Foundry sends
+# /v1/messages).
+INTERCEPTED_CLOUD_PROVIDERS: dict[str, tuple[str, str]] = {
+    "CLAUDE_CODE_USE_VERTEX": ("Google Vertex AI", VERTEX_BASE_URL_KEY),
+    "CLAUDE_CODE_USE_FOUNDRY": ("Microsoft Foundry", FOUNDRY_BASE_URL_KEY),
+}
+UNSUPPORTED_CLOUD_PROVIDER_KEYS: dict[str, str] = {
+    name: label for name, label in CLOUD_PROVIDER_KEYS.items() if name not in INTERCEPTED_CLOUD_PROVIDERS
+}
 PLACE_NAMES = {"env": "the process environment",
+               "flag:--settings": "the env block of your --settings argument",
                "settings:user": "the env block of your Claude Code user settings "
                                 "(~/.claude/settings.json, or settings.json in $CLAUDE_CONFIG_DIR)",
                f"settings:{MANAGED_KIND}": "the env block of Claude Code's managed settings file "
@@ -616,52 +657,133 @@ class CloudProvider:
     """Why ``cloud_provider`` would not let a launch through."""
     on: tuple[tuple[str, tuple[str, ...]], ...]  # each switch that is on, with every place it is on
     unread: tuple[tuple[str, str], ...] = ()  # (place, problem) for each settings file that could not be read
+    # (switch_name, truthy_places, reason) when an intercepted provider switch is overridden off in a
+    # higher-precedence source or set only in project settings while CLAUDE_CODE_IGNORE_PERSISTED_TRUST is on.
+    conflicts: tuple[tuple[str, tuple[str, ...], str], ...] = ()
 
 
-def cloud_provider(*, env: Mapping[str, str] | None = None, cwd: Path | None = None, home: Path | None = None,
-                   files: SettingsFiles | None = None, managed: Path | None = None) -> CloudProvider | None:
-    """Whether a Claude Code launched from ``cwd`` may send its requests to a cloud provider, or None
-    (D70). With one of ``CLOUD_PROVIDER_KEYS`` on, Claude Code sends nothing to ``ANTHROPIC_BASE_URL``,
-    so a proxy it was pointed at sees no request and bounds nothing.
+def _intercepted_conflict(name: str, places: tuple[str, ...], *, env: Mapping[str, str], cwd: Path,
+                          home: Path, files: SettingsFiles, managed: Path | None,
+                          extra_settings: dict | None) -> str | None:
+    """Detect precedence/trust ambiguity for an intercepted cloud-provider switch (B-H3 / A-M2)."""
+    if ignores_persisted_trust(env) and all(
+        place.startswith("settings:") and place.removeprefix("settings:") in PROJECT_KINDS
+        for place in places
+    ):
+        return "ignored while CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set"
+    effective = claude_env_value(name, env=env, cwd=cwd, home=home, files=files, managed=managed,
+                                 extra_settings=extra_settings)
+    if effective.value is not None and not env_truthy(effective.value) and effective.source:
+        return f"turned off in {_place(effective.source)}"
+    return None
 
-    The check fails closed. A switch counts when it is on (``env_truthy``) in the process environment
-    or in the ``env`` block (``js_string``) of any settings file Contexto can find: every file of
-    ``claude_settings_order`` (the main checkout's and the folder's project files, and the user's) and
-    the managed settings file (``managed``, by default ``managed_settings_path``; file-based managed
-    settings only). Precedence between them is not applied and neither is the folder's trust state:
-    Claude Code does not apply every file Contexto can read (measured on 2.1.322: a file with a
-    schema error such as a wrong-typed ``permissions``, any project file under ``--setting-sources
-    user``, a project file's ``env`` in ``-p`` mode while ``CLAUDE_CODE_IGNORE_PERSISTED_TRUST`` is
-    set), so a file that says off cannot be trusted to win, and a project file can only add a
-    refusal. The accepted cost is a refusal Claude Code would not have needed: the environment says
-    on and a file Claude Code does apply says off, or a file it ignores says on.
 
-    A settings file that is there and that Contexto could not read (``read_settings_file``: not a
-    regular file, over the size limit, not valid JSON) is reported in ``unread`` and also refuses the
-    launch, unless it cannot name a switch (``SettingsFile.may_name_provider``). It is not evidence
-    that a switch is off: Claude Code has no such limit and may parse the file differently. A file
-    that does not exist, and one this user cannot open, pass: Claude Code cannot read them either.
-
-    Not covered: managed settings that are not in that file, and ``CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST``
-    (the docs say Claude Code then ignores these switches in settings files; not measured, so a switch
-    found there still counts)."""
-    env = os.environ if env is None else env
-    files = files or SettingsFiles()
-    managed = managed or managed_settings_path()
+def _read_provider_sources(*, env: Mapping[str, str], cwd: Path, home: Path, files: SettingsFiles,
+                           managed: Path | None, extra_settings: dict | None) -> tuple[
+    list[tuple[str, SettingsFile]], tuple[tuple[str, str], ...]]:
     order = [(f"settings:{kind}", path)
-             for kind, path in claude_settings_order(cwd or Path.cwd(), home or Path.home(), env)]
+             for kind, path in claude_settings_order(cwd, home, env)]
     if managed is not None:
         order.append((f"settings:{MANAGED_KIND}", managed))
     read = [(place, files.read(path)) for place, path in order]
+    if isinstance(extra_settings, dict):
+        read.append(("flag:--settings", SettingsFile(extra_settings, None, False)))
+    unread = tuple((place, found.problem) for place, found in read if found.problem and found.may_name_provider)
+    return read, unread
+
+
+def _enabled_switches(keys: Mapping[str, str], env: Mapping[str, str],
+                      read: list[tuple[str, SettingsFile]]) -> tuple[tuple[str, tuple[str, ...]], ...]:
     on = []
-    for name in CLOUD_PROVIDER_KEYS:
+    for name in keys:
         places = ["env"] if env_truthy(env.get(name)) else []
         places += [place for place, found in read
                    if found.data is not None and env_truthy(settings_env(found.data, name))]
         if places:
             on.append((name, tuple(places)))
-    unread = tuple((place, found.problem) for place, found in read if found.problem and found.may_name_provider)
-    return CloudProvider(tuple(on), unread) if on or unread else None
+    return tuple(on)
+
+
+def cloud_provider(*, env: Mapping[str, str] | None = None, cwd: Path | None = None, home: Path | None = None,
+                   files: SettingsFiles | None = None, managed: Path | None = None,
+                   extra_settings: dict | None = None, allow_intercepted: bool = False) -> CloudProvider | None:
+    """Whether a Claude Code launched from ``cwd`` may send its requests to a cloud provider, or None
+    (D70). With ``allow_intercepted=False`` (default), checks every switch in ``CLOUD_PROVIDER_KEYS``.
+    With ``allow_intercepted=True`` (used by ``contexto run claude`` and ``contexto doctor``), Vertex AI
+    and Microsoft Foundry are allowed when exactly one is enabled and no unsupported provider (such as
+    SigV4-signed Amazon Bedrock) is on; two intercepted providers on at once still refuse.
+
+    The check fails closed. A switch counts when it is on (``env_truthy``) in the process environment
+    or in the ``env`` block (``js_string``) of any settings file Contexto can find (plus ``extra_settings``
+    from ``--settings`` when given): every file of ``claude_settings_order`` and the managed settings file
+    (``managed``, by default ``managed_settings_path``; file-based managed settings only).
+
+    A settings file that is there and that Contexto could not read (``read_settings_file``: not a
+    regular file, over the size limit, not valid JSON) is reported in ``unread`` and also refuses the
+    launch, unless it cannot name a switch (``SettingsFile.may_name_provider``)."""
+    env = os.environ if env is None else env
+    files = files or SettingsFiles()
+    managed = managed or managed_settings_path()
+    cwd_path = cwd or Path.cwd()
+    home_path = home or Path.home()
+    read, unread = _read_provider_sources(env=env, cwd=cwd_path, home=home_path,
+                                          files=files, managed=managed, extra_settings=extra_settings)
+    if not allow_intercepted:
+        on = _enabled_switches(CLOUD_PROVIDER_KEYS, env, read)
+        return CloudProvider(on, unread) if on or unread else None
+    unsupported = _enabled_switches(UNSUPPORTED_CLOUD_PROVIDER_KEYS, env, read)
+    intercepted = _enabled_switches(INTERCEPTED_CLOUD_PROVIDERS, env, read)
+    if unsupported:
+        return CloudProvider(unsupported, unread)
+    if len(intercepted) > 1:
+        return CloudProvider(intercepted, unread)
+    conflicts: list[tuple[str, tuple[str, ...], str]] = []
+    if len(intercepted) == 1:
+        name, places = intercepted[0]
+        reason = _intercepted_conflict(name, places, env=env, cwd=cwd_path, home=home_path,
+                                       files=files, managed=managed, extra_settings=extra_settings)
+        if reason is not None:
+            conflicts.append((name, places, reason))
+    return CloudProvider((), unread, tuple(conflicts)) if unread or conflicts else None
+
+
+def active_cloud_provider(*, env: Mapping[str, str] | None = None, cwd: Path | None = None,
+                          home: Path | None = None, files: SettingsFiles | None = None,
+                          managed: Path | None = None,
+                          extra_settings: dict | None = None) -> tuple[str | None, tuple[str, ...]]:
+    """The intercepted cloud provider enabled for this launch (``CLAUDE_CODE_USE_VERTEX`` or
+    ``CLAUDE_CODE_USE_FOUNDRY``) and where it is on, or ``(None, ())`` when none (or more than one,
+    or a conflicting precedence/trust override) is active."""
+    env = os.environ if env is None else env
+    files = files or SettingsFiles()
+    managed = managed or managed_settings_path()
+    cwd_path = cwd or Path.cwd()
+    home_path = home or Path.home()
+    read, _ = _read_provider_sources(env=env, cwd=cwd_path, home=home_path,
+                                     files=files, managed=managed, extra_settings=extra_settings)
+    intercepted = _enabled_switches(INTERCEPTED_CLOUD_PROVIDERS, env, read)
+    if len(intercepted) == 1:
+        name, places = intercepted[0]
+        if _intercepted_conflict(name, places, env=env, cwd=cwd_path, home=home_path,
+                                 files=files, managed=managed, extra_settings=extra_settings) is None:
+            return name, places
+    return None, ()
+
+
+def checked_provider_places(*, include_flag: bool = True) -> str:
+    """Human-readable list of every environment and settings location checked for cloud-provider
+    switches (no user paths)."""
+    places = [
+        "the process environment",
+        "the main checkout's .claude/settings.local.json",
+        ".claude/settings.local.json",
+        ".claude/settings.json",
+        "~/.claude/settings.json (or $CLAUDE_CONFIG_DIR/settings.json)",
+        "Claude Code's managed settings file (managed-settings.json)",
+    ]
+    if include_flag:
+        places.append("--settings")
+    return ", ".join(places[:-1]) + ", or " + places[-1]
 
 
 def _place(place: str) -> str:
@@ -692,25 +814,49 @@ def cloud_provider_note(found: CloudProvider) -> str:
     for place, problem in found.unread:
         parts.append(f"Contexto could not read {_file(place)} (it {problem}), so it cannot tell whether that file "
                      f"turns on a cloud provider")
+    for name, places, reason in found.conflicts:
+        provider = CLOUD_PROVIDER_KEYS.get(name, "a cloud provider")
+        parts.append(f"{name} ({provider}) is set in {_listed([_place(place) for place in places])}, but {reason}")
     return ". ".join(parts)
 
 
 def claude_key_helper(cwd: Path, home: Path, env: Mapping[str, str] | None = None, *,
-                      trusted_only: bool = True) -> Setting:
+                      trusted_only: bool = True, files: SettingsFiles | None = None,
+                      extra_settings: dict | None = None) -> Setting:
     """The ``apiKeyHelper`` Claude Code would use from ``cwd``. Trusted files only by default: the
     helper is a command, and its only caller hands it to Codex, which runs it without asking."""
+    if isinstance(extra_settings, dict):
+        flag_helper = _settings_string(extra_settings, lambda data: data.get(KEY_HELPER_KEY))
+        if flag_helper:
+            return Setting(flag_helper, "flag:--settings")
     return claude_setting(lambda data: _settings_string(data, lambda data: data.get(KEY_HELPER_KEY)),
-                          cwd, home, env, trusted_only=trusted_only)
+                          cwd, home, env, trusted_only=trusted_only, files=files)
+
+
+def _settings_env_url(key: str) -> Callable[[dict], str | None]:
+    def read(data: dict) -> str | None:
+        env = data.get("env")
+        return _settings_string(data, lambda _: env.get(key) if isinstance(env, dict) else None)
+    return read
+
+
+def _flag_env_string(extra_settings: dict | None, key: str) -> str | None:
+    if not isinstance(extra_settings, dict):
+        return None
+    return _settings_env_url(key)(extra_settings)
 
 
 def resolve_upstream(explicit: str | None = None, *, env: Mapping[str, str] | None = None,
                      cwd: Path | None = None, home: Path | None = None, trusted_only: bool = False,
-                     files: SettingsFiles | None = None) -> Upstream:
+                     files: SettingsFiles | None = None, extra_settings: dict | None = None) -> Upstream:
     """The upstream per the module docstring. ``trusted_only`` skips project files in a folder Claude
     Code has not trusted (``contexto run codex``); ``Upstream.ignored`` names the skipped kinds.
     ``files`` is the caller's ``SettingsFiles`` when it reads more than the base URL."""
     if explicit:
         return Upstream(explicit, "flag")
+    flag_url = _flag_env_string(extra_settings, BASE_URL_KEY)
+    if flag_url:
+        return Upstream(flag_url, "flag:--settings")
     env = os.environ if env is None else env
     found = claude_setting(_settings_base_url, cwd or Path.cwd(), home or Path.home(), env, trusted_only=trusted_only,
                            files=files)
@@ -720,3 +866,134 @@ def resolve_upstream(explicit: str | None = None, *, env: Mapping[str, str] | No
     if value:
         return Upstream(value, "env", found.ignored)
     return Upstream(DEFAULT_UPSTREAM, "default", found.ignored)
+
+
+def _validate_dns_label(raw: str, key: str, example: str) -> str:
+    """Validate and normalise a single DNS label (e.g. ``CLOUD_ML_REGION`` or
+    ``ANTHROPIC_FOUNDRY_RESOURCE``) before interpolating it into an HTTPS authority.
+
+    Never echoes ``raw`` in errors (it may contain secrets or terminal escape sequences)."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise ValueError(
+            f"{key} is not a valid DNS label (expected letters, digits, and hyphens such as {example}; "
+            f"use the provider's *_BASE_URL variable or --upstream for a full URL)."
+        )
+    value = raw.strip().lower()
+    if not _DNS_LABEL_RE.fullmatch(value):
+        raise ValueError(
+            f"{key} is not a valid DNS label (expected letters, digits, and hyphens such as {example}; "
+            f"use the provider's *_BASE_URL variable or --upstream for a full URL)."
+        )
+    return value
+
+
+def _check_provider_url(url: str, expected_suffix: str, key: str) -> str:
+    """Defense-in-depth check that a constructed provider URL stays on the expected HTTPS vendor host."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if (parts.scheme != "https" or parts.username is not None or parts.password is not None
+            or parts.query or parts.fragment or not host
+            or not (host == expected_suffix or host.endswith("." + expected_suffix)
+                    or host.endswith("-" + expected_suffix))):
+        raise ValueError(f"{key} produced an invalid provider upstream URL")
+    return url
+
+
+def resolve_provider_upstream(provider_key: str, explicit: str | None = None, *,
+                              env: Mapping[str, str] | None = None, cwd: Path | None = None,
+                              home: Path | None = None, files: SettingsFiles | None = None,
+                              managed: Path | None = None,
+                              extra_settings: dict | None = None) -> Upstream:
+    """Resolve the upstream URL for an intercepted cloud provider (``CLAUDE_CODE_USE_VERTEX`` or
+    ``CLAUDE_CODE_USE_FOUNDRY``).
+
+    Precedence: explicit ``--upstream``, ``--settings`` ``env.<BASE_URL_KEY>``, settings files
+    ``env.<BASE_URL_KEY>``, process env ``<BASE_URL_KEY>``, then the provider's default endpoint
+    derived from ``CLOUD_ML_REGION`` (Vertex) or ``ANTHROPIC_FOUNDRY_RESOURCE`` (Foundry). Raises
+    ``ValueError`` when no base URL or region/resource is configured or when a region/resource is
+    not a valid single DNS label."""
+    if provider_key not in INTERCEPTED_CLOUD_PROVIDERS:
+        raise ValueError(f"unsupported cloud provider {provider_key!r}")
+    label, url_key = INTERCEPTED_CLOUD_PROVIDERS[provider_key]
+    env = os.environ if env is None else env
+    cwd_path = cwd or Path.cwd()
+    home_path = home or Path.home()
+    if explicit:
+        return Upstream(explicit, "flag", base_url_key=url_key, provider=provider_key)
+    flag_url = _flag_env_string(extra_settings, url_key)
+    if flag_url:
+        return Upstream(flag_url, "flag:--settings", base_url_key=url_key, provider=provider_key)
+    found = claude_setting(_settings_env_url(url_key), cwd_path, home_path, env, files=files)
+    if found.value:
+        return Upstream(found.value, f"settings:{found.source}", found.ignored,
+                        base_url_key=url_key, provider=provider_key)
+    env_url = env.get(url_key, "").strip()
+    if env_url:
+        return Upstream(env_url, "env", found.ignored, base_url_key=url_key, provider=provider_key)
+    if provider_key == "CLAUDE_CODE_USE_VERTEX":
+        region_val = claude_env_value(VERTEX_REGION_KEY, env=env, cwd=cwd_path, home=home_path,
+                                      files=files, managed=managed, extra_settings=extra_settings)
+        raw_region = region_val.value or ""
+        if raw_region.strip():
+            region = _validate_dns_label(raw_region, VERTEX_REGION_KEY, "us-east5 or global")
+            host = "aiplatform.googleapis.com" if region == "global" else f"{region}-aiplatform.googleapis.com"
+            url = _check_provider_url(f"https://{host}/v1", "aiplatform.googleapis.com", VERTEX_REGION_KEY)
+            return Upstream(url, f"vertex:{region_val.source or 'default'}", found.ignored,
+                            base_url_key=url_key, provider=provider_key)
+        raise ValueError(
+            f"{provider_key} ({label}) is on, but neither {url_key} nor {VERTEX_REGION_KEY} is set: "
+            f"Contexto cannot determine the Vertex AI upstream URL. Set {VERTEX_REGION_KEY} (for example "
+            f"us-east5 or global), set {url_key}, or pass --upstream URL."
+        )
+    resource_val = claude_env_value(FOUNDRY_RESOURCE_KEY, env=env, cwd=cwd_path, home=home_path,
+                                    files=files, managed=managed, extra_settings=extra_settings)
+    raw_resource = resource_val.value or ""
+    if raw_resource.strip():
+        resource = _validate_dns_label(raw_resource, FOUNDRY_RESOURCE_KEY, "my-foundry-resource")
+        url = _check_provider_url(f"https://{resource}.services.ai.azure.com/anthropic",
+                                  "services.ai.azure.com", FOUNDRY_RESOURCE_KEY)
+        return Upstream(url, f"foundry:{resource_val.source or 'default'}", found.ignored,
+                        base_url_key=url_key, provider=provider_key)
+    raise ValueError(
+        f"{provider_key} ({label}) is on, but neither {url_key} nor {FOUNDRY_RESOURCE_KEY} is set: "
+        f"Contexto cannot determine the Microsoft Foundry upstream URL. Set {FOUNDRY_RESOURCE_KEY}, "
+        f"set {url_key}, or pass --upstream URL."
+    )
+
+
+def claude_oauth_detected(*, env: Mapping[str, str] | None = None, cwd: Path | None = None,
+                          home: Path | None = None, files: SettingsFiles | None = None,
+                          extra_settings: dict | None = None) -> str | None:
+    """Non-invasive Claude Pro/Max OAuth auth presence detection.
+
+    Returns a content-free source label when OAuth auth appears to be configured, or None. Never reads
+    credential secrets, never queries the OS keychain, and never logs or returns token values:
+
+    1. ``CLAUDE_CODE_OAUTH_TOKEN`` set to a non-empty value in ``--settings``, settings files, or env
+       (presence only; value discarded).
+    2. ``oauthAccount`` non-empty object in Claude Code's global config file (``~/.claude.json`` or
+       ``$CLAUDE_CONFIG_DIR/.claude.json``; account metadata only, read via single-fd bounded
+       ``read_settings_file``).
+    3. Non-empty regular ``.credentials.json`` file in ``~/.claude/`` or ``$CLAUDE_CONFIG_DIR/``
+       (stat-checked only; file is never opened)."""
+    env = os.environ if env is None else env
+    home_path = home or Path.home()
+    cwd_path = cwd or Path.cwd()
+    token = claude_env_value(OAUTH_TOKEN_KEY, env=env, cwd=cwd_path, home=home_path, files=files,
+                             extra_settings=extra_settings)
+    if token.value and token.value.strip() and token.source:
+        return f"{token.source}:{OAUTH_TOKEN_KEY}"
+    cfg_found = read_settings_file(claude_global_config_path(home_path, env))
+    if isinstance(cfg_found.data, dict):
+        acct = cfg_found.data.get("oauthAccount")
+        if isinstance(acct, dict) and acct:
+            return "config:oauthAccount"
+    try:
+        config_dir = (env.get(CONFIG_DIR_KEY) or "").strip()
+        creds = (Path(config_dir) if config_dir else home_path / ".claude") / ".credentials.json"
+        st = os.stat(creds)
+        if stat.S_ISREG(st.st_mode) and st.st_size > 0:
+            return "file:.credentials.json"
+    except OSError:
+        pass
+    return None

@@ -170,8 +170,11 @@ def test_the_plain_arm_compacts_at_the_bound_and_the_contexto_arm_does_not(run):
     before = [r["uncached"] + r["cache_write"] + r["cache_read"] + r["output"]
               for r in requests[:requests.index(summaries[0])] if r["main"]]
     assert len(before) >= 2 and all(usage < BOUND for usage in before[:-1]), before[-3:]
-    assert before[-1] >= BOUND  # the usage that crossed the trigger
-    assert before[-1] <= pre_tokens < BOUND + 3_000, (before[-1], pre_tokens)
+    # Claude Code compares last_usage + its estimate of newly added messages against the trigger, so
+    # compaction can fire either on the request after last_usage crossed BOUND or right as a new turn
+    # pushes pre_tokens over BOUND. Either way, pre_tokens sits right at BOUND (within 3,000 tokens).
+    assert BOUND <= pre_tokens < BOUND + 3_000, (before[-1], pre_tokens)
+    assert before[-1] <= pre_tokens, (before[-1], pre_tokens)
     after = [r for r in requests[requests.index(summaries[-1]) + 1:] if r["main"]]
     assert after and after[0]["uncached"] + after[0]["cache_write"] + after[0]["cache_read"] < before[-1]
 

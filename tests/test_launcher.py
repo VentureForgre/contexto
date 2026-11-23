@@ -221,31 +221,31 @@ def test_request_entry_is_logged_before_the_cli_sees_the_response_end(env, upstr
 
 
 def test_untested_claude_version_gets_one_warning_line_and_the_launch_goes_on(env, upstream, tmp_path):
-    # D38: claude --version at start; an untested version is one stderr line, logged, never a refusal.
-    env["FAKE_VERSION"] = "2.1.400 (Claude Code)"
+    # D38: claude --version at start; an out-of-range version is one stderr line, logged, never a refusal.
+    env["FAKE_VERSION"] = "2.2.0 (Claude Code)"
     env.pop("CONTEXTO_NO_VERSION_CHECK", None)
     proc = launch(env, "--upstream", upstream, "--session", "v1", "claude", "-p", "hi", cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == 0, err
-    warnings = [line for line in err.splitlines() if "2.1.400" in line]
-    assert len(warnings) == 1 and warnings[0].startswith("contexto: warning: Claude Code 2.1.400 ")
+    warnings = [line for line in err.splitlines() if "2.2.0" in line]
+    assert len(warnings) == 1 and warnings[0].startswith("contexto: warning: Claude Code 2.2.0 ")
     assert "tested: 2.1.302" in warnings[0]
     assert err.index("contexto: session v1") < err.index(warnings[0])
     assert Path(env["FAKE_RECORD"]).exists()  # claude ran
     check = [e for e in session_log(env, "v1") if e["event"] == "cli_version_check"]
-    assert check == [dict(check[0], cli="claude", version="2.1.400", tested=False)]
+    assert check == [dict(check[0], cli="claude", version="2.2.0", tested=False)]
 
 
 @pytest.mark.parametrize("how", ["flag", "env"])
 def test_version_check_is_silenced_by_the_flag_or_the_env(env, upstream, tmp_path, how):
-    env["FAKE_VERSION"] = "2.1.400 (Claude Code)"
+    env["FAKE_VERSION"] = "2.2.0 (Claude Code)"
     flags = ["--no-version-check"] if how == "flag" else []
     if how == "env":
         env["CONTEXTO_NO_VERSION_CHECK"] = "1"
     proc = launch(env, "--upstream", upstream, "--session", "v2", *flags, "claude", cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == 0, err
-    assert "2.1.400" not in err and "warning" not in err
+    assert "2.2.0" not in err and "warning" not in err
     check = [e for e in session_log(env, "v2") if e["event"] == "cli_version_check"]
     assert check == [{**check[0], "cli": "claude", "skipped": True}]
 
@@ -568,14 +568,51 @@ def test_bound_too_small_notice_without_full_sizing(tmp_path, event):
     assert "keeps only the new turn" in line and "may exceed the bound" in line and "unrotated" not in line
 
 
-@pytest.mark.parametrize("user_args", [["--settings", "mine.json"], ["-p", "hi", "--settings={}"],
-                                       ["--append-system-prompt", "--", "--settings", "mine.json", "-p", "x"]])
-def test_user_settings_are_refused_before_anything_starts(env, upstream, tmp_path, user_args):
+@pytest.mark.parametrize("user_args", [["--settings", "missing.json"], ["-p", "hi", "--settings={bad"],
+                                       ["--append-system-prompt", "--", "--settings", "missing.json", "-p", "x"],
+                                       ["--settings="], ["--settings"]])
+def test_invalid_user_settings_are_refused_before_anything_starts(env, upstream, tmp_path, user_args):
     proc = launch(env, "--upstream", upstream, "--session", "r1", "claude", *user_args, cwd=tmp_path)
     _, err = proc.communicate(timeout=30)
-    assert proc.returncode == EXIT_USAGE and "--settings in the claude arguments is not supported" in err
+    assert proc.returncode == EXIT_USAGE and "--settings" in err
     assert not Path(env["FAKE_RECORD"]).exists()  # claude never ran
     assert not (Path(env["CONTEXTO_HOME"]) / "sessions" / "r1").exists()  # no session, proxy, or temp files
+
+
+def test_valid_user_settings_are_merged_with_contexto_settings(env, upstream, tmp_path):
+    mine = tmp_path / "mine.json"
+    mine.write_text(json.dumps({
+        "model": "claude-sonnet-4-6",
+        "env": {"MY_FLAG": "yes", "ANTHROPIC_BASE_URL": "http://ignored-when-explicit.invalid"},
+        "permissions": {"allow": ["Read"], "deny": ["Bash"]},
+        "statusLine": {"type": "command", "command": "echo mine"},
+    }))
+    proc = launch(env, "--upstream", upstream, "--session", "r1m", "claude",
+                  "--settings", str(mine), "-p", "hi", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    record = json.loads(Path(env["FAKE_RECORD"]).read_text())
+    # User --settings flag was stripped and merged into Contexto's temporary settings file.
+    assert record["argv"] == ["--settings=" + record["settings_path"], "--mcp-config=" + record["mcp_path"], "-p", "hi"]
+    merged = record["settings"]
+    assert merged["model"] == "claude-sonnet-4-6"
+    assert merged["env"]["MY_FLAG"] == "yes"
+    assert merged["env"]["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
+    assert merged["permissions"]["deny"] == ["Bash"]
+    assert "Read" in merged["permissions"]["allow"]
+    assert "mcp__contexto__contexto_recall" in merged["permissions"]["allow"]
+    assert merged["statusLine"] == {"type": "command", "command": "echo mine"}
+
+
+def test_user_settings_inline_json_and_double_dash_literal_prompt(env, upstream, tmp_path):
+    proc = launch(env, "--upstream", upstream, "--session", "r1j", "claude",
+                  "--settings={\"env\":{\"CUSTOM\":\"1\"}}", "-p", "--", "--settings", cwd=tmp_path)
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    record = json.loads(Path(env["FAKE_RECORD"]).read_text())
+    assert record["argv"][2:] == ["-p", "--", "--settings"]
+    assert record["settings"]["env"]["CUSTOM"] == "1"
+    assert record["settings"]["env"]["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
 
 
 def test_user_mcp_config_passes_through(env, upstream, tmp_path):
@@ -608,16 +645,24 @@ def test_claude_argv_joins_each_flag_with_its_file():
     assert not any(arg in ("--settings", "--mcp-config") for arg in argv)
 
 
-def test_check_user_args():
+def test_check_user_args(tmp_path):
+    valid = tmp_path / "ok.json"
+    valid.write_text('{"env": {"FOO": "1"}}', encoding="utf-8")
     check_user_args(["-p", "x", "--mcp-config", "a.json", "b.json"])
     check_user_args(["a prompt", "--mcp-config=a.json"])
-    check_user_args(["-p", "--", "a prompt naming --settings"])  # only an argument that is the flag is refused
-    for args in (["--settings", "f"], ["--settings=f"], ["-p", "x", "--settings", "f"], ["a prompt", "--settings={}"],
-                 ["--settings="], ["--settings"],
-                 # A -- can be another option's value; Claude Code 2.1.302 and 2.1.310 still read the
-                 # --settings after it, so the check does not stop at --.
-                 ["--append-system-prompt", "--", "--settings", "x.json"], ["-p", "--", "--settings=x.json"],
-                 ["-p", "--", "--settings"]):
+    check_user_args(["-p", "--", "a prompt naming --settings"])
+    # Stopping after -- means literal prompts like --settings or --settings=x.json are never refused.
+    check_user_args(["-p", "--", "--settings"])
+    check_user_args(["-p", "--", "--settings=x.json"])
+    # Valid --settings JSON or readable file is accepted and merged.
+    check_user_args(["a prompt", "--settings={}"])
+    check_user_args(["--settings", str(valid)])
+    check_user_args([f"--settings={valid}"])
+    check_user_args(["--append-system-prompt", "--", "--settings", str(valid)])
+    # Missing, empty, unreadable, or invalid --settings before -- still fail closed with exit 2.
+    for args in (["--settings", str(tmp_path / "missing.json")], [f"--settings={tmp_path / 'missing.json'}"],
+                 ["--settings={not json"], ["--settings=[1,2]"], ["--settings="], ["--settings"],
+                 ["--append-system-prompt", "--", "--settings", str(tmp_path / "missing.json")]):
         with pytest.raises(LaunchError):
             check_user_args(args)
 

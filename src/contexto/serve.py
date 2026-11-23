@@ -176,6 +176,7 @@ from contexto.proxy import (
     EncodedBodyError,
     _Handler,
     _LoopbackServer,
+    classify_path,
     decode_request_body,
     utc_now,
 )
@@ -332,12 +333,14 @@ def mcp_config_payload(home: Path) -> dict[str, Any]:
 
 
 def cloud_provider_warning(found: CloudProvider) -> str:
-    """The warning for what ``contexto.upstream.cloud_provider`` found: the check ``contexto run claude``
-    refuses a launch by, read from this process's environment and directory (D70). The service warns
-    and does not refuse: its clients are started elsewhere, with their own environment and directory,
-    and a Claude Code started here would bypass it."""
+    """The warning for what ``contexto.upstream.cloud_provider`` found: read from this process's
+    environment and directory (D70). The service warns on all cloud-provider switches (including
+    Vertex AI and Microsoft Foundry) because ``print-settings`` only sets ``ANTHROPIC_BASE_URL`` and
+    clients are started elsewhere; to route Vertex AI or Foundry through Contexto automatically, use
+    ``contexto run claude`` (or configure ``--upstream`` and the provider base-URL env var manually,
+    whose paths ``serve`` transforms)."""
     return (f"warning: {cloud_provider_note(found)}. A Claude Code client with a cloud-provider switch on does "
-            f"not reach contexto serve, and its prompt is not bounded.")
+            f"not reach contexto serve via ANTHROPIC_BASE_URL, and its prompt is not bounded.")
 
 
 def check_upstream_loop(upstream: Upstream, port: int, token: str) -> None:
@@ -933,7 +936,8 @@ class ServeService:
             event["error"] = error
         self.log.log(event)
         why = UNBOUNDED_REASONS.get(reason)
-        if why is None or path != MESSAGES_PATH:
+        _, canonical = classify_path(path)
+        if why is None or canonical != MESSAGES_PATH:
             return
         now = self.clock()
         with self._lock:
@@ -1529,7 +1533,8 @@ class _ServeHandler(_Handler):
         """The session this request belongs to (leased), or None for a request that has none. Raises
         ``_Unrouted`` for a request that could have had one and cannot: it names a session it cannot
         have, or it is a ``/v1/messages`` that names none."""
-        if self.command != "POST" or path_only not in (MESSAGES_PATH, COUNT_TOKENS_PATH):
+        api, canonical = classify_path(path_only) if self.command == "POST" else (None, None)
+        if api != "messages" or canonical not in (MESSAGES_PATH, COUNT_TOKENS_PATH):
             return None
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
             return None  # _Handler refuses it
@@ -1557,7 +1562,7 @@ class _ServeHandler(_Handler):
         if header_id is not None and body_id is not None and header_id != body_id:
             raise _Unrouted("session_id_mismatch")
         cli_session = header_id or body_id
-        messages = path_only == MESSAGES_PATH
+        messages = canonical == MESSAGES_PATH
         if cli_session is None:
             if messages:
                 raise _Unrouted("no_session_id")
