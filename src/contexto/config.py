@@ -21,6 +21,7 @@ name so typos never silently fall back to defaults.
 
 from __future__ import annotations
 
+import errno
 import math
 import os
 import stat
@@ -32,7 +33,7 @@ from typing import Any
 
 from contexto.canonical import has_lone_surrogate
 from contexto.paths import config_path
-from contexto.platform_compat import O_BINARY, O_CLOEXEC, O_NONBLOCK
+from contexto.platform_compat import IS_WINDOWS, O_BINARY, O_CLOEXEC, O_NONBLOCK
 
 MAX_CONFIG_BYTES = 1 * 1024 * 1024  # 1 MiB; real config files are a few lines
 MAX_PORT = 65535
@@ -201,6 +202,8 @@ def _read_bytes(path: Path) -> bytes | None:
     except ValueError:
         raise _fail(path, None, "invalid path") from None
     except OSError as exc:
+        if exc.errno == errno.EISDIR or (IS_WINDOWS and exc.errno == errno.EACCES and os.path.isdir(path)):
+            raise _fail(path, None, "is not a regular file") from None
         raise _fail(path, None, f"cannot be opened ({exc.strerror or type(exc).__name__})") from None
     try:
         st = os.fstat(fd)

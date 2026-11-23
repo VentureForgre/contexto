@@ -148,7 +148,7 @@ def test_non_utf8_directory_fifo_and_oversized_config_are_refused(tmp_path):
     with pytest.raises(ConfigError, match="not valid UTF-8"):
         load_config(home=h1)
 
-    # Directory
+    # Directory (including Windows EACCES from os.open on a directory)
     h2 = tmp_path / "h2"
     (h2 / CONFIG_FILE).mkdir(parents=True)
     with pytest.raises(ConfigError, match="not a regular file"):
