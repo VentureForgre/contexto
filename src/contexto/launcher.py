@@ -50,13 +50,13 @@ tool command, a hook, an MCP server) inherits it. The block therefore also holds
 pointed at another base URL inherits the ``1`` too and sends the hints to that URL, where no Contexto
 proxy removes them. The explicit off above is the way out: Contexto then sets nothing to inherit.
 
-Cloud providers (D70): with ``CLAUDE_CODE_USE_BEDROCK``, ``CLAUDE_CODE_USE_VERTEX``,
-``CLAUDE_CODE_USE_FOUNDRY``, ``CLAUDE_CODE_USE_MANTLE`` or ``CLAUDE_CODE_USE_ANTHROPIC_AWS`` on, Claude
-Code sends every request to that provider and none to ``ANTHROPIC_BASE_URL`` (measured on 2.1.322;
-``CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`` too, measured on 2.1.318: ``upstream.CLOUD_PROVIDER_KEYS``),
-so the session would run with no bound and nothing would say so. The launch is refused before a
-session is opened when a switch is on in the process environment or in any settings file Contexto
-can find, whichever of them Claude Code would apply (``check_cloud_provider``).
+Cloud providers (D70): Google Vertex AI (``CLAUDE_CODE_USE_VERTEX``) and Microsoft Foundry
+(``CLAUDE_CODE_USE_FOUNDRY``) are intercepted via ``ANTHROPIC_VERTEX_BASE_URL`` and
+``ANTHROPIC_FOUNDRY_BASE_URL`` (clearing ``ANTHROPIC_FOUNDRY_RESOURCE`` so the Foundry SDK accepts
+``baseURL``). Unsupported switches (``CLAUDE_CODE_USE_BEDROCK``, ``CLAUDE_CODE_USE_MANTLE``,
+``CLAUDE_CODE_USE_ANTHROPIC_AWS``, ``CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD``), dual Vertex+Foundry,
+conflicting precedence/trust overrides, and unreadable settings files that may name a switch are
+refused before a session is opened (``check_cloud_provider``).
 
 Claude Code's settings files are read once per launch, with a bound (``claude_launch_settings``).
 
@@ -78,8 +78,9 @@ through the launcher's cleanup and exit 128 + N. SIGKILL cannot be caught, so a 
 (its own session, so terminal signals miss it) holds a pipe from the launcher: when the pipe closes
 without the launcher's "done", it sends claude SIGTERM and removes the temporary files. What a SIGKILL
 leaves: the session log has no ``exit`` event, and if the watchdog is killed too, the temporary
-directory stays in ``$TMPDIR`` (the proxy URL, the tool names, the session id and the home path;
-no secrets). Terminal resize (SIGWINCH) goes from the kernel to claude without the launcher's help.
+directory stays in ``$TMPDIR`` (mode ``0700`` directory with ``0600`` settings/MCP files, holding
+the proxy URL, tool names, session id, home path, and any merged user ``--settings`` content).
+Terminal resize (SIGWINCH) goes from the kernel to claude without the launcher's help.
 
 Window budget (contract rule 4): the engine keeps ``W = bound - headroom - F`` tokens for the
 working window, where ``F`` is the fixed overhead (system, tools, carried content, pinned text, and
@@ -138,7 +139,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from contexto.canonical import has_lone_surrogate, loads_bounded
+from contexto.canonical import JSONTooDeepError, has_lone_surrogate, loads_bounded
 from contexto.cliversions import launch_check
 from contexto.hints import HINT_HEADERS_KEY, HINT_MARKER_KEY, HINT_STATES, OFF, STRIPPED, hint_headers_state
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
@@ -156,12 +157,14 @@ from contexto.store.sessions import named, starting_with
 from contexto.toolcheck import denied_tools_message, missing_tools_message
 from contexto.upstream import (
     BASE_URL_KEY,
+    FOUNDRY_BASE_URL_KEY,
+    FOUNDRY_RESOURCE_KEY,
     INTERCEPTED_CLOUD_PROVIDERS,
     SETTINGS_FILE_LIMIT,
     SettingsFiles,
     Upstream,
+    _has_nonfinite,
     _json_constant,
-    _json_int,
     active_cloud_provider,
     checked_provider_places,
     claude_env_value,
@@ -293,14 +296,17 @@ def _validate_settings_object(data: Any, label: str) -> dict[str, Any]:
         perms = data["permissions"]
         if not isinstance(perms, dict):
             raise LaunchError(f"{label} has a 'permissions' field that is not a JSON object", EXIT_USAGE)
-        if "allow" in perms and not isinstance(perms["allow"], list):
-            raise LaunchError(f"{label} has a 'permissions.allow' field that is not a JSON list", EXIT_USAGE)
+        for field_name in ("allow", "deny", "ask"):
+            if field_name in perms and not isinstance(perms[field_name], list):
+                raise LaunchError(f"{label} has a 'permissions.{field_name}' field that is not a JSON list",
+                                  EXIT_USAGE)
     return data
 
 
 def _load_user_settings_arg(raw: str) -> dict[str, Any]:
     """Parse one user ``--settings <file-or-json>`` value safely (inline JSON object or regular JSON
-    file within ``SETTINGS_FILE_LIMIT``). Never leaks file contents in errors."""
+    file within ``SETTINGS_FILE_LIMIT``, via a single non-blocking bounded descriptor read). Never
+    leaks raw JSON text or file contents in errors."""
     if not raw or not raw.strip():
         raise LaunchError("--settings requires a non-empty file path or JSON object", EXIT_USAGE)
     stripped = raw.lstrip()
@@ -308,45 +314,41 @@ def _load_user_settings_arg(raw: str) -> dict[str, Any]:
         if len(raw.encode("utf-8", "surrogatepass")) > SETTINGS_FILE_LIMIT:
             raise LaunchError("--settings JSON exceeds the 4 MiB limit", EXIT_USAGE)
         try:
-            data = loads_bounded(raw, parse_int=_json_int, parse_constant=_json_constant)
-        except (ValueError, RecursionError) as exc:
-            raise LaunchError(f"--settings is not valid JSON: {exc}", EXIT_USAGE) from None
+            data = loads_bounded(raw, parse_constant=_json_constant)
+        except JSONTooDeepError:
+            raise LaunchError("--settings JSON is nested too deeply", EXIT_USAGE) from None
+        except (ValueError, RecursionError):
+            raise LaunchError("--settings is not valid JSON", EXIT_USAGE) from None
+        if _has_nonfinite(data):
+            raise LaunchError("--settings is not valid JSON", EXIT_USAGE)
         return _validate_settings_object(data, "--settings JSON")
     path = Path(raw)
-    found = read_settings_file(path)
+    found = read_settings_file(path, require_object=True, reject_huge_int=True)
     if found.problem:
         raise LaunchError(f"--settings file {found.problem}", EXIT_USAGE)
     if found.data is None:
         raise LaunchError("--settings file does not exist or cannot be opened", EXIT_USAGE)
-    # read_settings_file normalises a non-object JSON document (such as an array) to {}; re-check
-    # explicitly when the file is non-empty so malformed --settings files fail closed.
-    try:
-        raw_bytes = path.read_bytes()
-        text = (raw_bytes[2:len(raw_bytes) - len(raw_bytes) % 2].decode("utf-16-le", "surrogatepass")
-                if raw_bytes.startswith(b"\xff\xfe") else raw_bytes.decode("utf-8-sig", "replace"))
-        if text.strip():
-            parsed = loads_bounded(text, parse_int=_json_int, parse_constant=_json_constant)
-            return _validate_settings_object(parsed, "--settings file")
-    except (OSError, ValueError, RecursionError):
-        raise LaunchError("--settings file could not be parsed as a JSON object", EXIT_USAGE) from None
     return _validate_settings_object(found.data, "--settings file")
 
 
 def _merge_user_settings_dicts(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    """Merge two user ``--settings`` dicts in order (later keys override; ``env`` and ``permissions``
-    merge shallowly with ``permissions.allow`` concatenated without duplicates)."""
+    """Merge two user ``--settings`` dicts in order (later keys override; ``env`` merges shallowly
+    and ``permissions`` merges ``allow``/``deny``/``ask`` lists without duplicates)."""
     merged = dict(base)
     for key, value in overlay.items():
         if key == "env" and isinstance(merged.get("env"), dict) and isinstance(value, dict):
             merged["env"] = {**merged["env"], **value}
         elif key == "permissions" and isinstance(merged.get("permissions"), dict) and isinstance(value, dict):
             perms = {**merged["permissions"], **value}
-            if isinstance(merged["permissions"].get("allow"), list) and isinstance(value.get("allow"), list):
-                combined = list(merged["permissions"]["allow"])
-                for rule in value["allow"]:
-                    if rule not in combined:
-                        combined.append(rule)
-                perms["allow"] = combined
+            for field_name in ("allow", "deny", "ask"):
+                base_list = merged["permissions"].get(field_name)
+                over_list = value.get(field_name)
+                if isinstance(base_list, list) and isinstance(over_list, list):
+                    combined = list(base_list)
+                    for rule in over_list:
+                        if rule not in combined:
+                            combined.append(rule)
+                    perms[field_name] = combined
             merged["permissions"] = perms
         else:
             merged[key] = value
@@ -499,12 +501,25 @@ def check_cloud_provider(cwd: Path, env: Mapping[str, str] | None = None, *, hom
         if blocks:
             where = "that env block" if blocks == 1 else "those env blocks"
             steps.append(f"remove {name} from {where}, or set it to 0 there")
+    for name, places, _ in found.conflicts:
+        if "env" in places:
+            steps.append(f"unset {name} for this command (env -u {name} contexto run ...)")
+        if "flag:--settings" in places:
+            steps.append(f"remove or align {name} in --settings")
+        blocks = len([place for place in places if place not in ("env", "flag:--settings")])
+        if blocks:
+            where = "that env block" if blocks == 1 else "those env blocks"
+            steps.append(f"remove or align {name} in {where}")
     if found.unread:
         steps.append("fix or remove the " + ("file" if len(found.unread) == 1 else "files")
                      + " that could not be read")
     remedy = "; ".join(steps)
     checked = checked_provider_places()
-    if found.on and all(name in INTERCEPTED_CLOUD_PROVIDERS for name, _ in found.on):
+    if found.conflicts:
+        why = (f"Contexto cannot tell whether Claude Code will route to that cloud provider or directly to "
+               f"Anthropic (checked: {checked}), so the launch is refused")
+        how = f"Make the provider switch consistent: {remedy}."
+    elif found.on and all(name in INTERCEPTED_CLOUD_PROVIDERS for name, _ in found.on):
         why = (f"Both Google Vertex AI and Microsoft Foundry switches are on at once (checked: {checked}); "
                f"Contexto cannot tell which provider endpoint to intercept, whichever of them Claude Code "
                f"would apply")
@@ -525,20 +540,21 @@ def check_cloud_provider(cwd: Path, env: Mapping[str, str] | None = None, *, hom
 
 def claude_launch_settings(explicit_upstream: str | None, cwd: Path, env: Mapping[str, str] | None = None, *,
                            home: Path | None = None, managed: Path | None = None,
-                           extra_settings: dict[str, Any] | None = None) -> tuple[Upstream, str]:
+                           extra_settings: dict[str, Any] | None = None,
+                           files: SettingsFiles | None = None) -> tuple[Upstream, str]:
     """Everything ``contexto run claude`` takes from Claude Code's settings files (and any user
     ``--settings`` payload), each file read once and with a bound (``contexto.upstream.SettingsFiles``):
     the cloud-provider check, which refuses unsupported providers before anything else is decided; the
     upstream (``resolve_provider_upstream`` for Vertex AI / Microsoft Foundry, else ``resolve_upstream``);
     and the hint header state (``contexto.hints.hint_headers_state``). Nothing is created on disk."""
-    files = SettingsFiles()
+    files = files or SettingsFiles()
     check_cloud_provider(cwd, env, home=home, files=files, managed=managed, extra_settings=extra_settings)
     provider_key, _ = active_cloud_provider(env=env, cwd=cwd, home=home, files=files, managed=managed,
                                             extra_settings=extra_settings)
     if provider_key is not None:
         try:
             upstream = resolve_provider_upstream(provider_key, explicit_upstream, env=env, cwd=cwd, home=home,
-                                                 files=files, extra_settings=extra_settings)
+                                                 files=files, managed=managed, extra_settings=extra_settings)
         except ValueError as exc:
             raise LaunchError(str(exc), EXIT_USAGE) from None
     else:
@@ -1264,7 +1280,7 @@ def write_private_json(directory: Path, name: str, payload: dict[str, Any]) -> P
     path = directory / name
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(payload, f)
+        json.dump(payload, f, allow_nan=False)
     return path
 
 
@@ -1290,6 +1306,12 @@ def settings_payload(proxy_url: str, hint_headers: str = STRIPPED, *,
     env = {BASE_URL_KEY: proxy_url}
     if base_url_key != BASE_URL_KEY:
         env[base_url_key] = proxy_url
+        if base_url_key == FOUNDRY_BASE_URL_KEY:
+            # Claude Code's Foundry SDK rejects having both ANTHROPIC_FOUNDRY_BASE_URL and
+            # ANTHROPIC_FOUNDRY_RESOURCE set ("baseURL and resource are mutually exclusive",
+            # verified on 2.1.328); clearing the resource in --settings env routes cleanly through
+            # Contexto's proxy to the resolved resource upstream.
+            env[FOUNDRY_RESOURCE_KEY] = ""
     if hint_headers != OFF:
         env[HINT_HEADERS_KEY] = "1"
     env[HINT_MARKER_KEY] = hint_headers
@@ -1613,15 +1635,17 @@ def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None
 INFO_ARGS = (["--version"], ["-v"], ["--help"], ["-h"])  # claude prints and exits: no model request
 
 
-def _oauth_guidance_line(upstream: Upstream, cwd: Path, extra_settings: dict[str, Any] | None) -> str | None:
+def _oauth_guidance_line(upstream: Upstream, cwd: Path, extra_settings: dict[str, Any] | None, *,
+                         files: SettingsFiles | None = None, env: Mapping[str, str] | None = None,
+                         home: Path | None = None) -> str | None:
     """When Claude Pro/Max OAuth auth is detected (non-invasively, without reading secrets) and no
     explicit API key or key helper overrides it, return a concise note only when the upstream is a
     non-Anthropic host (not loopback), explaining transparent ``Authorization: Bearer`` passthrough."""
     if upstream.provider is not None:
         return None
-    env = os.environ
-    home = Path.home()
-    files = SettingsFiles()
+    env = os.environ if env is None else env
+    home = home or Path.home()
+    files = files or SettingsFiles()
     oauth = claude_oauth_detected(env=env, cwd=cwd, home=home, files=files, extra_settings=extra_settings)
     if oauth is None:
         return None
@@ -1648,13 +1672,15 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         raise LaunchError(cli_not_found(options.claude_bin), EXIT_NOT_FOUND)
     if options.claude_args in INFO_ARGS:  # nothing to bound, so no session or proxy (D57)
         return run_child([claude, *options.claude_args], stderr=stderr)
-    # D70: the provider check, the upstream and the hint header state, from one read of each settings file.
-    upstream, hint_headers = claude_launch_settings(options.upstream, Path.cwd(), extra_settings=user_settings)
+    # D70: the provider check, the upstream, the hint header state and OAuth check, from one read of each file.
+    settings_files = SettingsFiles()
+    upstream, hint_headers = claude_launch_settings(options.upstream, Path.cwd(), extra_settings=user_settings,
+                                                    files=settings_files)
     check_not_service(upstream, contexto_home(), "contexto run claude")
     check_upstream(upstream)
     if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: as Claude Code -p, no project base URL (D52)
-        print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', upstream.ignored, 'Pass --upstream', os.environ)}",
-              file=stderr)
+        note = untrusted_note(f"env.{upstream.base_url_key}", upstream.ignored, "Pass --upstream", os.environ)
+        print(f"contexto: {note}", file=stderr)
     home = contexto_home()
     check_home(home)
     memory = project_memory_wanted(options, stderr)
@@ -1695,7 +1721,7 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
                    "hint_headers": hint_headers, "statusline": status_note})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
-        oauth_note = _oauth_guidance_line(upstream, Path.cwd(), user_settings)
+        oauth_note = _oauth_guidance_line(upstream, Path.cwd(), user_settings, files=settings_files)
         if oauth_note:
             print(f"contexto: {oauth_note}", file=stderr, flush=True)
         project_memory_notice(store, stderr, engine_pin_budget(config))  # D69: what it carries, or nothing

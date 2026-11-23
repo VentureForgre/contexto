@@ -63,9 +63,12 @@ removes the temporary files; the session log then has no `exit` event. A launch 
 exception: a `claude` that is on `PATH` but cannot be executed (a bad `#!` line, for example) fails
 after the session opens, exits 127, and leaves that empty session behind.
 
-**Your own `--settings` is refused** (exit 2), because Claude Code accepts only one and the launcher
-needs it to route requests through the proxy. Put those settings in your Claude settings files
-instead. Details are under [Troubleshooting](troubleshooting.md).
+**Your own `--settings` is merged** with Contexto's injected settings (`env`, `permissions.allow`,
+and optional `statusLine`) into the temporary settings file passed to Claude Code. Contexto's proxy
+base URL and tool allow rules take precedence so requests stay bounded; your other `env`,
+`permissions` (`allow`, `deny`, `ask`), `statusLine`, and top-level keys are preserved. Invalid or
+unreadable `--settings` JSON exits 2. Scanning stops at `--`, so a literal prompt like `--settings`
+is passed through untouched. Details are under [Troubleshooting](troubleshooting.md).
 
 At start, `contexto run` prints the session line on stderr and, in a project with earlier sessions,
 a second line, `contexto: project memory: …`, which counts what it carries
@@ -116,7 +119,8 @@ request is in flight (Esc), the proxy stops the upstream response at once and lo
 | `CLAUDE_CODE_IGNORE_PERSISTED_TRUST` | `run`, `proxy` | Read, never set, by Contexto: when truthy, no project `.claude/` settings file is used, as Claude Code does in `-p` mode (see [Troubleshooting](troubleshooting.md)). |
 | `CONTEXTO_NO_VERSION_CHECK` | `run` | `1` skips the CLI version check, like `--no-version-check`. |
 | `CONTEXTO_IN_TURN_PAGING` | `run` | `0`, `false`, `off` or `no` turns in-turn paging off, like `--no-in-turn-paging`. |
-| `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` | `run claude` | Read, never set: when one is on in the environment or in a Claude Code settings file (including the managed settings file), Claude Code sends nothing to Contexto, so `contexto run claude` refuses to start (exit 2). It also refuses when a settings file it cannot read (not a regular file, over 4 MiB, or not JSON) could set one. |
+| `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` | `run claude` | Intercepted automatically: Contexto routes requests through its proxy via `ANTHROPIC_VERTEX_BASE_URL` or `ANTHROPIC_FOUNDRY_BASE_URL` (deriving the upstream from `CLOUD_ML_REGION` or `ANTHROPIC_FOUNDRY_RESOURCE` when no base URL or `--upstream` is set) and transforms Vertex `:rawPredict`/`:streamRawPredict` and Foundry Anthropic Messages paths. Enabling both at once, conflicting overrides, or missing region/resource exits 2. |
+| `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` | `run claude` | Read, never set: when one is on in the environment, `--settings`, or any Claude Code settings file (including the managed settings file), Claude Code sends nothing to Contexto, so `contexto run claude` refuses to start (exit 2). It also refuses when a settings file it cannot read (not a regular file, over 4 MiB, or not JSON) could set one. |
 | `CLAUDE_CODE_GATEWAY_HINT_HEADERS` | `run claude` | `contexto run claude` sets it to `1` for Claude Code so the engine can read Claude Code's request-class headers, and removes those headers before forwarding unless you had turned them on yourself. Set it to `0`, `false`, `no` or `off` in your environment or user settings to keep them off; the engine then uses its older text signatures. |
 | `CONTEXTO_HINT_HEADERS` | `run claude` | Set by `contexto run claude` for the CLI it runs (`stripped`, `forwarded` or `off`), and printed by `contexto serve --print-settings` (`stripped`), so a `contexto run claude` started inside that session can tell Contexto's `1` from yours. A settings file that sets the hint variable on beside `stripped` is not counted as yours either. Not meant to be set by hand. |
 | `CONTEXTO_PROJECT_MEMORY` | `run` | `0`, `false`, `off` or `no` (any case) turns [project memory](project-memory.md) off for the launch, like `--no-project-memory`. `1`, `true`, `on`, `yes` or unset leaves it on; any other value leaves it on and prints a warning. |

@@ -41,9 +41,11 @@ Hook-output signatures were measured on Claude Code 2.1.301 and re-measured on 2
 | that Claude Code applies the `--settings` `env` block to its own environment, which the marker `CONTEXTO_HINT_HEADERS` exists for (D70) | `src/contexto/hints.py`, `src/contexto/launcher.py` | `tests/test_hint_headers_real_client.py` (the nested tests) |
 | subagent shapes (`AGENT_TOOLS`, `ASYNC_LAUNCH`, `HAND_BACK`, `NOTICE_OPENINGS`, the `<task-notification>`, `resumedAgentId` and `<tools-used-before-summary>` patterns), gated by `SUBAGENT_SHAPES_TESTED` (D40, D56) | `src/contexto/rewrite.py`, `src/contexto/cliversions.py` | `spikes/m2/subagents` |
 
-The subagent shapes are gated by version: when the latest Claude Code version seen in a request's
-`User-Agent` is not in `SUBAGENT_SHAPES_TESTED`, side rooms only expire (15 minutes) and none closes
-early. Step 5 of the routine below re-measures them.
+The subagent shapes are gated by `cliversions.subagent_shapes_supported`: enabled across the
+compatible Claude Code `2.1.x` range (`>=2.1.302, <2.2.0`), with `SUBAGENT_SHAPES_TESTED` naming
+the explicitly measured versions and newer compatible patches automatically falling back to the
+15-minute expiry if runtime structural checks (`session_start_ok` or `hint_mismatch`) detect drift.
+Step 5 of the routine below re-measures them.
 
 The hint headers are documented by Claude Code, not read from its text, and `contexto run claude` asks
 for them (D70). Where a request carries one, it decides in place of the signature beside it: the
@@ -62,9 +64,9 @@ fallback no longer keeps its latest copy (D32). If Codex renames its section tag
 
 - At launch, `contexto run claude|codex` runs `<cli> --version` in its own process group, with stdin
   closed. It reads at most 4 KB of output, until a line with a version, end of file, or 3 seconds,
-  then kills the process group. For a version not in the list it prints one line on stderr:
-  `contexto: warning: Claude Code <v> is not a version Contexto was tested with (tested: ...)`, with
-  what may break and where to report it. The launch always goes on. A CLI that does not answer or
+  then kills the process group. For a version outside the supported semver range it prints one line on
+  stderr: `contexto: warning: Claude Code <v> is outside the version range Contexto supports (supported: ..., tested: ...)`,
+  with what may break and where to report it. The launch always goes on. A CLI that does not answer or
   prints no version is logged, not warned about. `contexto run --no-version-check <cli>` (the flag goes
   before the CLI's name) or `CONTEXTO_NO_VERSION_CHECK=1` skips the check. Ctrl+C during the check
   stops the launch with exit code 130, before the CLI starts. The session log gets a

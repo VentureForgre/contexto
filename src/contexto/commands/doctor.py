@@ -472,7 +472,9 @@ def check_cli(cli: str, env: Mapping[str, str]) -> Check:
                      f"Run `{cli} --version` yourself: Contexto cannot tell whether this version was tested", details)
     details.update(version=version, tested=is_tested(cli, version))
     if details["tested"]:
-        return Check(cli, PASS, f"{name} {version} at {path} (a tested version)", details=details)
+        if version in TESTED_VERSIONS.get(cli, ()):
+            return Check(cli, PASS, f"{name} {version} at {path} (a tested version)", details=details)
+        return Check(cli, PASS, f"{name} {version} at {path} (compatible; tested: {tested_list(cli)})", details=details)
     return Check(cli, WARN, f"{name} {version} at {path} is not a version Contexto was tested with "
                  f"(tested: {tested_list(cli)})", f"Check for a newer Contexto, or report it at {REPORT_URL}", details)
 

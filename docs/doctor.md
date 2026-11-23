@@ -249,18 +249,20 @@ that is importable only through `PYTHONPATH` passes here and fails under Codex.
 
 ### `provider`
 
-`contexto run claude` routes Claude Code through the proxy by setting `ANTHROPIC_BASE_URL`. With one
-of these switches on, Claude Code sends every request to that provider's own endpoint and none to
-`ANTHROPIC_BASE_URL`, so the proxy would see nothing and the session would run with no bound:
+`contexto run claude` intercepts **Google Vertex AI** (`CLAUDE_CODE_USE_VERTEX`) and **Microsoft
+Foundry** (`CLAUDE_CODE_USE_FOUNDRY`) directly via `ANTHROPIC_VERTEX_BASE_URL` and
+`ANTHROPIC_FOUNDRY_BASE_URL`. With any of the remaining unsupported cloud-provider switches on,
+Claude Code sends every request to that provider's own endpoint and none to `ANTHROPIC_BASE_URL`, so
+the proxy would see nothing and the session would run with no bound:
 
-| Variable | Provider |
-|---|---|
-| `CLAUDE_CODE_USE_BEDROCK` | Amazon Bedrock |
-| `CLAUDE_CODE_USE_VERTEX` | Google Vertex AI |
-| `CLAUDE_CODE_USE_FOUNDRY` | Microsoft Foundry |
-| `CLAUDE_CODE_USE_MANTLE` | Amazon Bedrock (Mantle) |
-| `CLAUDE_CODE_USE_ANTHROPIC_AWS` | Claude Platform on AWS |
-| `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` | Claude Platform on Google Cloud |
+| Variable | Provider | Support |
+|---|---|---|
+| `CLAUDE_CODE_USE_VERTEX` | Google Vertex AI | Intercepted (`ANTHROPIC_VERTEX_BASE_URL`) |
+| `CLAUDE_CODE_USE_FOUNDRY` | Microsoft Foundry | Intercepted (`ANTHROPIC_FOUNDRY_BASE_URL`) |
+| `CLAUDE_CODE_USE_BEDROCK` | Amazon Bedrock | Refused (exit 2) |
+| `CLAUDE_CODE_USE_MANTLE` | Amazon Bedrock (Mantle) | Refused (exit 2) |
+| `CLAUDE_CODE_USE_ANTHROPIC_AWS` | Claude Platform on AWS | Refused (exit 2) |
+| `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` | Claude Platform on Google Cloud | Refused (exit 2) |
 
 `contexto run claude` refuses such a launch with exit 2, before it opens a session. That refusal is
 D70's: the rule, the places it looks and why it errs toward refusing are in the

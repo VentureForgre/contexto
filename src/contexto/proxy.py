@@ -129,10 +129,12 @@ USAGE_FEEDBACK_PATHS = frozenset({MESSAGES_PATH}) | RESPONSES_PATHS
 #   or :rawPredict (and count-tokens:rawPredict), optionally prefixed with /v1.
 # - Foundry sends /v1/messages (already MESSAGES_PATH) or /anthropic/v1/messages (and count_tokens).
 VERTEX_COUNT_TOKENS_RE = re.compile(
-    r"^/(?:v1/)?projects/[^/]+/locations/[^/]+/publishers/anthropic/models/count-tokens:rawPredict$"
+    r"^/(?:v1/)?projects/[A-Za-z0-9][A-Za-z0-9._-]*/locations/[A-Za-z0-9][A-Za-z0-9._-]*"
+    r"/publishers/anthropic/models/count-tokens:rawPredict\Z"
 )
 VERTEX_MESSAGES_RE = re.compile(
-    r"^/(?:v1/)?projects/[^/]+/locations/[^/]+/publishers/anthropic/models/[^/:]+:(?:streamRawPredict|rawPredict)$"
+    r"^/(?:v1/)?projects/[A-Za-z0-9][A-Za-z0-9._-]*/locations/[A-Za-z0-9][A-Za-z0-9._-]*"
+    r"/publishers/anthropic/models/[A-Za-z0-9][A-Za-z0-9._@-]*:(?:streamRawPredict|rawPredict)\Z"
 )
 FOUNDRY_MESSAGES_PATHS = frozenset({"/anthropic/v1/messages"})
 FOUNDRY_COUNT_TOKENS_PATHS = frozenset({"/anthropic/v1/messages/count_tokens"})
@@ -208,9 +210,9 @@ REFUSED_MESSAGE = "contexto proxy: request refused (not from the local CLI)"
 # Azure AI Foundry, and Google Vertex AI: each has one identity per credential, so the affinity
 # header is not sent to them (D36). Matching is by host name only; an IP literal upstream gets the header.
 VENDOR_HOSTS = ("anthropic.com", "openai.com", "chatgpt.com", "openai.azure.com", "services.ai.azure.com",
-                "aiplatform.googleapis.com")
+                "cognitiveservices.azure.com", "aiplatform.googleapis.com")
 # Regional Vertex AI endpoints use a hyphenated single-label prefix (e.g. us-east5-aiplatform.googleapis.com).
-_VERTEX_REGIONAL_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-aiplatform\.googleapis\.com$")
+_VERTEX_REGIONAL_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-aiplatform\.googleapis\.com\Z")
 
 Headers = dict[str, str]
 TransformResult = tuple[dict[str, Any], Headers, list[dict[str, Any]]]
@@ -1358,7 +1360,16 @@ class _Handler(BaseHTTPRequestHandler):
                 conn.connect()
                 watch.attach(conn)
                 phase, phase_started = "send", time.monotonic()
-                conn.putrequest(self.command, owner.base_path + self.path, skip_host=True,
+                path_only = urlsplit(self.path).path
+                if (owner.base_path == "/v1" and path_only.startswith("/v1/projects/")
+                        and classify_path(path_only)[0] == "messages"):
+                    upstream_path = self.path
+                elif (owner.base_path == "/anthropic"
+                      and path_only in (FOUNDRY_MESSAGES_PATHS | FOUNDRY_COUNT_TOKENS_PATHS)):
+                    upstream_path = self.path
+                else:
+                    upstream_path = owner.base_path + self.path
+                conn.putrequest(self.command, upstream_path, skip_host=True,
                                 skip_accept_encoding=True)
                 conn.putheader("Host", owner.upstream_netloc)
                 # D70: the one place a request's headers are written upstream, so this also covers

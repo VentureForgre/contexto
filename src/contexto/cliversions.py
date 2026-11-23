@@ -87,10 +87,11 @@ MAX_SEEN = 8  # distinct client versions logged per engine; a bound, not an expe
 # gives up (a client other than the CLIs sends none); bounds the scan for such clients.
 MAX_UNJUDGED = 8
 
-_VERSION = re.compile(r"(?<![\w.])(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)(?![\w.])")
-_SEMVER = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.]+))?")
-_USER_AGENT = re.compile(r"\s*([A-Za-z][A-Za-z0-9_.-]*)/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)(?![\w.])")
-_HINT_HEADER_PREFIX = "x-claude-code-"
+_VERSION = re.compile(r"(?<![\w.])(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![\w.])")
+_SEMVER = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
+_USER_AGENT = re.compile(
+    r"\s*([A-Za-z][A-Za-z0-9_.-]*)/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![\w.])"
+)
 
 
 def parse_version(text: str) -> str | None:
@@ -147,16 +148,16 @@ def subagent_shapes_supported(version: str | None, *, session_start_ok: bool | N
     """Whether early side-room closing is enabled for Claude Code ``version``.
 
     Enabled for any Claude Code version in the supported semver range (``>=2.1.302, <2.2.0``):
-    - Versions explicitly listed in ``TESTED_VERSIONS["claude"]`` stay enabled unless a subagent
-      ``hint_mismatch`` is observed.
+    - Versions explicitly listed in ``SUBAGENT_SHAPES_TESTED`` stay enabled unless a ``hint_mismatch``
+      is observed.
     - Newer patch releases in the compatible range stay enabled unless runtime structural health
-      checks report drift (``session_start_ok is False`` or a subagent ``hint_mismatch``).
+      checks report drift (``session_start_ok is False`` or ``hint_mismatch``).
     Returns False when no Claude Code version has been seen or the version is outside the range."""
     if not version or not is_compatible("claude", version):
         return False
     if hint_mismatch:
         return False
-    if version not in TESTED_VERSIONS["claude"] and session_start_ok is False:
+    if version not in SUBAGENT_SHAPES_TESTED and session_start_ok is False:
         return False
     return True
 
@@ -336,7 +337,6 @@ class ClientVersions:
         self.untested_logged = False
         self.session_start_judged = False
         self.session_start_ok: bool | None = None
-        self.hint_headers_seen = False
         self.hint_mismatch_seen = False
         self.unjudged = 0  # judged requests that could not tell
 
@@ -349,11 +349,6 @@ class ClientVersions:
         """``judged`` is the engine's answer to "is this a request the dialect judges?" when it has one
         from Claude Code's request class (D70, ``RewriteEngine._classify``); None asks the dialect."""
         events: list[dict] = []
-        if not self.hint_headers_seen and any(
-            isinstance(k, str) and k.lower().startswith(_HINT_HEADER_PREFIX) and v
-            for k, v in headers.items()
-        ):
-            self.hint_headers_seen = True
         found = client_version(headers)
         if found:
             cli, client, version = found

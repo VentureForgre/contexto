@@ -1049,6 +1049,26 @@ def test_every_event_the_source_writes_is_a_fault_or_is_left_out_on_purpose():
 def test_the_paths_stats_counts_are_the_proxy_s():
     assert stats.MODEL_PATHS == proxy.USAGE_FEEDBACK_PATHS
     assert stats.COUNT_TOKENS_PATH == proxy.COUNT_TOKENS_PATH
+    assert stats._VERTEX_MESSAGES_RE.pattern == proxy.VERTEX_MESSAGES_RE.pattern
+    assert stats._VERTEX_COUNT_TOKENS_RE.pattern == proxy.VERTEX_COUNT_TOKENS_RE.pattern
+    assert stats._FOUNDRY_MESSAGES_PATHS == proxy.FOUNDRY_MESSAGES_PATHS
+    assert stats._FOUNDRY_COUNT_TOKENS_PATHS == proxy.FOUNDRY_COUNT_TOKENS_PATHS
+    samples = [
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/anthropic/v1/messages",
+        "/anthropic/v1/messages/count_tokens",
+        "/projects/p1/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict",
+        "/v1/projects/p1/locations/us-east5/publishers/anthropic/models/claude-sonnet-4@20250514:rawPredict",
+        "/projects/p1/locations/us-east5/publishers/anthropic/models/count-tokens:rawPredict",
+        "/v1/projects/../locations/us-east5/publishers/anthropic/models/claude-sonnet-4-6:rawPredict",
+        "/projects/p1/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-6:rawPredict\n",
+        "/v1/models",
+    ]
+    for path in samples:
+        api, canon = proxy.classify_path(path)
+        assert stats._is_messages_path(path) is (api == "messages" and canon == proxy.MESSAGES_PATH), path
+        assert stats._is_count_tokens_path(path) is (api == "messages" and canon == proxy.COUNT_TOKENS_PATH), path
 
 
 # The documented JSON shape ---------------------------------------------------------------------------

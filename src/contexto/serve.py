@@ -333,12 +333,14 @@ def mcp_config_payload(home: Path) -> dict[str, Any]:
 
 
 def cloud_provider_warning(found: CloudProvider) -> str:
-    """The warning for what ``contexto.upstream.cloud_provider`` found: the check ``contexto run claude``
-    refuses a launch by, read from this process's environment and directory (D70). The service warns
-    and does not refuse: its clients are started elsewhere, with their own environment and directory,
-    and a Claude Code started here would bypass it."""
+    """The warning for what ``contexto.upstream.cloud_provider`` found: read from this process's
+    environment and directory (D70). The service warns on all cloud-provider switches (including
+    Vertex AI and Microsoft Foundry) because ``print-settings`` only sets ``ANTHROPIC_BASE_URL`` and
+    clients are started elsewhere; to route Vertex AI or Foundry through Contexto automatically, use
+    ``contexto run claude`` (or configure ``--upstream`` and the provider base-URL env var manually,
+    whose paths ``serve`` transforms)."""
     return (f"warning: {cloud_provider_note(found)}. A Claude Code client with a cloud-provider switch on does "
-            f"not reach contexto serve, and its prompt is not bounded.")
+            f"not reach contexto serve via ANTHROPIC_BASE_URL, and its prompt is not bounded.")
 
 
 def check_upstream_loop(upstream: Upstream, port: int, token: str) -> None:

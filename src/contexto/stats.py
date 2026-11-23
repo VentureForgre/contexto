@@ -52,10 +52,12 @@ MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 MODEL_PATHS = frozenset({MESSAGES_PATH, "/responses", "/v1/responses"})  # a prompt sent for a completion
 _VERTEX_COUNT_TOKENS_RE = re.compile(
-    r"^/(?:v1/)?projects/[^/]+/locations/[^/]+/publishers/anthropic/models/count-tokens:rawPredict$"
+    r"^/(?:v1/)?projects/[A-Za-z0-9][A-Za-z0-9._-]*/locations/[A-Za-z0-9][A-Za-z0-9._-]*"
+    r"/publishers/anthropic/models/count-tokens:rawPredict\Z"
 )
 _VERTEX_MESSAGES_RE = re.compile(
-    r"^/(?:v1/)?projects/[^/]+/locations/[^/]+/publishers/anthropic/models/[^/:]+:(?:streamRawPredict|rawPredict)$"
+    r"^/(?:v1/)?projects/[A-Za-z0-9][A-Za-z0-9._-]*/locations/[A-Za-z0-9][A-Za-z0-9._-]*"
+    r"/publishers/anthropic/models/[A-Za-z0-9][A-Za-z0-9._@-]*:(?:streamRawPredict|rawPredict)\Z"
 )
 _FOUNDRY_MESSAGES_PATHS = frozenset({"/anthropic/v1/messages"})
 _FOUNDRY_COUNT_TOKENS_PATHS = frozenset({"/anthropic/v1/messages/count_tokens"})

@@ -175,7 +175,7 @@ def test_text_and_json_report_the_same_results(both, capsys, fast_mcp, monkeypat
 
 
 def test_warnings_alone_exit_0_and_a_failure_exits_1(world, capsys, fast_mcp):
-    fake_cli(world, "claude", "2.1.999 (Claude Code)")  # untested, no key, no codex: warnings only
+    fake_cli(world, "claude", "2.2.0 (Claude Code)")  # untested, no key, no codex: warnings only
     code, out, _ = run(capsys)
     assert code == 0 and "[warn]" in out and "[FAIL]" not in out
     assert out.splitlines()[-1].startswith("Ready: ") and "warning" in out.splitlines()[-1]
