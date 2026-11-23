@@ -26,26 +26,47 @@ AFFINITY_SALT_FILE = "affinity.salt"
 AFFINITY_SALT_BYTES = 32
 
 
+def _chmod_dir_nofollow(path: Path) -> None:
+    """Narrow ``path`` to ``DIR_MODE`` without following a symlink at ``path``, refusing non-directories."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", str(path)) from e
+        raise
+    try:
+        os.fchmod(fd, DIR_MODE)
+    finally:
+        os.close(fd)
+
+
 def private_dir(path: Path, *, narrow: bool = True) -> Path:
     """Create ``path`` and any missing parents as 0700; force an existing ``path`` to 0700 too, unless
     ``narrow`` is false (a directory the user chose, such as ``$CONTEXTO_HOME``, D55). A ``path`` that
-    exists and is not a directory raises NotADirectoryError before any mode is changed."""
+    exists and is not a directory raises NotADirectoryError before any mode is changed. Symlinks are
+    never followed when creating or chmodding directories."""
     path = Path(path)
     missing = []
     p = path
-    while not p.exists():
+    while not os.path.lexists(p):
         missing.append(p)
-        p = p.parent
-    if not missing and not path.is_dir():
-        raise NotADirectoryError(errno.ENOTDIR, "not a directory", str(path))
+        parent = p.parent
+        if parent == p:
+            break
+        p = parent
+    if not missing:
+        if narrow:
+            _chmod_dir_nofollow(path)
+            return path
+        if not path.is_dir():
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", str(path))
+        return path
     for d in reversed(missing):
         try:
             os.mkdir(d, DIR_MODE)
         except FileExistsError:
             pass
-        os.chmod(d, DIR_MODE)
-    if narrow:
-        os.chmod(path, DIR_MODE)
+        _chmod_dir_nofollow(d)
     return path
 
 
@@ -100,21 +121,32 @@ def open_regular(path: Path, *, follow: bool = False) -> int:
     return fd
 
 
-def read_regular(path: Path) -> bytes:
-    """The bytes of the regular file at ``path``, read as ``open_regular`` opens it."""
-    fd = open_regular(path)
+def read_regular(path: Path, *, follow: bool = False, max_bytes: int | None = None) -> bytes:
+    """The bytes of the regular file at ``path``, read as ``open_regular`` opens it. When
+    ``max_bytes`` is set, refuses any file larger than that bound with ``ValueError``."""
+    fd = open_regular(path, follow=follow)
     try:
+        if max_bytes is not None and os.fstat(fd).st_size > max_bytes:
+            raise ValueError(f"{path} exceeds {max_bytes} bytes")
         chunks = []
-        while chunk := os.read(fd, 1 << 20):
+        total = 0
+        while True:
+            to_read = 1 << 20 if max_bytes is None else min(1 << 20, max_bytes + 1 - total)
+            chunk = os.read(fd, to_read)
+            if not chunk:
+                break
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                raise ValueError(f"{path} exceeds {max_bytes} bytes")
             chunks.append(chunk)
         return b"".join(chunks)
     finally:
         os.close(fd)
 
 
-def read_regular_text(path: Path) -> str:
+def read_regular_text(path: Path, *, follow: bool = False, max_bytes: int | None = None) -> str:
     """``read_regular`` decoded as UTF-8 (UnicodeDecodeError, a ValueError, when it is not)."""
-    return read_regular(path).decode("utf-8")
+    return read_regular(path, follow=follow, max_bytes=max_bytes).decode("utf-8")
 
 
 def write_all(fd: int, data: bytes) -> None:
@@ -179,6 +211,14 @@ def _alive(pid: int) -> bool:
     return True
 
 
+_LINK_UNSUPPORTED = frozenset({
+    errno.EPERM,
+    errno.EOPNOTSUPP,
+    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+    getattr(errno, "ENOSYS", errno.EOPNOTSUPP),
+})
+
+
 def fsync_dir(path: Path) -> None:
     """Flush directory entries of ``path`` to disk; ignores filesystems where directory fsync is unsupported."""
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
@@ -205,7 +245,9 @@ def write_new(path: Path, data: bytes) -> bool:
 
     The data is written and fsynced to a private temporary file first, hard-linked into place, and
     the parent directory is fsynced so a reader never sees a partial file and an existing file is
-    never replaced. The temporary file is removed whether or not the write succeeds (a full disk, say).
+    never replaced. If the filesystem refuses ``os.link`` with ``EPERM``/``EOPNOTSUPP``/``ENOSYS``,
+    falls back to ``O_CREAT | O_EXCL | O_NOFOLLOW`` so existing files and symlinks are still never
+    overwritten or followed. The temporary file is removed whether or not the write succeeds.
     """
     path = Path(path)
     tmp = temp_name(path)
@@ -217,15 +259,41 @@ def write_new(path: Path, data: bytes) -> bool:
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.link(tmp, path)
-        created = True
-        return True
+        try:
+            os.link(tmp, path)
+            created = True
+            return True
+        except OSError as exc:
+            if exc.errno not in _LINK_UNSUPPORTED:
+                raise
+            _discard(tmp)
+            created = _write_new_excl(path, data)
+            return created
     except FileExistsError:
         return False
     finally:
         _discard(tmp)
         if created:
             fsync_dir(path.parent)
+
+
+def _write_new_excl(path: Path, data: bytes) -> bool:
+    """Fallback for filesystems where ``os.link`` is disallowed: create exclusively with
+    ``O_CREAT | O_EXCL | O_NOFOLLOW``, write and fsync, removing partial output on failure."""
+    try:
+        fd = open_private(path, os.O_WRONLY | os.O_EXCL)
+    except FileExistsError:
+        return False
+    try:
+        try:
+            write_all(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return True
+    except BaseException:
+        _discard(path)
+        raise
 
 
 def write_atomic(path: Path, data: bytes) -> None:

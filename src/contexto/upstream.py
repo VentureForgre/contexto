@@ -45,7 +45,6 @@ any file path stay out of logs.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
@@ -58,6 +57,7 @@ from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from contexto.canonical import loads_bounded
+from contexto.private import read_regular_text
 
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 BASE_URL_KEY = "ANTHROPIC_BASE_URL"
@@ -80,6 +80,7 @@ MANAGED_SETTINGS_FILES = {"darwin": "/Library/Application Support/ClaudeCode/man
                           "linux": "/etc/claude-code/managed-settings.json"}
 PROVIDER_PREFIX = "CLAUDE_CODE_USE_"  # every cloud-provider switch (CLOUD_PROVIDER_KEYS) starts with it
 SETTINGS_FILE_LIMIT = 4 * 1024 * 1024  # bytes read from one settings file; real ones are a few kilobytes
+GLOBAL_CONFIG_LIMIT = 16 * 1024 * 1024  # bytes read from Claude Code's global config (.claude.json)
 # Strict single DNS label for CLOUD_ML_REGION (e.g. us-east5, global) and ANTHROPIC_FOUNDRY_RESOURCE:
 # prevents URL/authority injection via '/', '@', '?', '#', ':', '.', whitespace, or control chars.
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
@@ -287,7 +288,8 @@ def folder_trusted(cwd: Path, home: Path, env: Mapping[str, str] | None = None, 
     if ignores_persisted_trust(env):
         return False
     try:
-        data = json.loads(claude_global_config_path(home, env).read_text(encoding="utf-8"))
+        text = read_regular_text(claude_global_config_path(home, env), follow=True, max_bytes=GLOBAL_CONFIG_LIMIT)
+        data = loads_bounded(text)
     except (OSError, ValueError, RecursionError):
         return False
     projects = data.get("projects") if isinstance(data, dict) else None

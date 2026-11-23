@@ -965,11 +965,17 @@ def test_codex_results_are_matched_by_call_id():
     assert RESPONSES.result_ids({"type": "custom_tool_call_output", "call_id": "c9", "output": "o"}) == ["c9"]
 
 
-def test_a_hosted_call_still_holds_the_stream():
+def test_a_hosted_call_does_not_hold_the_stream():
     hold = StreamHold("responses", lambda: None)
     stream = responses_stream("web_search_call", "message")
-    assert hold.feed(stream[0]) == [stream[0]] and hold.feed(stream[1]) == []  # held from the hosted call
-    assert hold.holding and not hold.client_calls
+    assert hold.feed(stream[0]) == [stream[0]] and hold.feed(stream[1]) == [stream[1]]  # hosted streams live
+    assert not hold.holding and not hold.client_calls
+    mixed = StreamHold("responses", lambda: None)
+    mixed_stream = responses_stream("web_search_call", "function_call")
+    assert mixed.feed(mixed_stream[0]) == [mixed_stream[0]]
+    assert mixed.feed(mixed_stream[1]) == [mixed_stream[1]]  # hosted call passes live
+    assert mixed.feed(mixed_stream[2]) == []  # client call activates the hold
+    assert mixed.holding and mixed.client_calls
 
 
 def test_a_stream_cut_mid_hold_still_reports_its_tool_call(tool_call_proxy):
