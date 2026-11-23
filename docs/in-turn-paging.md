@@ -6,7 +6,7 @@ prints megabytes), or a subagent, whose whole life is one turn. Contexto also pa
 the running turn as well, so the bound holds there too. This page says what the model sees, how it
 reads a paged result back, how to turn the feature off, and what it does not do.
 
-It applies to Claude Code (the Messages API). Codex tool loops are still sent whole.
+It applies to both Claude Code (the Messages API) and Codex (the OpenAI Responses API).
 
 ## When it runs
 
