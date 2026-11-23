@@ -172,7 +172,7 @@ def test_chat_completions_paging_rendering_and_epoch_resume(tmp_path):
             # Reasoning content stripped from retained pre-epoch assistant items
             assert all("reasoning_content" not in m for m in out["messages"] if m.get("role") == "assistant")
         est_tokens = max(1, len(json.dumps(out)) // 3)
-        engine.observe_usage("/v1/chat/completions", {"prompt_tokens": est_tokens, "completion_tokens": 40}, out)
+        engine.observe_usage("/v1/chat/completions", {"prompt_tokens": est_tokens, "completion_tokens": 40}, req)
         messages.extend(turn_msgs[1:])  # assistant tool call, tool result, assistant reply
 
     assert rotated, "expected Chat Completions conversation to rotate under small bound"
@@ -315,7 +315,7 @@ def test_gemini_paging_count_tokens_rendering_and_resume(tmp_path):
                 if item.get("role") == "model":
                     assert not any(p.get("thought") is True for p in item.get("parts", []))
         est_tokens = max(1, len(json.dumps(out)) // 3)
-        engine.observe_usage(ep, {"promptTokenCount": est_tokens, "candidatesTokenCount": 30}, out)
+        engine.observe_usage(ep, {"promptTokenCount": est_tokens, "candidatesTokenCount": 30}, req)
         contents.extend(turn_items[1:])
 
     assert rotated
@@ -350,8 +350,10 @@ def test_gemini_paging_count_tokens_rendering_and_resume(tmp_path):
     doc_req = {"systemInstruction": {"parts": [{"text": "Be concise."}]}, "contents": doc_contents}
     doc_out, _, _ = engine(doc_req, {}, ep)
     engine.observe_usage(ep, {"promptTokenCount": max(1, len(json.dumps(doc_out)) // 3) + 500,
-                              "candidatesTokenCount": 30}, doc_out)
-    assert store.epoch_record()["model"] == "gemini-2.5-pro"
+                              "candidatesTokenCount": 30}, doc_req)
+    rec = store.epoch_record()
+    assert rec is not None and rec.get("document_costs")
+    assert rec["model"] == "gemini-2.5-pro"
 
     # Epoch resume on a fresh engine with the same model succeeds; different model refuses with model_changed
     engine2 = rewrite.RewriteEngine(store=store, config=config)
