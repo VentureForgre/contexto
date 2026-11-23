@@ -24,11 +24,13 @@ from pathlib import Path
 from typing import Any
 
 from contexto.commands.serve import _port
-from contexto.launcher import BOUND_GUARD, DEFAULT_BOUND
+from contexto.launcher import BOUND_GUARD, DEFAULT_BOUND, LaunchError, LaunchOptions, check_options
 from contexto.paths import contexto_home
 from contexto.private import private_dir, write_atomic
-from contexto.serve import DEFAULT_PORT, ask_health, read_token, token_path
+from contexto.proxy import normalize_allowed_host
+from contexto.serve import DEFAULT_PORT, ServeError, ask_health, check_upstream_url, read_token, token_path
 from contexto.servecontract import SERVICE_HOST, running_state, service_running
+from contexto.upstream import Upstream
 
 LAUNCHD_LABEL = "io.contexto.serve"
 LAUNCHD_FILENAME = f"{LAUNCHD_LABEL}.plist"
@@ -37,8 +39,29 @@ SYSTEMD_UNIT_NAME = "contexto-serve.service"
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 
+class DaemonError(RuntimeError):
+    """Daemon unit generation or service-manager command failed."""
+
+    def __init__(self, message: str, code: int = 1) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def _default_runner(cmd: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(list(cmd), capture_output=True, text=True, check=False)
+
+
+def _run_cmd(runner: CommandRunner, cmd: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return runner(cmd)
+    except OSError as exc:
+        raise DaemonError(f"cannot run {cmd[0]}: {exc.strerror or type(exc).__name__}") from None
+
+
+def _check_unit_str(value: str, label: str) -> str:
+    if any(ch in value for ch in ("\n", "\r", "\x00")):
+        raise DaemonError(f"{label} must not contain newline or NUL characters", code=2)
+    return value
 
 
 def detect_platform(choice: str = "auto", *, platform_name: str | None = None) -> str:
@@ -96,9 +119,12 @@ def serve_argv(*, python: str | None = None, port: int = DEFAULT_PORT,
 def launchd_plist(home: Path, argv: Sequence[str], *,
                   label: str = LAUNCHD_LABEL) -> bytes:
     """Render a macOS LaunchAgent XML plist for ``contexto serve``."""
+    _check_unit_str(label, "launchd label")
+    _check_unit_str(str(home), "CONTEXTO_HOME")
+    checked_argv = [_check_unit_str(part, "argument") for part in argv]
     data: dict[str, Any] = {
         "Label": label,
-        "ProgramArguments": list(argv),
+        "ProgramArguments": checked_argv,
         "EnvironmentVariables": {"CONTEXTO_HOME": str(home)},
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
@@ -109,18 +135,30 @@ def launchd_plist(home: Path, argv: Sequence[str], *,
     return plistlib.dumps(data, fmt=plistlib.FMT_XML, sort_keys=True)
 
 
-def _systemd_quote(arg: str) -> str:
-    """Quote one ExecStart argument for systemd unit syntax."""
-    if not arg or any(c.isspace() or c in "\"'\\$;%" for c in arg):
-        escaped = arg.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+def _systemd_exec_quote(arg: str) -> str:
+    """Quote one ``ExecStart=`` argument for systemd unit syntax. Escapes ``$`` -> ``$$`` and
+    ``%`` -> ``%%`` so systemd does not expand environment variables or specifiers."""
+    _check_unit_str(arg, "ExecStart argument")
+    escaped = arg.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
+    if not arg or escaped != arg or any(c.isspace() or c in "\"';" for c in arg):
+        return f'"{escaped}"'
+    return arg
+
+
+def _systemd_env_quote(arg: str) -> str:
+    """Quote one ``Environment=`` assignment for systemd unit syntax (``%`` -> ``%%``, keeping
+    ``$`` literal per ``systemd.exec(5)``)."""
+    _check_unit_str(arg, "Environment value")
+    escaped = arg.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if not arg or escaped != arg or any(c.isspace() or c in "\"';" for c in arg):
         return f'"{escaped}"'
     return arg
 
 
 def systemd_unit(home: Path, argv: Sequence[str]) -> str:
     """Render a Linux ``systemd --user`` unit file for ``contexto serve``."""
-    exec_start = " ".join(_systemd_quote(part) for part in argv)
-    env_val = _systemd_quote(f"CONTEXTO_HOME={home}")
+    exec_start = " ".join(_systemd_exec_quote(part) for part in argv)
+    env_val = _systemd_env_quote(f"CONTEXTO_HOME={home}")
     return (
         "[Unit]\n"
         "Description=Contexto local proxy daemon\n"
@@ -140,6 +178,10 @@ def systemd_unit(home: Path, argv: Sequence[str]) -> str:
 
 def _launchd_domain(uid: int | None = None) -> str:
     return f"gui/{os.getuid() if uid is None else uid}"
+
+
+def _cmd_detail(res: subprocess.CompletedProcess[str]) -> str:
+    return (res.stderr or res.stdout or f"exit {res.returncode}").strip()
 
 
 def install_daemon(*, home: Path, platform: str, argv: Sequence[str],
@@ -163,22 +205,28 @@ def install_daemon(*, home: Path, platform: str, argv: Sequence[str],
             # Bootout any previous copy first (ignore errors when not loaded).
             bootout = ["launchctl", "bootout", f"{domain}/{LAUNCHD_LABEL}"]
             ran.append(bootout)
-            runner(bootout)
+            _run_cmd(runner, bootout)
             bootstrap = ["launchctl", "bootstrap", domain, str(target)]
             ran.append(bootstrap)
-            res = runner(bootstrap)
+            res = _run_cmd(runner, bootstrap)
             if res.returncode != 0:
                 load = ["launchctl", "load", "-w", str(target)]
                 ran.append(load)
-                runner(load)
+                res2 = _run_cmd(runner, load)
+                if res2.returncode != 0:
+                    raise DaemonError(f"wrote {target}, but launchctl failed to start it: {_cmd_detail(res2)}")
     else:
         reload_cmd = ["systemctl", "--user", "daemon-reload"]
         ran.append(reload_cmd)
-        runner(reload_cmd)
+        res = _run_cmd(runner, reload_cmd)
+        if res.returncode != 0:
+            raise DaemonError(f"wrote {target}, but systemctl daemon-reload failed: {_cmd_detail(res)}")
         if start_now:
             enable_cmd = ["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT_NAME]
             ran.append(enable_cmd)
-            runner(enable_cmd)
+            res2 = _run_cmd(runner, enable_cmd)
+            if res2.returncode != 0:
+                raise DaemonError(f"wrote {target}, but systemctl enable --now failed: {_cmd_detail(res2)}")
     return target, ran
 
 
@@ -193,15 +241,15 @@ def uninstall_daemon(*, platform: str, home_dir: Path | None = None,
         domain = _launchd_domain(uid)
         cmd = ["launchctl", "bootout", f"{domain}/{LAUNCHD_LABEL}"]
         ran.append(cmd)
-        res = runner(cmd)
+        res = _run_cmd(runner, cmd)
         if res.returncode != 0 and target.exists():
             unload = ["launchctl", "unload", "-w", str(target)]
             ran.append(unload)
-            runner(unload)
+            _run_cmd(runner, unload)
     else:
         disable = ["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT_NAME]
         ran.append(disable)
-        runner(disable)
+        _run_cmd(runner, disable)
     removed = False
     if target.exists() or target.is_symlink():
         target.unlink()
@@ -209,7 +257,7 @@ def uninstall_daemon(*, platform: str, home_dir: Path | None = None,
     if platform == "linux":
         reload_cmd = ["systemctl", "--user", "daemon-reload"]
         ran.append(reload_cmd)
-        runner(reload_cmd)
+        _run_cmd(runner, reload_cmd)
     return target, removed, ran
 
 
@@ -220,18 +268,20 @@ def start_daemon(*, platform: str, home_dir: Path | None = None,
     target = unit_path(platform, home_dir=home_dir, env=env)
     if not target.exists():
         return 1, f"unit file {target} is not installed; run `contexto daemon install` first"
-    if platform == "darwin":
-        domain = _launchd_domain(uid)
-        res = runner(["launchctl", "kickstart", "-k", f"{domain}/{LAUNCHD_LABEL}"])
-        if res.returncode != 0:
-            res = runner(["launchctl", "bootstrap", domain, str(target)])
-        if res.returncode != 0:
-            res = runner(["launchctl", "load", "-w", str(target)])
-    else:
-        res = runner(["systemctl", "--user", "start", SYSTEMD_UNIT_NAME])
+    try:
+        if platform == "darwin":
+            domain = _launchd_domain(uid)
+            res = _run_cmd(runner, ["launchctl", "kickstart", "-k", f"{domain}/{LAUNCHD_LABEL}"])
+            if res.returncode != 0:
+                res = _run_cmd(runner, ["launchctl", "bootstrap", domain, str(target)])
+            if res.returncode != 0:
+                res = _run_cmd(runner, ["launchctl", "load", "-w", str(target)])
+        else:
+            res = _run_cmd(runner, ["systemctl", "--user", "start", SYSTEMD_UNIT_NAME])
+    except DaemonError as exc:
+        return 1, str(exc)
     if res.returncode != 0:
-        detail = (res.stderr or res.stdout or f"exit {res.returncode}").strip()
-        return 1, f"failed to start daemon: {detail}"
+        return 1, f"failed to start daemon: {_cmd_detail(res)}"
     return 0, f"started ({target})"
 
 
@@ -240,16 +290,18 @@ def stop_daemon(*, platform: str, home_dir: Path | None = None,
                 runner: CommandRunner = _default_runner,
                 uid: int | None = None) -> tuple[int, str]:
     target = unit_path(platform, home_dir=home_dir, env=env)
-    if platform == "darwin":
-        domain = _launchd_domain(uid)
-        res = runner(["launchctl", "bootout", f"{domain}/{LAUNCHD_LABEL}"])
-        if res.returncode != 0 and target.exists():
-            res = runner(["launchctl", "unload", str(target)])
-    else:
-        res = runner(["systemctl", "--user", "stop", SYSTEMD_UNIT_NAME])
+    try:
+        if platform == "darwin":
+            domain = _launchd_domain(uid)
+            res = _run_cmd(runner, ["launchctl", "bootout", f"{domain}/{LAUNCHD_LABEL}"])
+            if res.returncode != 0 and target.exists():
+                res = _run_cmd(runner, ["launchctl", "unload", str(target)])
+        else:
+            res = _run_cmd(runner, ["systemctl", "--user", "stop", SYSTEMD_UNIT_NAME])
+    except DaemonError as exc:
+        return 1, str(exc)
     if res.returncode != 0:
-        detail = (res.stderr or res.stdout or f"exit {res.returncode}").strip()
-        return 1, f"failed to stop daemon: {detail}"
+        return 1, f"failed to stop daemon: {_cmd_detail(res)}"
     return 0, "stopped"
 
 
@@ -331,34 +383,51 @@ def run(args: argparse.Namespace, *, stdout=None, stderr=None,
         print(f"contexto daemon: {exc}", file=stderr)
         return 1
     home = contexto_home()
-    if action == "install":
-        argv = serve_argv(
-            port=args.port, upstream=args.upstream,
-            anthropic_upstream=args.anthropic_upstream,
-            openai_upstream=args.openai_upstream,
-            gemini_upstream=args.gemini_upstream,
-            bound=args.bound, allow_large_bound=args.allow_large_bound,
-            allow_hosts=args.allow_host, allow_local_origin=args.allow_local_origin,
-        )
-        target, _ = install_daemon(home=home, platform=platform, argv=argv,
-                                   start_now=not args.no_start, runner=runner)
-        print(f"contexto daemon: installed {target} ({shlex.join(argv)})", file=stdout)
-        return 0
-    if action == "uninstall":
-        target, removed, _ = uninstall_daemon(platform=platform, runner=runner)
-        msg = f"removed {target}" if removed else f"{target} was not installed"
-        print(f"contexto daemon: {msg}", file=stdout)
-        return 0
-    if action == "start":
-        code, msg = start_daemon(platform=platform, runner=runner)
-        print(f"contexto daemon: {msg}", file=stdout if code == 0 else stderr)
-        return code
-    if action == "stop":
-        code, msg = stop_daemon(platform=platform, runner=runner)
-        print(f"contexto daemon: {msg}", file=stdout if code == 0 else stderr)
-        return code
-    if action == "status":
-        code, msg = daemon_status(home=home, platform=platform)
-        print(f"contexto daemon: {msg}", file=stdout)
-        return code
+    try:
+        if action == "install":
+            if args.port < 1:
+                raise DaemonError("--port must be between 1 and 65535 for a background daemon", code=2)
+            check_options(LaunchOptions(bound=args.bound, allow_large_bound=args.allow_large_bound))
+            for attr, src in (("upstream", "flag"), ("anthropic_upstream", "flag:anthropic"),
+                              ("openai_upstream", "flag:openai"), ("gemini_upstream", "flag:gemini")):
+                raw_url = getattr(args, attr, None)
+                if raw_url:
+                    check_upstream_url(Upstream(raw_url, src))
+            for host in args.allow_host:
+                try:
+                    normalize_allowed_host(host)
+                except ValueError as exc:
+                    raise DaemonError(f"invalid --allow-host {host!r}: {exc}", code=2) from None
+            argv = serve_argv(
+                port=args.port, upstream=args.upstream,
+                anthropic_upstream=args.anthropic_upstream,
+                openai_upstream=args.openai_upstream,
+                gemini_upstream=args.gemini_upstream,
+                bound=args.bound, allow_large_bound=args.allow_large_bound,
+                allow_hosts=args.allow_host, allow_local_origin=args.allow_local_origin,
+            )
+            target, _ = install_daemon(home=home, platform=platform, argv=argv,
+                                       start_now=not args.no_start, runner=runner)
+            print(f"contexto daemon: installed {target} ({shlex.join(argv)})", file=stdout)
+            return 0
+        if action == "uninstall":
+            target, removed, _ = uninstall_daemon(platform=platform, runner=runner)
+            msg = f"removed {target}" if removed else f"{target} was not installed"
+            print(f"contexto daemon: {msg}", file=stdout)
+            return 0
+        if action == "start":
+            code, msg = start_daemon(platform=platform, runner=runner)
+            print(f"contexto daemon: {msg}", file=stdout if code == 0 else stderr)
+            return code
+        if action == "stop":
+            code, msg = stop_daemon(platform=platform, runner=runner)
+            print(f"contexto daemon: {msg}", file=stdout if code == 0 else stderr)
+            return code
+        if action == "status":
+            code, msg = daemon_status(home=home, platform=platform)
+            print(f"contexto daemon: {msg}", file=stdout)
+            return code
+    except (DaemonError, ServeError, LaunchError) as exc:
+        print(f"contexto daemon: {exc}", file=stderr)
+        return exc.code
     return 2

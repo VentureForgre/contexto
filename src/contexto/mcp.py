@@ -1509,21 +1509,23 @@ class ServeServer(Server):
         return server._tools_call(call_params)
 
     def _resolve_explicit(self, key: str) -> str:
-        """Resolve an explicit session key via the service when available, else accept an existing
-        Contexto session id directly."""
+        """Resolve an explicit session key via the service when available; fall back to an existing
+        local Contexto session id only when the service is not running."""
         if self.resolve_session is not None:
             try:
                 return self.resolve_session(key)
             except serveclient.ResolveError as exc:
-                if exc.kind != serveclient.UNKNOWN_TOOL_USE:
-                    # If the service is down, allow opening a valid existing Contexto session id directly.
+                if exc.kind == serveclient.NOT_RUNNING:
                     try:
                         self.sessions.check(key)
                         return key
                     except SessionUnavailable:
                         pass
-                    raise _NotRun(_RESOLVE_REPLIES[exc.kind], str(exc), reason=exc.reason,
-                                  switch=SWITCH_SET.format(note=self.provider) if self.provider else "") from None
+                if exc.kind == serveclient.UNKNOWN_TOOL_USE:
+                    raise _NotRun("{tool} was not run: no session found in contexto serve for {session}.",
+                                  f"unknown session {key!r}", session=_clip(repr(key), ECHO_CHARS)) from None
+                raise _NotRun(_RESOLVE_REPLIES[exc.kind], str(exc), reason=exc.reason,
+                              switch=SWITCH_SET.format(note=self.provider) if self.provider else "") from None
         return key
 
     def _session_server(self, params: dict[str, Any]) -> tuple[Server, dict[str, Any]]:
@@ -1548,13 +1550,11 @@ class ServeServer(Server):
                 explicit = meta.get("contexto/session") or meta.get("X-Contexto-Session")
             args = params.get("arguments")
             if explicit is None and isinstance(args, dict):
-                for arg_key in ("contexto_session", "session"):
-                    candidate = args.get(arg_key)
-                    if isinstance(candidate, str) and candidate:
-                        explicit = candidate
-                        trimmed = {k: v for k, v in args.items() if k != arg_key}
-                        call_params = {**params, "arguments": trimmed}
-                        break
+                candidate = args.get("contexto_session")
+                if isinstance(candidate, str) and candidate:
+                    explicit = candidate
+                    trimmed = {k: v for k, v in args.items() if k != "contexto_session"}
+                    call_params = {**params, "arguments": trimmed}
             if isinstance(explicit, str) and 0 < len(explicit) <= TOOL_USE_ID_MAX:
                 session = self._resolve_explicit(explicit)
             elif self.default_session and 0 < len(self.default_session) <= TOOL_USE_ID_MAX:

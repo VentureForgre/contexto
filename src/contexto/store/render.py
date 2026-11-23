@@ -196,7 +196,7 @@ def render_page(page: dict[str, Any], searchable: bool = False) -> str:
             mark = len(lines)
             if kind == "text":
                 lines.append(_text(block))
-            elif kind in ("thinking", "redacted_thinking"):
+            elif kind in ("thinking", "redacted_thinking", "reasoning"):
                 continue
             elif kind == "tool_use":
                 tool_input = block.get("input", {})
@@ -255,7 +255,7 @@ def is_chat_completions_item(message: dict[str, Any]) -> bool:
     role = message.get("role")
     if role in ("tool", "developer", "function"):
         return True
-    return role == "assistant" and ("tool_calls" in message or "reasoning_content" in message)
+    return role == "assistant" and ("tool_calls" in message or "reasoning_content" in message or "reasoning" in message)
 
 
 def is_gemini_item(message: dict[str, Any]) -> bool:

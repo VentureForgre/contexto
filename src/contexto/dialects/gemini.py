@@ -71,10 +71,10 @@ class GeminiDialect(Dialect):
     in_turn = None
 
     def matches_endpoint(self, endpoint: str) -> bool:
-        return bool(GEMINI_PATH_RE.match(endpoint))
+        return bool(GEMINI_PATH_RE.match(endpoint.split("?", 1)[0]))
 
     def is_count_endpoint(self, endpoint: str) -> bool:
-        return is_gemini_count_path(endpoint)
+        return is_gemini_count_path(endpoint.split("?", 1)[0])
 
     def is_context_block(self, block: Any) -> bool:
         return False
@@ -106,7 +106,7 @@ class GeminiDialect(Dialect):
             fr = _function_response(part)
             if fr is None:
                 continue
-            call_id = fr.get("id") or fr.get("name")
+            call_id = fr.get("id")
             if isinstance(call_id, str) and call_id:
                 ids.append(call_id)
         return ids
@@ -213,11 +213,11 @@ class GeminiDialect(Dialect):
 
     def usage_tokens(self, usage: dict) -> int:
         # promptTokenCount already includes cachedContentTokenCount in Gemini usageMetadata
-        return usage.get("promptTokenCount") or usage.get("input_tokens") or 0
+        return usage.get("promptTokenCount") or usage.get("prompt_token_count") or usage.get("input_tokens") or 0
 
     def output_tokens(self, usage: dict) -> int:
-        candidates = usage.get("candidatesTokenCount") or 0
-        thoughts = usage.get("thoughtsTokenCount") or 0
+        candidates = usage.get("candidatesTokenCount") or usage.get("candidates_token_count") or 0
+        thoughts = usage.get("thoughtsTokenCount") or usage.get("thoughts_token_count") or 0
         total = candidates + thoughts
         return total if total > 0 else (usage.get("output_tokens") or 0)
 

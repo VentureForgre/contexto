@@ -431,9 +431,23 @@ def test_stdio_mcp_serve_non_claude_fallback_resolution(tmp_path, multi_upstream
         assert ambig["result"]["isError"] is True and "ambiguous" in ambig["result"]["content"][0]["text"].lower()
 
         explicit = server.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-                                  "params": {"name": "contexto_state", "arguments": {"session": "solo-key"}}})
+                                  "params": {"name": "contexto_state",
+                                             "arguments": {"contexto_session": "solo-key"}}})
         assert explicit["result"]["isError"] is False
         assert "active fallback works" in explicit["result"]["content"][0]["text"]
+
+        # Bare `session` argument is NOT hijacked for routing (reserved for contexto_recall D69)
+        bare_session = server.handle({"jsonrpc": "2.0", "id": 40, "method": "tools/call",
+                                      "params": {"name": "contexto_state", "arguments": {"session": "solo-key"}}})
+        assert bare_session["result"]["isError"] is True
+        assert "ambiguous" in bare_session["result"]["content"][0]["text"].lower()
+
+        # Unknown explicit session fails closed with clear not-found message (does not claim service named it)
+        unknown = server.handle({"jsonrpc": "2.0", "id": 41, "method": "tools/call",
+                                 "params": {"name": "contexto_state",
+                                            "arguments": {"contexto_session": "does-not-exist"}}})
+        assert unknown["result"]["isError"] is True
+        assert "no session found" in unknown["result"]["content"][0]["text"].lower()
 
         # X-Contexto-Session env var binds the server directly
         bound_server = mcp_command.serve_server(
@@ -444,6 +458,80 @@ def test_stdio_mcp_serve_non_claude_fallback_resolution(tmp_path, multi_upstream
                                          "params": {"name": "contexto_state", "arguments": {}}})
         assert bound_res["result"]["isError"] is False
         assert "active fallback works" in bound_res["result"]["content"][0]["text"]
+    finally:
+        service.stop()
+
+
+def test_passthrough_for_does_not_poison_unprefixed_routes_and_rejects_duplicate_origin(tmp_path, multi_upstreams):
+    anth, _, _ = multi_upstreams
+    home = tmp_path / "home"
+    token = serve.ensure_token(home)
+    service = serve.ServeService(
+        home, UpstreamChoice(anth.url, "flag"), token, reaper=False,
+        allow_local_origin=True,
+    )
+    service.start(0)
+    try:
+        # Calling passthrough_for("openai") must NOT poison unprefixed Chat Completions routing
+        from contexto.dialects.chat_completions import CHAT_COMPLETIONS
+
+        p_openai = service.passthrough_for("openai", CHAT_COMPLETIONS)
+        assert p_openai.upstream_netloc == "api.openai.com"
+        p_default = service.passthrough_for(None, CHAT_COMPLETIONS)
+        assert p_default is service.passthrough
+
+        # Duplicate Origin headers (even when first is local) must be refused with 403
+        import socket
+
+        with socket.create_connection(("127.0.0.1", service.port), timeout=5) as sock:
+            raw_req = (
+                f"GET /{token}/contexto/health HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{service.port}\r\n"
+                "Origin: http://127.0.0.1:3000\r\n"
+                "Origin: https://evil.example\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode()
+            sock.sendall(raw_req)
+            resp = sock.recv(4096)
+        assert resp.startswith(b"HTTP/1.1 403 ")
+    finally:
+        service.stop()
+
+
+def test_streamable_http_mcp_validates_jsonrpc_and_handles_damaged_lock(tmp_path, multi_upstreams):
+    anth, oai, _ = multi_upstreams
+    home = tmp_path / "home"
+    token = serve.ensure_token(home)
+    service = serve.ServeService(
+        home, UpstreamChoice(anth.url, "flag"), token, reaper=False,
+        upstreams={"openai": UpstreamChoice(oai.url, "flag:openai")},
+    )
+    service.start(0)
+    try:
+        # Invalid JSON-RPC version and unknown tool return proper JSON-RPC errors (not tool errors)
+        h = {"Content-Type": "application/json"}
+        st, _, raw = _http(service.port, "POST", f"/{token}/mcp",
+                           json.dumps({"jsonrpc": "1.0", "id": 1, "method": "tools/call",
+                                       "params": {"name": "contexto_state"}}).encode(), h)
+        assert st == 200 and json.loads(raw)["error"]["code"] == mcp.INVALID_REQUEST
+
+        st, _, raw = _http(service.port, "POST", f"/{token}/mcp",
+                           json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                       "params": {"name": "no_such_tool"}}).encode(), h)
+        assert st == 200 and json.loads(raw)["error"]["code"] == mcp.INVALID_PARAMS
+
+        # Damaged live.lock on an existing closed session returns a tool error instead of dropping the socket
+        store = SessionStore(home, "damaged-sess")
+        store.release()
+        (home / "sessions" / "damaged-sess" / "live.lock").unlink()
+        (home / "sessions" / "damaged-sess" / "live.lock").mkdir()
+        st, _, raw = _http(service.port, "POST", f"/{token}/s/damaged-sess/mcp",
+                           json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                       "params": {"name": "contexto_state", "arguments": {}}}).encode(), h)
+        assert st == 200
+        body = json.loads(raw)
+        assert body["result"]["isError"] is True
+        assert "live.lock" in body["result"]["content"][0]["text"]
     finally:
         service.stop()
 

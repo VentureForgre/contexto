@@ -664,7 +664,7 @@ class UsageReader:
         elif self.api == "chat_completions":
             call_id = item.get("id")
         elif self.api == "gemini":
-            call_id = item.get("id") or item.get("name")
+            call_id = item.get("id")
         else:
             call_id = item.get("id") if item.get("type") == "tool_use" else None
         if isinstance(call_id, str) and call_id and call_id not in self.call_ids and len(self.call_ids) < 256:
@@ -739,7 +739,7 @@ class UsageReader:
                             self._take_call_id(fc)
                             found_call = True
                 finish = cand.get("finishReason") or cand.get("finish_reason")
-                if finish is not None:
+                if isinstance(finish, str) and finish and finish != "FINISH_REASON_UNSPECIFIED":
                     self._keep("stop_reason", finish)
                     self.ended = True
             if found_call:
@@ -1007,14 +1007,24 @@ class StreamHold:
         if self.api == "chat_completions":
             if sse_data(raw).strip() == b"[DONE]":
                 return True
-            usage = _sse_payload(raw).get("usage")
-            return isinstance(usage, dict) and bool(usage)
+            payload = _sse_payload(raw)
+            usage = payload.get("usage")
+            if not (isinstance(usage, dict) and bool(usage)):
+                return False
+            choices = payload.get("choices")
+            if not isinstance(choices, list) or not choices:
+                return True
+            return any(isinstance(c, dict) and c.get("finish_reason") is not None for c in choices)
         if self.api == "gemini":
             payload = _sse_payload(raw)
-            has_usage = isinstance(payload.get("usageMetadata") or payload.get("usage_metadata"), dict)
+            meta = payload.get("usageMetadata") or payload.get("usage_metadata")
+            has_usage = isinstance(meta, dict) and bool(meta)
             cands = payload.get("candidates")
             has_finish = isinstance(cands, list) and any(
-                isinstance(c, dict) and (c.get("finishReason") or c.get("finish_reason")) for c in cands
+                isinstance(c, dict)
+                and isinstance((fr := c.get("finishReason") or c.get("finish_reason")), str)
+                and bool(fr) and fr != "FINISH_REASON_UNSPECIFIED"
+                for c in cands
             )
             return has_usage and has_finish
         return False
@@ -1030,6 +1040,12 @@ class StreamHold:
         """One complete raw SSE event in; the raw events to write now, in order."""
         kind = sse_event_type(raw)
         if self._is_trigger(kind, raw) and not self.triggered:
+            # A Gemini or Chat Completions chunk can carry both a tool call and finishReason/usage
+            # in the same final SSE event: record client_calls before on_trigger() observes usage.
+            if not self.client_calls and self.api in ("chat_completions", "gemini"):
+                call = self._call(kind, raw)
+                if call == "client":
+                    self.client_calls = True
             self.triggered = True
             self.on_trigger()  # publish the real-usage room before anything held reaches the CLI
             return self._release() + [raw]
@@ -1383,11 +1399,13 @@ class _Handler(BaseHTTPRequestHandler):
         page sends its own name as Host, so neither can drive the proxy or write to the store. The
         name is checked, not the port (D59): a browser cannot put another port in Host on a
         connection to this socket, and an SSH or container forward to it sends its own port."""
-        origin = self.headers.get("Origin")
-        if origin is not None:
+        origins = self.headers.get_all("Origin") or []
+        if len(origins) > 1:
+            return "origin"
+        if len(origins) == 1:
             owner = getattr(self, "owner", None)
             if not (getattr(owner, "allow_local_origin", False)
-                    and is_local_origin(origin, getattr(owner, "allowed_hosts", frozenset()))):
+                    and is_local_origin(origins[0], getattr(owner, "allowed_hosts", frozenset()))):
                 return "origin"
         hosts = self.headers.get_all("Host") or []
         if len(hosts) != 1 or not self._host_allowed(hosts[0]):
@@ -1476,7 +1494,8 @@ class _Handler(BaseHTTPRequestHandler):
         raw_model = request.get("model") if request.get("model") is not None else model_from_endpoint(endpoint)
         entry["model"] = _scalar_summary(raw_model)  # a client value: never logged raw
         entry["stream"] = bool(request.get("stream")) or endpoint.endswith(":streamGenerateContent")
-        entry["original_message_count"] = len(request.get(history_key) or [])
+        raw_items = request.get(history_key)
+        entry["original_message_count"] = len(raw_items) if isinstance(raw_items, list) else 0
         preserves = getattr(owner.transform, "preserves_input", False) is True
         before: bytes | None = None
         if preserves:
@@ -1518,7 +1537,8 @@ class _Handler(BaseHTTPRequestHandler):
             entry["epoch"] = owner.last_epoch = _scalar_summary(epochs[-1])
         if owner.observe_thinking:
             new_headers = add_beta(new_headers, THINKING_BINDING_BETA)
-        entry["message_count"] = len(new_request.get(history_key) or [])
+        new_items = new_request.get(history_key)
+        entry["message_count"] = len(new_items) if isinstance(new_items, list) else 0
         if before is None and same_wire(new_request, request):
             return body, new_headers, original  # unchanged: the CLI's own bytes, nothing serialized
         try:

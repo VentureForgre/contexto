@@ -25,6 +25,7 @@ import re
 import shutil
 import stat
 import sys
+import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -63,10 +64,10 @@ def _backup_root(home: Path, target: str) -> Path:
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
     if path.is_symlink():
         raise SetupError(f"refusing to edit symlink {path}")
+    if not path.exists():
+        return {}
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -83,22 +84,34 @@ def _load_json_object(path: Path) -> dict[str, Any]:
 
 
 def _record_backup(home: Path, target: str, paths: list[Path]) -> Path:
-    """Save original bytes and mode of each file in ``paths`` if no backup exists yet for ``target``."""
+    """Save original bytes and mode of each file in ``paths`` before modifying it. Preserves the
+    original pre-Contexto backup across repeated runs while also backing up any newly targeted
+    path (e.g. if ``CLAUDE_CONFIG_DIR`` or ``CODEX_HOME`` changed between runs)."""
+    for file_path in paths:
+        if file_path.is_symlink():
+            raise SetupError(f"refusing to back up or edit symlink {file_path}")
     bdir = _backup_root(home, target)
     manifest_path = bdir / MANIFEST_NAME
+    entries: list[dict[str, Any]] = []
+    recorded: set[str] = set()
     if manifest_path.exists():
-        # Preserve the pre-Contexto snapshot across repeated `setup` runs.
+        existing_manifest = _load_json_object(manifest_path)
+        existing_files = existing_manifest.get("files")
+        if not isinstance(existing_files, list):
+            raise SetupError(f"corrupt backup manifest {manifest_path}")
+        entries = list(existing_files)
+        recorded = {e["path"] for e in entries if isinstance(e, dict) and isinstance(e.get("path"), str)}
+    missing_paths = [p for p in paths if str(p) not in recorded]
+    if not missing_paths and manifest_path.exists():
         return manifest_path
     private_dir(Path(home), narrow=False)
     private_dir(bdir.parent)
     private_dir(bdir)
-    entries: list[dict[str, Any]] = []
-    for idx, file_path in enumerate(paths):
-        if file_path.is_symlink():
-            raise SetupError(f"refusing to back up or edit symlink {file_path}")
+    next_idx = len(entries)
+    for file_path in missing_paths:
         if file_path.exists():
             st = file_path.stat()
-            backup_name = f"file-{idx}.bak"
+            backup_name = f"file-{next_idx}.bak"
             write_atomic(bdir / backup_name, file_path.read_bytes())
             entries.append({
                 "path": str(file_path),
@@ -113,6 +126,7 @@ def _record_backup(home: Path, target: str, paths: list[Path]) -> Path:
                 "backup": None,
                 "mode": None,
             })
+        next_idx += 1
     write_atomic(manifest_path, (json.dumps({"target": target, "files": entries}, indent=2) + "\n").encode("utf-8"))
     return manifest_path
 
@@ -216,7 +230,12 @@ def _apply_opencode(home: Path, port: int, token: str, *, user_home: Path, env: 
 
 
 def _toml_str(value: str) -> str:
-    return json.dumps(value)
+    """Encode ``value`` as a TOML basic string, rejecting lone surrogates and escaping DEL."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise SetupError(f"cannot encode non-UTF-8 string for TOML: {exc}") from None
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def _apply_codex(home: Path, port: int, token: str, *, user_home: Path, env: Mapping[str, str],
@@ -225,8 +244,20 @@ def _apply_codex(home: Path, port: int, token: str, *, user_home: Path, env: Map
     if config_path.is_symlink():
         raise SetupError(f"refusing to edit symlink {config_path}")
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    if existing.strip():
+        try:
+            tomllib.loads(existing)
+        except tomllib.TOMLDecodeError as exc:
+            raise SetupError(f"{config_path} is not valid TOML: {exc}") from None
     stripped = _CODEX_BLOCK_RE.sub("", existing).rstrip()
-    openai_base = base_url(port, token) + "/openai"
+    parsed_stripped = tomllib.loads(stripped) if stripped.strip() else {}
+    existing_providers = parsed_stripped.get("model_providers")
+    if isinstance(existing_providers, dict) and "contexto" in existing_providers:
+        raise SetupError(f"{config_path} already defines [model_providers.contexto] outside Contexto's managed block")
+    existing_mcp = parsed_stripped.get("mcp_servers")
+    if isinstance(existing_mcp, dict) and "contexto" in existing_mcp:
+        raise SetupError(f"{config_path} already defines [mcp_servers.contexto] outside Contexto's managed block")
+    openai_base = base_url(port, token) + "/openai/v1"
     if mcp_transport == "http":
         mcp_lines = [
             "[mcp_servers.contexto]",
@@ -243,6 +274,17 @@ def _apply_codex(home: Path, port: int, token: str, *, user_home: Path, env: Map
             "[mcp_servers.contexto.env]",
             f"CONTEXTO_HOME = {_toml_str(str(home))}",
         ]
+    features_lines: list[str] = []
+    extra_notes: list[str] = []
+    existing_features = parsed_stripped.get("features")
+    if not isinstance(existing_features, dict):
+        features_lines = [
+            "",
+            "[features]",
+            "enable_request_compression = false",
+        ]
+    elif existing_features.get("enable_request_compression") is not False:
+        extra_notes.append(f"note: {config_path} already has [features]; set enable_request_compression = false there")
     block = "\n".join([
         CODEX_BEGIN,
         "[model_providers.contexto]",
@@ -250,17 +292,21 @@ def _apply_codex(home: Path, port: int, token: str, *, user_home: Path, env: Map
         f"base_url = {_toml_str(openai_base)}",
         'wire_api = "responses"',
         "supports_websockets = false",
-        "enable_request_compression = false",
+        *features_lines,
         "",
         *mcp_lines,
         CODEX_END,
         "",
     ])
     updated = f"{stripped}\n\n{block}" if stripped else block
+    try:
+        tomllib.loads(updated)
+    except tomllib.TOMLDecodeError as exc:
+        raise SetupError(f"generated invalid TOML for {config_path}: {exc}") from None
     if not dry_run:
         _record_backup(home, "codex", [config_path])
         _write_text_atomic(config_path, updated)
-    return [f"updated {config_path} (mode 0600; [model_providers.contexto] + [mcp_servers.contexto])"]
+    return [f"updated {config_path} (mode 0600; [model_providers.contexto] + [mcp_servers.contexto])", *extra_notes]
 
 
 def _apply_cursor(home: Path, port: int, token: str, *, user_home: Path, env: Mapping[str, str],

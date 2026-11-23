@@ -770,8 +770,10 @@ class _Tally:
             read = self._number(details.get("cached_tokens")) if isinstance(details, dict) else None
             write, prompt = None, fresh
         elif api == "gemini":
-            fresh = self._number(usage.get("promptTokenCount"))
-            read = self._number(usage.get("cachedContentTokenCount"))
+            fresh = self._number(usage.get("promptTokenCount") if "promptTokenCount" in usage
+                                 else usage.get("prompt_token_count"))
+            read = self._number(usage.get("cachedContentTokenCount") if "cachedContentTokenCount" in usage
+                                else usage.get("cached_content_token_count"))
             write, prompt = None, fresh
         else:
             fresh = self._number(usage.get("input_tokens"))

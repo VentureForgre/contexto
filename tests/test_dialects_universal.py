@@ -325,8 +325,9 @@ def test_gemini_paging_count_tokens_rendering_and_resume(tmp_path):
     assert len(count_events) == 1 and count_events[0]["event"] == "count_tokens" and count_events[0]["epoch"] >= 1
     assert len(counted["contents"]) < len(contents)
 
-    # Stored pages render and search identically
+    # Stored pages render and search identically and record non-zero bytes/tokens (A4)
     pages = [p for pid in store.page_ids() if (p := store.get_page(pid)) is not None]
+    assert all(p["bytes"] > 0 and p["tokens"] > 0 for p in pages)
     rendered_by_id = {p["id"]: render_page(p) for p in pages}
     page0 = next((p for p in pages if "Prompt 0:" in rendered_by_id[p["id"]]), None)
     assert page0 is not None
@@ -336,12 +337,21 @@ def test_gemini_paging_count_tokens_rendering_and_resume(tmp_path):
     assert page0["stub"]["tools"] == ["read_file"]
     assert "lib/g_0.py" in page0["stub"]["paths"]
 
-    # Epoch resume on a fresh engine
+    # Model name is preserved in meta.json and epoch record across rotation & resume (A3)
+    assert store.window_model() == "gemini-2.5-pro"
+    assert store.epoch_record()["model"] == "gemini-2.5-pro"
+
+    # Epoch resume on a fresh engine with the same model succeeds; different model refuses with model_changed
     engine2 = rewrite.RewriteEngine(store=store, config=config)
     req2 = {"systemInstruction": {"parts": [{"text": "Be concise."}]},
             "contents": [*contents, {"role": "user", "parts": [{"text": "Next turn"}]}]}
     _, _, events2 = engine2(req2, {}, ep)
     assert any(e.get("event") == "epoch_resumed" for e in events2), events2
+
+    engine3 = rewrite.RewriteEngine(store=store, config=config)
+    _, _, events3 = engine3(req2, {}, "/v1beta/models/gemini-2.5-flash:generateContent")
+    assert any(e.get("event") == "epoch_not_resumed" and e.get("reason") == "model_changed"
+               for e in events3), events3
     store.release()
 
 
@@ -423,3 +433,46 @@ def test_base_path_encoding_edge_cases_match_claude_code(make_proxy, upstream, s
     assert resp.status == 200
     assert Upstream.received[0][1] == expected
     assert proxy_module._normalize_base_path("/a/..") == ""
+
+
+def test_gemini_function_call_without_id_does_not_leak_tool_name_as_call_id():
+    d = GeminiDialect()
+    fr_no_id = {"role": "user", "parts": [{"functionResponse": {"name": "read_file", "response": {"ok": True}}}]}
+    assert d.result_ids(fr_no_id) == []
+
+    reader = proxy_module.UsageReader("text/event-stream", api="gemini")
+    chunk = (b'data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":'
+             b'{"name":"read_file","args":{"path":"a.py"}}}]}}]}\n\n')
+    reader.feed(chunk)
+    assert reader.call_ids == []
+    assert reader.gemini_client_calls is True
+
+
+def test_stream_hold_single_chunk_tool_call_and_intermediate_usage_guards():
+    # 1. Gemini single chunk carrying functionCall + finishReason + usageMetadata sets client_calls=True before trigger
+    observed_flags: list[bool] = []
+    hold = proxy_module.StreamHold("gemini", lambda: observed_flags.append(hold.client_calls))
+    single = (b'data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":'
+              b'{"id":"fc_1","name":"read_file","args":{}}}]},"finishReason":"STOP"}],'
+              b'"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":10}}\n\n')
+    out = hold.feed(single)
+    assert out == [single] and hold.triggered is True and observed_flags == [True]
+
+    # 2. Gemini FINISH_REASON_UNSPECIFIED does not trigger prematurely
+    triggered: list[bool] = []
+    hold2 = proxy_module.StreamHold("gemini", lambda: triggered.append(True))
+    mid = (b'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},'
+           b'"finishReason":"FINISH_REASON_UNSPECIFIED"}],"usageMetadata":{"promptTokenCount":50}}\n\n')
+    assert hold2.feed(mid) == [mid] and not triggered and not hold2.triggered
+    reader = proxy_module.UsageReader("text/event-stream", api="gemini")
+    reader.feed(mid)
+    assert reader.ended is False and reader.ending.get("stop_reason") is None
+
+    # 3. Chat Completions intermediate usage chunk with finish_reason=null does not trigger prematurely
+    chat_triggered: list[bool] = []
+    hold3 = proxy_module.StreamHold("chat_completions", lambda: chat_triggered.append(True))
+    mid_chat = (b'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}],'
+                b'"usage":{"prompt_tokens":50,"completion_tokens":1}}\n\n')
+    assert hold3.feed(mid_chat) == [mid_chat] and not chat_triggered and not hold3.triggered
+    final_chat = b'data: {"id":"c1","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":10}}\n\n'
+    assert hold3.feed(final_chat) == [final_chat] and chat_triggered == [True]

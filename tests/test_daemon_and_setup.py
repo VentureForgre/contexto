@@ -199,12 +199,19 @@ def test_setup_and_undo_for_opencode_codex_and_cursor(tmp_path, target):
         assert parsed["provider"]["google"]["options"]["baseURL"].endswith("/gemini/v1beta")
         assert parsed["mcp"]["contexto"]["url"].endswith("/mcp")
     elif target == "codex":
-        assert 'model = "gpt-5"' in after
-        assert "[model_providers.contexto]" in after and "[mcp_servers.contexto]" in after
+        import tomllib
+
+        parsed_toml = tomllib.loads(after)
+        assert parsed_toml["model"] == "gpt-5"
+        assert parsed_toml["model_providers"]["contexto"]["base_url"].endswith("/openai/v1")
+        assert parsed_toml["features"]["enable_request_compression"] is False
+        assert parsed_toml["mcp_servers"]["contexto"]["url"].endswith("/mcp")
         # Second run replaces managed block instead of duplicating it
         setup.setup_target(target, home=home, port=7838, user_home=user_home, env=env)
-        assert cfg.read_text().count(setup.CODEX_BEGIN) == 1
-        assert ":7838/" in cfg.read_text()
+        re_read = cfg.read_text()
+        assert re_read.count(setup.CODEX_BEGIN) == 1
+        assert ":7838/" in re_read
+        assert tomllib.loads(re_read)["model_providers"]["contexto"]["base_url"].endswith("/openai/v1")
     else:
         parsed = json.loads(after)
         assert "other" in parsed["mcpServers"]
@@ -238,3 +245,79 @@ def test_setup_cli_roundtrip(tmp_path, monkeypatch, capsys):
     assert cli.main(["setup", "cursor", "--undo"]) == 0
     assert not (user_home / ".cursor" / "mcp.json").exists()
     assert "removed" in capsys.readouterr().out
+
+
+def test_daemon_rejects_control_chars_escapes_dollar_and_propagates_errors(tmp_path):
+    home = tmp_path / "home$val"
+    argv = ["/usr/bin/python3", "-m", "contexto", "serve", "--upstream", "http://127.0.0.1:4000/$var"]
+    unit = daemon.systemd_unit(home, argv)
+    # ExecStart doubles $, Environment keeps $ literal
+    assert '"http://127.0.0.1:4000/$$var"' in unit
+    assert f"Environment=CONTEXTO_HOME={home}" in unit or f'Environment="CONTEXTO_HOME={home}"' in unit
+    assert "$$val" not in unit
+
+    # Directive injection via newline is rejected
+    with pytest.raises(daemon.DaemonError, match="newline"):
+        daemon.systemd_unit(home, ["/usr/bin/python3", "bad\nExecStartPre=/bin/evil"])
+    with pytest.raises(daemon.DaemonError, match="newline"):
+        daemon.launchd_plist(home, ["/usr/bin/python3", "bad\x00arg"])
+
+    # Non-zero systemctl exit raises DaemonError instead of silently succeeding
+    with pytest.raises(daemon.DaemonError, match="daemon-reload failed"):
+        daemon.install_daemon(home=home, platform="linux", argv=["/usr/bin/python3"],
+                              home_dir=tmp_path / "u", env={"XDG_CONFIG_HOME": str(tmp_path / "xdg")},
+                              start_now=True, runner=_fake_runner([], rc=1))
+
+    # Missing launchctl/systemctl binary returns exit 1 cleanly
+    def _missing(cmd):
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
+
+    code, msg = daemon.start_daemon(platform="linux", home_dir=tmp_path / "u",
+                                    env={"XDG_CONFIG_HOME": str(tmp_path / "xdg")}, runner=_missing)
+    assert code == 1 and "cannot run systemctl" in msg
+
+
+def test_setup_codex_conflicts_broken_symlink_and_multi_path_backup(tmp_path):
+    home = tmp_path / "contexto"
+    user_home = tmp_path / "user"
+    user_home.mkdir()
+
+    # Broken symlink is refused even on --dry-run
+    cursor_dir = user_home / ".cursor"
+    cursor_dir.mkdir(parents=True)
+    (cursor_dir / "mcp.json").symlink_to(tmp_path / "does-not-exist.json")
+    with pytest.raises(setup.SetupError, match="symlink"):
+        setup.setup_target("cursor", home=home, port=7837, user_home=user_home,
+                           env={"HOME": str(user_home)}, dry_run=True)
+
+    # Codex refuses unmanaged [model_providers.contexto] instead of creating duplicate tables
+    codex1 = tmp_path / "codex1"
+    codex1.mkdir()
+    (codex1 / "config.toml").write_text('[model_providers.contexto]\nname = "Mine"\n')
+    with pytest.raises(setup.SetupError, match="already defines"):
+        setup.setup_target("codex", home=home, port=7837, user_home=user_home,
+                           env={"HOME": str(user_home), "CODEX_HOME": str(codex1)})
+
+    # Codex preserves existing [features] table without duplicating it
+    codex2 = tmp_path / "codex2"
+    codex2.mkdir()
+    orig2 = '[features]\nfoo = true\n'
+    (codex2 / "config.toml").write_text(orig2)
+    notes = setup.setup_target("codex", home=home, port=7837, user_home=user_home,
+                               env={"HOME": str(user_home), "CODEX_HOME": str(codex2)})
+    import tomllib
+
+    parsed = tomllib.loads((codex2 / "config.toml").read_text())
+    assert parsed["features"]["foo"] is True
+    assert any("already has [features]" in n for n in notes)
+
+    # Changing CODEX_HOME on a second run backs up the new file too, and --undo restores both
+    codex3 = tmp_path / "codex3"
+    codex3.mkdir()
+    orig3 = 'model = "o3"\n'
+    (codex3 / "config.toml").write_text(orig3)
+    setup.setup_target("codex", home=home, port=7837, user_home=user_home,
+                       env={"HOME": str(user_home), "CODEX_HOME": str(codex3)})
+    setup.undo_target("codex", home=home)
+    assert (codex2 / "config.toml").read_text() == orig2
+    assert (codex3 / "config.toml").read_text() == orig3

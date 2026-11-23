@@ -219,7 +219,7 @@ from contexto.servecontract import (
     service_running,
 )
 from contexto.stats import count_pages as count_store_pages
-from contexto.store import SessionStore, redact
+from contexto.store import LockFileDamagedError, SessionStore, redact
 from contexto.store.prune import SessionLiveError, SessionNotFoundError, remove_session
 from contexto.upstream import (
     CloudProvider,
@@ -524,7 +524,7 @@ def _validate_workdir(value: str | None) -> str | None:
     text = value.strip()
     if not text or "\x00" in text or len(text.encode("utf-8", "replace")) > MAX_WORKDIR_BYTES:
         return None
-    return text if os.path.isabs(text) else None
+    return text if os.path.isabs(text) and os.path.isdir(text) else None
 
 
 def strip_route_prefixes(raw_target: str) -> tuple[str, str | None, str | None, str | None]:
@@ -537,6 +537,7 @@ def strip_route_prefixes(raw_target: str) -> tuple[str, str | None, str | None, 
     url_session: str | None = None
     url_workdir: str | None = None
     url_provider: str | None = None
+    seen_workdir = False
     idx = 0
     while idx < len(segments):
         seg = segments[idx]
@@ -544,8 +545,9 @@ def strip_route_prefixes(raw_target: str) -> tuple[str, str | None, str | None, 
             url_session = segments[idx + 1]
             idx += 2
             continue
-        if seg == "w" and url_workdir is None and idx + 1 < len(segments):
-            url_workdir = decode_workdir_segment(segments[idx + 1])
+        if seg == "w" and not seen_workdir and idx + 1 < len(segments):
+            seen_workdir = True
+            url_workdir = _validate_workdir(decode_workdir_segment(segments[idx + 1]))
             idx += 2
             continue
         if seg in PROVIDER_NAMES and url_provider is None:
@@ -625,9 +627,10 @@ def route_by_headers_and_body(ctx: RouteContext) -> RouteMatch | None:
     if isinstance(ctx.request, dict):
         cache_key = ctx.request.get("prompt_cache_key")
         if isinstance(cache_key, str) and cache_key:
-            if not CLI_SESSION_ID.fullmatch(cache_key):
-                raise _Unrouted("invalid_session_id")
-            return RouteMatch(cache_key)
+            if CLI_SESSION_ID.fullmatch(cache_key):
+                return RouteMatch(cache_key)
+            hashed = hashlib.sha256(cache_key.encode("utf-8", "replace")).hexdigest()[:32]
+            return RouteMatch(f"pck-{hashed}")
     return None
 
 
@@ -739,11 +742,12 @@ class _Session:
                  now: float, *, notices: Any = None, observe_usage: Any = None,
                  observe_thinking: bool = False, strip_hint_headers: bool = True,
                  on_tool_calls: Callable[[tuple[str, ...]], None] | None = None,
-                 allowed_hosts: frozenset[str] = frozenset(), allow_local_origin: bool = False) -> None:
+                 allowed_hosts: frozenset[str] = frozenset(), allow_local_origin: bool = False,
+                 workdir: str | None = None) -> None:
         self.session_id = session_id
         self.store = store
         self.proxy = proxy
-        self.proxies: dict[str, ContextoProxy] = {proxy.upstream_netloc + proxy.base_path: proxy}
+        self.proxies: dict[str, ContextoProxy] = {}
         self._proxy_lock = threading.Lock()
         self._notices = notices
         self._observe_usage = observe_usage
@@ -752,6 +756,7 @@ class _Session:
         self._on_tool_calls = on_tool_calls
         self._allowed_hosts = allowed_hosts
         self._allow_local_origin = allow_local_origin
+        self._workdir = workdir
         self.recorder = recorder
         self.keys: set[str] = set()  # the client session keys routed here
         self.leases = 0  # requests routed here and not yet finished
@@ -760,8 +765,7 @@ class _Session:
 
     def proxy_for(self, upstream: Upstream) -> ContextoProxy:
         """Return a proxy for ``upstream`` sharing this session's engine, transform_lock, and store."""
-        parts = urlsplit(upstream.url)
-        key = parts.netloc.rsplit("@", 1)[-1] + parts.path.rstrip("/")
+        key = upstream.url
         with self._proxy_lock:
             existing = self.proxies.get(key)
             if existing is not None:
@@ -837,13 +841,8 @@ class ServeService:
                                          strip_hint_headers=not forward_hint_headers,
                                          allowed_hosts=self.allowed_hosts,
                                          allow_local_origin=self.allow_local_origin)
-        self.passthroughs: dict[str, ContextoProxy] = {
-            name: ContextoProxy(up.url, self.log, upstream_source=up.source,
-                                strip_hint_headers=not forward_hint_headers,
-                                allowed_hosts=self.allowed_hosts,
-                                allow_local_origin=self.allow_local_origin)
-            for name, up in self.upstreams.items()
-        }
+        # Additional passthrough proxies keyed by upstream URL (never by provider name).
+        self.passthroughs: dict[str, ContextoProxy] = {}
         self.port = 0
         self._lock = threading.Lock()  # the registry: held to look up or change it, never across I/O
         self._freed = threading.Condition(self._lock)  # notified when a session's last request finishes
@@ -1221,25 +1220,19 @@ class ServeService:
         return self.upstream
 
     def passthrough_for(self, provider: str | None, dialect: Any = None) -> ContextoProxy:
-        """The passthrough proxy for an unrouted request."""
-        if provider is not None and provider in self.passthroughs:
-            return self.passthroughs[provider]
-        if dialect is not None:
-            mapped = _PROVIDER_BY_DIALECT.get(dialect.name)
-            if mapped and mapped in self.passthroughs:
-                return self.passthroughs[mapped]
+        """The passthrough proxy for an unrouted request. Always resolves through
+        ``upstream_for`` first and caches extra proxies by upstream URL under ``self._lock``."""
         upstream = self.upstream_for(provider, dialect)
         if upstream.url == self.upstream.url:
             return self.passthrough
         with self._lock:
-            key = provider or upstream.url
-            cached = self.passthroughs.get(key)
+            cached = self.passthroughs.get(upstream.url)
             if cached is None:
                 cached = ContextoProxy(upstream.url, self.log, upstream_source=upstream.source,
                                        strip_hint_headers=not self.forward_hint_headers,
                                        allowed_hosts=self.allowed_hosts,
                                        allow_local_origin=self.allow_local_origin)
-                self.passthroughs[key] = cached
+                self.passthroughs[upstream.url] = cached
             return cached
 
     def resolve_session_key(self, key: str) -> str | None:
@@ -1355,9 +1348,10 @@ class ServeService:
         key = self.route_key(cli_session, parent, messages=messages)
         session = self._acquire(key, create, workdir=workdir, cli=cli)
         if session is not None:
-            if workdir is not None:
+            if workdir is not None and workdir != session._workdir:
                 try:
                     session.store.set_workdir(workdir)
+                    session._workdir = workdir
                 except Exception:
                     pass
             if session.recorder.note(key):
@@ -1432,10 +1426,11 @@ class ServeService:
         session.leases += 1
         session.last_used = self.clock()
 
-    def release(self, session: _Session) -> None:
+    def release(self, session: _Session, *, count_request: bool = True) -> None:
         with self._lock:
             session.leases -= 1
-            session.requests += 1
+            if count_request:
+                session.requests += 1
             session.last_used = self.clock()
             if not session.leases:
                 self._freed.notify_all()
@@ -1542,7 +1537,8 @@ class ServeService:
         return _Session(session_id, store, proxy, recorder, self.clock(), notices=notices,
                         observe_usage=observe_usage, observe_thinking=self.observe_thinking,
                         strip_hint_headers=not self.forward_hint_headers, on_tool_calls=on_calls,
-                        allowed_hosts=self.allowed_hosts, allow_local_origin=self.allow_local_origin)
+                        allowed_hosts=self.allowed_hosts, allow_local_origin=self.allow_local_origin,
+                        workdir=workdir)
 
     def _discard(self, session: _Session, created: bool) -> None:
         """With the session's guard held: a session opened by a request that lost the race with
@@ -1738,9 +1734,11 @@ class _ServeHandler(_Handler):
         return host_only in allowed
 
     def _refusal(self) -> str | None:
-        origin = self.headers.get("Origin")
-        if origin is not None:
-            if not (self.service.allow_local_origin and is_local_origin(origin, self.service.allowed_hosts)):
+        origins = self.headers.get_all("Origin") or []
+        if len(origins) > 1:
+            return "origin"
+        if len(origins) == 1:
+            if not (self.service.allow_local_origin and is_local_origin(origins[0], self.service.allowed_hosts)):
                 return "origin"
         hosts = self.headers.get_all("Host") or []
         if len(hosts) != 1 or not self._host_allowed(hosts[0]):
@@ -1964,10 +1962,11 @@ class _ServeHandler(_Handler):
     # Local endpoints & Streamable HTTP MCP
 
     def _cors_headers(self) -> dict[str, str]:
-        origin = self.headers.get("Origin")
-        if origin and self.service.allow_local_origin and is_local_origin(origin, self.service.allowed_hosts):
+        origins = self.headers.get_all("Origin") or []
+        if (len(origins) == 1 and self.service.allow_local_origin
+                and is_local_origin(origins[0], self.service.allowed_hosts)):
             return {
-                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Origin": origins[0],
                 "Access-Control-Allow-Methods": "POST, GET, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": f"Content-Type, Accept, {CONTEXTO_SESSION_HEADER}, "
                                                 f"{MCP_SESSION_HEADER}",
@@ -2059,44 +2058,58 @@ class _ServeHandler(_Handler):
 
     def _mcp_dispatch(self, message: Any, bound_key: str | None) -> dict[str, Any] | None:
         """Run one JSON-RPC message through Contexto's MCP ``Server``."""
-        if not isinstance(message, dict):
-            return mcp_module._error(None, mcp_module.INVALID_REQUEST, "Invalid request")
-        method = message.get("method")
-        if method != "tools/call":
-            # Protocol & discovery methods need no session.
-            stateless = mcp_module.Server(None, io.StringIO(), io.StringIO())  # type: ignore[arg-type]
-            stateless.listed = True  # avoid recording on None store
+        stateless = mcp_module.Server(None, io.StringIO(), io.StringIO(), project_tools=False)  # type: ignore[arg-type]
+        stateless.listed = True  # avoid recording on None store
+        if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
+                or not isinstance(message.get("method"), str)
+                or not mcp_module._valid_id(message.get("id"))):
+            return stateless.handle(message)
+        if message["method"] != "tools/call":
             return stateless.handle(message)
         params = message.get("params")
-        if not isinstance(params, dict) or not isinstance(params.get("name"), str):
-            stateless = mcp_module.Server(None, io.StringIO(), io.StringIO())  # type: ignore[arg-type]
+        params = {} if params is None else params
+        if (not isinstance(params, dict) or not isinstance(params.get("name"), str)
+                or params["name"] not in mcp_module._TOOL_NAMES):
             return stateless.handle(message)
+        meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+        requested = meta.get(mcp_module.META_VERSION)
+        modern = requested is not None
+        if modern and requested not in mcp_module.MODERN_VERSIONS:
+            return stateless.handle(message)
+        is_notification = "id" not in message
+
+        def _wrap_result(res: dict[str, Any]) -> dict[str, Any] | None:
+            if is_notification:
+                return None
+            if modern:
+                res = {"resultType": "complete", **res}
+            return {"jsonrpc": "2.0", "id": message.get("id"), "result": res}
+
         session_id, cleaned_params, error_reply = self._mcp_resolve_session(params, bound_key)
         if error_reply is not None:
-            if "id" not in message:
-                return None
-            return {"jsonrpc": "2.0", "id": message.get("id"), "result": error_reply}
+            return _wrap_result(error_reply)
         assert session_id is not None
         live_or_store = None
         borrowed = False
         try:
             live_or_store, borrowed = self.service.acquire_store(session_id)
             store = live_or_store.store if borrowed else live_or_store
-            server = mcp_module.Server(store, io.StringIO(), io.StringIO())
+            server = mcp_module.Server(store, io.StringIO(), io.StringIO(), project_tools=False)
             server._record_listed()
             call_msg = {**message, "params": cleaned_params}
             return server.handle(call_msg)
+        except LockFileDamagedError as exc:
+            damaged = mcp_module.Server(mcp_module.UnopenedStore(session_id, exc),
+                                        io.StringIO(), io.StringIO(), project_tools=False)
+            return damaged.handle({**message, "params": cleaned_params})
         except mcp_module.SessionUnavailable as exc:
-            if "id" not in message:
-                return None
             tool_name = params.get("name", "contexto")
-            return {"jsonrpc": "2.0", "id": message.get("id"),
-                    "result": mcp_module._tool_error(
-                        mcp_module.SESSION_UNOPENED.format(tool=tool_name, session=session_id, reason=exc.reason))}
+            return _wrap_result(mcp_module._tool_error(
+                mcp_module.SESSION_UNOPENED.format(tool=tool_name, session=session_id, reason=exc.reason)))
         finally:
             if live_or_store is not None:
                 if borrowed:
-                    self.service.release(live_or_store)
+                    self.service.release(live_or_store, count_request=False)
                 else:
                     try:
                         live_or_store.release()
@@ -2132,15 +2145,14 @@ class _ServeHandler(_Handler):
                     f"{tool_name} was not run: no session found for {explicit_meta!r}.")
         args = params.get("arguments")
         if isinstance(args, dict):
-            for arg_key in ("contexto_session", "session"):
-                candidate = args.get(arg_key)
-                if isinstance(candidate, str) and candidate:
-                    sid = self.service.resolve_session_key(candidate)
-                    if sid is not None:
-                        trimmed = {k: v for k, v in args.items() if k != arg_key}
-                        return sid, {**params, "arguments": trimmed}, None
-                    return None, cleaned, mcp_module._tool_error(
-                        f"{tool_name} was not run: no session found for {candidate!r}.")
+            candidate = args.get("contexto_session")
+            if isinstance(candidate, str) and candidate:
+                sid = self.service.resolve_session_key(candidate)
+                if sid is not None:
+                    trimmed = {k: v for k, v in args.items() if k != "contexto_session"}
+                    return sid, {**params, "arguments": trimmed}, None
+                return None, cleaned, mcp_module._tool_error(
+                    f"{tool_name} was not run: no session found for {candidate!r}.")
         active = self.service.active_session_ids()
         if len(active) == 1:
             return active[0], cleaned, None

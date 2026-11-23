@@ -560,7 +560,7 @@ def is_tool_output(item: Any) -> bool:
         return False
     if isinstance(item.get("type"), str) and item["type"].endswith("_output"):
         return True
-    if item.get("role") == "tool":
+    if item.get("role") in ("tool", "function"):
         return True
     parts = item.get("parts")
     return isinstance(parts, list) and any(

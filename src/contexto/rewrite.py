@@ -513,7 +513,7 @@ class Dialect:
         return endpoint in (MESSAGES, COUNT_TOKENS)
 
     def is_count_endpoint(self, endpoint: str) -> bool:
-        return endpoint == COUNT_TOKENS
+        return endpoint.split("?", 1)[0] == COUNT_TOKENS
 
     def is_context_block(self, block: Any) -> bool:
         return _anthropic_is_context_block(block)
@@ -601,6 +601,7 @@ class Dialect:
 
 ANTHROPIC = Dialect()
 _DIALECT: ContextVar[Dialect | None] = ContextVar("contexto_rewrite_dialect", default=None)
+_ENDPOINT: ContextVar[str] = ContextVar("contexto_rewrite_endpoint", default="")
 
 
 def _dialect() -> Dialect:
@@ -1583,13 +1584,23 @@ class StoreCalls:
         return value
 
 
-def window_model_name(request: dict, endpoint: str | None = None) -> str | None:
-    """The request's model as ``set_window`` accepts it (1 to 200 printable characters), else None."""
+def _request_model(request: dict, endpoint: str | None = None) -> str | None:
+    """The request's model string, falling back to the URL endpoint for dialects like Gemini
+    whose model name travels in the path rather than the JSON body."""
     model = request.get("model")
-    if not isinstance(model, str) and endpoint:
+    if isinstance(model, str):
+        return model
+    ep = endpoint if endpoint is not None else _ENDPOINT.get()
+    if ep:
         from contexto.dialects import model_from_endpoint
 
-        model = model_from_endpoint(endpoint)
+        return model_from_endpoint(ep)
+    return None
+
+
+def window_model_name(request: dict, endpoint: str | None = None) -> str | None:
+    """The request's model as ``set_window`` accepts it (1 to 200 printable characters), else None."""
+    model = _request_model(request, endpoint)
     return model if isinstance(model, str) and 0 < len(model) <= 200 and model.isprintable() else None
 
 
@@ -2372,7 +2383,7 @@ def epoch_record(state: EpochState, request: dict, messages: list[dict], key: st
               "pinned_text": state.pinned_text, "index_text": state.index_text,
               "preamble_sha256": preamble_sha256(config, state.pinned_text, state.index_text),
               "head_fingerprint": state.head_fingerprint, "dialect": dialect.name, "conversation": key,
-              "model": request.get("model") if isinstance(request.get("model"), str) else None,
+              "model": _request_model(request),
               "paged_carried": sorted(state.paged_carried), "config": asdict(config),
               "anchor": {"n": len(messages), "hash": anchor_hash(hashes)}, "head_rule": HEAD_RULE}
     if inturn.extent(state.inturn):  # D63: only an epoch with in-turn edits carries the field
@@ -2395,7 +2406,7 @@ def resume_state(record: dict, request: dict, messages: list[dict], dialect: Dia
         raise ValueError("epoch record text field")
     if record.get("dialect") != dialect.name:
         return None, "dialect_changed"
-    model = request.get("model") if isinstance(request.get("model"), str) else None
+    model = _request_model(request)
     if record.get("model") != model:
         return None, "model_changed"
     recorded = record.get("config")
@@ -2527,8 +2538,12 @@ class RewriteEngine:
     def __call__(self, request: dict, headers: dict[str, str],
                  endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
         dialect = dialect_for(endpoint)
-        with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
-            return self._call(request, headers, endpoint)
+        ep_token = _ENDPOINT.set(endpoint)
+        try:
+            with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
+                return self._call(request, headers, endpoint)
+        finally:
+            _ENDPOINT.reset(ep_token)
 
     def _call(self, request: dict, headers: dict[str, str], endpoint: str) -> tuple[dict, dict[str, str], list[dict]]:
         dialect = dialect_for(endpoint)
