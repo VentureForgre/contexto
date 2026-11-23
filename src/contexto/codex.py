@@ -61,7 +61,8 @@ TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
 # six openings in every scenario, the environment_context message last in the lead; the AGENTS.md
 # header was not exercised. Rechecked on 0.166.0 for D56 the same way: the same six openings; only the
 # built-in provider's requests (never Contexto's custom provider) add a role-less configuration_update item.
-CONTEXT_SECTIONS_CODEX_VERSION = "0.166.0"
+# Rechecked on 0.170.0 the same way against a local stub: identical lead items and section tags.
+CONTEXT_SECTIONS_CODEX_VERSION = "0.170.0"
 CONTEXT_SECTION = re.compile(
     r"\s*(?:<(?:skills_instructions|permissions instructions|collaboration_mode|multi_agent_role|"
     r"multi_agent_mode|environment_context)>|# AGENTS\.md instructions for )")

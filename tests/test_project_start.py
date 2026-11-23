@@ -215,7 +215,10 @@ def digest(run: list[tuple]) -> str:
 # Again after D71: Config.window_fraction moved to 0.25 and Config gained stable_prefix,
 # cache_ttl_seconds and cold_cache_fraction, updating the Codex rotation window and both epoch records
 # (Claude Code's requests stayed byte-for-byte identical).
-BEFORE_D69 = {MESSAGES: ("f3ce67fee80060c63749d3016bf6ee1f7c1706cdb56c7175c643fe76e452c7a8",
+# Updated for Claude Code 2.1.328: only ``signature_version`` and ``tested_versions`` inside the
+# synthetic run's ``session_start_unrecognised`` event changed; every request and the epoch record
+# hash are byte-for-byte identical.
+BEFORE_D69 = {MESSAGES: ("a3ca01b545de028a9605b750ff4cd7b36f248be355ad5ce0b1e4370e86c7372a",
                          "4dba8fc4935175c4b7be0f779b05e2daa7ab3c4e5dbf30acdb1c3f689c6f7df2"),
               RESPONSES: ("12f81069915093a2adb79dabd7286405ed6163728cc9d1d71394d639c2e4d651",
                           "564da66aef225fd608ee614e68e99abc0fae3b8c48097ad243a0cef0f6392a0e")}

@@ -23,7 +23,7 @@ from contexto.hints import (
     hint_headers_state,
 )
 from contexto.launcher import EXIT_USAGE, LaunchError, check_cloud_provider, settings_payload
-from contexto.upstream import CLOUD_PROVIDER_KEYS, cloud_provider, cloud_provider_note
+from contexto.upstream import CLOUD_PROVIDER_KEYS, UNSUPPORTED_CLOUD_PROVIDER_KEYS, cloud_provider, cloud_provider_note
 from test_launcher import FAKE_CLAUDE, launch, session_log
 
 CLAUDE_SESSION = "237dedfa-8ca9-43b9-ad3c-4a6ebcb1a084"
@@ -394,7 +394,7 @@ def test_check_cloud_provider_raises_a_usage_error_naming_the_variable_and_the_r
     assert "no bound" in message and "env -u CLAUDE_CODE_USE_MANTLE" in message and "without contexto" in message
 
 
-@pytest.mark.parametrize("name", sorted(CLOUD_PROVIDER_KEYS))
+@pytest.mark.parametrize("name", sorted(UNSUPPORTED_CLOUD_PROVIDER_KEYS))
 def test_run_claude_refuses_a_cloud_provider_launch_before_any_session(launch_env, recording, tmp_path, name):
     launch_env[name] = "1"
     launch_env["FAKE_REQUEST"] = "1"

@@ -85,6 +85,32 @@ def _try_price(model: str | None, uncached: int, cache_write: int, cache_read: i
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 MODEL_PATHS = frozenset({MESSAGES_PATH, "/responses", "/v1/responses"})  # a prompt sent for a completion
+_VERTEX_COUNT_TOKENS_RE = re.compile(
+    r"^/(?:v1/)?projects/[A-Za-z0-9][A-Za-z0-9._-]*/locations/[A-Za-z0-9][A-Za-z0-9._-]*"
+    r"/publishers/anthropic/models/count-tokens:rawPredict\Z"
+)
+_VERTEX_MESSAGES_RE = re.compile(
+    r"^/(?:v1/)?projects/[A-Za-z0-9][A-Za-z0-9._-]*/locations/[A-Za-z0-9][A-Za-z0-9._-]*"
+    r"/publishers/anthropic/models/[A-Za-z0-9][A-Za-z0-9._@-]*:(?:streamRawPredict|rawPredict)\Z"
+)
+_FOUNDRY_MESSAGES_PATHS = frozenset({"/anthropic/v1/messages"})
+_FOUNDRY_COUNT_TOKENS_PATHS = frozenset({"/anthropic/v1/messages/count_tokens"})
+
+
+def _is_messages_path(path: Any) -> bool:
+    return (isinstance(path, str)
+            and (path == MESSAGES_PATH or path in _FOUNDRY_MESSAGES_PATHS
+                 or (bool(_VERTEX_MESSAGES_RE.match(path)) and not _VERTEX_COUNT_TOKENS_RE.match(path))))
+
+
+def _is_count_tokens_path(path: Any) -> bool:
+    return (isinstance(path, str)
+            and (path == COUNT_TOKENS_PATH or path in _FOUNDRY_COUNT_TOKENS_PATHS
+                 or bool(_VERTEX_COUNT_TOKENS_RE.match(path))))
+
+
+def _is_model_path(path: Any) -> bool:
+    return isinstance(path, str) and (path in MODEL_PATHS or _is_messages_path(path))
 TOOL_NAMES = ("recall", "search", "state", "pin", "close")  # Contexto's MCP tools, without ``contexto_``
 
 # The Claude Code versions on which the compaction summary's wording was measured (the note above
@@ -634,7 +660,7 @@ class _Tally:
             pass  # the exit-time repeat of a warning the run already counted
         elif name in FAULT_EVENTS:
             self._fault(event, name, when)
-            if name == "encoded_body_rejected" and event.get("endpoint") in MODEL_PATHS:
+            if name == "encoded_body_rejected" and _is_model_path(event.get("endpoint")):
                 self.requests["rejected_encoding"] += 1  # answered 415: it has no request line
 
     def _fault(self, event: dict[str, Any], name: str, when: str | None) -> None:
@@ -663,9 +689,9 @@ class _Tally:
 
     def _request(self, event: dict[str, Any], when: str | None) -> None:
         path = event.get("path")
-        model = event.get("method") == "POST" and isinstance(path, str) and path in MODEL_PATHS
+        model = event.get("method") == "POST" and _is_model_path(path)
         if not model:
-            self.requests["count_tokens" if path == COUNT_TOKENS_PATH else "other"] += 1
+            self.requests["count_tokens" if _is_count_tokens_path(path) else "other"] += 1
             return
         self.requests["model"] += 1
         status = self._number(event.get("status"))
@@ -696,7 +722,7 @@ class _Tally:
             if inner.get("event") == "request":
                 engine = inner
         main = engine.get("main") is not False
-        if path == MESSAGES_PATH:
+        if _is_messages_path(path):
             self.messages_api = True
             if engine:
                 self._engine_messages = True

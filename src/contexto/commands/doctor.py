@@ -133,19 +133,23 @@ from contexto.upstream import (
     BASE_URL_KEY,
     CLOUD_PROVIDER_KEYS,
     CONFIG_DIR_KEY,
+    INTERCEPTED_CLOUD_PROVIDERS,
     KEY_HELPER_KEY,
     KIND_FILES,
     MANAGED_KIND,
     PROJECT_KINDS,
     SettingsFiles,
     Upstream,
+    active_cloud_provider,
     claude_env_value,
     claude_key_helper,
+    claude_oauth_detected,
     claude_settings_order,
     cloud_provider,
     cloud_provider_note,
     folder_trusted,
     managed_settings_path,
+    resolve_provider_upstream,
     resolve_upstream,
     settings_env,
     untrusted_note,
@@ -532,7 +536,9 @@ def check_cli(cli: str, env: Mapping[str, str]) -> Check:
                      f"Run `{cli} --version` yourself: Contexto cannot tell whether this version was tested", details)
     details.update(version=version, tested=is_tested(cli, version))
     if details["tested"]:
-        return Check(cli, PASS, f"{name} {version} at {path} (a tested version)", details=details)
+        if version in TESTED_VERSIONS.get(cli, ()):
+            return Check(cli, PASS, f"{name} {version} at {path} (a tested version)", details=details)
+        return Check(cli, PASS, f"{name} {version} at {path} (compatible; tested: {tested_list(cli)})", details=details)
     return Check(cli, WARN, f"{name} {version} at {path} is not a version Contexto was tested with "
                  f"(tested: {tested_list(cli)})", f"Check for a newer Contexto, or report it at {REPORT_URL}", details)
 
@@ -696,10 +702,24 @@ def base_url_place(source: str, env: Mapping[str, str]) -> str:
 
 def check_claude_upstream(ctx: Context) -> Check:
     """The upstream ``contexto run claude`` would use, resolved as ``launcher._run`` resolves it."""
-    upstream = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files,
-                                config_upstream=ctx.config.upstream)
-    place = base_url_place(upstream.source, ctx.env)
+    provider_key, _ = active_cloud_provider(env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+    if provider_key is not None:
+        try:
+            upstream = resolve_provider_upstream(provider_key, None, env=ctx.env, cwd=ctx.cwd, home=ctx.home,
+                                                 files=ctx.files)
+        except ValueError as exc:
+            label, url_key = INTERCEPTED_CLOUD_PROVIDERS[provider_key]
+            return Check("claude-upstream", FAIL, f"Claude Code upstream ({label}): {exc}",
+                         f"Set {url_key} or pass --upstream to contexto run",
+                         {"origin": None, "source": None, "provider": provider_key})
+        place = f"{upstream.base_url_key} ({upstream.source})"
+    else:
+        upstream = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files,
+                                    config_upstream=ctx.config.upstream)
+        place = base_url_place(upstream.source, ctx.env)
     details: dict[str, Any] = {"origin": url_origin(upstream.url), "source": upstream.source}
+    if upstream.provider:
+        details["provider"] = upstream.provider
     if upstream.ignored:
         details["ignored"] = list(upstream.ignored)
     try:
@@ -707,7 +727,7 @@ def check_claude_upstream(ctx: Context) -> Check:
     except LaunchError:  # its message names the source and the problem, never the URL
         return Check("claude-upstream", FAIL, f"Claude Code upstream from {place} is not a usable http(s) base URL: "
                      "`contexto run claude` refuses to start with it",
-                     f"Fix {BASE_URL_KEY} there, or pass --upstream to contexto run", details)
+                     f"Fix {upstream.base_url_key} there, or pass --upstream to contexto run", details)
     try:  # D70: this home's `contexto serve`, which docs/serve.md has clients put in their settings
         check_not_service(upstream, contexto_home(ctx.env), "contexto run claude")
     except LaunchError:  # its message never holds the URL, which carries the service's token
@@ -720,7 +740,8 @@ def check_claude_upstream(ctx: Context) -> Check:
     summary = f"Claude Code upstream: {details['origin']} (from {place})"
     if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST: a project file's base URL was passed over
         return Check("claude-upstream", WARN, summary,
-                     untrusted_note(f"env.{BASE_URL_KEY}", upstream.ignored, "Pass --upstream", ctx.env), details)
+                     untrusted_note(f"env.{upstream.base_url_key}", upstream.ignored, "Pass --upstream", ctx.env),
+                     details)
     return Check("claude-upstream", PASS, summary, details=details)
 
 
@@ -773,8 +794,9 @@ def check_codex_upstream(ctx: Context) -> Check:
 
 
 def check_claude_key(ctx: Context) -> Check:
-    """Whether Claude Code is given a credential by a variable or a helper. Only that a value is there
-    is read; the value is never kept, and a helper is not run."""
+    """Whether Claude Code is given a credential by a variable, a helper, or a Claude Pro/Max OAuth
+    login (detected non-invasively without reading secrets). Only that a value or login metadata is
+    present is checked; no secret is ever read or shown, and a helper is not run."""
     found: list[dict[str, str]] = []
     shown: list[str] = []
     for name in CLAUDE_KEY_VARIABLES:
@@ -786,14 +808,22 @@ def check_claude_key(ctx: Context) -> Check:
     if helper.value:
         found.append({"name": KEY_HELPER_KEY, "source": f"settings:{helper.source}"})
         shown.append(f"{KEY_HELPER_KEY} in {settings_file(helper.source or '', ctx.env)} (not run)")
-    details = {"found": found}
+    details: dict[str, Any] = {"found": found}
     if found:
         return Check("claude-key", PASS, f"Claude Code key: {' and '.join(shown)}; no value is read or shown",
                      details=details)
+    oauth = claude_oauth_detected(env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+    if oauth is not None:
+        details["oauth"] = oauth
+        return Check("claude-key", PASS,
+                     f"Claude Code auth: Claude Pro/Max OAuth login detected ({oauth}); "
+                     "Contexto forwards Authorization: Bearer transparently (no secret is read or shown)",
+                     details=details)
     names = ", ".join(CLAUDE_KEY_VARIABLES)
     return Check("claude-key", WARN, f"Claude Code key: none of {names} or {KEY_HELPER_KEY} is set",
-                 "Nothing to do if Claude Code holds a login (doctor does not read stored credentials); otherwise "
-                 f"set ANTHROPIC_API_KEY or an {KEY_HELPER_KEY}", details)
+                 "Nothing to do if Claude Code holds a Claude Pro/Max OAuth login (Contexto forwards "
+                 "Authorization: Bearer transparently; doctor does not read stored credentials); otherwise "
+                 f"run `claude /login`, set ANTHROPIC_API_KEY, or configure {KEY_HELPER_KEY}", details)
 
 
 def check_codex_key(ctx: Context) -> Check:
@@ -1056,15 +1086,20 @@ def stop_server(child: subprocess.Popen) -> None:
 
 def check_provider(ctx: Context) -> Check:
     """Whether ``contexto run claude`` would refuse to launch from this directory because Claude Code may
-    send its requests to a cloud provider, past the proxy (D70). The launcher's own check, with the
-    arguments it uses (``contexto.upstream.cloud_provider``; ``contexto.launcher.check_cloud_provider``
-    for the message): a switch on in the environment or in any settings file, or a settings file that
-    is there, could not be read and may turn one on. A failure: the launch exits 2. The summary is
-    ``cloud_provider_note`` and the next step is the rest of the launcher's message, word for word."""
-    found = cloud_provider(env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+    send its requests to an unsupported cloud provider, past the proxy (D70). Vertex AI and Microsoft
+    Foundry are intercepted directly via ``ANTHROPIC_VERTEX_BASE_URL`` / ``ANTHROPIC_FOUNDRY_BASE_URL``."""
+    found = cloud_provider(env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files, allow_intercepted=True)
     if found is None:
-        return Check("provider", PASS, "Cloud provider: no switch (CLAUDE_CODE_USE_BEDROCK and the like) is on, so "
-                     "Claude Code sends its requests through the proxy", details={"variables": [], "unread": []})
+        provider_key, places = active_cloud_provider(env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+        if provider_key is not None:
+            label, url_key = INTERCEPTED_CLOUD_PROVIDERS[provider_key]
+            return Check("provider", PASS,
+                         f"Cloud provider: {label} ({provider_key}) is intercepted via {url_key}",
+                         details={"variables": [{"variable": provider_key, "provider": label,
+                                                 "sources": list(places), "intercepted": True}], "unread": []})
+        return Check("provider", PASS, "Cloud provider: no unsupported switch (CLAUDE_CODE_USE_BEDROCK and the like) "
+                     "is on, so Claude Code sends its requests through the proxy",
+                     details={"variables": [], "unread": []})
     note = cloud_provider_note(found)
     try:
         check_cloud_provider(ctx.cwd, ctx.env, home=ctx.home, files=ctx.files)  # the same files, already read
