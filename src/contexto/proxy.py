@@ -656,7 +656,7 @@ class UsageReader:
 
     def _take_call_id(self, item: Any) -> None:
         """D40: keep the id of a client tool call (Messages ``tool_use``, Responses ``call_id``,
-        Chat Completions ``tool_calls[].id``, Gemini ``functionCall`` id/name)."""
+        Chat Completions ``tool_calls[].id``, Gemini ``functionCall`` id)."""
         if not isinstance(item, dict):
             return
         if self.api == "responses":
@@ -990,7 +990,8 @@ class StreamHold:
                     content = cand.get("content") if isinstance(cand, dict) else None
                     parts = content.get("parts") if isinstance(content, dict) else None
                     if isinstance(parts, list) and any(
-                        isinstance(p, dict) and ("functionCall" in p or "function_call" in p) for p in parts
+                        isinstance(p, dict) and isinstance(p.get("functionCall") or p.get("function_call"), dict)
+                        for p in parts
                     ):
                         return "client"
             return None

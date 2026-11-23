@@ -341,10 +341,23 @@ def test_gemini_paging_count_tokens_rendering_and_resume(tmp_path):
     assert store.window_model() == "gemini-2.5-pro"
     assert store.epoch_record()["model"] == "gemini-2.5-pro"
 
+    # Measuring an uncertain Gemini document (fileData) via observe_usage must preserve epoch model
+    doc_turn = {"role": "user", "parts": [
+        {"text": "Read this PDF"},
+        {"fileData": {"mimeType": "application/pdf", "fileUri": "gs://bucket/spec.pdf"}},
+    ]}
+    doc_contents = [*contents, doc_turn]
+    doc_req = {"systemInstruction": {"parts": [{"text": "Be concise."}]}, "contents": doc_contents}
+    doc_out, _, _ = engine(doc_req, {}, ep)
+    engine.observe_usage(ep, {"promptTokenCount": max(1, len(json.dumps(doc_out)) // 3) + 500,
+                              "candidatesTokenCount": 30}, doc_out)
+    assert store.epoch_record()["model"] == "gemini-2.5-pro"
+
     # Epoch resume on a fresh engine with the same model succeeds; different model refuses with model_changed
     engine2 = rewrite.RewriteEngine(store=store, config=config)
     req2 = {"systemInstruction": {"parts": [{"text": "Be concise."}]},
-            "contents": [*contents, {"role": "user", "parts": [{"text": "Next turn"}]}]}
+            "contents": [*doc_contents, {"role": "model", "parts": [{"text": "OK"}]},
+                         {"role": "user", "parts": [{"text": "Next turn"}]}]}
     _, _, events2 = engine2(req2, {}, ep)
     assert any(e.get("event") == "epoch_resumed" for e in events2), events2
 

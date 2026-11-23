@@ -250,7 +250,10 @@ def _apply_codex(home: Path, port: int, token: str, *, user_home: Path, env: Map
         except tomllib.TOMLDecodeError as exc:
             raise SetupError(f"{config_path} is not valid TOML: {exc}") from None
     stripped = _CODEX_BLOCK_RE.sub("", existing).rstrip()
-    parsed_stripped = tomllib.loads(stripped) if stripped.strip() else {}
+    try:
+        parsed_stripped = tomllib.loads(stripped) if stripped.strip() else {}
+    except tomllib.TOMLDecodeError as exc:
+        raise SetupError(f"{config_path} is not valid TOML after stripping Contexto block: {exc}") from None
     existing_providers = parsed_stripped.get("model_providers")
     if isinstance(existing_providers, dict) and "contexto" in existing_providers:
         raise SetupError(f"{config_path} already defines [model_providers.contexto] outside Contexto's managed block")

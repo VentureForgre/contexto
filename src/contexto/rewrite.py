@@ -3293,9 +3293,13 @@ class RewriteEngine:
     def observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
                       tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
         dialect = dialect_for(endpoint)
-        # preamble() must see the same knobs as the request did
-        with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
-            return self._observe_usage(endpoint, usage, request, tool_calls, tool_call_ids)
+        ep_token = _ENDPOINT.set(endpoint)
+        try:
+            # preamble() must see the same knobs as the request did
+            with recall_knobs(self.config), request_scope(request.get(dialect.field) if dialect else None):
+                return self._observe_usage(endpoint, usage, request, tool_calls, tool_call_ids)
+        finally:
+            _ENDPOINT.reset(ep_token)
 
     def _observe_usage(self, endpoint: str, usage: dict, request: dict, tool_calls: bool | None = None,
                        tool_call_ids: tuple[str, ...] = ()) -> list[dict]:
