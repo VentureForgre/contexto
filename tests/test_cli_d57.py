@@ -460,7 +460,7 @@ def test_run_codex_tells_codex_its_session(home, capsys, tmp_path, monkeypatch):
     assert seen.read_text() == "cx1"
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads a mode-000 directory")
 def test_unreadable_pages_are_one_line_errors(home, capsys):
     store, _ = make(home, "x", 1_000_000)
     store.pages_dir.chmod(0)

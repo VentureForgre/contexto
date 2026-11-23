@@ -12,7 +12,6 @@ import errno
 import hashlib
 import json
 import os
-import pwd
 import shlex
 import signal
 import socket
@@ -728,7 +727,7 @@ def test_a_home_that_is_a_file_fails(both, capsys, fast_mcp):
     assert both.store.read_text() == "x"
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX directory modes / non-root only")
 @pytest.mark.parametrize("where", ["home", "parent"])
 def test_a_home_that_cannot_be_written_fails_and_is_left_as_it_was(both, capsys, fast_mcp, monkeypatch, where):
     locked = {"home": both.store, "parent": both.tmp / "locked"}[where]
@@ -746,7 +745,7 @@ def test_a_home_that_cannot_be_written_fails_and_is_left_as_it_was(both, capsys,
         locked.chmod(0o700)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX directory modes / non-root only")
 @pytest.mark.parametrize("home_mode,status", [(0o700, "pass"), (0o500, "warn")])
 def test_a_read_only_sessions_directory_of_the_user_s_own_is_no_obstacle(both, capsys, fast_mcp, home_mode, status):
     """Reviewers A and B, PR #258: the store sets ``sessions`` to 0700 itself, so ``contexto run claude``
@@ -826,7 +825,10 @@ def test_a_deleted_working_directory_is_a_failed_line_that_says_so(both, capsys,
     assert found["python"]["status"] == found["store"]["status"] == "pass"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pwd is POSIX only")
 def test_no_home_directory_is_a_failed_line_that_says_so(both, capsys, fast_mcp, monkeypatch):
+    import pwd
+
     def no_entry(uid):
         raise KeyError(uid)
 
@@ -1112,7 +1114,8 @@ if "contexto-doctor-" in os.environ.get("CONTEXTO_HOME", ""):  # the MCP server 
 '''
 
 
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT])
+@pytest.mark.parametrize("signum", [s for name in ("SIGTERM", "SIGHUP", "SIGINT")
+                                    if (s := getattr(signal, name, None)) is not None])
 def test_a_terminating_signal_during_the_mcp_check_leaves_nothing_behind(both, signum):
     """Reviewers A and B, PR #258: SIGTERM or SIGHUP (a closed terminal) while the MCP server ran left
     the ``contexto-doctor-*`` home in the temporary directory and a hung server running. Here the server
@@ -1144,7 +1147,8 @@ def test_a_terminating_signal_during_the_mcp_check_leaves_nothing_behind(both, s
     assert not both.store.exists()
 
 
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize("signum", [s for name in ("SIGTERM", "SIGHUP")
+                                    if (s := getattr(signal, name, None)) is not None])
 def test_a_signal_that_lands_while_the_server_is_being_started_still_stops_it(world, monkeypatch, signum):
     """Seen once in four runs of the test above on a busy machine: SIGHUP arrived while
     ``subprocess.Popen`` was still returning, the exception was raised inside it, and the check never got
@@ -1382,7 +1386,7 @@ def test_doctor_connects_to_nothing_resolves_no_name_and_never_contacts_the_upst
 # Re-review of the fixes (PR #258) ---------------------------------------------------------------------
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can read and enter any directory")
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX directory modes / non-root only")
 @pytest.mark.parametrize("mode", [0o000, 0o100, 0o200, 0o300, 0o400, 0o600])
 def test_a_sessions_directory_that_cannot_be_read_and_entered_fails_as_the_launcher_does(both, capsys, fast_mcp,
                                                                                          mode):

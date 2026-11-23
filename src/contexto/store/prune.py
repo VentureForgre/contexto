@@ -21,7 +21,6 @@ directory before its final ``rmdir``, prune stops with an error and leaves the e
 from __future__ import annotations
 
 import errno
-import fcntl
 import os
 import re
 import shutil
@@ -33,9 +32,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from contexto.paths import session_dir
+from contexto.platform_compat import (
+    HAS_DIR_FD,
+    O_BINARY,
+    O_DIRECTORY,
+    O_NOFOLLOW,
+    O_NONBLOCK,
+    entry_is_link_or_junction,
+    flock_ex_nb,
+    is_link_or_junction,
+    unlock_and_close,
+)
 from contexto.private import FILE_MODE
 from contexto.store import LIVE_LOCK, SessionNotFoundError
-from contexto.store.sessions import ACTIVITY_NAMES, disk_usage_fd
+from contexto.store.sessions import ACTIVITY_NAMES, disk_usage, disk_usage_fd
 
 ACTIVE_GRACE_S = 600  # a session changed this recently counts as in use, lock or not
 RETENTION_MAX_AGE_ENV = "CONTEXTO_RETENTION_MAX_AGE"
@@ -43,8 +53,8 @@ RETENTION_KEEP_ENV = "CONTEXTO_RETENTION_KEEP"
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 _DURATION = re.compile(r"(\d+)([smhdw])")
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-_LOCK_FLAGS = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK  # read-write so flock works on NFS too
+_DIR_FLAGS = os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+_LOCK_FLAGS = os.O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_BINARY  # read-write so flock works on NFS too
 _LINK_ERRNOS = {errno.ELOOP, errno.EMLINK, errno.ENOTDIR}  # what O_NOFOLLOW gives for a symlink
 IN_USE = "in use by a running Contexto proxy or MCP server"
 _LOCK_LINK = f"{LIVE_LOCK} is a symlink; prune never follows links"
@@ -96,7 +106,7 @@ def _sessions_fd(home: Path) -> Iterator[int | None]:
     """A descriptor for ``home/sessions``, or None when there is none. The home may be a symlink;
     ``sessions/`` must be a real directory (UnsafeSessionPathError otherwise)."""
     try:
-        home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
+        home_fd = os.open(home, os.O_RDONLY | O_DIRECTORY)
     except FileNotFoundError:
         yield None
         return
@@ -195,10 +205,117 @@ def _open_lock(fd: int, *, create: bool) -> int | None:
 def _held_by_others(lock: int) -> bool:
     """Try the exclusive lock without waiting; True when another holder has the session open."""
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        flock_ex_nb(lock)
     except BlockingIOError:
         return True
     return False
+
+
+# Path-based fallbacks for platforms without dir_fd (Windows). POSIX always takes the dir_fd path above.
+
+
+def _win_sessions_dir(home: Path) -> Path | None:
+    if not os.path.exists(home):
+        return None
+    sessions = Path(home) / "sessions"
+    try:
+        st = os.stat(sessions, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if is_link_or_junction(sessions) or not stat.S_ISDIR(st.st_mode):
+        raise UnsafeSessionPathError(f"{sessions} is a symlink or not a directory; "
+                                     "prune only deletes inside a real sessions directory")
+    return sessions
+
+
+def _win_session_path(home: Path, session_id: str, expect: Ident | None) -> tuple[Path, Ident]:
+    path = session_dir(home, session_id)
+    sessions = _win_sessions_dir(home)
+    where = Path(home) / "sessions"
+    if sessions is None:
+        raise SessionNotFoundError(f"no session {session_id!r} under {where}")
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        raise SessionNotFoundError(f"no session {session_id!r} under {where}") from None
+    if is_link_or_junction(path) or stat.S_ISLNK(st.st_mode):
+        raise UnsafeSessionPathError(f"session {session_id!r} is a symlink; prune never follows links")
+    if not stat.S_ISDIR(st.st_mode):
+        raise SessionNotFoundError(f"{path} is not a session directory")
+    ident = _ident(st)
+    if expect is not None and ident != expect:
+        raise UnsafeSessionPathError(f"session {session_id!r} was replaced since it was selected")
+    return path, ident
+
+
+def _win_check_entry(path: Path, session_id: str, ident: Ident) -> None:
+    """``sessions/<id>`` still names the real directory identified by ``ident``."""
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        st = None
+    if st is None or is_link_or_junction(path) or not stat.S_ISDIR(st.st_mode) or _ident(st) != ident:
+        raise UnsafeSessionPathError(f"session {session_id!r} was moved or replaced while it was being "
+                                     "deleted; stopped without removing the entry")
+
+
+def _win_last_activity(path: Path) -> float:
+    last = os.stat(path, follow_symlinks=False).st_mtime
+    for name in ACTIVITY_NAMES:
+        try:
+            last = max(last, os.stat(path / name, follow_symlinks=False).st_mtime)
+        except FileNotFoundError:
+            continue
+    return last
+
+
+def _win_open_lock(path: Path, *, create: bool) -> int | None:
+    lock_path = path / LIVE_LOCK
+    try:
+        st = os.stat(lock_path, follow_symlinks=False)
+    except FileNotFoundError:
+        st = None
+    if st is not None:
+        if is_link_or_junction(lock_path) or stat.S_ISLNK(st.st_mode):
+            raise UnsafeSessionPathError(_LOCK_LINK)
+        if not stat.S_ISREG(st.st_mode):
+            raise UnsafeSessionPathError(_LOCK_NOT_FILE)
+    elif not create:
+        return None
+    try:
+        lock = os.open(lock_path, _LOCK_FLAGS | (os.O_CREAT if create else 0), FILE_MODE)
+    except FileNotFoundError:
+        if create:
+            raise
+        return None
+    except OSError as e:
+        if e.errno in _LINK_ERRNOS:
+            raise UnsafeSessionPathError(_LOCK_LINK) from None
+        if e.errno in (errno.EISDIR, errno.EACCES, errno.ENXIO, errno.EOPNOTSUPP):
+            if os.path.isdir(lock_path):
+                raise UnsafeSessionPathError(_LOCK_NOT_FILE) from None
+        raise
+    if not stat.S_ISREG(os.fstat(lock).st_mode):
+        os.close(lock)
+        raise UnsafeSessionPathError(_LOCK_NOT_FILE)
+    return lock
+
+
+def _win_delete_tree(directory: Path) -> None:
+    """Recursively delete ``directory`` without following symlinks or NTFS junctions."""
+    with os.scandir(directory) as it:
+        entries = list(it)
+    for entry in entries:
+        entry_path = Path(entry.path)
+        if entry.is_symlink():
+            os.unlink(entry_path)
+        elif entry_is_link_or_junction(entry):
+            os.rmdir(entry_path)
+        elif entry.is_dir(follow_symlinks=False):
+            _win_delete_tree(entry_path)
+            os.rmdir(entry_path)
+        else:
+            os.unlink(entry_path)
 
 
 def check_not_live(home: Path, session_id: str, *, now: float, grace: float = ACTIVE_GRACE_S,
@@ -206,6 +323,20 @@ def check_not_live(home: Path, session_id: str, *, now: float, grace: float = AC
     """SessionLiveError when the session is in use or was active within ``grace`` seconds, and the
     errors of ``_open_session`` and ``_open_lock``. Writes nothing: a session without ``live.lock``
     has never been opened by a D37 writer, so no current process holds it."""
+    if not HAS_DIR_FD:
+        path, _ = _win_session_path(home, session_id, expect)
+        idle = now - _win_last_activity(path)
+        if idle < grace:
+            raise SessionLiveError(f"active {max(0, int(idle // 60))} min ago (prune skips sessions active in the "
+                                   f"last {int(grace // 60)} min)")
+        lock = _win_open_lock(path, create=False)
+        if lock is not None:
+            try:
+                if _held_by_others(lock):
+                    raise SessionLiveError(IN_USE)
+            finally:
+                unlock_and_close(lock)
+        return
     with _sessions_fd(home) as sessions_fd:
         fd, _ = _open_session(sessions_fd, home, session_id, expect)
         try:
@@ -216,7 +347,7 @@ def check_not_live(home: Path, session_id: str, *, now: float, grace: float = AC
                     if _held_by_others(lock):
                         raise SessionLiveError(IN_USE)
                 finally:
-                    os.close(lock)  # releases the probe's lock
+                    unlock_and_close(lock)  # releases the probe's lock
         finally:
             os.close(fd)
 
@@ -264,6 +395,57 @@ def remove_session(home: Path, session_id: str, *, now: float, grace: float = AC
     the delete if a store opened the session again during it (its new files are kept); the errors of
     ``_open_session`` and ``_open_lock``; or OSError when the delete fails part way.
     """
+    if not HAS_DIR_FD:
+        path, ident = _win_session_path(home, session_id, expect)
+        idle = now - _win_last_activity(path)
+        if idle < grace:
+            raise SessionLiveError(f"active {max(0, int(idle // 60))} min ago (prune skips sessions active in the "
+                                   f"last {int(grace // 60)} min)")
+        lock = _win_open_lock(path, create=True)
+        assert lock is not None
+        lock_open = True
+        try:
+            if _held_by_others(lock):
+                raise SessionLiveError(IN_USE)
+            _win_check_entry(path, session_id, ident)
+            size = disk_usage(path)
+            with os.scandir(path) as it:
+                entries = list(it)
+            for entry in entries:
+                if entry.name == LIVE_LOCK:
+                    continue
+                entry_path = Path(entry.path)
+                if entry.is_symlink():
+                    os.unlink(entry_path)
+                elif entry_is_link_or_junction(entry):
+                    os.rmdir(entry_path)
+                elif entry.is_dir(follow_symlinks=False):
+                    _win_delete_tree(entry_path)
+                    os.rmdir(entry_path)
+                else:
+                    os.unlink(entry_path)
+            # Windows forbids unlinking an open file, so release the lock handle just before removing it.
+            unlock_and_close(lock)
+            lock_open = False
+            try:
+                os.unlink(path / LIVE_LOCK)
+            except FileNotFoundError:
+                pass
+            except PermissionError:
+                raise SessionLiveError("opened again while it was being deleted: its old contents "
+                                       "were removed and the new files kept") from None
+            _win_check_entry(path, session_id, ident)
+            try:
+                os.rmdir(path)
+            except OSError as e:
+                if e.errno in (errno.ENOTEMPTY, errno.EEXIST, errno.EACCES):
+                    raise SessionLiveError("opened again while it was being deleted: its old contents "
+                                           "were removed and the new files kept") from None
+                raise
+        finally:
+            if lock_open:
+                unlock_and_close(lock)
+        return size
     if not shutil.rmtree.avoids_symlink_attacks:
         raise UnsafeSessionPathError("this platform's shutil.rmtree can follow symlinks; prune does not delete")
     with _sessions_fd(home) as sessions_fd:
@@ -286,7 +468,7 @@ def remove_session(home: Path, session_id: str, *, now: float, grace: float = AC
                                                "were removed and the new files kept") from None
                     raise
             finally:
-                os.close(lock)
+                unlock_and_close(lock)
         finally:
             os.close(fd)
     return size
@@ -322,23 +504,39 @@ def select(home: Path, *, older_than: int | None, keep: int | None, session_id: 
     Symlinks in ``sessions/`` are not sessions and are never selected.
     """
     every = []
-    with _sessions_fd(home) as sessions_fd:
+    if not HAS_DIR_FD:
+        sessions = _win_sessions_dir(home)
         if session_id is not None:
-            os.close(_open_session(sessions_fd, home, session_id, None)[0])
+            _win_session_path(home, session_id, None)
         names = []
-        if sessions_fd is not None:
-            with os.scandir(sessions_fd) as it:
-                names = [e.name for e in it if e.is_dir(follow_symlinks=False)]
+        if sessions is not None:
+            with os.scandir(sessions) as it:
+                names = [e.name for e in it if e.is_dir(follow_symlinks=False) and not entry_is_link_or_junction(e)]
         for name in names:
             try:
-                fd, ident = _open_session(sessions_fd, home, name, None)
-            except (ValueError, SessionNotFoundError):  # not a valid id, or changed while listing
+                path, ident = _win_session_path(home, name, None)
+            except (ValueError, SessionNotFoundError):
                 continue
-            try:
-                size = disk_usage_fd(fd) if measure_size else 0
-                every.append(Candidate(name, _last_activity(fd), size, ident))
-            finally:
-                os.close(fd)
+            size = disk_usage(path) if measure_size else 0
+            every.append(Candidate(name, _win_last_activity(path), size, ident))
+    else:
+        with _sessions_fd(home) as sessions_fd:
+            if session_id is not None:
+                os.close(_open_session(sessions_fd, home, session_id, None)[0])
+            names = []
+            if sessions_fd is not None:
+                with os.scandir(sessions_fd) as it:
+                    names = [e.name for e in it if e.is_dir(follow_symlinks=False)]
+            for name in names:
+                try:
+                    fd, ident = _open_session(sessions_fd, home, name, None)
+                except (ValueError, SessionNotFoundError):  # not a valid id, or changed while listing
+                    continue
+                try:
+                    size = disk_usage_fd(fd) if measure_size else 0
+                    every.append(Candidate(name, _last_activity(fd), size, ident))
+                finally:
+                    os.close(fd)
     every.sort(key=lambda c: (c.last_activity, c.id), reverse=True)
     chosen = every[keep:] if keep is not None else every
     if session_id is not None:

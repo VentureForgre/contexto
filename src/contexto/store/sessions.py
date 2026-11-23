@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from contexto.paths import session_dir
+from contexto.platform_compat import HAS_DIR_FD, O_DIRECTORY, entry_is_link_or_junction, is_link_or_junction
 from contexto.private import read_regular
 from contexto.store import SessionNotFoundError, SessionStore
 from contexto.store.ledger import LedgerError
@@ -83,10 +84,41 @@ def disk_usage_fd(dir_fd: int) -> int:
     return total
 
 
+def _disk_usage_path(path: Path) -> int:
+    """Path-based ``disk_usage`` for platforms without ``os.fwalk`` / ``O_DIRECTORY`` (Windows).
+    Symlinks are counted as links and never followed; entries that vanish while walking are skipped."""
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return 0
+    if is_link_or_junction(path) or not stat.S_ISDIR(st.st_mode):
+        return 0
+    total = _allocated(st)
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                est = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            total += _allocated(est)
+            if stat.S_ISDIR(est.st_mode) and not entry_is_link_or_junction(entry):
+                stack.append(Path(entry.path))
+    return total
+
+
 def disk_usage(path: Path) -> int:
     """``disk_usage_fd`` of the directory at ``path``; 0 when it cannot be opened."""
+    if not HAS_DIR_FD or not hasattr(os, "fwalk"):
+        return _disk_usage_path(Path(path))
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        fd = os.open(path, os.O_RDONLY | O_DIRECTORY)
     except OSError:
         return 0
     try:
@@ -101,7 +133,7 @@ def session_ids(home: Path) -> list[str]:
         return []
     ids = []
     for p in root.iterdir():
-        if p.is_symlink():  # never follow a link out of sessions/
+        if is_link_or_junction(p):  # never follow a link or junction out of sessions/
             continue
         try:
             if p.is_dir() and session_dir(home, p.name) == p:
@@ -124,7 +156,7 @@ def _log_highlights(home: Path, session_id: str) -> tuple[str | None, int | None
 
 
 def _page_count(pages_dir: Path) -> int:
-    if pages_dir.is_symlink() or not pages_dir.is_dir():
+    if is_link_or_junction(pages_dir) or not pages_dir.is_dir():
         return 0
     seen: set[str] = set()
     try:
@@ -209,7 +241,8 @@ def resolve_session(home: Path, given: str, how: str | None = None) -> str:
         path = session_dir(home, given)
     except ValueError as e:
         raise SessionNotFoundError(str(e)) from e
-    if path.is_symlink():  # one rule for every command (D58): list leaves it out, prune and the stores refuse it
+    # One rule for every command (D58): list leaves it out, prune and the stores refuse it.
+    if is_link_or_junction(path):
         raise SessionNotFoundError(f"session {given!r} under {Path(home) / 'sessions'} is a symlink, not a session "
                                    "directory" + (f" (from {how})" if how else ""))
     if path.is_dir():

@@ -66,7 +66,6 @@ on a response whose usage could not be read (``contexto.bench.meter``).
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import functools
 import json
 import os
@@ -86,6 +85,7 @@ from contexto.bench import meter as bench_meter
 from contexto.bench import plan as bench_plan
 from contexto.bench import script as bench_script
 from contexto.bench.model import Script
+from contexto.platform_compat import O_BINARY, flock_ex_nb, unlock_and_close
 
 FORMAT = 1
 EXIT_STOPPED = 1
@@ -671,12 +671,12 @@ def out_lock(out: Path):
     directory removes it with its lock file (``remove_if_unused``)."""
     path = out / LOCK_NAME
     try:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | O_BINARY, 0o644)
     except FileNotFoundError:  # a refused run that had created the directory removed it again
         raise Refused(LOCKED) from None
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            flock_ex_nb(fd)
         except BlockingIOError:
             raise Refused(LOCKED) from None
         try:
@@ -688,7 +688,7 @@ def out_lock(out: Path):
             raise Refused(LOCKED)
         yield
     finally:
-        os.close(fd)
+        unlock_and_close(fd)
 
 
 def remove_if_unused(out: Path) -> None:

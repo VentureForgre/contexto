@@ -9,6 +9,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from contexto import cli
 from contexto.commands import logs as logs_cmd
 from contexto.store import SessionStore
@@ -174,13 +176,21 @@ def test_logs_follow_streams_appended_partial_and_rotated_lines(tmp_path):
         # Wait until follow_log has emitted the completed line before rotating the file.
         if not saw_exit.wait(timeout=5.0):
             return
-        # Simulate log rotation (replace file with a brand-new inode)
+        # Simulate log rotation (replace file with a brand-new inode); retry briefly on Windows
+        # if follow_log transiently holds the target open during the replace.
         tmp_new = tmp_path / "log.jsonl.new"
         tmp_new.write_text(
             json.dumps({"ts": "2026-10-01T12:00:02Z", "event": "proxy_error", "error": "rotated"}) + "\n",
             encoding="utf-8",
         )
-        os.replace(tmp_new, log)
+        for attempt in range(20):
+            try:
+                os.replace(tmp_new, log)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.01)
 
     t = threading.Thread(target=writer, daemon=True)
     t.start()
@@ -193,6 +203,7 @@ def test_logs_follow_streams_appended_partial_and_rotated_lines(tmp_path):
     assert [r["event"] for r in rows] == ["exit", "proxy_error"]
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="os.mkfifo is POSIX-only")
 def test_logs_refuses_fifo_without_blocking(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     s = SessionStore(home, "s1")
@@ -208,9 +219,13 @@ def test_logs_refuses_symlink_escapes_status_ignores_bool_bound_and_waits_for_ne
     s.release()
     target = tmp_path / "outside.jsonl"
     target.write_text(json.dumps({"event": "exit", "code": 0}) + "\n", encoding="utf-8")
-    (home / "sessions" / "s1" / "log.jsonl").symlink_to(target)
-    code, _, err = _run_cli(monkeypatch, home, ["logs", "s1"], capsys)
-    assert code == 1 and "cannot read" in err
+    try:
+        (home / "sessions" / "s1" / "log.jsonl").symlink_to(target)
+    except OSError:
+        pass
+    else:
+        code, _, err = _run_cli(monkeypatch, home, ["logs", "s1"], capsys)
+        assert code == 1 and "cannot read" in err
 
     # Status control-char escaping and bool bound ignored
     line = logs_cmd.format_event({"ts": "2026-10-01T12:00:00Z", "event": "request", "method": "POST",

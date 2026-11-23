@@ -154,12 +154,13 @@ def test_non_utf8_directory_fifo_and_oversized_config_are_refused(tmp_path):
     with pytest.raises(ConfigError, match="not a regular file"):
         load_config(home=h2)
 
-    # FIFO (must not block)
-    h3 = tmp_path / "h3"
-    h3.mkdir()
-    os.mkfifo(h3 / CONFIG_FILE)
-    with pytest.raises(ConfigError, match="not a regular file"):
-        load_config(home=h3)
+    # FIFO (must not block; POSIX-only)
+    if hasattr(os, "mkfifo"):
+        h3 = tmp_path / "h3"
+        h3.mkdir()
+        os.mkfifo(h3 / CONFIG_FILE)
+        with pytest.raises(ConfigError, match="not a regular file"):
+            load_config(home=h3)
 
     # Oversized
     h4 = tmp_path / "h4"
@@ -368,14 +369,18 @@ def test_sessions_prune_applies_retention_config_defaults(tmp_path, monkeypatch,
 
 
 def test_symlinked_config_and_huge_int_overflow(tmp_path):
-    # Dotfile symlink to a regular config file is followed
+    # Dotfile symlink to a regular config file is followed (skipped if Windows host disallows symlinks)
     target = tmp_path / "dotfiles_config.toml"
     target.write_text("bound = 123456\n", encoding="utf-8")
     home = tmp_path / "home"
     home.mkdir()
-    (home / CONFIG_FILE).symlink_to(target)
-    cfg = load_config(home=home)
-    assert cfg.exists is True and cfg.bound == 123456
+    try:
+        (home / CONFIG_FILE).symlink_to(target)
+    except OSError:
+        pass
+    else:
+        cfg = load_config(home=home)
+        assert cfg.exists is True and cfg.bound == 123456
 
     # Huge integer overflowing float raises ConfigError cleanly
     h2 = tmp_path / "h2"

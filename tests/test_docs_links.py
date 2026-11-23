@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import html
 import os
+import posixpath
 import re
 import subprocess
 from pathlib import Path
@@ -54,7 +55,7 @@ def tracked_paths() -> set[str]:
     for name in listing.stdout.decode().split("\0"):
         while name and name not in paths:
             paths.add(name)
-            name = os.path.dirname(name)
+            name = posixpath.dirname(name)
     return paths
 
 
@@ -183,10 +184,10 @@ def broken_links(root: Path, files: list[str], tracked: set[str] | None = None) 
             if not path:
                 resolved = name
             elif path.startswith("/"):  # GitHub reads a leading slash as the repository root
-                resolved = os.path.normpath(path.lstrip("/"))
+                resolved = posixpath.normpath(path.lstrip("/"))
             else:
-                resolved = os.path.normpath(os.path.join(os.path.dirname(name), path))
-            if resolved == ".." or resolved.startswith("../") or os.path.isabs(resolved):
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), path))
+            if resolved == ".." or resolved.startswith("../") or posixpath.isabs(resolved):
                 broken.append((name, line, target, "points outside the repository"))
                 continue
             if resolved != "." and not exists_exactly(root, resolved, listings):

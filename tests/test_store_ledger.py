@@ -140,6 +140,7 @@ def test_file_sources_require_sha256_and_missing_files_are_stale(store, tmp_path
     assert store.state().stale == frozenset()  # no project root, no staleness check
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
 def test_ledger_files_are_private_under_a_permissive_umask(tmp_path):
     old = os.umask(0)
     try:

@@ -96,7 +96,6 @@ The API, for the engine, the launcher, the MCP server and the commands:
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import json
 import os
@@ -114,6 +113,17 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes
 from contexto.paths import session_dir
+from contexto.platform_compat import (
+    O_DIRECTORY,
+    O_NONBLOCK,
+    entry_is_link_or_junction,
+    fcntl_getpath,
+    flock_ex,
+    flock_sh,
+    has_fcntl_getpath,
+    is_link_or_junction,
+    unlock_and_close,
+)
 from contexto.private import NotRegularFileError, open_private, read_regular, write_atomic
 from contexto.store.catalog import PageCatalog, load_page, read_page_text
 from contexto.store.fts import FtsIndex
@@ -192,20 +202,19 @@ def canonical(path: Path) -> Path:
     normalisation-insensitive volume takes ``~/Proj`` for ``~/proj`` and an NFD name for its NFC form,
     the name ``F_GETPATH`` gives for the open directory; elsewhere, or when it cannot be opened (it does
     not exist, it is not a directory, it cannot be read), ``path`` itself."""
-    getpath = getattr(fcntl, "F_GETPATH", None)
-    if getpath is None:
+    if not has_fcntl_getpath():
         return path
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | O_DIRECTORY | O_NONBLOCK)
     except (OSError, ValueError):
         return path
     try:
-        found = fcntl.fcntl(fd, getpath, bytes(1024)).split(b"\0", 1)[0]
+        found = fcntl_getpath(fd)
     except OSError:
         return path
     finally:
         os.close(fd)
-    return Path(os.fsdecode(found)) if found.startswith(b"/") else path
+    return Path(os.fsdecode(found)) if found and found.startswith(b"/") else path
 
 
 def project_id(root: Path | str) -> str:
@@ -522,7 +531,7 @@ def project_sessions(home: Path, root: Path) -> Listing:
     found, names, unreadable, passing = [], set(), 0, 0
     for entry in entries:
         try:
-            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+            if entry_is_link_or_junction(entry) or not entry.is_dir(follow_symlinks=False):
                 continue
             directory = session_dir(home, entry.name)
         except (OSError, ValueError):
@@ -835,7 +844,7 @@ def forget(home: Path, session_id: str, *, records: Iterable[str] = (), leave: b
     created: list[tuple[Path, int]] = []  # the lock files this call created, each with its descriptor
     try:
         before = os.stat(directory, follow_symlinks=False)
-        if not stat.S_ISDIR(before.st_mode):
+        if is_link_or_junction(directory) or not stat.S_ISDIR(before.st_mode):
             raise SessionNotFoundError(f"session {session_id!r} under {Path(home) / 'sessions'} is not a session "
                                        "directory")
         live = _open_lock(directory / LIVE_LOCK, created)  # creates the file at most, never the directory
@@ -843,7 +852,7 @@ def forget(home: Path, session_id: str, *, records: Iterable[str] = (), leave: b
         raise gone from None
     written: int | None = None
     try:
-        fcntl.flock(live, fcntl.LOCK_SH)  # waits out a prune that is deleting the session
+        flock_sh(live)  # waits out a prune that is deleting the session
         try:
             held, current = os.fstat(live), os.stat(directory / LIVE_LOCK, follow_symlinks=False)
             if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
@@ -852,7 +861,7 @@ def forget(home: Path, session_id: str, *, records: Iterable[str] = (), leave: b
         except (FileNotFoundError, NotADirectoryError):  # prune deleted it while this waited
             raise gone from None
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            flock_ex(lock)
             try:
                 meta = json.loads(read_regular(directory / META_FILE).decode("utf-8"))
             except (FileNotFoundError, NotADirectoryError):
@@ -876,18 +885,21 @@ def forget(home: Path, session_id: str, *, records: Iterable[str] = (), leave: b
                 write_atomic(directory / META_FILE, canonical_bytes({**meta, **updates}))
             written = _dir_time(directory)
         finally:
-            os.close(lock)  # releases the flock
+            unlock_and_close(lock)  # releases the flock
         try:
             # Forgetting is not activity in the session: its directory gets back its time, so `sessions
             # list` shows the same last activity and a prune right after is not refused as too recent.
             # Only while the time is still the one this call's own changes left: a write the running
             # session made since then keeps its time.
             if written is not None and _dir_time(directory) == written:
-                os.utime(directory, ns=(before.st_atime_ns, before.st_mtime_ns), follow_symlinks=False)
+                if os.utime in os.supports_follow_symlinks:
+                    os.utime(directory, ns=(before.st_atime_ns, before.st_mtime_ns), follow_symlinks=False)
+                else:
+                    os.utime(directory, ns=(before.st_atime_ns, before.st_mtime_ns))
         except OSError:
             pass
     finally:
-        os.close(live)
+        unlock_and_close(live)
 
 
 def _dir_time(directory: Path) -> int | None:
@@ -1095,9 +1107,10 @@ def _window_matches_approximate(entries: Sequence[dict[str, Any]], query: str
 
 
 def _real_directory(path: Path) -> None:
-    """Raise OSError unless ``path`` is a directory itself, not a symlink to one (FileNotFoundError when
-    it is gone, NotADirectoryError for anything else in its place)."""
-    if not stat.S_ISDIR(os.stat(path, follow_symlinks=False).st_mode):
+    """Raise OSError unless ``path`` is a directory itself, not a symlink or junction to one (FileNotFoundError
+    when it is gone, NotADirectoryError for anything else in its place)."""
+    st = os.stat(path, follow_symlinks=False)
+    if is_link_or_junction(path) or not stat.S_ISDIR(st.st_mode):
         raise NotADirectoryError(f"{path.name} is not a directory")
 
 

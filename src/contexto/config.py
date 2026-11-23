@@ -32,6 +32,7 @@ from typing import Any
 
 from contexto.canonical import has_lone_surrogate
 from contexto.paths import config_path
+from contexto.platform_compat import O_BINARY, O_CLOEXEC, O_NONBLOCK
 
 MAX_CONFIG_BYTES = 1 * 1024 * 1024  # 1 MiB; real config files are a few lines
 MAX_PORT = 65535
@@ -194,7 +195,7 @@ def _read_bytes(path: Path) -> bytes | None:
     """Read ``path`` safely: follow symlinks (dotfiles), never block on a FIFO, reject directories and
     files larger than ``MAX_CONFIG_BYTES``. Returns None when the file does not exist."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(path, os.O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_BINARY)
     except (FileNotFoundError, NotADirectoryError):
         return None
     except ValueError:

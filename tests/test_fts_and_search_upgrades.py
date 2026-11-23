@@ -7,6 +7,7 @@ import json
 import math
 import os
 import stat
+import sys
 
 from contexto import mcp
 from contexto.store import SessionStore, catalog, fts
@@ -42,7 +43,8 @@ def test_fts5_lazy_build_incremental_sync_and_zero_rescan(tmp_path, monkeypatch)
 
     assert store.search("unique_key_3") == [ids[3]]
     assert db_path.is_file()
-    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
 
     # Track page reads on subsequent searches
     reads: list[str] = []
@@ -391,7 +393,8 @@ def test_fts_corrupt_db_and_journal_rebuild_on_first_search(tmp_path):
     assert store.search("target_777") == [pid]
     assert db_path.is_file()
     assert not journal_path.exists()
-    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
 
 
 def test_fts_vs_catalog_exact_parity_on_unicode_and_short_words(tmp_path):

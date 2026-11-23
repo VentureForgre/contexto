@@ -72,7 +72,8 @@ def test_set_window_keeps_workdir_and_the_file_stays_private(tmp_path):
     meta = json.loads((store.dir / "meta.json").read_text())
     assert meta == {"workdir": str(tmp_path.resolve()), "project": str(project_root(tmp_path)),  # D69
                     "window_tokens": 33_000, "bytes_per_token": 1.8}
-    assert (store.dir / "meta.json").stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert (store.dir / "meta.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_malformed_window_metadata_reads_as_unknown(tmp_path):
@@ -103,6 +104,10 @@ def test_concurrent_writers_keep_both_fields_and_readers_never_see_a_partial_fil
         while not stop.is_set():
             try:
                 json.loads((store.dir / "meta.json").read_text())
+            except PermissionError:
+                # Windows lockless read_text() can momentarily collide with MoveFileExW during replace.
+                if sys.platform != "win32":
+                    raise
             except ValueError as e:
                 bad.append(e)
 

@@ -115,6 +115,14 @@ from contexto.launcher import (
 from contexto.mcp import LEGACY_VERSIONS as MCP_PROTOCOL_VERSIONS
 from contexto.mcp import SERVER_NAME, TOOLS
 from contexto.paths import config_path, contexto_home
+from contexto.platform_compat import (
+    available_signals,
+    has_group_or_other_perms,
+    is_link_or_junction,
+    is_owned_by_current_user,
+    is_owned_by_current_user_or_root,
+    new_process_group_kwargs,
+)
 from contexto.servecontract import (
     LOCK_FILE,
     STATE_FILE,
@@ -294,7 +302,7 @@ def termination_raises() -> Iterator[None]:
 
     previous: dict[int, Any] = {}
     try:
-        for signum in (signal.SIGTERM, signal.SIGHUP):
+        for signum in available_signals("SIGTERM", "SIGHUP"):
             if signal.getsignal(signum) is not signal.SIG_IGN:
                 previous[signum] = signal.signal(signum, stop)
     except ValueError:  # not the main thread
@@ -316,7 +324,7 @@ def signals_held() -> Iterator[None]:
     held: list[int] = []
     previous: dict[int, Any] = {}
     try:
-        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        for signum in available_signals("SIGINT", "SIGTERM", "SIGHUP"):
             if signal.getsignal(signum) is not None:  # None: set from C, and cannot be put back from here
                 previous[signum] = signal.signal(signum, lambda number, frame: held.append(number))
     except ValueError:  # not the main thread, where no signal handler runs anyway
@@ -963,7 +971,7 @@ def check_store(env: Mapping[str, str], *, claude: bool = True) -> Check:
     try:
         if not sessions.is_dir():
             return failed("cannot be used: its sessions entry is not a directory")
-        if sessions.stat().st_uid != os.geteuid() and os.geteuid() != 0:
+        if not is_owned_by_current_user_or_root(sessions.stat()):
             return failed("cannot be used: its sessions directory belongs to another user, so `contexto run` cannot "
                           "set its mode")
         if not os.access(sessions, os.R_OK) or not _launcher_can_look_in(sessions):
@@ -1068,7 +1076,7 @@ def check_mcp(env: Mapping[str, str], cwd: Path, *, command: list[str] | None = 
             with signals_held():  # nor between the server starting and this having it to stop
                 child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, env={**env, **server["env"]}, cwd=cwd,
-                                         start_new_session=True)
+                                         **new_process_group_kwargs())
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             return failed(f"cannot be started ({getattr(exc, 'strerror', None) or type(exc).__name__})")
         try:
@@ -1156,13 +1164,13 @@ def _check_private_serve_file(path: Path, name: str) -> str | None:
         return None
     except OSError as exc:
         return f"{name} cannot be inspected ({type(exc).__name__})"
-    if stat.S_ISLNK(st.st_mode):
+    if stat.S_ISLNK(st.st_mode) or is_link_or_junction(path):
         return f"{name} is a symlink"
     if not stat.S_ISREG(st.st_mode):
         return f"{name} is not a regular file"
-    if st.st_uid != os.geteuid():
+    if not is_owned_by_current_user(st):
         return f"{name} belongs to another user"
-    if stat.S_IMODE(st.st_mode) & 0o077:
+    if has_group_or_other_perms(st):
         return f"{name} has mode {stat.S_IMODE(st.st_mode):04o} (must be 0600)"
     return None
 

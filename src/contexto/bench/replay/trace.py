@@ -278,7 +278,7 @@ def record(path: Path, script: Script, turns: int, measured: Any, version: str) 
     """Write the trace for ``script`` to ``path`` and return it."""
     trace = build(script, turns, measured, version)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(to_json(trace), encoding="utf-8")
+    path.write_text(to_json(trace), encoding="utf-8", newline="\n")
     return trace
 
 

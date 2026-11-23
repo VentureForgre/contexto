@@ -64,7 +64,7 @@ def call(store, query):
 
 def last_event(store):
     log = store.events if isinstance(store, MemoryStore) else [
-        json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+        json.loads(line) for line in (store.dir / "log.jsonl").read_text(encoding="utf-8").splitlines()]
     return [e for e in log if e.get("event") == "mcp_call" and e.get("tool") == "contexto_search"][-1]
 
 

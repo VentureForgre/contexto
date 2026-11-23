@@ -309,7 +309,7 @@ def test_a_late_first_usage_with_a_20000_token_system_prompt_counts_the_whole_he
     assert_measured_once(engine, req, ev, LIVE)
 
 
-@pytest.mark.parametrize("system_text", [BASE_SYSTEM, SEAT_SYSTEM])
+@pytest.mark.parametrize("system_text", [BASE_SYSTEM, SEAT_SYSTEM], ids=["base", "seat"])
 @pytest.mark.parametrize("server", [no_change, big_server])
 @pytest.mark.parametrize("first_usage_at", [0, 1, 4, 7, 8, 12])
 def test_a_head_measured_at_any_step_is_at_least_the_real_head_and_counts_a_change_once(server, first_usage_at,
@@ -325,7 +325,8 @@ def test_a_head_measured_at_any_step_is_at_least_the_real_head_and_counts_a_chan
 @pytest.mark.parametrize("system_text, cfg", [(SEAT_SYSTEM, ROOM), (LIVE_SYSTEM, LIVE),
                                               (LIVE_SYSTEM, Config(bound=30_000, headroom_floor=5_000,
                                                                    min_turn_room=1_000, pin_budget=200,
-                                                                   index_budget=200))])
+                                                                   index_budget=200))],
+                         ids=["seat_room", "live", "live_30k"])
 @pytest.mark.parametrize("first", [1, 4])
 def test_usage_without_an_input_count_measures_nothing(system_text, cfg, first):
     # PR #244 review B: the first response's usage had output_tokens alone; rule 4 took the head as 0 and

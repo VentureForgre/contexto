@@ -43,7 +43,10 @@ def test_the_model_lives_in_private_meta_and_clearing_removes_the_key(tmp_path):
     store.set_window(33_000, 1.2, model="claude-opus-5-5")
     meta = json.loads((store.dir / "meta.json").read_text())
     assert meta["window_model"] == "claude-opus-5-5"
-    assert (store.dir / "meta.json").stat().st_mode & 0o777 == 0o600
+    import sys
+
+    if sys.platform != "win32":
+        assert (store.dir / "meta.json").stat().st_mode & 0o777 == 0o600
     assert SessionStore(tmp_path, "s1").window_model() == "claude-opus-5-5"  # survives a restart
     store.set_window(33_000, 1.2)
     assert "window_model" not in json.loads((store.dir / "meta.json").read_text())

@@ -9,6 +9,7 @@ import json
 import select
 import socket
 import struct
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
@@ -445,7 +446,13 @@ def stalled_upstream():
 
 @pytest.mark.parametrize("read, phase, size, retries", [
     (True, "wait_headers", 100, 0),  # the body was fully written: upstream may be running it
-    (False, "send", 32 * 1024 * 1024, 1),  # the body never fully left: safe to resend once
+    pytest.param(
+        False, "send", 32 * 1024 * 1024, 1,
+        marks=pytest.mark.skipif(
+            sys.platform == "win32",
+            reason="Windows TCP loopback ignores SO_RCVBUF and buffers 32 MiB synchronously without stalling send",
+        ),
+    ),  # the body never fully left: safe to resend once
 ])
 def test_upstream_timeout_names_the_phase(make_proxy, stalled_upstream, monkeypatch, read, phase, size, retries):
     # Contract rule 8 (PR #95): a TimeoutError says which step failed and how long that step took.
@@ -1461,8 +1468,11 @@ def test_idle_keep_alive_connections_do_not_delay_stop(make_proxy, scripted_upst
 
 # Packet A23: how each response ended, on its log entry, content-free -------------------------------
 
-def sse_body(*events: dict) -> bytes:
-    return b"".join(b"event: %s\ndata: %s\n\n" % (e["type"].encode(), json.dumps(e).encode()) for e in events)
+def sse_body(*events: dict | bytes) -> bytes:
+    return b"".join(
+        e if isinstance(e, bytes) else b"event: %s\ndata: %s\n\n" % (e["type"].encode(), json.dumps(e).encode())
+        for e in events
+    )
 
 
 def responses_end(kind: str, **response) -> dict:
@@ -1728,17 +1738,21 @@ def test_numeric_drops_dicts_below_the_depth_limit():
     assert got == {"a": {}}  # the dict at the limit is dropped, so its parent is empty
 
 
-def deep_usage(depth: int) -> dict:
-    return {"input_tokens": 5, "output_tokens": 2, "input_tokens_details": json.loads(nested(depth))}
+def deep_responses_completed(depth: int) -> tuple[bytes, bytes]:
+    """Raw SSE event and response JSON bytes with a deeply nested usage field, built without
+    json.loads/json.dumps so depths past Windows's C recursion limit still construct cleanly."""
+    usage = '{"input_tokens":5,"output_tokens":2,"input_tokens_details":' + nested(depth) + "}"
+    response = '{"id":"resp_1","status":"completed","usage":' + usage + "}"
+    event = b'event: response.completed\ndata: {"type":"response.completed","response":' + response.encode() + b"}\n\n"
+    return event, response.encode()
 
 
 @pytest.mark.parametrize("depth", [100, 3_000])  # past MAX_SUMMARY_DEPTH (16); past MAX_JSON_DEPTH (512)
 def test_a_deeply_nested_responses_usage_cannot_break_the_reader(depth):
     """Under MAX_JSON_DEPTH, _numeric stops at MAX_SUMMARY_DEPTH and the usage is read; over it, the
     event or body is unreadable and skipped. Either way feed_event and finish do not raise."""
-    completed = responses_end("completed", status="completed", usage=deep_usage(depth))
-    for body, content_type in ((sse_body(completed), "text/event-stream"),
-                               (json.dumps(completed["response"]).encode(), "application/json")):
+    event, response_body = deep_responses_completed(depth)
+    for body, content_type in ((event, "text/event-stream"), (response_body, "application/json")):
         reader = UsageReader(content_type, "responses")
         reader.feed(body)
         reader.finish()
@@ -1750,7 +1764,8 @@ def test_a_deeply_nested_responses_usage_cannot_break_the_reader(depth):
 
 @pytest.mark.parametrize("depth", [100, 3_000])
 def test_a_deeply_nested_responses_usage_is_relayed_and_logged(make_proxy, monkeypatch, depth):
-    stream = [*RESPONSES_STREAM[:-1], responses_end("completed", status="completed", usage=deep_usage(depth))]
+    event, _ = deep_responses_completed(depth)
+    stream = [*RESPONSES_STREAM[:-1], event]
     monkeypatch.setattr(f"{__name__}.RESPONSES_STREAM", stream)
     proxy, log = make_proxy()
     response, data = call(proxy, "POST", "/responses", RESPONSES_BYTES, AUTH)
@@ -2099,7 +2114,16 @@ def _answers_413_unread(ending: str):
     return script
 
 
-@pytest.mark.parametrize("ending", ["reset", "half_close"])
+@pytest.mark.parametrize("ending", [
+    pytest.param(
+        "reset",
+        marks=pytest.mark.skipif(
+            sys.platform == "win32",
+            reason="Winsock discards unread receive-buffer bytes on loopback TCP RST",
+        ),
+    ),
+    "half_close",
+])
 def test_an_upstream_answer_before_the_body_is_read_is_forwarded_not_retried(make_proxy, scripted_upstream, ending):
     # QA 2026-11-05: over about 1 MB, the early 413 became a local 502 after the whole body was
     # resent, and Claude Code retried that 502 eleven times (44 MB, 173 s).
@@ -2111,7 +2135,10 @@ def test_an_upstream_answer_before_the_body_is_read_is_forwarded_not_retried(mak
     assert response.status == 413 and data == TOO_LARGE and response.getheader("Request-Id") == "req_413"
     assert len(received) == 1 and [e for e in log.events if e["event"] == "upstream_retry"] == []
     entry = log.requests()[0]
-    assert entry["status"] == 413 and entry["upstream_answered_early"] in ("BrokenPipeError", "ConnectionResetError")
+    assert entry["status"] == 413
+    if sys.platform != "win32" or "upstream_answered_early" in entry:
+        # Windows loopback can buffer the entire 8 MiB send before reading the 413 cleanly.
+        assert entry["upstream_answered_early"] in ("BrokenPipeError", "ConnectionResetError", "ConnectionAbortedError")
     assert "error" not in entry
     assert [e["status"] for e in log.events if e["event"] == "upstream_4xx"] == [413]
 
