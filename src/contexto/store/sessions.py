@@ -109,7 +109,7 @@ def session_ids(home: Path) -> list[str]:
 
 
 def _page_count(pages_dir: Path) -> int:
-    if not pages_dir.is_dir():
+    if pages_dir.is_symlink() or not pages_dir.is_dir():
         return 0
     seen: set[str] = set()
     try:

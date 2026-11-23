@@ -39,6 +39,7 @@ from __future__ import annotations
 import gzip
 import heapq
 import os
+import stat
 import threading
 import zlib
 from collections.abc import Callable
@@ -260,7 +261,11 @@ class PageCatalog:
         if salient:
             json_path = self.pages_dir / f"{entry.id}.json"
             gz_path = self.pages_dir / f"{entry.id}.json.gz"
-            path = json_path if os.path.lexists(json_path) else gz_path
+            try:
+                json_regular = stat.S_ISREG(os.stat(json_path, follow_symlinks=False).st_mode)
+            except OSError:
+                json_regular = False
+            path = json_path if json_regular else gz_path
             page = self._read(path)[0]
         else:
             page = entry.view

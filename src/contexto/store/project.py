@@ -1274,15 +1274,19 @@ class EarlierPages:
     def search(self, project: Project, query: str,
                view: Callable[[str, str, dict[str, Any]], Any] | None = None, *,
                approximate: bool = False,
+               fallback_approximate: bool | None = None,
                approx_view: Callable[[str, str, dict[str, Any], ApproxHit, Plan | None], Any] | None = None
                ) -> EarlierSearch:
         """Search the newest ``EARLIER_SESSIONS`` earlier sessions of ``project``, newest first, and
         return the best ``EARLIER_HITS`` matches of each that has one.
 
-        When strict search finds no earlier match (or when ``approximate=True``), falls back to
-        approximate / code-split matching over the earlier sessions and their last snapshots, marking
-        ``EarlierSearch.approximate = True``.
+        When ``approximate=True`` or when ``fallback_approximate`` is enabled (defaulting to True only
+        when ``approx_view`` is provided) and strict search finds no earlier match, runs an approximate /
+        code-split pass over the earlier sessions and their last snapshots, marking
+        ``EarlierSearch.approximate = True``. Callers without ``approx_view`` (such as CLI strict search)
+        stay strictly matched unless ``approximate=True`` or ``fallback_approximate=True`` is requested.
         """
+        allow_fallback = (approx_view is not None) if fallback_approximate is None else bool(fallback_approximate)
         started = _clock()
         members = project.earlier[:EARLIER_SESSIONS]
         not_searched = len(project.earlier) - len(members)
@@ -1313,11 +1317,13 @@ class EarlierPages:
                     if use_approx:
                         approx_found, count = self._ranked_approximate(member, catalog, query, allowed)
                         found_ids = None if approx_found is None else [h.id for h in approx_found]
+                        found_total = 0 if approx_found is None else approx_found.total
                         approx_by_id = {} if approx_found is None else {h.id: h for h in approx_found}
                         if approx_found is not None and approx_found.plan is not None:
                             last_plan = approx_found.plan
                     else:
                         found_ids, count = self._ranked(member, catalog, query, allowed)
+                        found_total = 0 if found_ids is None else len(found_ids)
                         approx_by_id = {}
                 except OSError:  # gone (a prune), a symlink, or a directory that cannot be listed
                     self._drop(member.id)
@@ -1360,7 +1366,7 @@ class EarlierPages:
                     else:
                         shown = tuple(pages)
                     hits.append(SessionHits(member.id, label, session_date(member.created),
-                                            len(found_ids) - gone, shown, tuple(lines), len(matched)))
+                                            max(0, found_total - gone), shown, tuple(lines), len(matched)))
                 pages.clear()
                 page = None
             return EarlierSearch(tuple(hits), searched, skipped, not_searched + extra_not_searched, listed, unusable,
@@ -1370,7 +1376,7 @@ class EarlierPages:
             result = run_pass(True)
         else:
             result = run_pass(False)
-            if not result.hits and members and (_clock() - started <= EARLIER_SECONDS):
+            if allow_fallback and not result.hits and members and (_clock() - started <= EARLIER_SECONDS):
                 fallback = run_pass(True)
                 if fallback.hits:
                     result = fallback

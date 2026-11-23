@@ -81,14 +81,44 @@ def redact_secrets_text(text: str) -> str:
 
 
 def redact_page_messages(value: Any) -> Any:
-    """Recursively copy ``value`` with secret patterns redacted from all string values (iterative-safe)."""
+    """Copy ``value`` with secret patterns redacted from all string values, iteratively (safe at MAX_JSON_DEPTH)."""
     if isinstance(value, str):
         return redact_secrets_text(value)
-    if isinstance(value, list):
-        return [redact_page_messages(v) for v in value]
-    if isinstance(value, dict):
-        return {k: redact_page_messages(v) for k, v in value.items()}
-    return value
+    if not isinstance(value, (dict, list)):
+        return value
+    root: Any = {} if isinstance(value, dict) else []
+    stack: list[tuple[Any, Any]] = [(value, root)]
+    while stack:
+        src, dst = stack.pop()
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if isinstance(v, str):
+                    dst[k] = redact_secrets_text(v)
+                elif isinstance(v, dict):
+                    child: dict[str, Any] = {}
+                    dst[k] = child
+                    stack.append((v, child))
+                elif isinstance(v, list):
+                    child_list: list[Any] = []
+                    dst[k] = child_list
+                    stack.append((v, child_list))
+                else:
+                    dst[k] = v
+        else:
+            for v in src:
+                if isinstance(v, str):
+                    dst.append(redact_secrets_text(v))
+                elif isinstance(v, dict):
+                    child = {}
+                    dst.append(child)
+                    stack.append((v, child))
+                elif isinstance(v, list):
+                    child_list = []
+                    dst.append(child_list)
+                    stack.append((v, child_list))
+                else:
+                    dst.append(v)
+    return root
 
 
 def same_content(a: dict[str, Any], b: dict[str, Any]) -> bool:
@@ -264,7 +294,10 @@ def _assistant_outcome(view: list[dict[str, Any]]) -> str | None:
                     texts.append(block.get("text", ""))
         for text in reversed(texts):
             for raw_line in text.splitlines():
-                line = raw_line.strip().lstrip("#-*• ").strip()
+                stripped = raw_line.strip()
+                if stripped.startswith("```"):
+                    continue
+                line = stripped.lstrip("#-*• ").strip()
                 if len(line) < 4:
                     continue
                 if line.lower().rstrip(".!") in _TRIVIAL_OUTCOMES:
@@ -285,8 +318,8 @@ def build_stub(turn: list[dict[str, Any]]) -> dict[str, Any]:
     the ``<system-reminder>`` tag when the CLI wraps it), or a placeholder when it is empty. A page
     whose only message is a user message made entirely of context blocks (a paged context block,
     D32) is treated the same way: empty ``user_text`` and ``reminder_text``, the first non-empty line
-    inside the tag. Other pages with user text keep exactly the three fields. Stubs never reach page
-    ids, which hash only the turn number and the messages.
+    inside the tag. Other pages with longer user text keep the three base fields. Stubs never reach
+    page ids, which hash only the turn number and the messages.
     """
     view = _view(turn)  # Responses (Codex) items as Messages API messages, the same view search reads (B23)
     first_user = next((m for m in view if m.get("role") == "user"), {})

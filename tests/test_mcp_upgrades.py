@@ -205,3 +205,63 @@ def test_mcp_startup_and_initialize_do_not_scan_historical_sessions(tmp_path, mo
     listed = call(server, "tools/list")["result"]["tools"]
     assert any("scope" in t["inputSchema"]["properties"] for t in listed if t["name"] == "contexto_search")
     assert isinstance(Path(cur.dir), Path)
+
+
+# 6. Review regression tests: version date validation, _meta version gating, line-length boundary, approx telemetry
+
+
+def test_is_version_date_rejects_unicode_digits_and_invalid_dates():
+    assert mcp._is_version_date("2025-06-18") is True
+    assert mcp._is_version_date("2026-12-31") is True
+    assert mcp._is_version_date("9999-99-99") is False
+    assert mcp._is_version_date("2025-00-10") is False
+    assert mcp._is_version_date("2025-13-01") is False
+    assert mcp._is_version_date("2025-06-00") is False
+    assert mcp._is_version_date("2025-06-32") is False
+    # Arabic-Indic Unicode digits must be rejected.
+    assert mcp._is_version_date("٢٠٢٧-٠١-٠١") is False
+
+
+def test_structured_content_respects_request_meta_protocol_version():
+    store = MemoryStore()
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    # No initialize called; per-request _meta says 2024-11-05 (pre-2025-06-18).
+    res_old = tool(server, "contexto_pin", {"kind": "decision", "text": "use sqlite"},
+                   meta={mcp.META_VERSION: "2024-11-05"})
+    assert res_old["isError"] is False
+    assert "structuredContent" not in res_old
+    # Per-request _meta >= 2025-06-18 includes structuredContent.
+    res_new = tool(server, "contexto_pin", {"kind": "decision", "text": "use wal"},
+                   meta={mcp.META_VERSION: "2025-06-18"})
+    assert res_new["isError"] is False
+    assert "structuredContent" in res_new
+
+
+def test_max_line_chars_allows_exact_limit_plus_newline():
+    server = mcp.Server(MemoryStore(), io.StringIO(), io.StringIO())
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    server.max_line_chars = len(payload)
+    # Exact limit plus CRLF or LF must succeed.
+    assert server.handle_line(payload + "\n")["result"] == {}
+    assert server.handle_line(payload + "\r\n")["result"] == {}
+    # One payload char over must be rejected.
+    too_long = payload + " "
+    assert server.handle_line(too_long + "\n")["error"]["code"] == mcp.INVALID_REQUEST
+
+
+def test_approx_in_view_only_logs_approximate_true(tmp_path):
+    store = SessionStore(tmp_path, "s-approx-in-view-log")
+    store.set_retained(0, 0, [
+        {"turn": 0, "message_index": 0, "role": "user", "text": "configured refreshToken TTL to 900s"},
+        {"turn": 1, "message_index": 1, "role": "user", "text": "asking now"},
+    ])
+    store.set_turn_room("t1", 50_000)
+    server = mcp.Server(store, io.StringIO(), io.StringIO())
+    res = tool(server, "contexto_search", {"query": "refresh_token"})
+    assert res["isError"] is False
+    assert "in view (approximate)" in res["content"][0]["text"]
+
+    events = [json.loads(line) for line in (store.dir / "log.jsonl").read_text().splitlines()]
+    search_events = [e for e in events if e.get("event") == "mcp_call" and e.get("tool") == "contexto_search"]
+    assert len(search_events) == 1
+    assert search_events[0]["approximate"] is True

@@ -1,18 +1,20 @@
 """Lazily built, incrementally maintained per-session SQLite FTS5 search index (zero external deps).
 
-Uses Python stdlib ``sqlite3`` with two FTS5 virtual tables inside ``<session_dir>/search.sqlite``:
+Uses Python stdlib ``sqlite3`` with an FTS5 ``trigram`` virtual table inside
+``<session_dir>/search.sqlite``:
 
 - ``pages_tri`` (``trigram`` tokenizer over case-folded page text): exact-recall substring candidate
-  filtering for strict queries (words of 3+ chars) in O(matches) instead of O(N) file scans.
-- ``pages_fts`` (``unicode61`` tokenizer over code-split tokens): fast code-aware lookup across
-  ``camelCase``, ``snake_case``, ``kebab-case``, and space-separated tokens.
+  filtering for strict queries (words of 3+ chars) in O(matches) instead of O(N) file scans, backed
+  by compressed ``fields_z`` blobs so repeated searches never re-read or re-parse ``pages/*.json``
+  and never thrash the 64 MB RAM cache.
 
 The index is purely a derived cache over immutable ``pages/*.json`` (and ``.json.gz``) files. If
 SQLite FTS5 is unavailable, or if ``search.sqlite`` is damaged, locked, or unreadable, every method
 returns ``None`` and the caller falls back transparently to ``PageCatalog`` scanning.
 
 Read-only callers (``SessionStore.open_existing``, ``EarlierPages``) open an existing
-``search.sqlite`` with ``?mode=ro`` and never create or modify any file in that session directory.
+``search.sqlite`` with ``?mode=ro`` per call and close immediately so multi-session searches never
+accumulate open file descriptors or modify any file in earlier sessions.
 """
 
 from __future__ import annotations
@@ -30,14 +32,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from contexto.private import FILE_MODE
-from contexto.store.pages import _search_fields, search_entry
+from contexto.private import open_private
+from contexto.store.pages import search_entry
 from contexto.store.search import (
     TEXT_SEP,
     Approximate,
     Query,
     SearchEntry,
-    code_tokens,
     rank_approximate,
     score_matched,
     search_key,
@@ -45,28 +46,57 @@ from contexto.store.search import (
 )
 
 FTS_FILE = "search.sqlite"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 Signature = tuple[int, int, int]  # (st_ino, st_size, st_mtime_ns)
 _BUSY_TIMEOUT_MS = 2_000
+_SQLITE_CORRUPT_CODES = frozenset({
+    getattr(sqlite3, "SQLITE_CORRUPT", 11),
+    getattr(sqlite3, "SQLITE_FORMAT", 24),
+    getattr(sqlite3, "SQLITE_NOTADB", 26),
+})
+_CORRUPT_MARKERS = ("malformed", "not a database", "file is encrypted", "corrupt")
+
+
+class _FtsCorruptError(RuntimeError):
+    """Internal signal that ``search.sqlite`` itself is genuinely corrupt and may be rebuilt."""
 
 
 @functools.lru_cache(maxsize=1)
-def fts5_available() -> bool:
-    """True when this Python's stdlib ``sqlite3`` supports FTS5 with both ``unicode61`` and ``trigram``."""
+def _trigram_mode() -> str | None:
+    """Return the supported FTS5 trigram tokenizer clause, or ``None`` if FTS5 trigram is absent."""
     conn = None
     try:
         conn = sqlite3.connect(":memory:")
-        conn.execute("CREATE VIRTUAL TABLE _probe_u USING fts5(body, tokenize='unicode61')")
-        conn.execute("CREATE VIRTUAL TABLE _probe_t USING fts5(body, tokenize='trigram')")
-        return True
+        try:
+            conn.execute("CREATE VIRTUAL TABLE _probe_t USING fts5(body, tokenize='trigram case_sensitive 1')")
+            return "trigram case_sensitive 1"
+        except sqlite3.Error:
+            conn.execute("CREATE VIRTUAL TABLE _probe_t2 USING fts5(body, tokenize='trigram')")
+            return "trigram"
     except sqlite3.Error:
-        return False
+        return None
     finally:
         if conn is not None:
             try:
                 conn.close()
             except sqlite3.Error:
                 pass
+
+
+def fts5_available() -> bool:
+    """True when this Python's stdlib ``sqlite3`` supports FTS5 ``trigram``."""
+    return _trigram_mode() is not None
+
+
+def _is_corrupt_sqlite_error(exc: sqlite3.Error) -> bool:
+    """True only for genuine SQLite file corruption (never lock/busy/I/O/constraint errors)."""
+    if isinstance(exc, (sqlite3.OperationalError, sqlite3.IntegrityError)):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code in _SQLITE_CORRUPT_CODES:
+        return True
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _CORRUPT_MARKERS)
 
 
 def _has_surrogate(text: str) -> bool:
@@ -116,6 +146,14 @@ def _close_conn_box(box: list[sqlite3.Connection | None]) -> None:
             pass
 
 
+def _rollback_quiet(conn: sqlite3.Connection) -> None:
+    if conn.in_transaction:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+
+
 class FtsIndex:
     """Per-session SQLite FTS5 index, lazily opened on first search and synced incrementally.
 
@@ -142,8 +180,17 @@ class FtsIndex:
 
     @contextmanager
     def _connection_locked(self) -> Iterator[sqlite3.Connection | None]:
-        """Yield a SQLite connection under ``self._lock``; closes transient read-only connections on exit."""
+        """Yield a SQLite connection under ``self._lock``; closes transient read-only connections on exit.
+
+        Raises ``_FtsCorruptError`` when opening/initializing finds genuine database corruption so the
+        caller's retry loop can unlink and rebuild once. Transient lock/busy/I/O errors yield ``None``
+        without touching the database file.
+        """
         if self._disabled or not fts5_available():
+            yield None
+            return
+        mode = _trigram_mode()
+        if mode is None:
             yield None
             return
         if self.read_only:
@@ -183,81 +230,116 @@ class FtsIndex:
         if not _is_regular_or_missing(self.path):
             yield None
             return
+        # Pre-create with 0o600 when missing so search.sqlite never has a non-0600 permission window.
         try:
-            conn = sqlite3.connect(str(self.path), timeout=_BUSY_TIMEOUT_MS / 1000.0, check_same_thread=False)
-            try:
-                os.chmod(self.path, FILE_MODE)
-            except OSError:
-                pass
+            fd = open_private(self.path, os.O_RDWR)
+            os.close(fd)
+        except OSError:
+            yield None
+            return
+        conn = None
+        try:
+            conn = sqlite3.connect(str(self.path), timeout=_BUSY_TIMEOUT_MS / 1000.0,
+                                   isolation_level=None, check_same_thread=False)
             conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
             conn.execute("PRAGMA journal_mode = DELETE")
             conn.execute("PRAGMA synchronous = NORMAL")
-            self._ensure_schema(conn)
+            self._ensure_schema(conn, mode)
             self._conn_box[0] = conn
-        except (sqlite3.Error, OSError):
+        except sqlite3.Error as exc:
+            if conn is not None:
+                _rollback_quiet(conn)
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            if _is_corrupt_sqlite_error(exc):
+                raise _FtsCorruptError(str(exc)) from exc
+            yield None
+            return
+        except OSError:
             if conn is not None:
                 try:
                     conn.close()
                 except sqlite3.Error:
                     pass
-            self._reset_corrupt_locked()
             yield None
             return
         yield conn
 
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-        if row is not None and row[0] != SCHEMA_VERSION:
-            conn.executescript(
-                "DROP TABLE IF EXISTS pages_fts;"
-                "DROP TABLE IF EXISTS pages_tri;"
-                "DROP TABLE IF EXISTS pages;"
-                "DELETE FROM meta;"
+    def _ensure_schema(self, conn: sqlite3.Connection, mode: str) -> None:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+            if row is not None and row[0] != SCHEMA_VERSION:
+                conn.execute("DROP TABLE IF EXISTS pages_fts")
+                conn.execute("DROP TABLE IF EXISTS pages_tri")
+                conn.execute("DROP TABLE IF EXISTS pages")
+                conn.execute("DELETE FROM meta")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS pages ("
+                "  rowid INTEGER PRIMARY KEY,"
+                "  page_id TEXT UNIQUE NOT NULL,"
+                "  file_name TEXT UNIQUE NOT NULL,"
+                "  turn INTEGER NOT NULL,"
+                "  context INTEGER NOT NULL,"
+                "  sig_ino INTEGER NOT NULL,"
+                "  sig_size INTEGER NOT NULL,"
+                "  sig_mtime INTEGER NOT NULL,"
+                "  fields_z BLOB NOT NULL"
+                ")"
             )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS pages ("
-            "  rowid INTEGER PRIMARY KEY,"
-            "  page_id TEXT UNIQUE NOT NULL,"
-            "  file_name TEXT UNIQUE NOT NULL,"
-            "  turn INTEGER NOT NULL,"
-            "  context INTEGER NOT NULL,"
-            "  sig_ino INTEGER NOT NULL,"
-            "  sig_size INTEGER NOT NULL,"
-            "  sig_mtime INTEGER NOT NULL,"
-            "  fields_z BLOB NOT NULL"
-            ")"
-        )
-        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(code_text, tokenize='unicode61')")
-        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS pages_tri USING fts5(raw_text, tokenize='trigram')")
-        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (SCHEMA_VERSION,))
-        conn.commit()
+            conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS pages_tri USING fts5(raw_text, tokenize='{mode}')")
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (SCHEMA_VERSION,))
+            conn.execute("COMMIT")
+        except BaseException:
+            _rollback_quiet(conn)
+            raise
 
     def _reset_corrupt_locked(self) -> None:
+        """Close and remove a genuinely corrupt ``search.sqlite`` and any leftover journal/WAL sidecars."""
         self._close_locked()
-        if not self.read_only and _is_regular(self.path):
-            try:
-                self.path.unlink(missing_ok=True)
-            except OSError:
-                self._disabled = True
+        if self.read_only:
+            return
+        for suffix in ("", "-journal", "-wal", "-shm"):
+            target = self.path if not suffix else self.session_dir / (FTS_FILE + suffix)
+            if _is_regular(target):
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    if not suffix:
+                        self._disabled = True
 
     def _sync_locked(self, conn: sqlite3.Connection, listing: dict[str, Signature],
                      read_page: Callable[[str], dict[str, Any] | None]) -> bool:
         """Synchronize the index with ``listing``; returns True when ready, False to fall back."""
+        if self.read_only:
+            rows = conn.execute("SELECT file_name, sig_ino, sig_size, sig_mtime FROM pages").fetchall()
+            stored_ro = {file_name: (ino, size, mtime) for file_name, ino, size, mtime in rows}
+            # Read-only caller never writes: use the DB only if every listed file matches its stored signature.
+            return len(stored_ro) == len(listing) and all(stored_ro.get(n) == sig for n, sig in listing.items())
+
+        # Fast path: read-only check before taking a write lock when the index is already up to date.
         rows = conn.execute("SELECT rowid, file_name, sig_ino, sig_size, sig_mtime FROM pages").fetchall()
         stored = {file_name: (rowid, (ino, size, mtime)) for rowid, file_name, ino, size, mtime in rows}
-        if self.read_only:
-            # Read-only caller never writes: use the DB only if every listed file matches its stored signature.
-            return len(stored) == len(listing) and all(stored.get(n, (None, None))[1] == sig
-                                                       for n, sig in listing.items())
-        removed = [rowid for file_name, (rowid, sig) in stored.items() if listing.get(file_name) != sig]
-        to_add = [(file_name, sig) for file_name, sig in listing.items()
-                  if stored.get(file_name, (None, None))[1] != sig]
-        if not removed and not to_add:
+        if (len(stored) == len(listing)
+                and all(stored.get(n, (None, None))[1] == sig for n, sig in listing.items())):
             return True
-        with conn:
+
+        # Acquire a write transaction up front so concurrent writers serialize cleanly and re-diff
+        # against the latest committed rows (no UNIQUE constraint races).
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute("SELECT rowid, file_name, sig_ino, sig_size, sig_mtime FROM pages").fetchall()
+            stored = {file_name: (rowid, (ino, size, mtime)) for rowid, file_name, ino, size, mtime in rows}
+            removed = [rowid for file_name, (rowid, sig) in stored.items() if listing.get(file_name) != sig]
+            to_add = [(file_name, sig) for file_name, sig in listing.items()
+                      if stored.get(file_name, (None, None))[1] != sig]
+            if not removed and not to_add:
+                conn.execute("COMMIT")
+                return True
             for rowid in removed:
-                conn.execute("DELETE FROM pages_fts WHERE rowid = ?", (rowid,))
                 conn.execute("DELETE FROM pages_tri WHERE rowid = ?", (rowid,))
                 conn.execute("DELETE FROM pages WHERE rowid = ?", (rowid,))
             for file_name, (ino, size, mtime) in to_add:
@@ -266,18 +348,15 @@ class FtsIndex:
                     continue
                 try:
                     entry = search_entry(page)
-                    raw_fields = "\n".join(_search_fields(page))
                 except (KeyError, TypeError, AttributeError):
                     continue
                 if entry.text is None:
                     continue
                 fields_z = zlib.compress(entry.text, 1)
                 raw_text = _fts_safe_text(entry.text.replace(TEXT_SEP, b"\n").decode("utf-8", "surrogatepass"))
-                code_text = _fts_safe_text(code_tokens(raw_fields))
                 # If a page_id moved between .json and .json.gz, remove any prior row with the same page_id.
                 old = conn.execute("SELECT rowid FROM pages WHERE page_id = ?", (entry.id,)).fetchone()
                 if old is not None:
-                    conn.execute("DELETE FROM pages_fts WHERE rowid = ?", (old[0],))
                     conn.execute("DELETE FROM pages_tri WHERE rowid = ?", (old[0],))
                     conn.execute("DELETE FROM pages WHERE rowid = ?", (old[0],))
                 cur = conn.execute(
@@ -286,8 +365,11 @@ class FtsIndex:
                     (entry.id, file_name, entry.turn, int(entry.context), ino, size, mtime, sqlite3.Binary(fields_z)),
                 )
                 rowid = cur.lastrowid
-                conn.execute("INSERT INTO pages_fts(rowid, code_text) VALUES (?, ?)", (rowid, code_text))
                 conn.execute("INSERT INTO pages_tri(rowid, raw_text) VALUES (?, ?)", (rowid, raw_text))
+            conn.execute("COMMIT")
+        except BaseException:
+            _rollback_quiet(conn)
+            raise
         return True
 
     def search(self, query: str, listing: dict[str, Signature],
@@ -307,11 +389,18 @@ class FtsIndex:
                         if not self._sync_locked(conn, listing, read_page):
                             return None
                         return self._run_strict(conn, q)
-                except sqlite3.DatabaseError:
+                except _FtsCorruptError:
                     self._reset_corrupt_locked()
                     if self.read_only or attempt == 1:
                         return None
-                except (sqlite3.Error, OSError):
+                except sqlite3.Error as exc:
+                    if _is_corrupt_sqlite_error(exc):
+                        self._reset_corrupt_locked()
+                        if self.read_only or attempt == 1:
+                            return None
+                        continue
+                    return None
+                except OSError:
                     return None
             return None
 
@@ -358,11 +447,9 @@ class FtsIndex:
     def _word_df(self, conn: sqlite3.Connection, word_str: str, word_bytes: bytes) -> int:
         """Exact document frequency of ``word_bytes`` across indexed pages."""
         if len(word_str) >= 3:
-            if word_str.isascii() and "\n" not in word_str:
-                # For ASCII terms >= 3 chars, verify only if needed or count via trigram.
-                # Note: raw_text joins fields with '\n' and word_str has no whitespace, and trigram is
-                # case-insensitive while raw_text is already folded, so trigram phrase matches are exact
-                # for ASCII terms (no multi-char Unicode folding edge cases).
+            # With case_sensitive 1 over already-folded raw_text, trigram matches are exact for ASCII
+            # terms (no SQLite Unicode folding of İ/ſ). Otherwise verify against fields_z for exact parity.
+            if _trigram_mode() == "trigram case_sensitive 1" and word_str.isascii() and "\n" not in word_str:
                 return conn.execute(
                     "SELECT COUNT(*) FROM pages_tri WHERE raw_text MATCH ?",
                     (_fts_quote(word_str),),
@@ -404,34 +491,17 @@ class FtsIndex:
                             return _entries[i]._replace(text=zlib.decompress(got[0]))
 
                         return rank_approximate(entries, query, fetch)
-                except sqlite3.DatabaseError:
+                except _FtsCorruptError:
                     self._reset_corrupt_locked()
                     if self.read_only or attempt == 1:
                         return None
-                except (sqlite3.Error, OSError):
+                except sqlite3.Error as exc:
+                    if _is_corrupt_sqlite_error(exc):
+                        self._reset_corrupt_locked()
+                        if self.read_only or attempt == 1:
+                            return None
+                        continue
+                    return None
+                except OSError:
                     return None
             return None
-
-    def code_search(self, query: str, listing: dict[str, Signature],
-                    read_page: Callable[[str], dict[str, Any] | None]) -> list[str] | None:
-        """Fast code-aware token lookup via ``pages_fts`` (matches camelCase/snake_case/kebab-case)."""
-        tokens = [t for t in code_tokens(query).split() if len(t) >= 2]
-        if not tokens or _has_surrogate(query):
-            return None
-        unique = list(dict.fromkeys(tokens))[:8]
-        with self._lock:
-            try:
-                with self._connection_locked() as conn:
-                    if conn is None:
-                        return None
-                    if not self._sync_locked(conn, listing, read_page):
-                        return None
-                    expr = " AND ".join(_fts_quote(t) for t in unique)
-                    rows = conn.execute(
-                        "SELECT p.page_id FROM pages p JOIN pages_fts f ON p.rowid = f.rowid "
-                        "WHERE f.code_text MATCH ? ORDER BY bm25(pages_fts), p.turn DESC",
-                        (expr,),
-                    ).fetchall()
-                    return [r[0] for r in rows]
-            except (sqlite3.Error, OSError):
-                return None

@@ -313,7 +313,7 @@ class Candidate:
 
 
 def select(home: Path, *, older_than: int | None, keep: int | None, session_id: str | None,
-           now: float) -> list[Candidate]:
+           now: float, measure_size: bool = True) -> list[Candidate]:
     """Sessions every given condition selects, most recent activity first.
 
     ``keep`` keeps the ``keep`` sessions with the most recent activity (ranked over all sessions);
@@ -335,7 +335,8 @@ def select(home: Path, *, older_than: int | None, keep: int | None, session_id: 
             except (ValueError, SessionNotFoundError):  # not a valid id, or changed while listing
                 continue
             try:
-                every.append(Candidate(name, _last_activity(fd), disk_usage_fd(fd), ident))
+                size = disk_usage_fd(fd) if measure_size else 0
+                every.append(Candidate(name, _last_activity(fd), size, ident))
             finally:
                 os.close(fd)
     every.sort(key=lambda c: (c.last_activity, c.id), reverse=True)
@@ -387,7 +388,7 @@ def auto_prune(home: Path, *, max_age: int | None = None, keep: int | None = Non
         return []
     now_ts = time.time() if now is None else now
     try:
-        candidates = select(home, older_than=max_age, keep=keep, session_id=None, now=now_ts)
+        candidates = select(home, older_than=max_age, keep=keep, session_id=None, now=now_ts, measure_size=False)
     except (UnsafeSessionPathError, SessionNotFoundError, OSError, ValueError):
         return []
     pruned: list[str] = []

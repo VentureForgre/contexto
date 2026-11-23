@@ -579,10 +579,10 @@ def _folded_form(squeezed: str) -> re.Pattern[bytes]:
 
 
 def _split_form(parts: tuple[str, ...]) -> re.Pattern[bytes]:
-    """Match code-split identifier parts separated by whitespace or punctuation (e.g. ``refresh token``,
-    ``refresh_token``, ``refresh-token``), so ``refreshToken`` and ``refresh_token`` also match prose
-    ``refresh token``."""
-    sep = rb"[\s_.\-/]+"
+    """Match code-split identifier parts separated by horizontal whitespace or punctuation (e.g.
+    ``refresh token``, ``refresh_token``, ``refresh-token``), never across line breaks, so
+    ``refreshToken`` and ``refresh_token`` also match prose ``refresh token``."""
+    sep = rb"[ \t_.\-/]+"
     return re.compile(sep.join(re.escape(search_key(p)) for p in parts))
 
 

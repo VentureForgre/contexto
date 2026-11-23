@@ -181,14 +181,20 @@ def _alive(pid: int) -> bool:
 
 def fsync_dir(path: Path) -> None:
     """Flush directory entries of ``path`` to disk; ignores filesystems where directory fsync is unsupported."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
-        fd = os.open(path, os.O_RDONLY)
+        fd = os.open(path, flags)
     except OSError:
         return
     try:
         os.fsync(fd)
     except OSError as e:
-        if e.errno not in (errno.EINVAL, errno.EBADF, errno.EROFS):
+        ignored = {errno.EINVAL, errno.EBADF, errno.EROFS}
+        for name in ("EOPNOTSUPP", "ENOTSUP"):
+            code = getattr(errno, name, None)
+            if code is not None:
+                ignored.add(code)
+        if e.errno not in ignored:
             raise
     finally:
         os.close(fd)

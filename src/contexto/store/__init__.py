@@ -647,6 +647,20 @@ def redact(event: Any) -> Any:
     return event
 
 
+def _release_store(live_fd: int, fts_box: list[Any]) -> None:
+    try:
+        os.close(live_fd)
+    except OSError:
+        pass
+    fts = fts_box[0] if fts_box else None
+    if fts is not None:
+        fts_box[0] = None
+        try:
+            fts.close()
+        except Exception:
+            pass
+
+
 class SessionStore(LedgerOps):
     def __init__(self, home: Path, session_id: str, *, create: bool = True,
                  compress_pages: bool | None = None, redact_secrets: bool | None = None,
@@ -677,7 +691,8 @@ class SessionStore(LedgerOps):
         # Creates the session directory and locks it before anything else is created in it, so prune
         # cannot remove it under us.
         live, pruned = hold_live(self.dir, create=create)
-        self.release = weakref.finalize(self, os.close, live)  # release(): drop the lock before collection
+        self._fts_box: list[Any] = [None]
+        self.release = weakref.finalize(self, _release_store, live, self._fts_box)  # drop lock + FTS on release/GC
         private_dir(self.pages_dir)
         removed = remove_stale_temps(self.dir) + remove_stale_temps(self.pages_dir)
         self._key_cache = self._load_key()
@@ -696,13 +711,14 @@ class SessionStore(LedgerOps):
     def __getstate__(self) -> dict[str, Any]:
         """Exclude non-picklable runtime locks, SQLite handles, and in-memory caches when pickling."""
         state = dict(self.__dict__)
-        for key in ("_meta_lock_state", "_fts_index", "_page_catalog", "_earlier_pages"):
+        for key in ("_meta_lock_state", "_fts_index", "_fts_box", "_page_catalog", "_earlier_pages"):
             state.pop(key, None)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
         self._meta_lock_state = threading.local()
+        self._fts_box = [None]
 
     def _maybe_auto_prune(self) -> None:
         """Run optional retention pruning when ``CONTEXTO_RETENTION_MAX_AGE`` or ``CONTEXTO_RETENTION_KEEP``
@@ -1003,11 +1019,11 @@ class SessionStore(LedgerOps):
         writes (``set_window``, ``set_turn_room``, ``set_retained``, ``set_epoch``) are never blocked by
         response formatting.
         """
-        now = self.clock()
-        summary: list[dict[str, Any]] = []
         expired: list[dict[str, Any]] = []
+        snap_summary: dict[str, Any] | None = None
 
         with self._charge_lock():
+            now = self.clock()
             # Step 1: brief meta.lock read to validate meta.lock/meta.json and snapshot remaining room.
             with self._meta_lock():
                 snap = self._read_meta_strict()
@@ -1020,6 +1036,11 @@ class SessionStore(LedgerOps):
             main_left = max(0, room_tokens - spent) if published else None
             left = [x for x in (main_left, side_left) if x is not None]
             remaining: int | None = min(left) if left else None
+            if remaining is not None:
+                limited_by = "main" if main_left is not None and main_left == remaining else "side"
+                snap_summary = {"limited_by": limited_by, "side_rooms": len(snap_sides)}
+                if limited_by == "side" and tightest is not None:
+                    snap_summary["limiting_age_s"] = max(0, int(now - tightest[1][2]))
 
             # Step 2: run response formatting / charge callback completely OUTSIDE meta.lock!
             used = charge(remaining)
@@ -1032,35 +1053,25 @@ class SessionStore(LedgerOps):
                 recorded = read_side_rooms(meta)
                 expired[:] = expired_side_room_events(recorded, now)
                 live = live_side_rooms(recorded, now)
-                cur_main = read_turn_room(meta)
-                cur_turn_id, cur_room_tokens, cur_spent = cur_main
-                cur_pub = cur_turn_id is not None and cur_room_tokens is not None
-                cur_tight = min(live.items(), key=lambda kv: max(0, kv[1][0] - kv[1][1]), default=None)
-                cur_side_left = max(0, cur_tight[1][0] - cur_tight[1][1]) if cur_tight else None
-                cur_main_left = max(0, cur_room_tokens - cur_spent) if cur_pub else None
-                cur_left = [x for x in (cur_main_left, cur_side_left) if x is not None]
-                if not cur_left:
-                    return {"side_rooms": {}} if recorded else None
-                cur_remaining = min(cur_left)
-                applied = 0 if remaining is None else min(used, cur_remaining)
-                limited_by = "main" if cur_main_left is not None and cur_main_left == cur_remaining else "side"
-                info: dict[str, Any] = {"limited_by": limited_by, "side_rooms": len(live)}
-                if limited_by == "side" and cur_tight is not None:
-                    info["limiting_age_s"] = max(0, int(now - cur_tight[1][2]))
-                summary[:] = [info]
+                if remaining is None:
+                    return {"side_rooms": side_rooms_record(live)} if expired else None
+                if used == 0 and not expired:
+                    return None
                 updates: dict[str, Any] = {}
-                if recorded:
+                if recorded and (used > 0 or expired):
                     updates["side_rooms"] = side_rooms_record(
-                        {r: (t, s + applied, at) for r, (t, s, at) in live.items()}
+                        {r: (t, s + used, at) for r, (t, s, at) in live.items()}
                     )
-                if cur_pub:
+                cur_turn_id, cur_room_tokens, cur_spent = read_turn_room(meta)
+                if used > 0 and cur_turn_id is not None and cur_room_tokens is not None:
+                    # Apply the charge to main without clamping by a newly arrived tighter side room.
                     updates["turn_room"] = {"turn_id": cur_turn_id, "room_tokens": cur_room_tokens,
-                                            "spent_tokens": cur_spent + applied, "seq": read_room_stamp(meta)}
+                                            "spent_tokens": cur_spent + used, "seq": read_room_stamp(meta)}
                 return updates or None
 
             self._modify_meta(commit)
         self._log_side_events(expired)
-        return summary[0] if summary else None
+        return snap_summary
 
     def _log_side_events(self, events: list[dict[str, Any]]) -> None:
         for event in events:
@@ -1348,7 +1359,14 @@ class SessionStore(LedgerOps):
             try:
                 raw = read_regular(src)
                 gz = gzip.compress(raw, compresslevel=6, mtime=0)
-                write_new(dst, gz)
+                created = write_new(dst, gz)
+                if not created:
+                    # Never unlink src unless dst is already a valid regular gzip holding identical content.
+                    try:
+                        if gzip.decompress(read_regular(dst)) != raw:
+                            continue
+                    except (OSError, EOFError, ValueError):
+                        continue
                 os.unlink(src)
                 fsync_dir(self.pages_dir)
                 archived += 1
@@ -1381,8 +1399,10 @@ class SessionStore(LedgerOps):
             if earlier is None:
                 raise PageNotFoundError(f"no stored or quarantined page {page_id}") from None
             return earlier
-        os.chmod(target, 0o600)
+        if not target.is_symlink() and target.is_file():
+            os.chmod(target, 0o600)
         fsync_dir(quarantine)
+        fsync_dir(self.pages_dir)
         self.log({"event": "page_quarantined", "page_id": page_id, "path": f"quarantine/{target.name}"})
         return target
 
@@ -1409,7 +1429,9 @@ class SessionStore(LedgerOps):
             index = self.__dict__["_fts_index"] = FtsIndex(
                 self.dir, read_only=getattr(self, "_read_only", False)
             )
-            weakref.finalize(self, index.close)
+            fts_box = self.__dict__.get("_fts_box")
+            if fts_box is not None:
+                fts_box[0] = index
         return index
 
     def set_search_cache(self, budget_bytes: int | None) -> None:
@@ -1447,13 +1469,16 @@ class SessionStore(LedgerOps):
         entries = sorted(self._catalog.entries(), key=lambda e: page_order(e.view), reverse=True)
         return [{"id": e.id, "turn": e.turn, "line": self._catalog.line(e, False)} for e in entries]
 
-    def _fts_read_page(self, file_name: str) -> dict[str, Any] | None:
-        """Read a page for FTS5 indexing through ``PageCatalog._read`` (logging unreadable files once)."""
+    def _fts_read_page(self, file_name: str, sig: tuple[int, int, int] | None = None) -> dict[str, Any] | None:
+        """Read a page for FTS5 indexing through ``PageCatalog._read`` (logging unreadable files once).
+
+        Uses the already-listed ``sig`` so indexing N pages does O(N) stats instead of O(N^2).
+        """
         catalog = self._catalog
-        with catalog._lock:
-            sig = catalog._listing().get(file_name)
-            if sig is not None and catalog._unreadable.get(file_name) == sig:
-                return None
+        if sig is not None:
+            with catalog._lock:
+                if catalog._unreadable.get(file_name) == sig:
+                    return None
         page, damaged = catalog._read(self.pages_dir / file_name)
         if page is None and damaged and sig is not None:
             with catalog._lock:
@@ -1471,7 +1496,7 @@ class SessionStore(LedgerOps):
                 with self._catalog._lock:
                     listing = {n: sig for n, sig in self._catalog._listing().items()
                                if self._catalog._unreadable.get(n) != sig}
-                found = fts.search(query, listing, self._fts_read_page)
+                found = fts.search(query, listing, lambda name, _l=listing: self._fts_read_page(name, _l.get(name)))
                 if found is None:
                     break
                 if self._catalog.all_present(list(listing)):
@@ -1496,7 +1521,9 @@ class SessionStore(LedgerOps):
                 with self._catalog._lock:
                     listing = {n: sig for n, sig in self._catalog._listing().items()
                                if self._catalog._unreadable.get(n) != sig}
-                found = fts.search_approximate(query, listing, self._fts_read_page)
+                found = fts.search_approximate(
+                    query, listing, lambda name, _l=listing: self._fts_read_page(name, _l.get(name))
+                )
                 if found is None:
                     break
                 if self._catalog.all_present(list(listing)):
@@ -1530,6 +1557,7 @@ class SessionStore(LedgerOps):
     def search_earlier(self, query: str,
                        view: Callable[[str, str, dict[str, Any]], Any] | None = None, *,
                        approximate: bool = False,
+                       fallback_approximate: bool | None = None,
                        approx_view: Callable[[str, str, dict[str, Any], Any, Any], Any] | None = None
                        ) -> EarlierSearch | None:
         """Search the earlier sessions of this session's project (``EarlierPages.search``); None when
@@ -1538,7 +1566,8 @@ class SessionStore(LedgerOps):
         project = self.project()
         if project is None:
             return None
-        return self._earlier.search(project, query, view, approximate=approximate, approx_view=approx_view)
+        return self._earlier.search(project, query, view, approximate=approximate,
+                                    fallback_approximate=fallback_approximate, approx_view=approx_view)
 
     def earlier_session(self, session: str) -> EarlierSession:
         """The earlier session of this session's project that ``session`` names: its id, or its label or

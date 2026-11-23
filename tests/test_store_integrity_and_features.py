@@ -350,3 +350,58 @@ def test_secret_redaction_is_opt_in_and_redacts_before_persisting(tmp_path):
         assert leaked not in safe_raw
     assert "[REDACTED]" in safe_raw
     assert "postgres://admin:[REDACTED]@db.internal:5432/prod" in safe_raw
+
+
+# 7. Review regression tests: archive safety, charge_turn_room concurrency, stats gzip support
+
+
+def test_archive_pages_refuses_to_unlink_json_when_existing_gz_differs(tmp_path):
+    store = SessionStore(tmp_path, "s-archive-safe")
+    [p0] = store.page_out([make_turn("turn zero critical payload")], 0)
+    [p1] = store.page_out([make_turn("turn one newest")], 1)
+    src = store.pages_dir / f"{p0}.json"
+    dst = store.pages_dir / f"{p0}.json.gz"
+    dst.write_bytes(b"corrupt existing gzip bytes")
+
+    archived = store.archive_pages(min_age_turns=1)
+    assert archived == 0
+    assert src.exists()
+    assert store.get_page(p0)["turn"] == 0
+    assert p1 != p0
+
+
+def test_charge_turn_room_does_not_undercharge_main_when_tighter_side_room_arrives(tmp_path):
+    store = SessionStore(tmp_path, "s-charge-side")
+    store.set_turn_room("t1", 1000)
+
+    def callback(remaining: int | None) -> int:
+        assert remaining == 1000
+        # A tighter side room arrives while formatting the response outside meta.lock.
+        store.set_side_room("side-a", 100)
+        return 900
+
+    summary = store.charge_turn_room(callback)
+    # Summary reflects the snapshot that bounded the call (main, 0 side rooms).
+    assert summary == {"limited_by": "main", "side_rooms": 0}
+    # Main must be charged the full 900 tokens, not clamped to 100.
+    assert store.turn_room() == ("t1", 1000, 900)
+
+
+def test_stats_counts_and_totals_gzipped_pages(tmp_path):
+    from contexto.stats import count_pages, page_totals, session_stats
+
+    store = SessionStore(tmp_path, "s-stats-gz", compress_pages=True)
+    [p0, p1] = store.page_out([make_turn("first compressed turn"), make_turn("second compressed turn")], 0)
+    assert (store.pages_dir / f"{p0}.json.gz").is_file()
+    assert (store.pages_dir / f"{p1}.json.gz").is_file()
+
+    assert count_pages(store.pages_dir) == 2
+    totals = page_totals(store.pages_dir)
+    assert totals["count"] == 2
+    assert totals["unreadable"] == 0
+    assert totals["tokens_estimate"] > 0
+    assert totals["file_bytes"] > 0
+
+    st = session_stats(tmp_path, "s-stats-gz")
+    assert st["pages"]["count"] == 2
+    assert st["pages"]["tokens_estimate"] == totals["tokens_estimate"]

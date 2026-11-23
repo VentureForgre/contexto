@@ -113,11 +113,10 @@ NO_HIT = "No paged-out turn contains every word of that query."
 # charged text: none of these lines is a control reply.
 SCOPES = ("session", "project")
 NO_HIT_SESSION = "No paged-out turn of this session contains every word of that query."
-# D65 against D69: the current session's part falls back to approximate matches exactly as a session-scope
-# reply does, but earlier sessions are searched strictly, also when the current part fell back. Their text
-# is old and can be injected, and an approximate match (part of the query, a word with one letter changed)
-# is easier for stuffed text to win; ranking up to 50 sessions' pages approximately would also cost far
-# more than the strict pass. So the earlier part's first line, and its line for no match, say so.
+# D65 & D69: when the current session already has strict hits (and approximate=False), earlier sessions
+# are searched strictly so stuffed old text cannot displace strict current-session results. When the
+# current session finds no strict hit or the caller requests approximate=True, earlier sessions also
+# fall back to approximate / code-split matching under EARLIER_APPROX_HEADER (still marked untrusted).
 EARLIER_HEADER = "[earlier sessions of this project, newest first (a match there holds every word):]"
 EARLIER_APPROX_HEADER = "[earlier sessions of this project, approximate matches, newest first:]"
 # Review B on D69, finding 1 (b): after EARLIER_HEADER, in every reply that shows an earlier session's text, and
@@ -254,7 +253,8 @@ class Store(Protocol):
     def search(self, query: str) -> list[str]: ...
     # Optional: search_approximate(query) (D65); without it, a query no page holds every word of finds nothing.
     def pin(self, kind: str, text: str, *, supersedes: Iterable[str] = (), epistemic: str = "reported",
-            provenance: Iterable[dict[str, Any]] = ()) -> str: ...
+            provenance: Iterable[dict[str, Any]] = (), topic: str | None = None,
+            owner: str | None = None) -> str: ...
     def close(self, obligation_id: str, note: str) -> str: ...
     def state_text(self) -> str: ...
     def log(self, event: dict[str, Any]) -> None: ...
@@ -413,9 +413,14 @@ PROJECT_TOOLS = _project_tools()
 
 
 def _is_version_date(value: Any) -> bool:
-    """True for a ``YYYY-MM-DD`` MCP protocol version date string."""
-    return (isinstance(value, str) and len(value) == 10 and value[4] == "-" and value[7] == "-"
-            and value[:4].isdigit() and value[5:7].isdigit() and value[8:].isdigit())
+    """True for a valid ASCII ``YYYY-MM-DD`` MCP protocol version date string."""
+    if not (isinstance(value, str) and len(value) == 10 and value.isascii()
+            and value[4] == "-" and value[7] == "-"):
+        return False
+    y, m, d = value[:4], value[5:7], value[8:]
+    if not (y.isdigit() and m.isdigit() and d.isdigit()):
+        return False
+    return 1 <= int(m) <= 12 and 1 <= int(d) <= 31
 
 
 def _has_project(store: Any) -> bool:
@@ -477,10 +482,11 @@ class Server:
         if callable(readline):
             limit = self.max_line_chars
             while True:
-                line = readline(limit + 1)
+                # Allow up to 2 extra bytes for trailing CRLF so a line of exactly ``limit`` payload chars fits.
+                line = readline(limit + 3)
                 if not line:
                     break
-                if len(line) > limit and not line.endswith("\n"):
+                if len(line.rstrip("\r\n")) > limit and not line.endswith("\n"):
                     # Drain the rest of the oversized line without buffering it in memory.
                     while True:
                         rest = readline(65_536)
@@ -516,7 +522,7 @@ class Server:
         return 0  # end of input is the shutdown signal
 
     def handle_line(self, line: str) -> dict[str, Any] | None:
-        if len(line) > self.max_line_chars:
+        if len(line.rstrip("\r\n")) > self.max_line_chars:
             self._diag(f"request line exceeded {self.max_line_chars} characters")
             return _error(None, INVALID_REQUEST, f"Request line exceeds {self.max_line_chars} characters")
         try:
@@ -545,7 +551,7 @@ class Server:
         """Handle ``notifications/cancelled`` cleanly without raising or replying."""
         req_id = params.get("requestId")
         reason = params.get("reason")
-        if req_id is not None:
+        if isinstance(req_id, (str, int, float)) and not isinstance(req_id, bool):
             detail = f" ({_clip(reason)})" if isinstance(reason, str) and reason else ""
             self._diag(f"cancelled request {_clip(str(req_id))}{detail}")
 
@@ -598,9 +604,10 @@ class Server:
             "instructions": self.instructions,
         }
 
-    def _supports_structured_content(self) -> bool:
+    def _supports_structured_content(self, request_version: str | None = None) -> bool:
         """``structuredContent`` was introduced in MCP 2025-06-18; omit it on older negotiated versions."""
-        return self.legacy_version is None or self.legacy_version >= STRUCTURED_CONTENT_MIN_VERSION
+        version = request_version if _is_version_date(request_version) else self.legacy_version
+        return version is None or version >= STRUCTURED_CONTENT_MIN_VERSION
 
     def _discover(self, params: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -633,6 +640,8 @@ class Server:
         name = params["name"]
         args = params.get("arguments")
         args = {} if args is None else args  # [], 0 or false is not an object (D58)
+        meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+        req_version = meta.get(META_VERSION) if isinstance(meta.get(META_VERSION), str) else None
         event: dict[str, Any] = {"event": "mcp_call", "tool": name}
         try:
             if not isinstance(args, dict):
@@ -640,7 +649,7 @@ class Server:
             content, structured, extra = getattr(self, "_tool_" + name.removeprefix("contexto_"))(args)
             event.update(extra, ok=True)
             result: dict[str, Any] = {"content": content, "isError": False}
-            if structured is not None and self._supports_structured_content():
+            if structured is not None and self._supports_structured_content(req_version):
                 result["structuredContent"] = structured
         except ToolError as exc:
             event.update(ok=False, error=type(exc).__name__)
@@ -883,6 +892,7 @@ class Server:
         in_view_found = [0]
         in_view = self._in_view_rows(query, in_view_found, approximate=force_approx)  # None: in view not checked
         lead = in_view or []
+        strict_lead = bool(lead) and not force_approx
         limit, _ = recall_limit(*self._window(), measured=use_measured)
         specific = SPECIFIC_WHY
         head = [SEARCH_BEST_HEADER]
@@ -892,6 +902,7 @@ class Server:
         plan: Plan | None = None
         detailed_hits: list[ApproxHit] = []  # the approximate hits shown in detail, in the reply's order
         approx_in_view: list[Row] = []
+        used_approx_in_view = bool(force_approx and lead)
         if force_approx or (not strict and not lead):
             # No paged page holds every word and nothing in view matches (or approximate=True was requested):
             # approximate matches, said to be (D65).
@@ -912,6 +923,8 @@ class Server:
                 specific = "use a more specific query"
             if not lead and in_view is not None:
                 approx_in_view = self._in_view_rows(query, in_view_found, approximate=True) or []
+                if approx_in_view:
+                    used_approx_in_view = True
                 if not hits and approx_in_view:
                     lead = approx_in_view
                     approx_in_view = []
@@ -965,8 +978,10 @@ class Server:
             return fit(limit if room is None else min(room, limit), room is None or limit <= room)
 
         # D69: with scope "project", the earlier sessions' part follows, in the same reply and the same charge.
-        earlier = (_EarlierPart(self._search_earlier(query, approximate=force_approx, context=ctx, per_page=per_page,
-                                                     line_chars=line_chars))
+        earlier_fallback = force_approx or (not strict and not strict_lead)
+        earlier = (_EarlierPart(self._search_earlier(query, approximate=force_approx,
+                                                     fallback_approximate=earlier_fallback,
+                                                     context=ctx, per_page=per_page, line_chars=line_chars))
                    if scope == "project" else None)
 
         def build_project(room: int | None) -> list[str] | None:
@@ -1011,7 +1026,7 @@ class Server:
                          earlier_in_view_skipped=earlier.found.in_view_skipped)
         return ([{"type": "text", "text": text}, {"type": "text", "text": coverage}], None,
                 {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": total,
-                 "approximate": bool(steps) or (shown and bool(approx_in_view)) or (
+                 "approximate": bool(steps) or (shown and used_approx_in_view) or (
                      shown and bool(earlier and earlier.found.approximate and earlier.shown)),
                  **({"approximate_steps": steps} if steps else {}),
                  "in_view_hits": sum(1 for _, span in in_view_all if span) if shown else 0,
@@ -1019,8 +1034,9 @@ class Server:
                  "in_view_checked": in_view is not None,
                  "returned": _spans(rows) if shown else [], **extra, **budget})
 
-    def _search_earlier(self, query: str, *, approximate: bool = False, context: int = MATCH_CONTEXT,
-                        per_page: int = MATCHES_PER_PAGE, line_chars: int = MATCH_LINE_CHARS) -> EarlierSearch:
+    def _search_earlier(self, query: str, *, approximate: bool = False, fallback_approximate: bool = False,
+                        context: int = MATCH_CONTEXT, per_page: int = MATCHES_PER_PAGE,
+                        line_chars: int = MATCH_LINE_CHARS) -> EarlierSearch:
         """What the project's earlier sessions hold of ``query`` (``SessionStore.search_earlier``). A
         session whose project view is gone since the server started (project memory turned off for it)
         has no earlier session to search. Each page to be shown comes back as ``_earlier_page`` makes it,
@@ -1038,7 +1054,8 @@ class Server:
                                  per_page=per_page, line_chars=line_chars)
 
         try:
-            return search(query, view, approximate=approximate, approx_view=approx_view) or EarlierSearch()
+            return (search(query, view, approximate=approximate, fallback_approximate=fallback_approximate,
+                           approx_view=approx_view) or EarlierSearch())
         except TypeError:  # a test mock implementing the 2-arg signature
             return search(query, view) or EarlierSearch()
 
@@ -1225,7 +1242,8 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str,
         on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only
     else:
         words, q = hit_view(approximate[0], text, approximate[1])
-        rows.append(("  " + words, None))
+        safe_words = words if session is None else words.translate(_ONE_STUB_ROW)
+        rows.append(("  " + safe_words, None))
         on_page = q is not None
     shown, total = (match_lines(text, q, context=context, per_page=per_page, line_chars=line_chars, last=True)
                     if on_page else ([], 0))  # the LAST matching lines (B21)

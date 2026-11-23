@@ -368,7 +368,7 @@ def retained_matches_approximate(entries: list[dict[str, Any]], query: str, *,
     """Approximate matching lines of a retained-window snapshot when strict ``retained_matches`` finds none:
     drops stop words, matches code-split / separator-folded identifiers (``refresh_token`` <-> ``refreshToken``
     <-> ``refresh token``), and allows partial matches passing the relevance floor."""
-    from contexto.store.search import APPROX_FLOOR, _folded_form, _split_form, split_identifier
+    from contexto.store.search import _DIGIT_PAIR, _folded_form, _split_form, split_identifier
 
     plan = plan_words(query)
     if plan is None or not entries:
@@ -378,7 +378,7 @@ def retained_matches_approximate(entries: list[dict[str, Any]], query: str, *,
     folded_pats = [_folded_form(squeeze(w)) if shaped[j] else None for j, w in enumerate(plan.words)]
     split_pats = []
     for j in range(count):
-        parts = split_identifier(plan.typed[j]) if shaped[j] else ()
+        parts = split_identifier(plan.typed[j]) if shaped[j] and not _DIGIT_PAIR.search(plan.words[j]) else ()
         split_pats.append(_split_form(parts) if len(parts) > 1 else None)
     newest = max((e["turn"] for e in entries), default=None)
     found: list[tuple[int, int, int, int, str]] = []
@@ -412,7 +412,7 @@ def retained_matches_approximate(entries: list[dict[str, Any]], query: str, *,
         matched_count = len(matched_idx)
         any_specific = any(plan.specific(j) for j in matched_idx)
         if not (matched_count == count or any_specific
-                or (matched_count >= 2 and matched_count / count >= APPROX_FLOOR)):
+                or (matched_count >= 2 and matched_count / count >= 0.6)):
             continue
         forms = tuple(dict.fromkeys(matched_forms))
         q = Query(" ".join(forms), forms)

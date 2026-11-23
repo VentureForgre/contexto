@@ -299,3 +299,160 @@ def test_self_echo_suppression_recognizes_any_mcp_prefix(monkeypatch):
         ]},
     ]
     assert own_call_ids(t_env) == {"u2"}
+
+
+# 6. Review regression tests: FTS5 O(N) sync, concurrency, locked fallback, parity, D69 safety
+
+
+def test_fts_initial_sync_does_not_rescan_directory_per_page(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path, "s-fts-linear")
+    store.page_out([turn(f"page payload alpha_{i}") for i in range(25)], 0)
+
+    calls = 0
+    orig_listing = catalog.PageCatalog._listing
+
+    def counting_listing(self):
+        nonlocal calls
+        calls += 1
+        return orig_listing(self)
+
+    monkeypatch.setattr(catalog.PageCatalog, "_listing", counting_listing)
+    hits = store.search("alpha_12")
+    assert len(hits) == 1
+    # Should list the directory once per search, never once per page (O(N^2)).
+    assert calls <= 2
+
+
+def test_fts_concurrent_writable_stores_sync_without_error(tmp_path):
+    import threading
+
+    s1 = SessionStore(tmp_path, "s-fts-concurrent")
+    s1.page_out([turn(f"concurrent payload token_{i}") for i in range(20)], 0)
+    s2 = SessionStore(tmp_path, "s-fts-concurrent")
+
+    errors: list[BaseException] = []
+    results: list[list[str]] = []
+
+    def worker(store: SessionStore, q: str) -> None:
+        try:
+            results.append(store.search(q))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(s1, "token_5")),
+        threading.Thread(target=worker, args=(s2, "token_5")),
+        threading.Thread(target=worker, args=(s1, "token_12")),
+        threading.Thread(target=worker, args=(s2, "token_12")),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not errors
+    assert all(len(r) == 1 for r in results)
+    assert (s1.dir / fts.FTS_FILE).is_file()
+
+
+def test_fts_locked_db_falls_back_without_deleting_search_sqlite(tmp_path, monkeypatch):
+    import sqlite3
+
+    store = SessionStore(tmp_path, "s-fts-locked")
+    [pid] = store.page_out([turn("exclusive lock test needle_xyz")], 0)
+    assert store.search("needle_xyz") == [pid]
+    db_path = store.dir / fts.FTS_FILE
+    ino_before = db_path.stat().st_ino
+
+    # Add a new page so the next search needs to write to search.sqlite.
+    [pid2] = store.page_out([turn("second page needle_abc")], 1)
+    monkeypatch.setattr(fts, "_BUSY_TIMEOUT_MS", 50)
+
+    locker = sqlite3.connect(str(db_path), isolation_level=None)
+    try:
+        locker.execute("BEGIN EXCLUSIVE")
+        # Must fall back cleanly to PageCatalog AND NOT delete search.sqlite!
+        assert store.search("needle_abc") == [pid2]
+        assert db_path.is_file()
+        assert db_path.stat().st_ino == ino_before
+    finally:
+        locker.execute("ROLLBACK")
+        locker.close()
+
+
+def test_fts_corrupt_db_and_journal_rebuild_on_first_search(tmp_path):
+    store = SessionStore(tmp_path, "s-fts-corrupt-rebuild")
+    [pid] = store.page_out([turn("corrupt rebuild target_777")], 0)
+    db_path = store.dir / fts.FTS_FILE
+    journal_path = store.dir / (fts.FTS_FILE + "-journal")
+    db_path.write_bytes(b"corrupt header bytes not sqlite")
+    journal_path.write_bytes(b"stale corrupt journal bytes")
+
+    assert store.search("target_777") == [pid]
+    assert db_path.is_file()
+    assert not journal_path.exists()
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+
+def test_fts_vs_catalog_exact_parity_on_unicode_and_short_words(tmp_path):
+    store_fts = SessionStore(tmp_path, "s-parity", use_fts=True)
+    pages = [
+        turn("Istanbul İSTANBUL ſervice db io alpha beta"),
+        turn("alpha beta alpha beta db"),
+        turn("alpha gamma io"),
+        turn("lone surrogate \ud800 alpha"),
+    ]
+    store_fts.page_out(pages, 0)
+    store_scan = SessionStore(tmp_path, "s-parity", use_fts=False)
+
+    for query in ("alpha beta", "db io", "istanbul", "service", "alpha"):
+        assert store_fts.search(query) == store_scan.search(query), query
+
+
+def test_split_form_never_matches_across_newlines():
+    from contexto.store.search import _split_form
+
+    pat = _split_form(("refresh", "token"))
+    assert pat.search(b"refresh token") is not None
+    assert pat.search(b"refresh\ttoken") is not None
+    assert pat.search(b"refresh_token") is not None
+    assert pat.search(b"refresh\ntoken") is None
+    assert pat.search(b"refresh\r\ntoken") is None
+
+
+def test_cli_project_search_remains_strict_without_approx_view(tmp_path, monkeypatch, capsys):
+    from contexto import cli
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path))
+    s1 = SessionStore(tmp_path, "s-cli-1")
+    s1.set_workdir(repo)
+    s1.page_out([turn("configured refreshToken expiry to 3600s")], 0)
+    s2 = SessionStore(tmp_path, "s-cli-2")
+    s2.set_workdir(repo)
+
+    code = cli.main(["search", "refresh_token", "--session", "s-cli-2", "--project", "--json"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    # CLI --project is strict: must never return unlabelled approximate hits with empty matches.
+    assert payload.get("earlier", {}).get("sessions", []) == []
+
+
+def test_redact_page_messages_handles_deep_nesting_iteratively():
+    from contexto.store.pages import redact_page_messages
+
+    nested: dict = {"secret": "sk-ant-api03-1234567890abcdef1234567890"}
+    cur = nested
+    for _ in range(400):
+        nxt: dict = {}
+        cur["child"] = nxt
+        cur = nxt
+    cur["leaf"] = "ghp_1234567890abcdef1234567890"
+
+    out = redact_page_messages(nested)
+    assert out["secret"] == "[REDACTED]"
+    node = out
+    for _ in range(400):
+        node = node["child"]
+    assert node["leaf"] == "[REDACTED]"

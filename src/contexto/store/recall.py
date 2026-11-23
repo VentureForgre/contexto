@@ -178,9 +178,10 @@ def salient_identifiers(texts: Iterable[str], limit: int = SALIENT_MAX, max_char
     an allowlist of positions: JSON object keys (when the text, or a line of it, parses as JSON),
     the left side of ``key=value`` and ``key = value``, ``key:`` at the start of a line (YAML,
     including ``- key:``), ``"key":``, and file paths that are not themselves in value or list
-    position. Values, list items, array elements, and names in prose are never listed. Neither is
-    any identifier containing a digit (ids such as AI-93532 used as keys), so names with an
-    incidental digit (s3-bucket) are left to search, which finds them in the page text.
+    position. Values, list items, array elements, and names in prose are never listed. Value-like
+    tokens (pure numbers, dotted versions, UUIDs, hex hashes, and ticket/cohort IDs such as
+    ``AI-93532``) are filtered by ``_value_like``, while technical identifiers with digits
+    (``oauth2``, ``sha256``, ``http2``, ``s3``, ``v2``, ``k8s``, ``utf8``) are kept.
 
     Limit: a value written in key position (an answer used as a JSON key, or a line that starts
     with it followed by a colon) is listed like any key. Identifiers are ranked by how rarely they
