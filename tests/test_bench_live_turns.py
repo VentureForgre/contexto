@@ -5,7 +5,6 @@ manifest's statements. No model, no spend: everything runs on 127.0.0.1 with a f
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import plistlib
@@ -297,25 +296,29 @@ def test_managed_settings_are_read_where_claude_code_reads_them(tmp_path):
 
 
 def test_a_second_run_into_the_same_output_directory_is_refused_at_once(env, tmp_path, script):
+    from contexto.platform_compat import O_BINARY, flock_ex_nb, unlock_and_close
+
     out = tmp_path / "out"
     out.mkdir()
-    holder = os.open(out / runner.LOCK_NAME, os.O_RDWR | os.O_CREAT)
-    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)  # another run holds it
+    holder = os.open(out / runner.LOCK_NAME, os.O_RDWR | os.O_CREAT | O_BINARY)
+    flock_ex_nb(holder)  # another run holds it
     try:
         stub = stub_for(script)
         run = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, stub=stub, out=out)
         assert run.code == 2 and "another contexto bench run is writing to this output directory" in run.printed
         assert not stub.requests and sorted(p.name for p in out.iterdir()) == [runner.LOCK_NAME]
     finally:
-        os.close(holder)
+        unlock_and_close(holder)
     run = bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, out=out)
     assert run.code == 0
     # Released on the way out: another process can take it now.
-    probe = os.open(out / runner.LOCK_NAME, os.O_RDWR)
+    from contexto.platform_compat import O_BINARY, flock_ex_nb, unlock_and_close
+
+    probe = os.open(out / runner.LOCK_NAME, os.O_RDWR | O_BINARY)
     try:
-        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        flock_ex_nb(probe)
     finally:
-        os.close(probe)
+        unlock_and_close(probe)
 
 
 def test_the_lock_is_released_when_a_run_is_refused_or_fails(env, tmp_path, script, monkeypatch):
@@ -326,11 +329,13 @@ def test_the_lock_is_released_when_a_run_is_refused_or_fails(env, tmp_path, scri
     monkeypatch.setattr(runner, "_run_units", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
     with pytest.raises(RuntimeError):
         bench_stubs.run_bench(env, tmp_path, [script], arms=("full",), bound=BOUND, out=out)
-    probe = os.open(out / runner.LOCK_NAME, os.O_RDWR)
+    from contexto.platform_compat import O_BINARY, flock_ex_nb, unlock_and_close
+
+    probe = os.open(out / runner.LOCK_NAME, os.O_RDWR | O_BINARY)
     try:
-        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        flock_ex_nb(probe)
     finally:
-        os.close(probe)
+        unlock_and_close(probe)
 
 
 def test_a_lock_on_a_directory_that_was_removed_is_refused_with_a_message(env, tmp_path, script, monkeypatch):

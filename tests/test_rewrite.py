@@ -7,6 +7,7 @@ single text block to a plain string. All content is synthetic."""
 import copy
 import dataclasses
 import json
+import sys
 
 import pytest
 
@@ -1669,7 +1670,9 @@ def test_snapshot_and_both_room_publishes_share_the_request_sequence_in_the_real
     engine(request(history(3) + [user("newer")]), {}, MESSAGES)
     assert store.retained_current()[2] == store.room_stamp() == stamp + 1
     if kind == "session":
-        assert oct((tmp_path / "sessions" / "a14" / "retained.json").stat().st_mode & 0o777) == "0o600"
+        import sys
+        if sys.platform != "win32":
+            assert oct((tmp_path / "sessions" / "a14" / "retained.json").stat().st_mode & 0o777) == "0o600"
 
 
 
@@ -1895,17 +1898,27 @@ def test_cache_control_is_dropped_at_any_depth_in_order():
 def test_a_tool_input_deeper_than_the_recursion_limit_is_hashed_and_paged():
     """json.loads parses far deeper than Python recurses. A model's tool input that deep, in a message
     carrying cache_control, is normalised with a stack, not recursion, so the transform still pages."""
-    deep = json.loads('{"a":' * 5_000 + "1" + "}" * 5_000)
-    marked = {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": deep,
-                                                "cache_control": {"type": "ephemeral"}}]}
-    plain = {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": deep}]}
-    assert message_hash(marked) == message_hash(plain)
-    msgs = with_tool_turn(marked, tool_result(1)) + [user("new prompt 6")]
-    _, st, ev, store = run(msgs, config=LISTED)
-    assert "rotation" in names(ev) and st.k > 4
-    later = more_turns(msgs + [assistant(f"answer 6 {FILL}")], 7, 6) + [user("new prompt 13")]
-    _, st2, ev2, _ = run(later, state=st, store=store, config=LISTED)
-    assert "rotation" in names(ev2) and st2.k > st.k
+    # Windows CPython 3.12 caps _json's C recursion below 3,000; lower Python's recursion limit so
+    # depth 800 still strictly exceeds Python recursion while json.loads/canonical_json stay in C stack.
+    old_limit = sys.getrecursionlimit() if sys.platform == "win32" else None
+    depth = 800 if sys.platform == "win32" else 5_000
+    if old_limit is not None:
+        sys.setrecursionlimit(400)
+    try:
+        deep = json.loads('{"a":' * depth + "1" + "}" * depth)
+        marked = {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": deep,
+                                                    "cache_control": {"type": "ephemeral"}}]}
+        plain = {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": deep}]}
+        assert message_hash(marked) == message_hash(plain)
+        msgs = with_tool_turn(marked, tool_result(1)) + [user("new prompt 6")]
+        _, st, ev, store = run(msgs, config=LISTED)
+        assert "rotation" in names(ev) and st.k > 4
+        later = more_turns(msgs + [assistant(f"answer 6 {FILL}")], 7, 6) + [user("new prompt 13")]
+        _, st2, ev2, _ = run(later, state=st, store=store, config=LISTED)
+        assert "rotation" in names(ev2) and st2.k > st.k
+    finally:
+        if old_limit is not None:
+            sys.setrecursionlimit(old_limit)
 
 
 def test_the_ratio_restore_waits_for_a_request_on_the_recorded_model():

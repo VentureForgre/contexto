@@ -120,7 +120,6 @@ not on PATH or cannot be run; 130 for a Ctrl+C during the version check, before 
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -145,6 +144,15 @@ from contexto.hints import HINT_HEADERS_KEY, HINT_MARKER_KEY, HINT_STATES, OFF, 
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
 from contexto.mcp import TOOLS as MCP_TOOLS
 from contexto.paths import PROJECT_MEMORY_ENV, contexto_home, mcp_env, project_memory_env, session_dir
+from contexto.platform_compat import (
+    O_BINARY,
+    O_NOFOLLOW,
+    O_NONBLOCK,
+    available_signals,
+    flock_ex_nb,
+    new_process_group_kwargs,
+    unlock_and_close,
+)
 from contexto.private import affinity_salt, open_private, private_dir
 from contexto.proxy import ContextoProxy, affinity_key, identity_transform, is_vendor_host
 from contexto.stats import fault_notices, log_unwritable_message, print_exit_summary, quiet_from_env
@@ -190,10 +198,10 @@ EXIT_USAGE = 2
 EXIT_PROXY = 1
 EXIT_NOT_FOUND = 127
 EXIT_INTERRUPTED = 130  # 128 + SIGINT: Ctrl+C before the CLI started
-FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+FORWARDED_SIGNALS = available_signals("SIGTERM", "SIGHUP", "SIGQUIT")
 # Signals whose default action would kill the launcher alone; while claude runs they end it with SIGTERM
 # (claude's runtime may give SIGUSR1 a meaning of its own, such as a debugger).
-TERMINATING_SIGNALS = (signal.SIGUSR1, signal.SIGUSR2, signal.SIGALRM)
+TERMINATING_SIGNALS = available_signals("SIGUSR1", "SIGUSR2", "SIGALRM")
 WATCHDOG_DONE = b"done\n"
 WATCHDOG_EXITED = b"exited\n"  # the child was reaped: its pid may be reused
 # Contexto's own ``contexto run`` options, and whether each takes a value (D55: a hint when one is put
@@ -938,17 +946,20 @@ def session_in_use(home: Path, session_id: str) -> bool:
     shared lock on its ``live.lock`` (D37), so a non-blocking exclusive lock fails. False when the lock
     cannot be opened (the open that follows reports a real problem)."""
     try:
-        fd = os.open(session_dir(home, session_id) / LIVE_LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        lock_path = session_dir(home, session_id) / LIVE_LOCK
+        if O_NOFOLLOW == 0 and os.path.islink(lock_path):
+            return False
+        fd = os.open(lock_path, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_BINARY)
     except (OSError, ValueError):
         return False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        flock_ex_nb(fd)
     except BlockingIOError:
         return True
     except OSError:
         return False
     finally:
-        os.close(fd)  # releases the probe's lock
+        unlock_and_close(fd)  # releases the probe's lock
     return False
 
 
@@ -1027,12 +1038,12 @@ def choosing(home: Path, stderr=None) -> Iterator[None]:
     try:
         try:
             private_dir(home, narrow=False)
-            fd = open_private(home / CHOOSE_LOCK, os.O_RDWR | os.O_NOFOLLOW)
+            fd = open_private(home / CHOOSE_LOCK, os.O_RDWR | O_NOFOLLOW)
             started = time.monotonic()
             noticed = False
             while True:
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    flock_ex_nb(fd)
                     break
                 except BlockingIOError:
                     waited = time.monotonic() - started
@@ -1054,7 +1065,7 @@ def choosing(home: Path, stderr=None) -> Iterator[None]:
         yield
     finally:
         if fd is not None:
-            os.close(fd)  # releases the lock
+            unlock_and_close(fd)  # releases the lock
 
 
 def pick_session(options: LaunchOptions, home: Path, cwd: Path, stderr) -> tuple[SessionChoice, Any]:
@@ -1278,7 +1289,7 @@ def build_engine(store: Any,
 def write_private_json(directory: Path, name: str, payload: dict[str, Any]) -> Path:
     """Create ``directory/name`` with mode 0600 from the first byte, holding ``payload``."""
     path = directory / name
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(payload, f, allow_nan=False)
     return path
@@ -1415,7 +1426,7 @@ class Watchdog:
         try:
             process = subprocess.Popen([sys.executable, "-I", "-S", "-c", WATCHDOG, str(tmp)],
                                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.DEVNULL, start_new_session=True)
+                                       stderr=subprocess.DEVNULL, **new_process_group_kwargs())
         except (OSError, subprocess.SubprocessError) as exc:
             store.log({"event": "watchdog_unavailable", "error": type(exc).__name__})
             return None

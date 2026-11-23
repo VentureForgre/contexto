@@ -197,7 +197,7 @@ def test_anything_but_a_git_install_prints_the_version_alone(installed, direct_u
     b"\xff\xfe\x00{",  # not UTF-8
     b"[" * 100_000,  # nested past the JSON decoder's recursion limit
     b'{"vcs_info": {"vcs": "git", "commit_id": NaN}}',
-])
+], ids=["empty", "open_brace", "not_json", "null", "truncated", "bad_utf8", "deep_json", "nan"])
 def test_malformed_direct_url_json_prints_the_version_alone(installed, raw):
     installed(raw=raw)
     assert contexto.version_line() == PLAIN

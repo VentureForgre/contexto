@@ -48,7 +48,11 @@ def test_valid_client_key():
         assert not valid_client_key(bad)
 
 
-@pytest.mark.parametrize("payload", [b"", b"\x00", b"\x00\x00\x01\x02\x03", b"hello world", os.urandom(70_000)])
+@pytest.mark.parametrize(
+    "payload",
+    [b"", b"\x00", b"\x00\x00\x01\x02\x03", b"hello world", os.urandom(70_000)],
+    ids=["empty", "1b", "5b", "hello", "70k"],
+)
 def test_apply_mask_round_trip(payload):
     mask = b"\x37\xfa\x21\x3d"
     masked = apply_mask(payload, mask)

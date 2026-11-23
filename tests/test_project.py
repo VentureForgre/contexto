@@ -768,7 +768,8 @@ def test_a_session_resumed_from_another_project_stays_in_the_project_it_started_
     assert carried_ids(new_session(home, "in-sandbox", sandbox, 3)) == [rule]
 
 
-@pytest.mark.skipif(not hasattr(__import__("fcntl"), "F_GETPATH"), reason="F_GETPATH is macOS only")
+@pytest.mark.skipif(not __import__("contexto.platform_compat", fromlist=["has_fcntl_getpath"]).has_fcntl_getpath(),
+                    reason="F_GETPATH is macOS only")
 def test_another_spelling_of_a_directory_names_the_same_project(tmp_path):
     """Review B, poc6: on a file system that ignores case or Unicode normalisation, ``--dir ~/Proj`` and
     ``~/proj``, or an NFD and an NFC name, are one directory and so one project."""

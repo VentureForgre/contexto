@@ -37,6 +37,7 @@ def test_relative_home_is_made_absolute(monkeypatch, tmp_path):
 
 def test_absolute_home_expands_and_absolutizes(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "h"))
     monkeypatch.chdir(tmp_path)
     assert absolute_home("~/x") == tmp_path / "h" / "x"
     assert absolute_home("rel") == tmp_path / "rel"

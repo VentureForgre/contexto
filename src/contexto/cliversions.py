@@ -33,12 +33,18 @@ import os
 import re
 import selectors
 import shutil
-import signal
 import subprocess
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any
+
+from contexto.platform_compat import (
+    IS_WINDOWS,
+    kill_process_group,
+    new_process_group_kwargs,
+    read_fd_until,
+)
 
 # Claude Code 2.1.302: session-start signature, context-block kinds, and the missing-tools notices
 # (spikes/m2/scale/reminders), the permission refusal of Contexto's tools in -p mode (D44), and the
@@ -214,7 +220,7 @@ def installed_version(binary: str, *, timeout: float = VERSION_TIMEOUT_S,
         with spawn_guard() if spawn_guard is not None else nullcontext():
             child = subprocess.Popen([path, "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, env=None if env is None else dict(env),
-                                     start_new_session=True)
+                                     **new_process_group_kwargs())
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         return None, type(exc).__name__
     except BaseException:  # a signal the guard held, raised as it exits: the command must not outlive it
@@ -240,9 +246,17 @@ def installed_version(binary: str, *, timeout: float = VERSION_TIMEOUT_S,
 def _read_version_output(child: subprocess.Popen, deadline: float) -> tuple[bytes, bool]:
     """Read ``child``'s output until a complete line with a version, end of file, ``MAX_VERSION_OUTPUT``
     bytes, or ``deadline`` (a ``time.monotonic`` value); returns ``(output, timed_out)``."""
-    output = b""
     assert child.stdout is not None
     fd = child.stdout.fileno()
+
+    def _has_version_line(buf: bytes) -> bool:
+        *complete, _ = buf.split(b"\n")
+        return any(parse_version(line.decode("utf-8", "replace")) for line in complete)
+
+    if IS_WINDOWS:
+        return read_fd_until(fd, max_bytes=MAX_VERSION_OUTPUT, deadline=deadline,
+                             stop=_has_version_line, read_fn=os.read)
+    output = b""
     with selectors.DefaultSelector() as selector:
         selector.register(fd, selectors.EVENT_READ)
         while len(output) < MAX_VERSION_OUTPUT:
@@ -255,26 +269,14 @@ def _read_version_output(child: subprocess.Popen, deadline: float) -> tuple[byte
             if not chunk:
                 return output, False  # end of file
             output += chunk
-            *complete, _ = output.split(b"\n")
-            if any(parse_version(line.decode("utf-8", "replace")) for line in complete):
+            if _has_version_line(output):
                 return output, False  # a complete version line: no need to wait for end of file
     return output, False
 
 
 def _kill_group(child: subprocess.Popen) -> None:
     """Kill the command's process group (and so anything it left holding the pipe), then reap it."""
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except (OSError, AttributeError):
-        pass
-    try:
-        child.kill()
-    except OSError:
-        pass
-    try:
-        child.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
-        pass
+    kill_process_group(child, timeout=1.0)
     if child.stdout is not None:
         child.stdout.close()
 

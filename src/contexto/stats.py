@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from contexto.paths import session_dir
+from contexto.platform_compat import is_link_or_junction, pread
 from contexto.private import open_regular
 
 STATS_VERSION = 1  # the ``--json`` shape; raised only when a documented key changes meaning or goes
@@ -324,7 +325,7 @@ def _run_begins(fd: int, start_line: int) -> int:
     begin, held, pos, tail = start_line, 0, start_line, b""
     while pos > 0:
         size = min(pos, _LOOK_BACK_BYTES)
-        data = os.pread(fd, size, pos - size) + tail
+        data = pread(fd, size, pos - size) + tail
         pos -= size
         first = 0 if pos == 0 else data.find(b"\n") + 1  # the first line that starts in this piece
         if pos and not first:  # no line starts here: it is part of a longer one
@@ -864,8 +865,8 @@ def _page_tokens(path: Path, size: int) -> int | None:
         return None
     try:
         if not path.name.endswith(".json.gz"):
-            head = _PAGE_HEAD.match(os.pread(fd, _PAGE_HEAD_BYTES, 0))
-            tail = _PAGE_TAIL.search(os.pread(fd, _PAGE_TAIL_BYTES, max(0, size - _PAGE_TAIL_BYTES)))
+            head = _PAGE_HEAD.match(pread(fd, _PAGE_HEAD_BYTES, 0))
+            tail = _PAGE_TAIL.search(pread(fd, _PAGE_TAIL_BYTES, max(0, size - _PAGE_TAIL_BYTES)))
             if head and tail and head.group(1).decode() == page_id:
                 return int(tail.group(1))
         chunks = []
@@ -1002,7 +1003,7 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
     the log's numbers. Raises ``SessionNotFoundError`` when the session directory does not exist;
     nothing else is raised for a damaged session."""
     directory = session_dir(home, session_id)
-    if directory.is_symlink() or not directory.is_dir():
+    if is_link_or_junction(directory) or not directory.is_dir():
         from contexto.store import SessionNotFoundError
 
         raise SessionNotFoundError(f"no session {session_id!r} under {Path(home) / 'sessions'}")

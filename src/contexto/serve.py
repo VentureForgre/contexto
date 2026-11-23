@@ -169,6 +169,7 @@ from contexto.launcher import (
 )
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
 from contexto.paths import contexto_home, mcp_env
+from contexto.platform_compat import available_signals, socket_peek, unlock_and_close
 from contexto.private import open_private, private_dir, write_all, write_atomic, write_new
 from contexto.proxy import (
     LISTEN_HOST,
@@ -255,7 +256,7 @@ UNSERVED_KEPT = 1024  # ids a count_tokens found no session for, remembered for 
 UNSERVED_TTL_S = 5.0  # /context sends 26 count_tokens in a row (2.1.322): one lookup on disk, not 26
 STATUS_TIMEOUT_S = 3.0
 STOPPING_MESSAGE = "contexto serve is stopping; the request was not forwarded"
-STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+STOP_SIGNALS = available_signals("SIGINT", "SIGTERM", "SIGHUP")
 # Why a /v1/messages request was forwarded unchanged, for the stderr warning (``ServeService.unrouted``).
 UNBOUNDED_REASONS = {
     "session_cap": "every open session had a request in flight; raise --max-sessions",
@@ -872,6 +873,7 @@ class ServeService:
         self._unbounded: dict[str, list[Any]] = {}  # reason -> [when last warned, requests since]
         self._unchecked: dict[socket.socket, float] = {}  # connections before the token check -> their deadline
         self._vouched: set[socket.socket] = set()  # unchecked connections whose request line showed the token
+        self._reading: set[socket.socket] = set()  # connections whose handler is past vouch() and may drain the socket
         self._unchecked_changed = threading.Condition()
         self._server: _ServeServer | None = None
         self._thread: threading.Thread | None = None
@@ -916,7 +918,7 @@ class ServeService:
         except BaseException:
             if server is not None:
                 server.server_close()
-            os.close(lock)
+            unlock_and_close(lock)
             raise
         self._lock_fd = lock
         self._server = server
@@ -991,6 +993,7 @@ class ServeService:
         with self._unchecked_changed:
             self._unchecked.clear()
             self._vouched.clear()
+            self._reading.clear()
             self._unchecked_changed.notify_all()  # the deadline thread sees _reaper_stop and ends
         self._release_home()
         with self._refusal_lock:
@@ -1014,7 +1017,7 @@ class ServeService:
         except OSError:
             pass
         try:
-            os.close(lock)
+            unlock_and_close(lock)
         except OSError:
             pass
 
@@ -1086,13 +1089,15 @@ class ServeService:
         while it is the oldest unchecked one (round-3 review, with the cap held full: a 2 ms gap
         between the pieces was answered 25 of 25 times, 5 ms 15 of 25, 30 ms 1 of 23). A client that
         connects and waits before it sends is in the same position (docs/serve.md, "Limits")."""
+        has_dontwait = hasattr(socket, "MSG_DONTWAIT")
         for connection, _ in sorted(self._unchecked.items(), key=lambda item: item[1]):
             if connection in self._vouched:
                 continue
-            if self.shows_token(connection, wait=False):
+            if (has_dontwait or connection not in self._reading) and self.shows_token(connection, wait=False):
                 self._vouched.add(connection)
                 continue
             del self._unchecked[connection]
+            self._reading.discard(connection)
             try:
                 connection.shutdown(socket.SHUT_RD)
             except OSError:
@@ -1106,9 +1111,8 @@ class ServeService:
         ``wait`` waits for the first of them (the handler's look), else only what has arrived counts. A
         line that has not arrived whole up to the slash after the token counts as not showing it."""
         want = TOKEN_PEEK_BYTES + len(self.token_bytes) + 1
-        flags = socket.MSG_PEEK if wait else socket.MSG_PEEK | socket.MSG_DONTWAIT
         try:
-            head = connection.recv(want, flags)
+            head = socket_peek(connection, want, wait=wait)
         except OSError:  # nothing has arrived (BlockingIOError), or the connection is gone
             return False
         _, space, target = head.partition(b" ")
@@ -1120,14 +1124,17 @@ class ServeService:
         """The handler's look before it reads a new connection's first request: once its request line
         has arrived and shows the token, the connection is never the one shut to make room (it keeps
         its deadline)."""
-        if self.shows_token(connection, wait=True):
-            with self._unchecked_changed:
-                if connection in self._unchecked:
+        shown = self.shows_token(connection, wait=True)
+        with self._unchecked_changed:
+            if connection in self._unchecked:
+                self._reading.add(connection)
+                if shown:
                     self._vouched.add(connection)
 
     def _watch(self, connection: socket.socket) -> None:
         self._unchecked[connection] = time.monotonic() + self.unchecked_deadline_s
         self._vouched.discard(connection)
+        self._reading.discard(connection)
         self._unchecked_changed.notify_all()
 
     def watch(self, connection: socket.socket) -> None:
@@ -1135,17 +1142,20 @@ class ServeService:
         was refused, and its body is about to be read and dropped."""
         with self._unchecked_changed:
             self._watch(connection)
+            self._reading.add(connection)
 
     def passed(self, connection: socket.socket) -> bool:
         """The connection passed the token check: its deadline is lifted for good. False when the
         deadline came first, or it was shut to make room, and the connection is already shut."""
         with self._unchecked_changed:
             self._vouched.discard(connection)
+            self._reading.discard(connection)
             return self._unchecked.pop(connection, None) is not None
 
     def forget(self, connection: socket.socket) -> None:
         with self._unchecked_changed:
             self._vouched.discard(connection)
+            self._reading.discard(connection)
             self._unchecked.pop(connection, None)
 
     def _expire_unchecked(self) -> None:
@@ -1159,6 +1169,7 @@ class ServeService:
                 for connection in due:
                     del self._unchecked[connection]
                     self._vouched.discard(connection)
+                    self._reading.discard(connection)
                     try:
                         connection.shutdown(socket.SHUT_RD)
                     except OSError:
@@ -2265,9 +2276,10 @@ class _StopSignals:
         self._previous: dict[int, Any] = {}
 
     def install(self) -> None:
+        sighup = getattr(signal, "SIGHUP", None)
         for signum in STOP_SIGNALS:
             try:
-                if signum == signal.SIGHUP and signal.getsignal(signum) is signal.SIG_IGN:
+                if signum == sighup and signal.getsignal(signum) is signal.SIG_IGN:
                     continue  # started under nohup: a hangup stays ignored
                 self._previous[signum] = signal.signal(signum, self._handle)
             except ValueError:  # not the main thread

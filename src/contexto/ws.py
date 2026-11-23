@@ -39,6 +39,7 @@ from typing import Any
 
 from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, loads_bounded
 from contexto.hints import without_hint_headers
+from contexto.platform_compat import shutdown_socket
 
 WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_WS_MESSAGE_BYTES = 64 * 1024 * 1024  # matches proxy.MAX_DECODED_BODY_BYTES
@@ -407,10 +408,7 @@ def _open_upstream_socket(owner: Any) -> socket.socket:
 
 
 def _shut_socket(sock: socket.socket) -> None:
-    try:
-        socket.socket.shutdown(sock, socket.SHUT_RDWR)
-    except OSError:
-        pass
+    shutdown_socket(sock)
 
 
 def _ws_header_tokens(value: str | None) -> set[str]:

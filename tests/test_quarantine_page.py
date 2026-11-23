@@ -31,7 +31,8 @@ def test_moves_the_page_privately_and_keeps_its_bytes(tmp_path):
         os.umask(old)
     assert not source.exists() and target.read_bytes() == before
     assert target.parent == store.dir / "quarantine" and target.name.startswith(f"{pid}.")
-    assert mode(target) == 0o600 and mode(target.parent) == 0o700
+    if sys.platform != "win32":
+        assert mode(target) == 0o600 and mode(target.parent) == 0o700
     assert store.get_page(pid) is None
 
 

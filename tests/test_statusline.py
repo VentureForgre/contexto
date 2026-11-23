@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import pty
 import shlex
 import subprocess
 import sys
@@ -491,7 +490,10 @@ def test_the_served_lookup_reads_what_the_launcher_records(tmp_path):
     assert statusline.served_by(tmp_path, "never-seen") == [] == statusline.served_by(tmp_path / "none", OTHER_ID)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty is POSIX only")
 def test_the_command_does_not_wait_for_a_terminal_or_a_silent_pipe(tmp_path):
+    import pty
+
     write_log(tmp_path, "s", [*launch(0), request(1, tokens=50_000)])
     # A terminal on stdin (run by hand): not read at all.
     leader, follower = pty.openpty()
@@ -517,10 +519,12 @@ def test_the_command_does_not_wait_for_a_terminal_or_a_silent_pipe(tmp_path):
     proc.stdin.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty is POSIX only")
 def test_a_terminal_on_stdin_is_never_waited_on(monkeypatch):
     """Reviewer A, PR #276: without the terminal check every test still passed, because the half-second
     deadline also ends the wait. The check is held here by the code path, not by a time: a terminal is
     not even polled."""
+    import pty
     import select
 
     polled = []
@@ -758,7 +762,8 @@ def test_the_user_file_follows_claude_config_dir_and_the_managed_directory_its_r
                               env={})[1] == "added"
     assert statusline.managed_settings_dir("darwin") == Path("/Library/Application Support/ClaudeCode")
     assert statusline.managed_settings_dir("linux") == Path("/etc/claude-code")
-    assert statusline.managed_settings_dir("win32") is None
+    assert statusline.managed_settings_dir("win32") == Path(r"C:\ProgramData\ClaudeCode")
+    assert statusline.managed_settings_dir("freebsd") is None
 
 
 def test_the_files_checked_are_the_ones_claude_code_reads_in_its_order(tmp_path):

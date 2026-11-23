@@ -762,7 +762,7 @@ def test_an_option_given_twice_adds_to_the_list_and_a_long_mistyped_id_is_not_ec
     assert set(memory(capsys, root).values()) == {False}
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads and writes whatever the mode")
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads and writes whatever the mode")
 def test_what_cannot_be_read_or_written_is_reported_in_one_line_each(three, capsys, home):
     root, (s1, s2, _), duty, choice = three
     locked = new_session(home, "locked", root, 4)

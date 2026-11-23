@@ -43,6 +43,17 @@ from typing import Any
 
 from contexto import stats
 from contexto.paths import absolute_home, contexto_home, session_dir
+from contexto.platform_compat import (
+    IS_WINDOWS,
+    O_BINARY,
+    O_NOFOLLOW,
+    O_NONBLOCK,
+    flock_ex_nb,
+    is_link_or_junction,
+    quote_command,
+    read_fd_until,
+    unlock_and_close,
+)
 from contexto.private import open_regular, read_regular
 from contexto.stats import session_stats
 
@@ -63,7 +74,9 @@ STDIN_WAIT_S = 0.5  # how long a pipe on stdin may stay silent before the comman
 STDIN_LIMIT = 1 << 20  # Claude Code's JSON is a few kilobytes
 SETTINGS_LIMIT = 8 << 20  # a settings file larger than this is not read, so it counts as unreadable
 EXPANSION = "${"  # Claude Code expands ${VAR} in an MCP config (D55); ``launch_status_line`` has the rule
-MANAGED_DIRS = {"darwin": "/Library/Application Support/ClaudeCode", "linux": "/etc/claude-code"}
+_WIN_UNSAFE_CMD_CHARS = frozenset('\r\n"%!')  # characters cmd.exe expands or splits even inside quotes
+MANAGED_DIRS = {"darwin": "/Library/Application Support/ClaudeCode", "linux": "/etc/claude-code",
+                "win32": r"C:\ProgramData\ClaudeCode"}
 # A log line that holds a launch, a proxy start or a tool call contains one of these words; any other
 # line that happens to contain one is parsed and then ignored. They are searched for one at a time with
 # ``bytes.find``: one regular expression for the three was 20 times slower over a 3 MB log.
@@ -188,7 +201,7 @@ def session_numbers(home: Path, session_id: str) -> dict[str, Any] | None:
     ``paged`` (page files in the store), ``recalls`` and ``searches`` (tool calls that succeeded),
     ``stopped`` (paging is stopped now) and its ``cause``. A value is None when nothing supports it."""
     directory = session_dir(home, session_id)
-    if directory.is_symlink() or not directory.is_dir():
+    if is_link_or_junction(directory) or not directory.is_dir():
         return None
     try:
         numbers = quick_numbers(directory)
@@ -340,7 +353,7 @@ def find_session(home: Path, given: str) -> str | None:
         path = session_dir(home, given)
     except ValueError:
         return None
-    if path.is_symlink():
+    if is_link_or_junction(path):
         return None
     if path.is_dir():
         return given
@@ -357,7 +370,7 @@ def _is_session(home: Path, name: str) -> bool:
         path = session_dir(home, name)
     except ValueError:
         return False
-    return not path.is_symlink() and path.is_dir()
+    return not is_link_or_junction(path) and path.is_dir()
 
 
 def served_by(home: Path, claude_session: str) -> list[tuple[float, str]]:
@@ -398,20 +411,21 @@ def session_live(home: Path, session_id: str) -> bool:
     """Whether a launch has the session open now: the proxy, the launcher and the MCP server each hold a
     shared lock on its ``live.lock`` (D37), so a non-blocking exclusive lock fails. The probe the
     launcher's ``session_in_use`` makes; its lock is dropped at once."""
-    import fcntl
-
     try:
-        fd = os.open(session_dir(home, session_id) / "live.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        lock_path = session_dir(home, session_id) / "live.lock"
+        if O_NOFOLLOW == 0 and os.path.islink(lock_path):
+            return False
+        fd = os.open(lock_path, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_BINARY)
     except (OSError, ValueError):
         return False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        flock_ex_nb(fd)
     except BlockingIOError:
         return True
     except OSError:
         return False
     finally:
-        os.close(fd)
+        unlock_and_close(fd)
     return False
 
 
@@ -493,6 +507,29 @@ def stdin_object(stream: Any) -> dict[str, Any] | None:
         if os.isatty(fd):
             return None
         deadline = time.monotonic() + STDIN_WAIT_S
+        if IS_WINDOWS:
+            parsed: dict[str, Any] | None = None
+
+            def _complete(buf: bytes) -> bool:
+                nonlocal parsed
+                if len(buf) > STDIN_LIMIT:
+                    return True
+                if buf.rstrip().endswith(b"}"):
+                    try:
+                        found = json.loads(buf)
+                    except ValueError:
+                        return False
+                    parsed = found if isinstance(found, dict) else None
+                    return True
+                return False
+
+            data, timed_out = read_fd_until(fd, max_bytes=STDIN_LIMIT + 1, deadline=deadline, stop=_complete)
+            if timed_out or len(data) > STDIN_LIMIT:
+                return None
+            if parsed is not None:
+                return parsed
+            found = json.loads(data)
+            return found if isinstance(found, dict) else None
         data = b""
         while True:
             ready, _, _ = select.select([fd], [], [], max(0.0, deadline - time.monotonic()))
@@ -592,19 +629,17 @@ def settings_files(cwd: Path, user_home: Path, env: Mapping[str, str] | None,
 
 
 def installed_command(session_id: str, home: Path, own_settings: Sequence[Path], *, color: bool,
-                      executable: str | None = None) -> str:
+                      executable: str | None = None, platform: str | None = None) -> str:
     """The shell command for the launcher's ``statusLine``. Nothing in it depends on the environment
     Claude Code gives the command (2.1.318 and 2.1.322 pass the launcher's on, which is measured and
     not documented): the
     interpreter is this one by its absolute path, ``-P`` keeps the project's directory off ``sys.path``
     as it does for the MCP server, and the session, the store home and the settings files to re-check
-    are arguments. Each is one ``--name=value`` token, quoted for a POSIX shell, so an id that starts
-    with ``-`` or a home with spaces or quotes arrives whole."""
-    import shlex
-
+    are arguments. Each is one ``--name=value`` token, quoted for the platform's shell, so an id that
+    starts with ``-`` or a home with spaces or quotes arrives whole."""
     argv = [executable or sys.executable, "-P", "-m", "contexto", "statusline", f"--session={session_id}",
             f"--home={home}", *(f"--own-settings={path}" for path in own_settings)]
-    return shlex.join([*argv, "--color"] if color else argv)
+    return quote_command([*argv, "--color"] if color else argv, platform=platform)
 
 
 def opted_out(env: Mapping[str, str]) -> bool:
@@ -668,6 +703,12 @@ def launch_status_line(session_id: str, home: Path, cwd: Path, *, enabled: bool 
             return {}, "managed_hooks_only"
         # The files a `/statusline` during this session could write: the command re-checks them.
         watched = [Path(cwd) / path for kind, path in files if kind != "managed"]
+        if IS_WINDOWS and any(
+            ch in _WIN_UNSAFE_CMD_CHARS
+            for value in (sys.executable, session_id, str(home), *(str(p) for p in watched))
+            for ch in value
+        ):
+            return {}, "unsafe_path"
         command = installed_command(session_id, home, watched, color=not env.get("NO_COLOR"))
         if EXPANSION in command:
             return {}, "unsafe_path"

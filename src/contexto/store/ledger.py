@@ -28,7 +28,6 @@ line with a bad id or chain link, is left for a human and ``repair()`` refuses.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -39,6 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from contexto.canonical import canonical_bytes
+from contexto.platform_compat import O_BINARY, flock_ex, flock_sh, flock_sh_nb, fsync_dir, unlock_and_close
 from contexto.private import (
     NotRegularFileError,
     open_private,
@@ -156,11 +156,7 @@ def _intact(lines: list[_Line]) -> list[_Line]:
 
 
 def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    fsync_dir(path)
 
 
 def _draft_fields(draft: dict) -> dict:
@@ -206,10 +202,10 @@ class Ledger:
         except NotRegularFileError as e:  # a symlink, FIFO or directory in its place: damage, as for the ledger (D58)
             raise LedgerCorruptError(f"{LOCK_FILE} is not a regular file") from e
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            flock_ex(fd) if exclusive else flock_sh(fd)
             yield True
         finally:
-            os.close(fd)  # closing the descriptor releases the flock
+            unlock_and_close(fd)  # closing the descriptor releases the flock
 
     def _read(self) -> bytes:
         try:
@@ -255,14 +251,14 @@ class Ledger:
         fd = None
         try:
             fd = open_regular(self.lock_path)
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            flock_sh_nb(fd)
         except OSError:  # no lock file yet, not a regular file, or held by a writer
             pass
         try:
             return self._records(self._lines())
         finally:
             if fd is not None:
-                os.close(fd)  # closing the descriptor releases the flock
+                unlock_and_close(fd)  # closing the descriptor releases the flock
 
     def head(self) -> str:
         """Return the SHA-256 of the last intact line, or GENESIS_PREV when there is none."""
@@ -352,7 +348,7 @@ class Ledger:
             data = self._read()
             bad = data[tail.offset :]
             quarantined = self._quarantine(bad)
-            fd = os.open(self.path, os.O_WRONLY)
+            fd = os.open(self.path, os.O_WRONLY | O_BINARY)
             try:
                 os.ftruncate(fd, tail.offset)
                 os.fsync(fd)

@@ -417,4 +417,4 @@ def test_contexto_run_codex_passes_the_budget_to_the_mcp_server(tmp_path):
     launch = plan_codex([], "http://127.0.0.1:1", "S1", auth_mode="chatgpt", env=env, cwd=tmp_path, home=tmp_path,
                         contexto_home=home)
     assert 'mcp_servers.contexto.env.CONTEXTO_SEARCH_CACHE_MB="16"' in launch.argv
-    assert f'mcp_servers.contexto.env.CONTEXTO_HOME="{home}"' in launch.argv
+    assert f'mcp_servers.contexto.env.CONTEXTO_HOME={json.dumps(str(home))}' in launch.argv

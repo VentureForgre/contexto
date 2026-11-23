@@ -57,6 +57,7 @@ from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from contexto.canonical import loads_bounded
+from contexto.platform_compat import O_BINARY, O_CLOEXEC, O_NONBLOCK
 from contexto.private import read_regular_text
 
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
@@ -77,7 +78,8 @@ MANAGED_KIND = "managed"
 # it, since a variable could be inherited from a project's settings ``env`` block through a session
 # and hide the real file from a nested launch. The test suite patches this table in its own process.
 MANAGED_SETTINGS_FILES = {"darwin": "/Library/Application Support/ClaudeCode/managed-settings.json",
-                          "linux": "/etc/claude-code/managed-settings.json"}
+                          "linux": "/etc/claude-code/managed-settings.json",
+                          "win32": r"C:\ProgramData\ClaudeCode\managed-settings.json"}
 PROVIDER_PREFIX = "CLAUDE_CODE_USE_"  # every cloud-provider switch (CLOUD_PROVIDER_KEYS) starts with it
 SETTINGS_FILE_LIMIT = 4 * 1024 * 1024  # bytes read from one settings file; real ones are a few kilobytes
 GLOBAL_CONFIG_LIMIT = 16 * 1024 * 1024  # bytes read from Claude Code's global config (.claude.json)
@@ -367,7 +369,7 @@ def read_settings_file(path: Path, *, require_object: bool = False,
     oversized integers and non-finite floats are rejected rather than coerced to ``inf`` so re-serialising
     a merged ``--settings`` file cannot emit ``Infinity``."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(path, os.O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_BINARY)
     except (OSError, ValueError):  # missing, not permitted, a symlink loop, a name the system rejects
         return SettingsFile(None, None)
     try:

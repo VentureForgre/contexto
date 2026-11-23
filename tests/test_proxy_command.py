@@ -62,7 +62,10 @@ def test_proxy_command_serves_and_logs_to_the_session(tmp_path: Path):
         conn.request("HEAD", "/api/hello")
         assert conn.getresponse().status == 200
         conn.close()
-        proc.send_signal(signal.SIGINT)
+        if sys.platform == "win32":
+            proc.terminate()
+        else:
+            proc.send_signal(signal.SIGINT)
         proc.wait(timeout=60)  # Ctrl+C is how the proxy is stopped; it must exit on it
     finally:
         if proc.poll() is None:

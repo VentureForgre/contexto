@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import gzip
 import io
 import json
@@ -13,6 +12,7 @@ import time
 import pytest
 
 from contexto import mcp, private
+from contexto.platform_compat import O_BINARY, flock_ex_nb, unlock_and_close
 from contexto.store import MetaCorruptError, SessionStore
 from contexto.store import project as project_module
 from contexto.store.catalog import PageCatalog
@@ -183,14 +183,14 @@ def test_charge_turn_room_does_not_hold_meta_lock_during_callback(tmp_path):
 
     def charge(remaining):
         # Verify meta.lock is NOT held while response formatting runs.
-        fd = os.open(store.dir / "meta.lock", os.O_RDWR)
+        fd = os.open(store.dir / "meta.lock", os.O_RDWR | O_BINARY)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            flock_ex_nb(fd)
             probe_results.append(True)
         except BlockingIOError:
             probe_results.append(False)
         finally:
-            os.close(fd)
+            unlock_and_close(fd)
         # Another store instance can update metadata without blocking!
         SessionStore(tmp_path, "s1").set_window(120_000, 2.5)
         return min(remaining, 100)
@@ -231,7 +231,10 @@ def test_page_catalog_listing_ignores_symlinks(tmp_path):
     outside = tmp_path / "outside.json"
     outside.write_text(json.dumps(store.get_page(good)), encoding="utf-8")
     link = store.pages_dir / "pg_0123456789abcdef.json"
-    link.symlink_to(outside)
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks require elevated privileges on this Windows host")
 
     catalog = PageCatalog(store.pages_dir, store.log)
     with catalog._lock:

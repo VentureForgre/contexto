@@ -66,7 +66,10 @@ def test_sessions_list_skips_symlinks_out_of_sessions(home, capsys, tmp_path_fac
     make(home, "real", 1_000_000)
     elsewhere = tmp_path_factory.mktemp("elsewhere")
     SessionStore(elsewhere, "foreign")
-    (home / "sessions" / "linked").symlink_to(elsewhere / "sessions" / "foreign")
+    try:
+        (home / "sessions" / "linked").symlink_to(elsewhere / "sessions" / "foreign")
+    except OSError:
+        pytest.skip("symlinks require elevated privileges on this Windows host")
     _, out, _ = run(capsys, "sessions", "list", "--json")
     assert [d["id"] for d in json.loads(out)] == ["real"]
 
@@ -153,7 +156,8 @@ UNREADABLE_PAGES = [
 ]
 
 
-@pytest.mark.parametrize("content", UNREADABLE_PAGES)
+@pytest.mark.parametrize("content", UNREADABLE_PAGES,
+                         ids=["deep_json", "not_json", "bad_messages_type", "bad_messages_field", "array"])
 def test_recall_of_an_unreadable_page_exits_1_with_a_clean_error(home, capsys, content):
     """Rule 18: a page file that cannot be read is logged page_unreadable; the CLI says so."""
     store, pid = make(home, "s1", 1_000_000)
@@ -260,6 +264,7 @@ def test_mcp_resolves_contexto_home_like_the_other_subcommands(tmp_path, monkeyp
     from contexto import paths
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
     if value is None:
         monkeypatch.delenv("CONTEXTO_HOME", raising=False)
@@ -281,6 +286,7 @@ def test_mcp_home_option_is_expanded_and_absolute(tmp_path, monkeypatch, value):
     import contexto.mcp
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CONTEXTO_HOME", str(tmp_path / "ignored"))  # --home wins
     seen = {}

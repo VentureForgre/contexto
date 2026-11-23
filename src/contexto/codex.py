@@ -49,6 +49,14 @@ from urllib.parse import urlsplit
 
 from contexto import inturn, paths
 from contexto.canonical import canonical_bytes, loads_bounded
+from contexto.platform_compat import (
+    O_BINARY,
+    O_NONBLOCK,
+    chmod_private,
+    is_link_or_junction,
+    key_helper_shell,
+    new_process_group_kwargs,
+)
 from contexto.rewrite import CARRIED_TEXT, SESSION_START, UNCLASSIFIED, Dialect
 from contexto.stats import print_exit_summary
 from contexto.tokens import TokenEstimator
@@ -317,9 +325,9 @@ CHATGPT_MODE_HELP = ("ChatGPT login: route the user's own Codex ChatGPT credenti
 CODEX_BIN = "codex"
 # Codex runs ``auth.command`` itself, with ``args``, without a shell (codex-rs ModelProviderAuthInfo,
 # 0.166.0). Claude Code runs ``apiKeyHelper`` through a shell, and Contexto reuses that helper, so the
-# helper string goes to /bin/sh -c as one argument: ``~``, ``$VAR``, pipes and quoting work as they do
-# for Claude Code (D54).
-KEY_HELPER_SHELL = "/bin/sh"
+# helper string goes to the platform's shell (``/bin/sh -c`` on POSIX, ``cmd.exe /c`` on Windows) as
+# one argument: ``~``, ``$VAR``, pipes and quoting work as they do for Claude Code (D54).
+KEY_HELPER_SHELL, KEY_HELPER_SHELL_ARGS = key_helper_shell()
 # Codex's interactive TUI starts a shared background app-server for each CODEX_HOME and leaves it
 # running after the TUI exits, with an updater that downloads new Codex releases into the home
 # (measured on 0.166.0: two processes and 517 MB per home, 936 MB after one self-update).
@@ -512,7 +520,7 @@ def _load_user_config(user_home: Path | None) -> tuple[dict[str, Any], str | Non
     label = _safe_path_label(path)
     fd: int | None = None
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(path, os.O_RDONLY | O_NONBLOCK | O_BINARY)
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return {}, f"ignored {label}: not a regular file"
@@ -589,7 +597,8 @@ def _mcp_server(session_id: str) -> tuple[str, list[str]]:
 def api_key_config(proxy_url: str, helper: str | None, session_id: str, contexto_home: Path,
                    env: dict[str, str] | None = None, *, env_key: str | None = None,
                    supports_websockets: bool = False,
-                   user_config: dict[str, Any] | None = None) -> str:
+                   user_config: dict[str, Any] | None = None,
+                   platform: str | None = None) -> str:
     mcp_command, mcp_args = _mcp_server(session_id)
     if helper is not None:
         if not helper.strip():
@@ -603,7 +612,8 @@ def api_key_config(proxy_url: str, helper: str | None, session_id: str, contexto
         "supports_websockets": supports_websockets,
     }
     if helper is not None:
-        provider["auth"] = {"command": KEY_HELPER_SHELL, "args": ["-c", helper]}
+        shell, shell_args = key_helper_shell(platform=platform, env=env)
+        provider["auth"] = {"command": shell, "args": [*shell_args, helper]}
     else:
         assert env_key is not None
         provider["env_key"] = env_key
@@ -768,7 +778,7 @@ def help_lists_no_daemon(codex: str) -> bool:
     group, stdin closed; False when it cannot be run)."""
     try:
         out = subprocess.run([codex, "--help"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, timeout=HELP_TIMEOUT_S, start_new_session=True)
+                             stderr=subprocess.DEVNULL, timeout=HELP_TIMEOUT_S, **new_process_group_kwargs())
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
     return re.search(rb"(?m)^\s*--no-daemon\b", out.stdout) is not None
@@ -849,6 +859,8 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
         # Kept under the Contexto session directory so Codex's rollouts stay resumable; only the
         # config (which names the helper command) and symlinks to user assets are removed on exit.
         codex_home = Path(codex_home_dir)
+        if is_link_or_junction(codex_home):
+            raise CodexLaunchError(f"session codex-home {str(codex_home)!r} is a symlink")
         codex_home.mkdir(mode=0o700, parents=True, exist_ok=True)
         keep = True
     else:
@@ -861,14 +873,16 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     user_config, cfg_note = ({}, None) if same_home else _load_user_config(user_home)
     if cfg_note:
         notes.append(cfg_note)
+    if is_link_or_junction(codex_home):
+        raise CodexLaunchError(f"session codex-home {str(codex_home)!r} is a symlink")
     config = codex_home / "config.toml"
     linked: list[Path] = []
+    config_created = False
     try:
-        if codex_home.is_symlink():
-            raise CodexLaunchError(f"session codex-home {str(codex_home)!r} is a symlink")
-        codex_home.chmod(0o700)
+        chmod_private(codex_home, 0o700)
         config.unlink(missing_ok=True)  # a stale config or broken symlink from an interrupted run
-        fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, 0o600)
+        config_created = True
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(api_key_config(proxy_url, helper, session_id, contexto_home, base_env,
                                    env_key=env_key, supports_websockets=supports_websockets,
@@ -879,7 +893,8 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
             if link.is_symlink():
                 link.unlink(missing_ok=True)
         if keep:
-            config.unlink(missing_ok=True)
+            if config_created:
+                config.unlink(missing_ok=True)
         else:
             shutil.rmtree(codex_home, ignore_errors=True)
         raise
@@ -899,8 +914,8 @@ def add_arguments(parser) -> None:
                             f"directory whose provider runs the key helper). {CHATGPT_MODE}: {CHATGPT_MODE_HELP}")
     group.add_argument("--codex-key-helper", default=None,
                        help=f"command that prints the API key, for example '{KEY_HELPER_EXAMPLE}', run with "
-                            f"{KEY_HELPER_SHELL} -c as Claude Code runs apiKeyHelper (default ${KEY_HELPER_ENV}, "
-                            "else Claude Code's apiKeyHelper)")
+                            f"{KEY_HELPER_SHELL} {' '.join(KEY_HELPER_SHELL_ARGS)} as Claude Code runs apiKeyHelper "
+                            f"(default ${KEY_HELPER_ENV}, else Claude Code's apiKeyHelper)")
     group.add_argument("--codex-upstream", default=None,
                        help=f"upstream for Codex requests, with its version path, such as https://api.openai.com/v1 "
                             f"(default ${UPSTREAM_ENV}, else the ChatGPT backend in chatgpt mode, else Claude Code's "
