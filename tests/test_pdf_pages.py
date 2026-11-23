@@ -1406,9 +1406,35 @@ def test_png_predictor_supports_multibyte_bpp_and_indirect_decode_parms():
     # Colors=3, BitsPerComponent=8 -> bpp=3
     raw = _png_predicted_objstm_pdf(9, predictor=15, columns=5, filter_fn=lambda r: r % 5, colors=3, bpc=8)
     assert count_pages(raw) == (9, True)
-    # Indirect /DecodeParms and /Columns
+    # Indirect /Columns
     raw_ind = raw.replace(b"/Columns 5", b"/Columns 99 0 R") + b"99 0 obj 5 endobj\n"
     assert count_pages(raw_ind) == (9, True)
+    # Indirect /DecodeParms dictionary and array form [/DecodeParms [<< ... >>]]
+    parms = b"<< /Predictor 15 /Columns 5 /Colors 3 /BitsPerComponent 8 >>"
+    raw_ind_parms = raw.replace(b"/DecodeParms " + parms, b"/DecodeParms 98 0 R") + b"98 0 obj " + parms + b" endobj\n"
+    assert count_pages(raw_ind_parms) == (9, True)
+    raw_arr_parms = raw.replace(b"/DecodeParms " + parms, b"/DecodeParms [" + parms + b"]")
+    assert count_pages(raw_arr_parms) == (9, True)
+    # Sub-byte and 16-bit BitsPerComponent values (1, 2, 4, 16)
+    for bpc, cols in [(1, 32), (2, 16), (4, 8), (16, 4)]:
+        sub = _png_predicted_objstm_pdf(4, predictor=12, columns=cols, filter_fn=lambda r: 2, colors=1, bpc=bpc)
+        assert count_pages(sub) == (4, True)
+
+
+@pytest.mark.parametrize("columns", [126, 2_000_000], ids=["many-paeth-rows", "wide-paeth-row"])
+def test_png_paeth_predictor_respects_step_budget_and_yields(columns):
+    # Crafted 2-4 MiB Paeth-filtered object stream must hit PDF_MAX_STEPS promptly instead of CPU DoS.
+    stride = columns + 1
+    rows = max(1, (2 * 1024 * 1024) // stride)
+    payload = zlib.compress((b"\x04" + b"\x00" * columns) * rows)
+    pdf = (
+        b"%%PDF-1.7\n5 0 obj << /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode "
+        b"/DecodeParms << /Predictor 14 /Columns %d >> /Length %d >>\nstream\n" % (columns, len(payload))
+        + payload + b"\nendstream\nendobj\n"
+    )
+    started = time.monotonic()
+    assert count_pages(pdf) == (PDF_MAX_PAGES, False)
+    assert time.monotonic() - started < 2.0
 
 
 def test_unsupported_or_corrupt_predictors_stay_uncertain():

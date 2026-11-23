@@ -273,8 +273,8 @@ def image_size(head: bytes) -> tuple[int, int] | None:
             return struct.unpack("<HH", head[6:10])
         if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
             chunk = head[12:16]
-            if chunk == b"VP8 ":  # lossy: 14-bit sizes after the frame tag and start code
-                if len(head) < 30:
+            if chunk == b"VP8 ":  # lossy keyframe: frame tag bit 0 == 0, start code 9d 01 2a, 14-bit sizes
+                if len(head) < 30 or (head[20] & 1) != 0 or head[23:26] != b"\x9d\x01\x2a":
                     return None
                 width, height = struct.unpack("<HH", head[26:30])
                 return width & 0x3FFF, height & 0x3FFF
@@ -338,7 +338,7 @@ def _is_low_detail_image(block: dict) -> bool:
     detail = block.get("detail")
     if detail is None and isinstance(block.get("image_url"), dict):
         detail = block["image_url"].get("detail")
-    return isinstance(detail, str) and detail.strip().lower() == "low"
+    return detail == "low"
 
 
 def _image_cost(block: dict) -> tuple[int, int]:
@@ -632,7 +632,7 @@ class TokenEstimator:
     def observe(self, request_bytes: int, input_tokens: int | float, *, tool_result: bool = False) -> None:
         """Record a request's byte size and real input tokens (without media, D48) using EWMA decay.
         Set ``tool_result=True`` to update the separate tool-result ratio."""
-        if request_bytes <= 0 or input_tokens <= 0:
+        if request_bytes <= 0 or not math.isfinite(input_tokens) or input_tokens <= 0:
             return
         if tool_result:
             if self.tool_tokens:

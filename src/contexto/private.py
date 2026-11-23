@@ -211,7 +211,12 @@ def _alive(pid: int) -> bool:
     return True
 
 
-_LINK_UNSUPPORTED = frozenset({errno.EPERM, errno.EOPNOTSUPP, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)})
+_LINK_UNSUPPORTED = frozenset({
+    errno.EPERM,
+    errno.EOPNOTSUPP,
+    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+    getattr(errno, "ENOSYS", errno.EOPNOTSUPP),
+})
 
 
 def write_new(path: Path, data: bytes) -> bool:
@@ -238,6 +243,7 @@ def write_new(path: Path, data: bytes) -> bool:
         except OSError as exc:
             if exc.errno not in _LINK_UNSUPPORTED:
                 raise
+            _discard(tmp)
             return _write_new_excl(path, data)
     except FileExistsError:
         return False

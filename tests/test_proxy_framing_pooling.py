@@ -616,7 +616,7 @@ def test_client_watch_wakes_immediately_and_joins_on_close():
         watch.close()
         elapsed = time.monotonic() - started
         assert not watch._thread.is_alive()
-        assert elapsed < 0.04  # event-driven pipe wakeup: well below the old 50 ms poll interval
+        assert elapsed < 0.25  # event-driven pipe wakeup: well below the 5000 ms poll timeout
         assert watch._wake_r is None and watch._wake_w is None
         # Idempotent second close
         watch.close()
@@ -625,8 +625,9 @@ def test_client_watch_wakes_immediately_and_joins_on_close():
         b.close()
 
 
-def test_transform_flush_hook_runs_outside_transform_lock():
+def test_transform_flush_deferred_runs_outside_lock_and_regular_flush_is_not_called():
     locked_during_flush: list[bool] = []
+    regular_flush_calls: list[int] = []
 
     class FlushingTransform:
         preserves_input = True
@@ -635,6 +636,10 @@ def test_transform_flush_hook_runs_outside_transform_lock():
             return req, headers, []
 
         def flush(self):
+            # Must NEVER be auto-called per request (collides with SessionRecorder.flush).
+            regular_flush_calls.append(1)
+
+        def flush_deferred(self):
             locked_during_flush.append(proxy.transform_lock.locked())
 
     class Ok(BaseHTTPRequestHandler):
@@ -663,7 +668,354 @@ def test_transform_flush_hook_runs_outside_transform_lock():
         assert conn.getresponse().status == 200
         conn.close()
         assert locked_during_flush == [False]
+        assert regular_flush_calls == []
     finally:
         proxy.stop()
         server.shutdown()
         server.server_close()
+
+
+def test_stream_hold_streams_hosted_responses_calls_live_and_holds_only_client_calls():
+    triggers: list[int] = []
+    hold = StreamHold("responses", lambda: triggers.append(1))
+    hosted = (
+        b"event: response.output_item.added\n"
+        b'data: {"type":"response.output_item.added","item":{"type":"web_search_call","id":"ws_1"}}\n\n'
+    )
+    hosted_delta = (
+        b"event: response.web_search_call.completed\n"
+        b'data: {"type":"response.web_search_call.completed","item_id":"ws_1"}\n\n'
+    )
+    # Hosted tool calls stream live without holding.
+    assert hold.feed(hosted) == [hosted]
+    assert hold.feed(hosted_delta) == [hosted_delta]
+    assert not hold.holding and not hold.client_calls and hold.held_events == 0
+
+    # A subsequent client function_call DOES activate StreamHold.
+    client_call = (
+        b"event: response.output_item.added\n"
+        b'data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"fc_1"}}\n\n'
+    )
+    completed = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n'
+    )
+    assert hold.feed(client_call) == []
+    assert hold.holding and hold.client_calls
+    assert hold.feed(completed) == [client_call, completed]
+    assert triggers == [1]
+
+
+def test_post_is_never_retried_in_wait_headers_on_reused_pooled_socket():
+    """RFC 9112 §9.8 & Contract Rule 8: a non-idempotent POST that fails in wait_headers after
+    endheaders() completes on a reused pooled socket returns 502 instead of silently re-executing."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(4)
+    port = server.getsockname()[1]
+    posts_seen = 0
+
+    def run_upstream():
+        nonlocal posts_seen
+        s1, _ = server.accept()
+        with s1:
+            # 1st request (GET): answer with keep-alive so proxy pools s1.
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                buf += s1.recv(65536)
+            s1.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            # 2nd request (POST) arrives on pooled s1: read full request, then drop before headers!
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = s1.recv(65536)
+                if not chunk:
+                    return
+                buf += chunk
+            posts_seen += 1
+            # Close without sending a response (RemoteDisconnected in wait_headers).
+
+    t = threading.Thread(target=run_upstream, daemon=True)
+    t.start()
+    log = _Log()
+    proxy = ContextoProxy(f"http://127.0.0.1:{port}", log)
+    proxy.start()
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=5)
+        c.request("GET", "/warm")
+        assert c.getresponse().read() == b"ok"
+        c.request("POST", "/v1/messages", body=b'{"messages":[]}', headers={"Content-Type": "application/json"})
+        resp = c.getresponse()
+        assert resp.status == 502
+        resp.read()
+        c.close()
+        assert posts_seen == 1
+    finally:
+        proxy.stop()
+        server.close()
+        t.join(timeout=2.0)
+
+
+def test_head_304_1xx_and_chunked_plus_cl_upstream_response_framing():
+    """Verify HEAD, 304 (with CL), 103 interim (never pooled), and TE:chunked+CL responses."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+    port = server.getsockname()[1]
+
+    def read_req(sock: socket.socket) -> bytes:
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        return buf
+
+    def run_upstream():
+        # Connection 1: HEAD with CL, 304 with CL, TE:chunked + bogus CL
+        s1, _ = server.accept()
+        with s1:
+            read_req(s1)
+            s1.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 123\r\n\r\n")
+            read_req(s1)
+            s1.sendall(b"HTTP/1.1 304 Not Modified\r\nContent-Length: 45\r\n\r\n")
+            read_req(s1)
+            s1.sendall(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 999\r\n\r\n"
+                b"5\r\nhello\r\n0\r\n\r\n"
+            )
+            # 103 interim response: proxy must NOT pool s1 after this!
+            read_req(s1)
+            s1.sendall(b"HTTP/1.1 103 Early Hints\r\nLink: </a.css>; rel=preload\r\n\r\n")
+        # Connection 2 (fresh, proving 103 did not poison the pool): normal 200 OK
+        s2, _ = server.accept()
+        with s2:
+            read_req(s2)
+            s2.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nfresh")
+
+    t = threading.Thread(target=run_upstream, daemon=True)
+    t.start()
+    proxy = ContextoProxy(f"http://127.0.0.1:{port}", _Log())
+    proxy.start()
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=5)
+        c.request("HEAD", "/meta")
+        r1 = c.getresponse()
+        assert r1.status == 200 and r1.getheader("Content-Length") == "123"
+        assert r1.getheader("Transfer-Encoding") is None
+        assert r1.read() == b""
+
+        c.request("GET", "/cached")
+        r2 = c.getresponse()
+        assert r2.status == 304 and r2.getheader("Content-Length") == "45"
+        assert r2.getheader("Transfer-Encoding") is None
+        assert r2.read() == b""
+
+        c.request("GET", "/chunked-plus-cl")
+        r3 = c.getresponse()
+        assert r3.status == 200 and r3.getheader("Transfer-Encoding") == "chunked"
+        assert r3.getheader("Content-Length") is None
+        assert r3.read() == b"hello"
+        c.close()
+
+        # 103 interim response is not pooled and closes client connection cleanly.
+        raw_sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=5)
+        try:
+            raw_sock.sendall(b"GET /early HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = raw_sock.recv(4096)
+                if not chunk:
+                    break
+                head += chunk
+            assert head.startswith(b"HTTP/1.1 103 ")
+        finally:
+            raw_sock.close()
+
+        # Next request gets a fresh upstream connection and reads "fresh", never stale bytes.
+        c2 = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=5)
+        c2.request("GET", "/after-103")
+        r4 = c2.getresponse()
+        assert r4.status == 200 and r4.read() == b"fresh"
+        c2.close()
+    finally:
+        proxy.stop()
+        server.close()
+        t.join(timeout=2.0)
+
+
+@pytest.mark.parametrize("raw_request", [
+    b"POST /x HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n0\r\n\r\n",
+    b"POST /x HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: notchunked\r\n\r\n0\r\n\r\n",
+    b"POST /x HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: gzip\r\n\r\nabc",
+    b"POST /x HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n" + b"X-T: 1\r\n" * 70 + b"\r\n",
+], ids=["te-and-cl", "te-notchunked", "te-nonchunked", "excessive-trailers"])
+def test_strict_transfer_encoding_and_trailer_caps_return_400_with_connection_close(raw_request):
+    proxy = ContextoProxy("http://127.0.0.1:1", _Log())
+    proxy.start()
+    try:
+        raw_resp = _raw_exchange(proxy.port, raw_request)
+        head = raw_resp.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+        assert head.startswith("HTTP/1.1 400 ")
+        assert "connection: close" in head.lower()
+    finally:
+        proxy.stop()
+
+
+def test_upstream_pool_eviction_ttl_dirty_discard_and_unstarted_proxy_stop():
+    from contexto.proxy import _UpstreamPool
+
+    class FakeSock:
+        def __init__(self, fileno_val: int = -1, dirty: bool = False):
+            self._fd = fileno_val
+            self._dirty = dirty
+            self.closed = False
+
+        def fileno(self) -> int:
+            return self._fd
+
+    class FakeConn:
+        def __init__(self, sock=None):
+            self.sock = sock
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+            self.sock = None
+
+    # Max-idle eviction closes oldest connection.
+    a1, b1 = socket.socketpair()
+    a2, b2 = socket.socketpair()
+    a3, b3 = socket.socketpair()
+    try:
+        pool = _UpstreamPool(max_idle=2, idle_ttl_s=30.0)
+        c1, c2, c3 = FakeConn(a1), FakeConn(a2), FakeConn(a3)
+        pool.release(c1)
+        pool.release(c2)
+        pool.release(c3)
+        assert c1.closed and not c2.closed and not c3.closed
+        # LIFO reuse: c3 then c2
+        assert pool.acquire() is c3
+        assert pool.acquire() is c2
+        assert pool.acquire() is None
+
+        # Dirty socket (unconsumed bytes on peer) is discarded and closed on acquire.
+        b2.sendall(b"garbage")
+        pool.release(c2)
+        assert pool.acquire() is None
+        assert c2.closed
+
+        # Expired TTL connection is discarded on acquire.
+        pool_ttl = _UpstreamPool(max_idle=2, idle_ttl_s=0.01)
+        pool_ttl.release(c3)
+        time.sleep(0.03)
+        assert pool_ttl.acquire() is None
+        assert c3.closed
+
+        # Unstarted ContextoProxy.stop() closes pooled sockets (serve.py path).
+        a4, b4 = socket.socketpair()
+        try:
+            unstarted = ContextoProxy("http://127.0.0.1:1", _Log())
+            c4 = FakeConn(a4)
+            unstarted._pool.release(c4)
+            unstarted.stop()
+            assert c4.closed
+        finally:
+            a4.close()
+            b4.close()
+    finally:
+        for s in (a1, b1, a2, b2, a3, b3):
+            s.close()
+
+
+def test_side_decoder_stacked_encodings_and_bomb_limit_and_responses_bool_usage():
+    from contexto.proxy import _SideDecoder
+
+    plain = b'{"usage":{"input_tokens":42}}'
+    stacked = gzip.compress(zlib.compress(plain))
+    dec = _SideDecoder("deflate, gzip")
+    assert dec.supported and dec.decode(stacked) == plain
+
+    # Bomb past limit marks decoder unsupported instead of exhausting memory.
+    bomb = gzip.compress(b"A" * 100_000)
+    capped = _SideDecoder("gzip", limit=1024)
+    assert capped.decode(bomb) == b""
+    assert not capped.supported
+
+    # UsageReader rejects bool on Responses API too.
+    reader = UsageReader("application/json", api="responses")
+    reader.feed(json.dumps({
+        "status": "completed",
+        "output": [],
+        "usage": {"input_tokens": True, "output_tokens": 5, "input_tokens_details": {"cached_tokens": False}},
+    }).encode())
+    reader.finish()
+    assert reader.usage == {"output_tokens": 5, "input_tokens_details": {}}
+
+
+def test_serve_routes_repeated_content_encoding_without_bypass_and_closes_pool(tmp_path):
+    from contexto.serve import ServeService
+    from contexto.upstream import Upstream as ResolvedUpstream
+
+    upstream_bodies: list[dict] = []
+
+    class Upstream(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            upstream_bodies.append(json.loads(raw))
+            resp = b'{"id":"m1","type":"message","content":[],"usage":{"input_tokens":10,"output_tokens":2}}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+    up = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=up.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+    home = tmp_path / "home"
+    svc = ServeService(
+        home,
+        ResolvedUpstream(url=f"http://127.0.0.1:{up.server_address[1]}", source="flag"),
+        "a" * 32,
+        reaper=False,
+    )
+    svc.start(0)
+    try:
+        payload = json.dumps({
+            "model": "claude-sonnet-5",
+            "max_tokens": 64,
+            "stream": False,
+            "messages": [{"role": "user", "content": "hello"}],
+            "metadata": {"user_id": "u_session_11111111-1111-4111-8111-111111111111"},
+        }).encode()
+        wire = gzip.compress(zlib.compress(payload))
+        req = (
+            f"POST /{svc.token}/v1/messages HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{svc.port}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Encoding: deflate\r\n"
+            f"Content-Encoding: gzip\r\n"
+            f"Content-Length: {len(wire)}\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode() + wire
+        raw_resp = _raw_exchange(svc.port, req)
+        assert raw_resp.startswith(b"HTTP/1.1 200 ")
+        # Must have been routed to a managed session (not unrouted passthrough).
+        assert len(svc._sessions) == 1
+        session = next(iter(svc._sessions.values()))
+        # Pooled upstream socket is open before stop and closed by svc.stop().
+        assert len(session.proxy._pool._idle) == 1
+        svc.stop()
+        assert len(session.proxy._pool._idle) == 0
+        assert len(svc.passthrough._pool._idle) == 0
+    finally:
+        svc.stop()
+        up.shutdown()
+        up.server_close()

@@ -655,3 +655,9 @@ def test_folder_trusted_refuses_fifo_and_oversized_global_config(tree, home, tmp
         json.dumps({"projects": {str(tree / "repo"): {"hasTrustDialogAccepted": True}}, "pad": "x" * 256})
     )
     assert not folder_trusted(tree / "repo", home, {"CLAUDE_CONFIG_DIR": str(big_cfg)})
+
+    # Deeply nested JSON past MAX_JSON_DEPTH is rejected cleanly without raising.
+    deep_cfg = tmp_path / "deep_cfg"
+    deep_cfg.mkdir()
+    (deep_cfg / ".claude.json").write_text("[" * 400 + "]" * 400)
+    assert not folder_trusted(tree / "repo", home, {"CLAUDE_CONFIG_DIR": str(deep_cfg)})

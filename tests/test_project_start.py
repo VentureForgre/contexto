@@ -215,7 +215,7 @@ def digest(run: list[tuple]) -> str:
 # Again with TokenEstimator EWMA + separate prose vs dense tool_result ratios: Turn 1 prose no longer
 # overwrites the 1.5 tool seed, changing the first tool round's pre-measurement estimate and subsequent
 # EWMA-decayed estimates; all four nothing-carried store kinds remain byte-for-byte identical.
-BEFORE_D69 = {MESSAGES: ("876a83654d303d9d7daad3cfb2fcc32896ddf1a3686a0a14718d457cbf2d9718",
+BEFORE_D69 = {MESSAGES: ("fa987af6a66c3fca29a4df85eb46e92cc51e1d19f732123875264282ccedc141",
                          "7b7bed49ae2ddd199bbd502f5bd4a2bbd3450d307dec51c75694b2321e08686a"),
               RESPONSES: ("211474f2bb1e3351fa3b8223632b5a458c5f0bfc1892ac29d07311f79bc70c28",
                           "f0db37296fb624564964d63362555b1ab84c966242f660e9d0d60749db2f5a78")}

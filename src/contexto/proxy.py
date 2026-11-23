@@ -35,7 +35,7 @@ reduced to scalars, on that request's log entry as ``usage_events``, and a real 
 entry's ``over_bound``; this is the only place they are logged (packet A2e). A callable that takes a
 ``tool_calls`` keyword also gets whether the response holds a tool call the client runs (D40): from
 the stream hold when there is one (whether a client call started it; a hosted Responses call such
-as ``web_search_call`` holds the stream but does not count), else from a Messages ``stop_reason`` or
+as ``web_search_call`` streams live and does not hold or count), else from a Messages ``stop_reason`` or
 a Responses ``output`` list, else None for unknown. One that takes ``tool_call_ids`` gets the ids of
 the client calls seen (``tool_use`` ids, Responses ``call_id``), so the engine can tell which request
 continues which side room. Calls to the
@@ -120,9 +120,14 @@ MAX_DECODED_BODY_BYTES = 64 * 1024 * 1024
 # Uncompressed/wire inbound request body cap (configurable independently of MAX_DECODED_BODY_BYTES).
 MAX_REQUEST_BODY_BYTES = MAX_DECODED_BODY_BYTES
 MAX_CONTENT_ENCODINGS = 8  # cap on stacked Content-Encoding layers
+MAX_CHUNK_TRAILERS = 64  # cap on trailer header lines in a chunked request body
+MAX_CHUNK_TRAILER_BYTES = 65536  # cap on total trailer bytes in a chunked request body
 MAX_CALL_IDS = 4096  # per-response client tool call id cap
 UPSTREAM_POOL_MAX_IDLE = 8  # idle keep-alive upstream connections kept per proxy
-UPSTREAM_POOL_IDLE_TTL_S = 60.0  # evict pooled upstream connections idle longer than this
+UPSTREAM_POOL_IDLE_TTL_S = 30.0  # evict pooled upstream connections idle longer than this
+IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE"})
+_STALE_POOL_ERRORS = (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
+                      http.client.CannotSendRequest)
 _HEX_CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
@@ -135,7 +140,7 @@ USAGE_FEEDBACK_PATHS = frozenset({MESSAGES_PATH}) | RESPONSES_PATHS
 RESPONSE_END_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
 # D40: Responses tool calls that run on OpenAI's servers (the Responses API reference's hosted tools;
 # ``mcp_call`` is the hosted remote-MCP tool, which OpenAI calls itself). They never reach Contexto's
-# MCP server and do not open a side room; the stream hold still holds on them. Any other ``*_call``
+# MCP server, do not open a side room, and stream live without activating StreamHold. Any other ``*_call``
 # item, known (``function_call``, ``custom_tool_call``, ``local_shell_call``, ``computer_call``) or
 # not, counts as a call the client runs, so a new type fails safe.
 HOSTED_CALL_TYPES = frozenset({"web_search_call", "file_search_call", "image_generation_call",
@@ -469,12 +474,13 @@ def _scalar_summary(value: Any, depth: int = 0) -> Any:
 class _SideDecoder:
     """Decompresses a side copy of the response for usage parsing; relayed bytes are untouched."""
 
-    def __init__(self, encoding: str | None) -> None:
+    def __init__(self, encoding: str | None, *, limit: int = MAX_DECODED_BODY_BYTES) -> None:
         raw = (encoding or "identity").strip().lower()
         codings = _parse_content_encodings([raw])
         layers = [c for c in codings if c != "identity"]
         self.encoding = ", ".join(layers) if layers else "identity"
         self.supported = len(layers) <= MAX_CONTENT_ENCODINGS and all(c in ("gzip", "deflate") for c in layers)
+        self._remaining = limit
         self._objs = (
             [zlib.decompressobj(16 + zlib.MAX_WBITS) if c == "gzip" else zlib.decompressobj()
              for c in reversed(layers)]
@@ -482,17 +488,25 @@ class _SideDecoder:
         )
 
     def decode(self, chunk: bytes) -> bytes:
-        if not self.supported:
-            return b""
+        if not self.supported or not self._objs:
+            return chunk if self.supported else b""
         data = chunk
         for obj in self._objs:
             if not data:
                 break
+            if self._remaining <= 0:
+                self.supported = False
+                return b""
             try:
-                data = obj.decompress(data)
+                out = obj.decompress(data, self._remaining + 1)
             except zlib.error:
                 self.supported = False
                 return b""
+            if len(out) > self._remaining:
+                self.supported = False
+                return b""
+            data = out
+        self._remaining -= len(data)
         return data
 
 
@@ -1077,16 +1091,40 @@ class _ClientWatch:
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._closed = False
+        self._wake_r: int | None = None
+        self._wake_w: int | None = None
         try:
             wake_r, wake_w = os.pipe()
-            os.set_blocking(wake_r, False)
-            os.set_blocking(wake_w, False)
-            self._wake_r: int | None = wake_r
-            self._wake_w: int | None = wake_w
+            try:
+                os.set_blocking(wake_r, False)
+                os.set_blocking(wake_w, False)
+            except OSError:
+                for fd in (wake_r, wake_w):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                raise
+            self._wake_r, self._wake_w = wake_r, wake_w
         except OSError:
             self._wake_r = self._wake_w = None
         self._thread = threading.Thread(target=self._run, name="contexto-client-watch", daemon=True)
-        self._thread.start()
+        try:
+            self._thread.start()
+        except BaseException:
+            self._close_wake_fds()
+            raise
+
+    def _close_wake_fds(self) -> None:
+        with self._lock:
+            fds = (self._wake_r, self._wake_w)
+            self._wake_r = self._wake_w = None
+        for fd in fds:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def attach(self, conn: http.client.HTTPConnection) -> None:
         """The connected upstream connection to shut if the client goes away (or has already)."""
@@ -1119,55 +1157,59 @@ class _ClientWatch:
         self._thread.join(timeout=1.0)
         with self._lock:
             upstream, self._upstream = self._upstream, None
-            wake_r, wake_w = self._wake_r, self._wake_w
-            if not self._thread.is_alive():
+            alive = self._thread.is_alive()
+            fds = (None, None) if alive else (self._wake_r, self._wake_w)
+            if not alive:
                 self._wake_r = self._wake_w = None
         if upstream is not None:
             upstream.close()
-        if not self._thread.is_alive():
-            for fd in (wake_r, wake_w):
-                if fd is not None:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
+        for fd in fds:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def _run(self) -> None:
         poller = select.poll()  # not select.select, which cannot watch a descriptor above 1023
         try:
-            client_fd = self.client.fileno()
-            if client_fd < 0:
-                return
-            poller.register(client_fd, select.POLLIN)  # a close or a reset is reported as readable
-            if self._wake_r is not None:
-                poller.register(self._wake_r, select.POLLIN)
-        except (OSError, ValueError):  # the client's socket is already closed: nothing to watch
-            return
-        poll_ms = 5000 if self._wake_r is not None else int(CLIENT_WATCH_INTERVAL_S * 1000)
-        peek_flags = socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)
-        while not self._done.is_set():
             try:
-                events = poller.poll(poll_ms)
-            except OSError:
-                break
-            if not events:
-                continue
-            if self._done.is_set() or any(fd == self._wake_r for fd, _ in events):
+                client_fd = self.client.fileno()
+                if client_fd < 0:
+                    return
+                poller.register(client_fd, select.POLLIN)  # a close or a reset is reported as readable
+                if self._wake_r is not None:
+                    poller.register(self._wake_r, select.POLLIN)
+            except (OSError, ValueError):  # the client's socket is already closed: nothing to watch
                 return
-            try:
-                if self.client.recv(1, peek_flags):
-                    return  # the client sent more, so it is still there
-            except BlockingIOError:
-                continue  # spurious wakeup: keep watching
-            except OSError:  # a reset, or a socket the handler has closed
-                pass
-            if self._done.is_set():
-                return  # the request is over: a close now is the client ending a kept-alive connection
-            with self._lock:
-                self.gone = True
-                if self._upstream is not None:
-                    _shut(self._upstream)
-            return
+            poll_ms = 5000 if self._wake_r is not None else int(CLIENT_WATCH_INTERVAL_S * 1000)
+            peek_flags = socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)
+            while not self._done.is_set():
+                try:
+                    events = poller.poll(poll_ms)
+                except OSError:
+                    break
+                if not events:
+                    continue
+                if self._done.is_set() or any(fd == self._wake_r for fd, _ in events):
+                    return
+                try:
+                    if self.client.recv(1, peek_flags):
+                        return  # the client sent more, so it is still there
+                except BlockingIOError:
+                    continue  # spurious wakeup: keep watching
+                except OSError:  # a reset, or a socket the handler has closed
+                    pass
+                if self._done.is_set():
+                    return  # the request is over: a close now is the client ending a kept-alive connection
+                with self._lock:
+                    self.gone = True
+                    if self._upstream is not None:
+                        _shut(self._upstream)
+                return
+        finally:
+            if self._closed:
+                self._close_wake_fds()
 
 
 class _LoopbackServer(ThreadingHTTPServer):
@@ -1296,6 +1338,8 @@ class ContextoProxy:
                 self.log({"event": "proxy_stop_incomplete", "in_flight": in_flight})
             self._pool.close_all()
             self.log({"event": "proxy_stop", **self._store_pages()})
+        else:
+            self._pool.close_all()
 
     def serve_forever(self, port: int = 0) -> None:
         """Block until interrupted, starting the server first if needed."""
@@ -1367,7 +1411,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _read_body(self, limit: int | None = None) -> bytes:
         cap = MAX_REQUEST_BODY_BYTES if limit is None else limit
-        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+        te_values = self.headers.get_all("Transfer-Encoding") or []
+        cl_values = self.headers.get_all("Content-Length") or []
+        if te_values:
+            if cl_values:
+                raise ValueError("Transfer-Encoding and Content-Length both present")
+            te_codings = _parse_content_encodings(te_values)
+            if te_codings != ["chunked"]:
+                raise ValueError("unsupported Transfer-Encoding")
             body = bytearray()
             while True:
                 line = self.rfile.readline(65536)
@@ -1378,30 +1429,29 @@ class _Handler(BaseHTTPRequestHandler):
                     raise ValueError("invalid chunk size")
                 size = int(raw_size, 16)
                 if size == 0:
+                    trailer_lines = 0
+                    trailer_bytes = 0
                     while True:
                         trailer = self.rfile.readline(65536)
                         if trailer in (b"\r\n", b"\n"):
                             return bytes(body)
                         if not trailer or not trailer.endswith(b"\n"):
                             raise ValueError("unexpected EOF in chunked trailer")
+                        trailer_lines += 1
+                        trailer_bytes += len(trailer)
+                        if trailer_lines > MAX_CHUNK_TRAILERS or trailer_bytes > MAX_CHUNK_TRAILER_BYTES:
+                            raise ValueError("chunked trailers too large")
                 if size > cap - len(body):
                     raise BodyTooLargeError(f"request body exceeds {cap:,} bytes")
                 body += self._read_exact(size)
                 crlf = self.rfile.readline(65536)
                 if crlf not in (b"\r\n", b"\n"):
                     raise ValueError("malformed chunk terminator")
-        cl_values = self.headers.get_all("Content-Length") or []
         if not cl_values:
             return b""
-        parsed: set[int] = set()
-        for raw in cl_values:
-            text = raw.strip()
-            if not text or not text.isascii() or not text.isdigit():
-                raise ValueError("invalid Content-Length")
-            parsed.add(int(text))
-        if len(parsed) != 1:
-            raise ValueError("conflicting Content-Length headers")
-        length = parsed.pop()
+        length = _parse_content_length(cl_values)
+        if length is None:
+            raise ValueError("invalid or conflicting Content-Length")
         if length > cap:
             raise BodyTooLargeError(f"request body exceeds {cap:,} bytes")
         return self._read_exact(length) if length else b""
@@ -1490,14 +1540,15 @@ class _Handler(BaseHTTPRequestHandler):
         except BodyTooLargeError:
             self.owner.log({"event": "request", "method": self.command, "path": path_only, "status": 413,
                             "error": "request body too large"})
-            self._send_local_error(413, "contexto proxy: request body too large", "request_too_large")
             self.close_connection = True
+            self._send_local_error(413, "contexto proxy: request body too large", "request_too_large", close=True)
             return
         except ValueError:
             self.owner.log({"event": "request", "method": self.command, "path": path_only, "status": 400,
                             "error": "malformed request framing"})
-            self._send_local_error(400, "contexto proxy: malformed request framing", "invalid_request_error")
             self.close_connection = True
+            self._send_local_error(400, "contexto proxy: malformed request framing",
+                                   "invalid_request_error", close=True)
             return
         headers: HeaderList = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP]
         affinity = self.owner.affinity_header
@@ -1592,7 +1643,7 @@ class _Handler(BaseHTTPRequestHandler):
             if owner.observe_thinking:
                 headers = _merge_headers(headers, header_view, add_beta(header_view, THINKING_BINDING_BETA))
             return body, headers, original
-        flush = getattr(owner.transform, "flush", None)
+        flush = getattr(owner.transform, "flush_deferred", None)
         if callable(flush):
             try:
                 with owner._io_lock:
@@ -1644,8 +1695,9 @@ class _Handler(BaseHTTPRequestHandler):
         # unless it has already answered it (D53: an early 413 is forwarded, not retried).
         # From wait_headers on, upstream may be running it, so that failure is a 502 and the CLI decides.
         # Stale keep-alive sockets taken from the pool are transparently replaced with a fresh connection
-        # per RFC 9112 §9.8 when they fail before any response byte is received.
+        # per RFC 9112 §9.8 when they drop before send completes, or in wait_headers for idempotent methods.
         retried = False
+        pool_retried = False
         early_response = False
         allow_pool = True
         outgoing_headers = _strip_hint_header_list(headers) if owner.strip_hint_headers else headers
@@ -1695,12 +1747,12 @@ class _Handler(BaseHTTPRequestHandler):
                         entry["upstream_answered_early"] = type(exc).__name__
                         break
                 conn.close()
-                if reused and (
-                    phase == "send"
-                    or isinstance(exc, (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError))
+                if reused and not pool_retried and isinstance(exc, _STALE_POOL_ERRORS) and (
+                    phase == "send" or self.command in IDEMPOTENT_METHODS
                 ):
+                    pool_retried = True
                     allow_pool = False
-                    continue  # stale keep-alive socket closed by upstream before answering: open fresh
+                    continue  # stale keep-alive socket closed by upstream: open fresh connection
                 failure = {"upstream_phase": phase, "phase_ms": _ms(phase_started),
                            "errno": getattr(exc, "errno", None)}
                 if not retried and phase in RETRYABLE_PHASES:
@@ -1723,10 +1775,12 @@ class _Handler(BaseHTTPRequestHandler):
         reader = UsageReader(content_type, entry.get("api", "messages"))
         resp_encodings = response.headers.get_all("Content-Encoding") or []
         decoder = _SideDecoder(", ".join(resp_encodings) if resp_encodings else None)
-        length = response.getheader("Content-Length")
+        raw_cl_values = response.headers.get_all("Content-Length") or []
+        valid_cl = _parse_content_length(raw_cl_values)
         no_body = _no_body_response(response.status, self.command)
-        chunked = length is None and not no_body
-        expected = None if chunked else _declared_length(length, response, self.command)
+        interim_1xx = 100 <= response.status < 200
+        chunked = (not no_body) and (bool(response.chunked) or valid_cl is None)
+        expected = None if (chunked or no_body) else valid_cl
         response_bytes = 0
         # The client must not see the response complete before the engine has its usage and the
         # session log has the entry: Claude Code sends its next request right away, and the engine
@@ -1826,11 +1880,16 @@ class _Handler(BaseHTTPRequestHandler):
                     self.send_header(name, value)
             if chunked:
                 self.send_header("Transfer-Encoding", "chunked")
-            elif length is not None and not (100 <= response.status < 200 or response.status == 204):
-                self.send_header("Content-Length", length)
+            elif valid_cl is not None and not interim_1xx and response.status != 204:
+                self.send_header("Content-Length", str(valid_cl))
+            if interim_1xx:
+                self.close_connection = True
             self.end_headers()
             if no_body:
-                read_upstream()  # marks http.client response closed so the keep-alive socket can be pooled
+                try:
+                    response.read()  # marks http.client response closed so keep-alive socket can be pooled
+                except (OSError, http.client.HTTPException) as exc:
+                    raise _UpstreamReadError from exc
             else:
                 while chunk := read_upstream():
                     response_bytes += len(chunk)
@@ -1885,13 +1944,13 @@ class _Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 relay_ok = False
             pooled = None
-            if relay_ok and not early_response and not response.will_close and response.isclosed():
+            if relay_ok and not early_response and not interim_1xx and not response.will_close and response.isclosed():
                 pooled = watch.detach()
             if pooled is not None:
                 owner._pool.release(pooled)
             else:
                 conn.close()
-            if not watch.gone and hold is not None and hold.held:
+            if not watch.gone and not entry.get("client_aborted") and hold is not None and hold.held:
                 # upstream failed mid-hold while client is still listening: observe, then release in order
                 try:
                     write_events(hold.eof())
@@ -2003,7 +2062,7 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.owner.log({"event": "observe_usage_error", "error": type(exc).__name__})
             return []
-        flush = getattr(self.owner.transform, "flush", None)
+        flush = getattr(self.owner.transform, "flush_deferred", None)
         if callable(flush):
             try:
                 with self.owner._io_lock:
@@ -2012,16 +2071,33 @@ class _Handler(BaseHTTPRequestHandler):
                 pass
         return [e for e in events if isinstance(e, dict)] if isinstance(events, list) else []
 
-    def _send_local_error(self, status: int, message: str, error_type: str = "api_error") -> None:
+    def _send_local_error(self, status: int, message: str, error_type: str = "api_error",
+                          *, close: bool = False) -> None:
         body = json.dumps({"type": "error", "error": {"type": error_type, "message": message}}).encode()
         try:
             self.send_response_only(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if close:
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
         except OSError:
             pass
+
+
+def _parse_content_length(values: list[str]) -> int | None:
+    """Parse one or more ``Content-Length`` header values; None when absent, invalid, or conflicting."""
+    if not values:
+        return None
+    parsed: set[int] = set()
+    for raw in values:
+        for part in raw.split(","):
+            text = part.strip()
+            if not text or not text.isascii() or not text.isdigit():
+                return None
+            parsed.add(int(text))
+    return parsed.pop() if len(parsed) == 1 else None
 
 
 def _declared_length(length: str | None, response: http.client.HTTPResponse, method: str) -> int | None:

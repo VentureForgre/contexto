@@ -833,7 +833,9 @@ def test_screenshots_too_large_for_the_bound_say_so(tmp_path):
     b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0",  # truncated before canvas size
     b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0\0\0\0\0\x01\x02\x03\x04\x05",  # 29 bytes (< 30)
     b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0\0\0\0\x9d\x01\x2a\x01",  # truncated VP8 lossy
-], ids=["vp8l-empty", "vp8l-short", "vp8l-badsig", "vp8x-empty", "vp8x-29b", "vp8-short"])
+    b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0\x01\0\0\x9d\x01\x2a\x10\x00\x10\x00",  # non-keyframe VP8
+    b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0\x00\0\0\x00\x00\x00\x10\x00\x10\x00",  # bad VP8 start code
+], ids=["vp8l-empty", "vp8l-short", "vp8l-badsig", "vp8x-empty", "vp8x-29b", "vp8-short", "vp8-inter", "vp8-badsig"])
 def test_truncated_webp_headers_return_none_and_price_at_max(head):
     assert image_size(head) is None
     data = base64.b64encode(head).decode()
@@ -849,3 +851,97 @@ def test_truncated_webp_headers_return_none_and_price_at_max(head):
 def test_openai_low_detail_images_price_at_85_tokens(block):
     from contexto.tokens import OPENAI_LOW_DETAIL_IMAGE_TOKENS
     assert media_cost([block]).tokens == OPENAI_LOW_DETAIL_IMAGE_TOKENS == 85
+
+
+@pytest.mark.parametrize("block", [
+    {"type": "input_image", "image_url": "https://example.com/huge.png", "detail": "high"},
+    {"type": "input_image", "image_url": "https://example.com/huge.png", "detail": "auto"},
+    {"type": "input_image", "image_url": "https://example.com/huge.png", "detail": "LOW"},
+    {"type": "input_image", "image_url": {"url": "https://example.com/huge.png", "detail": "low"}, "detail": "high"},
+], ids=["high", "auto", "non-canonical-LOW", "top-level-overrides-nested"])
+def test_openai_non_low_detail_images_do_not_price_at_85(block):
+    assert media_cost([block]).tokens == IMAGE_MAX_TOKENS
+
+
+def test_pdf_in_view_with_dense_tool_output_does_not_poison_tool_ratio(tmp_path):
+    """Reviewer B finding 2: dense (<1.5 bpt) tool output with a PDF in view must learn its dense
+    tool ratio from the exact media-cancelled delta instead of falling through to PDF slack."""
+    eng = _engine(tmp_path, bound=400_000)
+    raw = base64.b64decode(pdf_b64(20, filler=100_000))
+    doc = pdf_block(base64.b64encode(raw).decode())
+    # Turn 0: prose (sets prose ratio ~3.0, leaves tool ratio at seed 1.5).
+    msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "intro " * 1000}]}]
+    req0 = {**HEAD, "messages": list(msgs)}
+    up0, _, _ = eng(req0, {}, EP)
+    eng.observe_usage(EP, {"input_tokens": _real_usage(up0), "output_tokens": 10}, req0)
+    assert 2.9 <= eng.estimator.measured_bytes_per_token <= 3.05
+    assert eng.estimator.measured_tool_bytes_per_token is None
+
+    # Turn 1: attach 20-page PDF (real cost 31,660 vs allowance 91,360 -> large slack).
+    msgs += [{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+             {"role": "user", "content": [{"type": "text", "text": "read pdf"}, doc]}]
+    req1 = {**HEAD, "messages": list(msgs)}
+    up1, _, _ = eng(req1, {}, EP)
+    s1, _ = split_media(up1["messages"])
+    real1 = math.ceil(len(canonical_json({**up1, "messages": s1})) / 3.0) + 31_660
+    eng.observe_usage(EP, {"input_tokens": real1, "output_tokens": 10}, req1)
+
+    # Turn 2: append 45 KB dense log tool_result at 1.1 bpt with the SAME PDF in view.
+    dense_log = "0123456789 " * 4_100
+    msgs += [{"role": "assistant", "content": [{"type": "tool_use", "id": "t_dense", "name": "Read", "input": {}}]},
+             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t_dense", "content": dense_log}]}]
+    req2 = {**HEAD, "messages": list(msgs)}
+    up2, _, _ = eng(req2, {}, EP)
+    s2, _ = split_media(up2["messages"])
+    tool_b = len(canonical_bytes(msgs[-1]["content"][0]))
+    prose_b = len(canonical_json({**up2, "messages": s2})) - tool_b
+    real2 = math.ceil(prose_b / 3.0 + tool_b / 1.1) + 31_660
+    eng.observe_usage(EP, {"input_tokens": real2, "output_tokens": 10}, req2)
+
+    assert eng.estimator.measured_tool_bytes_per_token is not None
+    assert eng.estimator.measured_tool_bytes_per_token < 1.3  # learned 1.1, NOT poisoned to 3.0!
+    assert 2.9 <= eng.estimator.measured_bytes_per_token <= 3.05
+
+
+def test_media_free_deconvolution_and_prose_append_after_tool_results(tmp_path):
+    """Reviewer B finding 3: sparse tool output after dense tool output never corrupts prose EWMA,
+    and a pure-prose append after a large tool loop updates prose without corrupting tool ratio."""
+    eng = _engine(tmp_path, bound=400_000)
+    msgs: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "start " * 400}]}]
+    req0 = {**HEAD, "messages": list(msgs)}
+    up0, _, _ = eng(req0, {}, EP)
+    eng.observe_usage(EP, {"input_tokens": math.ceil(len(canonical_bytes(up0)) / 3.5), "output_tokens": 10}, req0)
+    assert eng.estimator.measured_bytes_per_token == pytest.approx(3.5, rel=0.01)
+
+    # Large dense tool result (1.0 bpt).
+    msgs += [{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]},
+             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x" * 60_000}]}]
+    req1 = {**HEAD, "messages": list(msgs)}
+    up1, _, _ = eng(req1, {}, EP)
+    tb1 = len(canonical_bytes(msgs[-1]["content"][0]))
+    pb1 = len(canonical_bytes(up1)) - tb1
+    eng.observe_usage(EP, {"input_tokens": math.ceil(pb1 / 3.5 + tb1 / 1.0), "output_tokens": 10}, req1)
+    assert eng.estimator.measured_tool_bytes_per_token == pytest.approx(1.0, rel=0.05)
+
+    # Pure-prose append (dense code prose at 1.8 bpt) after large tool result updates PROSE, not tool.
+    msgs += [{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+             {"role": "user", "content": [{"type": "text", "text": "a=b;c=d; " * 2_500}]}]
+    req2 = {**HEAD, "messages": list(msgs)}
+    up2, _, _ = eng(req2, {}, EP)
+    added_prose = len(canonical_bytes(up2)) - len(canonical_bytes(up1))
+    real2 = math.ceil(pb1 / 3.5 + tb1 / 1.0 + added_prose / 1.8)
+    eng.observe_usage(EP, {"input_tokens": real2, "output_tokens": 10}, req2)
+    assert eng.estimator.measured_bytes_per_token < 3.0  # learned denser prose
+    assert eng.estimator.measured_tool_bytes_per_token == pytest.approx(1.0, rel=0.05)  # tool untouched
+
+    # Sparse tool output + prose append (deconvolution) never injects >6.0 bpt into prose EWMA.
+    msgs += [{"role": "assistant", "content": [{"type": "text", "text": "words " * 1_600},
+                                               {"type": "tool_use", "id": "t2", "name": "Read", "input": {}}]},
+             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "content": "word " * 700}]}]
+    req3 = {**HEAD, "messages": list(msgs)}
+    up3, _, _ = eng(req3, {}, EP)
+    tb3 = len(canonical_bytes(msgs[-1]["content"][0]))
+    pb3 = len(canonical_bytes(up3)) - len(canonical_bytes(up2)) - tb3
+    real3 = real2 + math.ceil(pb3 / 3.5 + tb3 / 4.0)
+    eng.observe_usage(EP, {"input_tokens": real3, "output_tokens": 10}, req3)
+    assert eng.estimator.measured_bytes_per_token <= 4.0  # not jumped to ~9 bpt!

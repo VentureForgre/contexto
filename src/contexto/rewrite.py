@@ -1769,7 +1769,13 @@ def _record_usage(estimator: TokenEstimator, state: EpochState, text_bytes: int,
     if state.last_sent_appends and previous is not None:
         if keys:
             appended = appended_usage(previous, text_bytes, real, keys)
-        elif not previous.keys and tool_bytes > previous.tool_bytes:
+            if appended is None and previous.keys == keys and tool_bytes > previous.tool_bytes:
+                added_bytes, added_tokens = text_bytes - previous.text_bytes, real - previous.real
+                delta_tool = tool_bytes - previous.tool_bytes
+                if (added_bytes > 0 and added_tokens > 0 and delta_tool >= added_bytes * 0.5
+                        and tlow <= added_bytes / added_tokens <= thigh):
+                    appended = (added_bytes, added_tokens)
+        elif not previous.keys and (tool_bytes > previous.tool_bytes or previous.tool_bytes > 0):
             added_bytes, added_tokens = text_bytes - previous.text_bytes, real - previous.real
             if added_bytes > 0 and added_tokens > 0:
                 appended = (added_bytes, added_tokens)
@@ -1778,10 +1784,11 @@ def _record_usage(estimator: TokenEstimator, state: EpochState, text_bytes: int,
         delta_tool = max(0, tool_bytes - previous.tool_bytes)
         delta_prose = max(0, delta_bytes - delta_tool)
         if delta_tool == 0:
-            estimator.observe(delta_bytes, delta_tokens)
+            if (low <= delta_bytes / delta_tokens <= high) if keys else (tlow <= delta_bytes / delta_tokens <= thigh):
+                estimator.observe(delta_bytes, delta_tokens)
             return
         if delta_tool >= delta_bytes * 0.5:
-            if estimator.measured_bytes_per_token is None and (not keys or low <= delta_bytes / delta_tokens <= high):
+            if estimator.measured_bytes_per_token is None and low <= delta_bytes / delta_tokens <= high:
                 estimator.observe(delta_bytes, delta_tokens)
             prose_ratio = estimator.measured_bytes_per_token or TEXT_BYTES_PER_TOKEN
             tool_tokens = delta_tokens - (delta_prose / prose_ratio)
@@ -1790,16 +1797,23 @@ def _record_usage(estimator: TokenEstimator, state: EpochState, text_bytes: int,
             return
         if estimator.measured_tool_bytes_per_token:
             prose_tokens = delta_tokens - (delta_tool / estimator.measured_tool_bytes_per_token)
-            if prose_tokens > 0 and (not keys or low <= delta_prose / prose_tokens <= high):
+            if prose_tokens > 0 and low <= delta_prose / prose_tokens <= high:
                 estimator.observe(delta_prose, prose_tokens)
             return
-        estimator.observe(delta_bytes, delta_tokens)
+        if (low <= delta_bytes / delta_tokens <= high) if keys else (tlow <= delta_bytes / delta_tokens <= thigh):
+            estimator.observe(delta_bytes, delta_tokens)
         return
     text_b, text_t = text_usage(state.last_sent_bytes, real, media, estimator.measured_bytes_per_token)
     if text_t is None:
         return
     if tool_bytes == 0:
         estimator.observe(text_b, text_t)
+        return
+    # When media has floor < estimate slack and a prose ratio is already known, text_usage synthesizes
+    # text_t from measured_bytes_per_token; never let that synthetic value teach tool_result or deconvolve.
+    if media.tokens > media.floor and estimator.measured_bytes_per_token is not None:
+        if real - text_b / estimator.measured_bytes_per_token > media.tokens:
+            estimator.observe(text_b, text_t)
         return
     prose_bytes = max(0, text_b - tool_bytes)
     if estimator.measured_bytes_per_token and tool_bytes >= text_b * 0.5:

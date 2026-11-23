@@ -704,7 +704,12 @@ class _Reader:
 
     def _unpredict_png(self, data: bytes, row_bytes: int, bpp: int) -> bytes:
         """Reverse RFC 2083 PNG predictors (PDF /Predictor 10..15): one filter tag byte (0..4)
-        followed by ``row_bytes`` filtered bytes per row."""
+        followed by ``row_bytes`` filtered bytes per row.
+
+        Charges step budget proportionally to per-byte Python work (Paeth 1 step/byte, Sub/Up/Average
+        1 step per 2 bytes, None C-copy 1 step per 64 bytes) and processes wide rows in
+        ``PDF_YIELD_STEPS`` chunks so neither CPU budget nor GIL yield cadence can be bypassed.
+        """
         stride = row_bytes + 1
         if len(data) % stride != 0:
             raise _Uncertain
@@ -712,50 +717,74 @@ class _Reader:
         if not rows:
             return b""
         out = bytearray(rows * row_bytes)
-        out_mv = memoryview(out)
-        in_mv = memoryview(data)
-        prev: bytes | memoryview = bytes(row_bytes)
-        step_cost = max(1, stride // 64)
-        try:
-            for r in range(rows):
-                if r % 64 == 0:
-                    self.spend(min(64, rows - r) * step_cost)
-                base = r * stride
-                ftype = data[base]
-                row = in_mv[base + 1:base + stride]
-                dst = r * row_bytes
-                if ftype == 0:  # None
-                    out[dst:dst + row_bytes] = row
-                elif ftype == 1:  # Sub
-                    for i in range(row_bytes):
+        chunk_size = PDF_YIELD_STEPS
+        pending_steps = 0
+        for r in range(rows):
+            src = r * stride + 1
+            ftype = data[src - 1]
+            dst = r * row_bytes
+            prev_base = dst - row_bytes
+            if ftype == 0:  # None (C-level slice copy)
+                out[dst:dst + row_bytes] = data[src:src + row_bytes]
+                pending_steps += max(1, row_bytes // 64)
+            elif ftype == 1:  # Sub
+                for start in range(0, row_bytes, chunk_size):
+                    end = min(start + chunk_size, row_bytes)
+                    for i in range(start, end):
                         left = out[dst + i - bpp] if i >= bpp else 0
-                        out[dst + i] = (row[i] + left) & 0xFF
-                elif ftype == 2:  # Up
-                    for i in range(row_bytes):
-                        out[dst + i] = (row[i] + prev[i]) & 0xFF
-                elif ftype == 3:  # Average
-                    for i in range(row_bytes):
+                        out[dst + i] = (data[src + i] + left) & 0xFF
+                    pending_steps += max(1, (end - start) // 2)
+                    if pending_steps >= PDF_YIELD_STEPS:
+                        self.spend(pending_steps)
+                        pending_steps = 0
+            elif ftype == 2:  # Up
+                if r == 0:
+                    out[dst:dst + row_bytes] = data[src:src + row_bytes]
+                    pending_steps += max(1, row_bytes // 64)
+                else:
+                    for start in range(0, row_bytes, chunk_size):
+                        end = min(start + chunk_size, row_bytes)
+                        for i in range(start, end):
+                            out[dst + i] = (data[src + i] + out[prev_base + i]) & 0xFF
+                        pending_steps += max(1, (end - start) // 2)
+                        if pending_steps >= PDF_YIELD_STEPS:
+                            self.spend(pending_steps)
+                            pending_steps = 0
+            elif ftype == 3:  # Average
+                for start in range(0, row_bytes, chunk_size):
+                    end = min(start + chunk_size, row_bytes)
+                    for i in range(start, end):
                         left = out[dst + i - bpp] if i >= bpp else 0
-                        out[dst + i] = (row[i] + ((left + prev[i]) >> 1)) & 0xFF
-                elif ftype == 4:  # Paeth
-                    for i in range(row_bytes):
+                        up = out[prev_base + i] if r else 0
+                        out[dst + i] = (data[src + i] + ((left + up) >> 1)) & 0xFF
+                    pending_steps += max(1, (end - start) // 2)
+                    if pending_steps >= PDF_YIELD_STEPS:
+                        self.spend(pending_steps)
+                        pending_steps = 0
+            elif ftype == 4:  # Paeth
+                for start in range(0, row_bytes, chunk_size):
+                    end = min(start + chunk_size, row_bytes)
+                    for i in range(start, end):
                         a = out[dst + i - bpp] if i >= bpp else 0
-                        b = prev[i]
-                        c = prev[i - bpp] if i >= bpp else 0
+                        b = out[prev_base + i] if r else 0
+                        c = out[prev_base + i - bpp] if (r and i >= bpp) else 0
                         p = a + b - c
                         pa = p - a if p >= a else a - p
                         pb = p - b if p >= b else b - p
                         pc = p - c if p >= c else c - p
                         pr = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
-                        out[dst + i] = (row[i] + pr) & 0xFF
-                else:
-                    raise _Uncertain
-                prev = out_mv[dst:dst + row_bytes]
-        finally:
-            if isinstance(prev, memoryview):
-                prev.release()
-            out_mv.release()
-            in_mv.release()
+                        out[dst + i] = (data[src + i] + pr) & 0xFF
+                    pending_steps += end - start
+                    if pending_steps >= PDF_YIELD_STEPS:
+                        self.spend(pending_steps)
+                        pending_steps = 0
+            else:
+                raise _Uncertain
+            if pending_steps >= PDF_YIELD_STEPS:
+                self.spend(pending_steps)
+                pending_steps = 0
+        if pending_steps:
+            self.spend(pending_steps)
         return bytes(out)
 
     def object_stream(self, dictionary: dict, start: int, end: int) -> None:

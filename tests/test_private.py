@@ -168,3 +168,13 @@ def test_write_new_fallback_cleans_up_partial_file_on_write_failure(tmp_path, mo
     with pytest.raises(OSError):
         private_mod.write_new(target, b"hello")
     assert not target.exists() and list(tmp_path.iterdir()) == []
+
+
+def test_read_regular_max_bytes_exact_boundary(tmp_path):
+    from contexto.private import read_regular
+
+    f = tmp_path / "exact.bin"
+    f.write_bytes(b"0123456789")
+    assert read_regular(f, max_bytes=10) == b"0123456789"
+    with pytest.raises(ValueError):
+        read_regular(f, max_bytes=9)

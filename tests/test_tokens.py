@@ -99,6 +99,8 @@ def test_estimator_switches_to_measured_ratio_with_ewma_decay():
     msgs = [{"role": "user", "content": "a" * 70}]
     assert est.estimate_messages(msgs) == 35
     est.observe(request_bytes=0, input_tokens=10)  # ignored
+    est.observe(request_bytes=100, input_tokens=float("nan"))  # ignored
+    est.observe(request_bytes=100, input_tokens=float("inf"))  # ignored
     assert est.measured_bytes_per_token == 2.0
     est.observe(request_bytes=3000, input_tokens=500)  # EWMA: newer 6.0 outweighs decayed 2.0
     expected = (1000 * EWMA_DECAY + 3000) / (500 * EWMA_DECAY + 500)
