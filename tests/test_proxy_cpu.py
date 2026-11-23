@@ -440,7 +440,8 @@ def drive(upstream: str, preserving: bool, turns: int = 18, restart_after: int =
 
     def engine_view(engine: RewriteEngine) -> dict:
         private = {k: v for k, v in vars(engine).items()
-                   if k not in ("store", "estimator", "config", "tools", "clients")}
+                   if k not in ("store", "estimator", "config", "tools", "clients",
+                                "_last_activity", "_last_response_monotonic", "_request_keys")}
         # The missing-tools check (contexto.toolcheck) holds this run's clock readings; compare the rest.
         tools = {k: v for k, v in vars(engine.tools).items()
                  if k not in ("store", "clock", "started", "started_wall")}
