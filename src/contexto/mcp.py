@@ -41,15 +41,21 @@ from typing import IO, TYPE_CHECKING, Any, Protocol
 from contexto import __version__, serveclient
 from contexto.canonical import loads_bounded, utf8
 from contexto.servecontract import MAX_TOOL_USE_ID_CHARS
-from contexto.store import LockFileDamagedError, PageUnreadableError
+from contexto.store import LockFileDamagedError, MetaCorruptError, PageUnreadableError
 from contexto.store.ledger import LedgerCorruptError
 from contexto.store.pages import is_context_page
 from contexto.store.pinned import FACT_KINDS
 from contexto.store.project import EarlierSearch, NotEarlierSessionError
 from contexto.store.render import (
+    EXPAND_LINE_CHARS,
+    EXPAND_MATCH_CONTEXT,
+    EXPAND_MATCHES_PER_PAGE,
+    EXPAND_MAX_CHARS_PER_TOKEN,
     MATCH_CONTEXT,
+    MATCH_LINE_CHARS,
     MATCHES_PER_PAGE,
     MAX_CHARS_PER_TOKEN,
+    MAX_CONTEXT_LINES,
     RECALL_LIMIT,
     match_lines,
     matching_line_starts,
@@ -57,6 +63,7 @@ from contexto.store.render import (
     recall_limit,
     render_page,
     retained_matches,
+    retained_matches_approximate,
 )
 from contexto.store.search import FOLDED, SHOWN_IN_DETAIL, TYPO, ApproxHit, Plan, Query, hit_view, text_matches
 from contexto.upstream import CLOUD_PROVIDER_KEYS, cloud_provider, cloud_provider_note
@@ -68,7 +75,9 @@ SERVER_NAME = "contexto"
 SERVER_VERSION = __version__  # the package version, which `contexto version` prints first (D64); it was 0.1.0
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+STRUCTURED_CONTENT_MIN_VERSION = "2025-06-18"
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
+MAX_LINE_CHARS = 16 * 1024 * 1024  # cap max stdin line size so an unbounded line cannot OOM the server
 # The best pages, shown with their matching lines per contexto_search reply, newest first (B17, D34).
 SEARCH_LIMIT = SHOWN_IN_DETAIL
 # The reply's first line about paged pages, so the model sees why a page that holds only the words can
@@ -104,12 +113,12 @@ NO_HIT = "No paged-out turn contains every word of that query."
 # charged text: none of these lines is a control reply.
 SCOPES = ("session", "project")
 NO_HIT_SESSION = "No paged-out turn of this session contains every word of that query."
-# D65 against D69: the current session's part falls back to approximate matches exactly as a session-scope
-# reply does, but earlier sessions are searched strictly, also when the current part fell back. Their text
-# is old and can be injected, and an approximate match (part of the query, a word with one letter changed)
-# is easier for stuffed text to win; ranking up to 50 sessions' pages approximately would also cost far
-# more than the strict pass. So the earlier part's first line, and its line for no match, say so.
+# D65 & D69: when the current session already has strict hits (and approximate=False), earlier sessions
+# are searched strictly so stuffed old text cannot displace strict current-session results. When the
+# current session finds no strict hit or the caller requests approximate=True, earlier sessions also
+# fall back to approximate / code-split matching under EARLIER_APPROX_HEADER (still marked untrusted).
 EARLIER_HEADER = "[earlier sessions of this project, newest first (a match there holds every word):]"
+EARLIER_APPROX_HEADER = "[earlier sessions of this project, approximate matches, newest first:]"
 # Review B on D69, finding 1 (b): after EARLIER_HEADER, in every reply that shows an earlier session's text, and
 # charged with it. Pages and windows hold tool output and web pages, and a page renders a tool result's text as
 # it is, so a fetched page can hold a line that reads like a user turn of that session.
@@ -211,7 +220,11 @@ LOCK_DAMAGED = ("{tool} failed: this session's {file} is damaged ({reason}), so 
                 "go on without this tool meanwhile.")
 LOCK_EFFECTS = {"meta.lock": "recall, search and state, which charge the recall room, are refused (pins and closes "
                              "still work)",
+                "charge.lock": "recall, search and state, which charge the recall room, are refused (pins and closes "
+                               "still work)",
                 "live.lock": "Contexto could not open the session and every tool is refused"}
+META_CORRUPT = ("{tool} failed: this session's meta.json is corrupt ({reason}), so metadata updates are refused to "
+                "avoid wiping session settings. Repair or restore meta.json in the session directory.")
 TOOL_FAILED = ("{tool} failed: an internal error in Contexto ({error}). Try once more; if it fails again, go on "
                "without it.")
 
@@ -240,7 +253,8 @@ class Store(Protocol):
     def search(self, query: str) -> list[str]: ...
     # Optional: search_approximate(query) (D65); without it, a query no page holds every word of finds nothing.
     def pin(self, kind: str, text: str, *, supersedes: Iterable[str] = (), epistemic: str = "reported",
-            provenance: Iterable[dict[str, Any]] = ()) -> str: ...
+            provenance: Iterable[dict[str, Any]] = (), topic: str | None = None,
+            owner: str | None = None) -> str: ...
     def close(self, obligation_id: str, note: str) -> str: ...
     def state_text(self) -> str: ...
     def log(self, event: dict[str, Any]) -> None: ...
@@ -296,6 +310,10 @@ TOOLS: list[dict[str, Any]] = [
                 "text": {"type": "string", "minLength": 1},
                 "supersedes": {"type": "array", "items": {"type": "string"}},
                 "epistemic": {"type": "string", "enum": list(EPISTEMICS), "default": "reported"},
+                "topic": {"type": "string", "minLength": 1,
+                          "description": "Optional topic for decisions (used to detect conflicting active decisions)"},
+                "owner": {"type": "string", "minLength": 1,
+                          "description": "Optional owner for obligations (defaults to assistant)"},
                 "provenance": {
                     "type": "array",
                     "items": {
@@ -349,7 +367,15 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"query": {"type": "string", "minLength": 1}},
+            "properties": {
+                "query": {"type": "string", "minLength": 1},
+                "expand": {"type": "boolean", "default": False,
+                           "description": "Show expanded snippets with more context lines to cut follow-up recalls"},
+                "context_lines": {"type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_LINES,
+                                  "description": "Lines of context shown before and after each matching line"},
+                "approximate": {"type": "boolean", "default": False,
+                                "description": "Use approximate and code-split matching even when strict hits exist"},
+            },
             "required": ["query"],
             "additionalProperties": False,
         },
@@ -386,15 +412,38 @@ def _project_tools() -> list[dict[str, Any]]:
 PROJECT_TOOLS = _project_tools()
 
 
+def _is_version_date(value: Any) -> bool:
+    """True for a valid ASCII ``YYYY-MM-DD`` MCP protocol version date string."""
+    if not (isinstance(value, str) and len(value) == 10 and value.isascii()
+            and value[4] == "-" and value[7] == "-"):
+        return False
+    y, m, d = value[:4], value[5:7], value[8:]
+    if not (y.isdigit() and m.isdigit() and d.isdigit()):
+        return False
+    return 1 <= int(m) <= 12 and 1 <= int(d) <= 31
+
+
 def _has_project(store: Any) -> bool:
-    """Whether the session has a project view now (``store.project()`` is not None). A store without
-    the method, or one that cannot be read, has none: the server then serves what it served before D69."""
+    """Whether the session has a project view now, without scanning historical session directories.
+
+    Uses ``store.has_project()`` (which reads only this session's ``meta.json``) unless ``project``
+    was overridden on the store instance or ``has_project`` is absent. A store without either method,
+    or one that cannot be read, has none: the server then serves what it served before D69.
+    """
+    if store is None:
+        return False
+    instance_dict = getattr(store, "__dict__", {})
+    has_project = getattr(store, "has_project", None)
+    if "project" not in instance_dict and callable(has_project):
+        try:
+            return bool(has_project())
+        except Exception:
+            return False
     project = getattr(store, "project", None)
     try:
         return callable(project) and project() is not None
     except Exception:  # an unopened or damaged store: every tool call reports it; the list is the plain one
         return False
-
 
 
 class Server:
@@ -405,13 +454,10 @@ class Server:
         self.stderr = stderr or sys.stderr
         self.legacy_version: str | None = None  # set by initialize
         self.listed = False  # tools/list answered and recorded (see _tools_list)
-        # D69: decided once, here, so the tool list never changes during a session (it is part of the
-        # prompt's cached head). Without a project view the list and the arguments are those before D69.
-        # ``project_tools=False`` forces that: ``ServeServer`` lists the plain tools for every session, so
-        # each session it serves must refuse the arguments it did not list (review B on #287, N6).
-        self.project_tools = _has_project(store) if project_tools is None else project_tools
-        self.tools = PROJECT_TOOLS if self.project_tools else TOOLS
-        self.instructions = PROJECT_INSTRUCTIONS if self.project_tools else INSTRUCTIONS
+        self.max_line_chars = MAX_LINE_CHARS
+        # D69: decided once at startup so the tool list never changes mid-session (cached head).
+        # _has_project() uses store.has_project() (this session's meta.json only, no home scan).
+        self.project_tools: bool = _has_project(store) if project_tools is None else project_tools
         self.handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "initialize": self._initialize,
             "server/discover": self._discover,
@@ -420,26 +466,65 @@ class Server:
             "tools/call": self._tools_call,
         }
 
+    @property
+    def tools(self) -> list[dict[str, Any]]:
+        return PROJECT_TOOLS if self.project_tools else TOOLS
+
+    @property
+    def instructions(self) -> str:
+        return PROJECT_INSTRUCTIONS if self.project_tools else INSTRUCTIONS
+
     # Transport
 
+    def _iter_lines(self, stdin: Iterable[str]):
+        """Yield lines from ``stdin`` with a bounded memory cap on each line (``max_line_chars``)."""
+        readline = getattr(stdin, "readline", None)
+        if callable(readline):
+            limit = self.max_line_chars
+            while True:
+                # Allow up to 2 extra bytes for trailing CRLF so a line of exactly ``limit`` payload chars fits.
+                line = readline(limit + 3)
+                if not line:
+                    break
+                if len(line.rstrip("\r\n")) > limit and not line.endswith("\n"):
+                    # Drain the rest of the oversized line without buffering it in memory.
+                    while True:
+                        rest = readline(65_536)
+                        if not rest or rest.endswith("\n"):
+                            break
+                yield line
+            return
+        yield from stdin
+
+    def _write_response(self, response: dict[str, Any]) -> bool:
+        """Write one JSON-RPC response line; returns False on BrokenPipeError so ``serve`` exits cleanly."""
+        try:
+            text = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+        except (ValueError, TypeError, RecursionError) as exc:  # never let one reply kill the server
+            self._diag(f"unserializable response: {type(exc).__name__}")
+            text = json.dumps(_error(None, INTERNAL_ERROR, "Internal error"), separators=(",", ":"))
+        try:
+            # A lone UTF-16 surrogate echoed from the request has no UTF-8 form: it is written as its
+            # JSON escape, the same string to the client, rather than failing the write (D58).
+            self.stdout.write(utf8(text).decode("utf-8") + "\n")
+            self.stdout.flush()
+            return True
+        except BrokenPipeError:
+            return False
+
     def serve(self, stdin: Iterable[str]) -> int:
-        for line in stdin:
+        for line in self._iter_lines(stdin):
             if not line.strip():
                 continue
             response = self.handle_line(line)
-            if response is not None:
-                try:
-                    text = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
-                except (ValueError, TypeError, RecursionError) as exc:  # never let one reply kill the server
-                    self._diag(f"unserializable response: {type(exc).__name__}")
-                    text = json.dumps(_error(None, INTERNAL_ERROR, "Internal error"), separators=(",", ":"))
-                # A lone UTF-16 surrogate echoed from the request has no UTF-8 form: it is written as its
-                # JSON escape, the same string to the client, rather than failing the write (D58).
-                self.stdout.write(utf8(text).decode("utf-8") + "\n")
-                self.stdout.flush()
+            if response is not None and not self._write_response(response):
+                return 0  # client closed stdout pipe: exit cleanly
         return 0  # end of input is the shutdown signal
 
     def handle_line(self, line: str) -> dict[str, Any] | None:
+        if len(line.rstrip("\r\n")) > self.max_line_chars:
+            self._diag(f"request line exceeded {self.max_line_chars} characters")
+            return _error(None, INVALID_REQUEST, f"Request line exceeds {self.max_line_chars} characters")
         try:
             message = loads_bounded(line)
         except ValueError:  # not JSON, or nested deeper than MAX_JSON_DEPTH
@@ -462,6 +547,14 @@ class Server:
 
     # Dispatch
 
+    def _on_cancelled(self, params: dict[str, Any]) -> None:
+        """Handle ``notifications/cancelled`` cleanly without raising or replying."""
+        req_id = params.get("requestId")
+        reason = params.get("reason")
+        if isinstance(req_id, (str, int, float)) and not isinstance(req_id, bool):
+            detail = f" ({_clip(reason)})" if isinstance(reason, str) and reason else ""
+            self._diag(f"cancelled request {_clip(str(req_id))}{detail}")
+
     def _dispatch(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message["method"]
         msg_id = message.get("id")
@@ -469,14 +562,22 @@ class Server:
         params = {} if params is None else params
         if not isinstance(params, dict):
             return _error(msg_id, INVALID_PARAMS, "params must be an object")
+        if method == "notifications/cancelled":
+            self._on_cancelled(params)
+            return None
         if method.startswith("notifications/"):
             return None
         meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
         requested = meta.get(META_VERSION)
-        modern = requested is not None
-        if modern and requested not in MODERN_VERSIONS:
-            return _error(msg_id, UNSUPPORTED_VERSION, "Unsupported protocol version",
-                          {"supported": list(MODERN_VERSIONS) + list(LEGACY_VERSIONS), "requested": requested})
+        modern = False
+        if requested is not None:
+            is_modern_ver = (requested in MODERN_VERSIONS
+                             or (_is_version_date(requested) and requested >= MODERN_VERSIONS[0]))
+            is_legacy_ver = requested in LEGACY_VERSIONS
+            if not is_modern_ver and not is_legacy_ver:
+                return _error(msg_id, UNSUPPORTED_VERSION, "Unsupported protocol version",
+                              {"supported": list(MODERN_VERSIONS) + list(LEGACY_VERSIONS), "requested": requested})
+            modern = is_modern_ver
         handler = self.handlers.get(method)
         if handler is None:
             return _error(msg_id, METHOD_NOT_FOUND, f"Method not found: {_clip(method)}")
@@ -493,7 +594,8 @@ class Server:
 
     def _initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         requested = params.get("protocolVersion")
-        version = requested if requested in LEGACY_VERSIONS else LEGACY_VERSIONS[0]
+        supported = (*MODERN_VERSIONS, *LEGACY_VERSIONS)
+        version = requested if requested in supported else LEGACY_VERSIONS[0]
         self.legacy_version = version
         return {
             "protocolVersion": version,
@@ -501,6 +603,11 @@ class Server:
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": self.instructions,
         }
+
+    def _supports_structured_content(self, request_version: str | None = None) -> bool:
+        """``structuredContent`` was introduced in MCP 2025-06-18; omit it on older negotiated versions."""
+        version = request_version if _is_version_date(request_version) else self.legacy_version
+        return version is None or version >= STRUCTURED_CONTENT_MIN_VERSION
 
     def _discover(self, params: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -533,6 +640,8 @@ class Server:
         name = params["name"]
         args = params.get("arguments")
         args = {} if args is None else args  # [], 0 or false is not an object (D58)
+        meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+        req_version = meta.get(META_VERSION) if isinstance(meta.get(META_VERSION), str) else None
         event: dict[str, Any] = {"event": "mcp_call", "tool": name}
         try:
             if not isinstance(args, dict):
@@ -540,7 +649,7 @@ class Server:
             content, structured, extra = getattr(self, "_tool_" + name.removeprefix("contexto_"))(args)
             event.update(extra, ok=True)
             result: dict[str, Any] = {"content": content, "isError": False}
-            if structured is not None:
+            if structured is not None and self._supports_structured_content(req_version):
                 result["structuredContent"] = structured
         except ToolError as exc:
             event.update(ok=False, error=type(exc).__name__)
@@ -556,6 +665,10 @@ class Server:
             self._diag(f"{name}: {exc.file} is damaged ({exc.reason})")
             result = _tool_error(LOCK_DAMAGED.format(tool=name, file=exc.file, reason=exc.reason,
                                                      effect=LOCK_EFFECTS.get(exc.file, "Contexto cannot use it")))
+        except MetaCorruptError as exc:
+            event.update(ok=False, error=type(exc).__name__)
+            self._diag(f"{name}: meta.json is corrupt ({exc.reason})")
+            result = _tool_error(META_CORRUPT.format(tool=name, reason=exc.reason))
         except Exception as exc:  # an unexpected failure fails this call only, as a result the model can read
             event.update(ok=False, error=type(exc).__name__)
             self._diag(f"internal error in {name}: {type(exc).__name__}")
@@ -638,7 +751,7 @@ class Server:
                  **budget})
 
     def _tool_pin(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-        _reject_extra(args, {"kind", "text", "supersedes", "epistemic", "provenance"})
+        _reject_extra(args, {"kind", "text", "supersedes", "epistemic", "provenance", "topic", "owner"})
         kind = _require_str(args, "kind")
         if kind not in RECORD_KINDS:
             raise ToolError(f"kind must be one of {', '.join(RECORD_KINDS)}")
@@ -648,6 +761,12 @@ class Server:
         epistemic = args.get("epistemic", "reported")
         if epistemic not in EPISTEMICS:
             raise ToolError(f"epistemic must be one of {', '.join(EPISTEMICS)}")
+        topic = args.get("topic")
+        if topic is not None and (not isinstance(topic, str) or not topic.strip()):
+            raise ToolError("topic must be a non-empty string")
+        owner = args.get("owner")
+        if owner is not None and (not isinstance(owner, str) or not owner.strip()):
+            raise ToolError("owner must be a non-empty string")
         supersedes = args.get("supersedes")
         if supersedes is not None and (not isinstance(supersedes, list)
                                        or not all(isinstance(s, str) for s in supersedes)):
@@ -657,9 +776,14 @@ class Server:
                 isinstance(p, dict) and isinstance(p.get("type"), str) and isinstance(p.get("locator"), str)
                 for p in provenance)):
             raise ToolError("provenance must be a list of objects with string type and locator")
+        pin_kwargs: dict[str, Any] = {"supersedes": tuple(supersedes or ()), "epistemic": epistemic,
+                                      "provenance": tuple(provenance or ())}
+        if topic is not None:
+            pin_kwargs["topic"] = topic
+        if owner is not None:
+            pin_kwargs["owner"] = owner
         try:
-            record_id = self.store.pin(kind, text, supersedes=tuple(supersedes or ()), epistemic=epistemic,
-                                       provenance=tuple(provenance or ()))
+            record_id = self.store.pin(kind, text, **pin_kwargs)
         except ValueError as exc:
             raise ToolError(f"Not recorded: {exc}") from None
         reply = f"Recorded {kind} {record_id}."
@@ -725,24 +849,51 @@ class Server:
         return [page_id for page_id in found if page_id not in dropped], pages
 
     def _tool_search(self, args: dict[str, Any]) -> tuple[list[dict[str, Any]], None, dict[str, Any]]:
-        _reject_extra(args, {"query", "scope"} if self.project_tools else {"query"})
+        allowed = {"query", "expand", "context_lines", "approximate"}
+        if self.project_tools:
+            allowed.add("scope")
+        _reject_extra(args, allowed)
         query = _require_str(args, "query")
         scope = args.get("scope", SCOPES[0])
         if not isinstance(scope, str) or scope not in SCOPES:
             raise ToolError('scope must be "session" or "project"')
-        strict = self.store.search(query)  # best first (D34)
+        expand = args.get("expand", False)
+        if not isinstance(expand, bool):
+            raise ToolError("expand must be a boolean")
+        force_approx = args.get("approximate", False)
+        if not isinstance(force_approx, bool):
+            raise ToolError("approximate must be a boolean")
+        context_lines = args.get("context_lines")
+        if context_lines is not None and (
+            not isinstance(context_lines, int) or isinstance(context_lines, bool)
+            or not 0 <= context_lines <= MAX_CONTEXT_LINES
+        ):
+            raise ToolError(f"context_lines must be an integer between 0 and {MAX_CONTEXT_LINES}")
+        if expand:
+            ctx = EXPAND_MATCH_CONTEXT if context_lines is None else context_lines
+            per_page = EXPAND_MATCHES_PER_PAGE
+            line_chars = EXPAND_LINE_CHARS
+            use_measured = True
+        else:
+            ctx = MATCH_CONTEXT if context_lines is None else context_lines
+            per_page = MATCHES_PER_PAGE
+            line_chars = MATCH_LINE_CHARS
+            use_measured = context_lines is not None and context_lines > MATCH_CONTEXT
+        strict = [] if force_approx else self.store.search(query)  # best first (D34)
         found, pages = self._readable_pages(strict)
         # The best pages are chosen by relevance and shown newest first, so among them the newest statement
         # of a fact comes first (D28); the next best are listed newest first too. In each part turn pages
         # come first and paged context blocks after them, under their own line (D34).
-        hits = _with_context_header([(_hit_rows(page_id, page, query), is_context_page(page))
+        hits = _with_context_header([(_hit_rows(page_id, page, query, context=ctx, per_page=per_page,
+                                                line_chars=line_chars), is_context_page(page))
                                      for page_id, page in _newest_first(pages[:SEARCH_LIMIT])])
         more = _with_context_header([([_more_row(page_id, page, query)], is_context_page(page))
                                      for page_id, page in _newest_first(pages[SEARCH_LIMIT:])])
         in_view_found = [0]
-        in_view = self._in_view_rows(query, in_view_found)  # None: in view not checked
+        in_view = self._in_view_rows(query, in_view_found, approximate=force_approx)  # None: in view not checked
         lead = in_view or []
-        limit, _ = recall_limit(*self._window())  # one search reply is held to the per-call recall limit
+        strict_lead = bool(lead) and not force_approx
+        limit, _ = recall_limit(*self._window(), measured=use_measured)
         specific = SPECIFIC_WHY
         head = [SEARCH_BEST_HEADER]
         more_header = "[more matching pages, newest first; recall one at its offset:]"
@@ -750,15 +901,19 @@ class Server:
         total = len(found)
         plan: Plan | None = None
         detailed_hits: list[ApproxHit] = []  # the approximate hits shown in detail, in the reply's order
-        if not strict and not lead:
-            # No paged page holds every word and nothing in view matches: approximate matches, said to be
-            # (D65). Only then: a strict match whose pages cannot be read now is still "no hit".
+        approx_in_view: list[Row] = []
+        used_approx_in_view = bool(force_approx and lead)
+        if force_approx or (not strict and not lead):
+            # No paged page holds every word and nothing in view matches (or approximate=True was requested):
+            # approximate matches, said to be (D65).
             approximate, total, plan = self._approximate(query)
             total = total if approximate else 0
             if approximate:
                 shown = _most_words_first(approximate[:SEARCH_LIMIT])
                 detailed_hits = [hit for hit, _ in shown]
-                hits = _with_context_header([(_hit_rows(hit.id, page, query, (hit, plan)), is_context_page(page))
+                hits = _with_context_header([(_hit_rows(hit.id, page, query, (hit, plan), context=ctx,
+                                                        per_page=per_page, line_chars=line_chars),
+                                              is_context_page(page))
                                              for hit, page in shown])
                 more = _with_context_header([([_more_row(hit.id, page, query, (hit, plan))], is_context_page(page))
                                              for hit, page in _most_words_first(approximate[SEARCH_LIMIT:])])
@@ -766,9 +921,16 @@ class Server:
                 more_header = "[more approximate matches, recall one at its offset:]"
                 not_shown = "[{count} more approximate matches not shown; {why}]"
                 specific = "use a more specific query"
+            if not lead and in_view is not None:
+                approx_in_view = self._in_view_rows(query, in_view_found, approximate=True) or []
+                if approx_in_view:
+                    used_approx_in_view = True
+                if not hits and approx_in_view:
+                    lead = approx_in_view
+                    approx_in_view = []
 
         def render(rows: list[Row], detailed: int, listed: int, why: str) -> str:
-            lines = [t for t, _ in lead] + head + [t for t, _ in rows]
+            lines = [t for t, _ in lead] + head + [t for t, _ in rows] + [t for t, _ in approx_in_view]
             if listed:
                 lines.append(more_header)
                 lines += [t for entry in more[:listed] for t, _ in entry]
@@ -816,7 +978,11 @@ class Server:
             return fit(limit if room is None else min(room, limit), room is None or limit <= room)
 
         # D69: with scope "project", the earlier sessions' part follows, in the same reply and the same charge.
-        earlier = _EarlierPart(self._search_earlier(query)) if scope == "project" else None
+        earlier_fallback = force_approx or (not strict and not strict_lead)
+        earlier = (_EarlierPart(self._search_earlier(query, approximate=force_approx,
+                                                     fallback_approximate=earlier_fallback,
+                                                     context=ctx, per_page=per_page, line_chars=line_chars))
+                   if scope == "project" else None)
 
         def build_project(room: int | None) -> list[str] | None:
             """The current session's part as ``fit`` gives it, in what the room and the per-call limit
@@ -838,7 +1004,8 @@ class Server:
                     return [text]
             return None  # no hit in this session, and not even that line fits
 
-        texts, budget = self._within_room(build if earlier is None else build_project, "contexto_search")
+        texts, budget = self._within_room(build if earlier is None else build_project, "contexto_search",
+                                          measured=use_measured)
         text = texts[0] if texts else BUDGET_SPENT
         shown = texts is not None and text not in CONTROL_REPLIES
         # D65, content-free: whether the reply showed approximate matches, and which steps of the fallback
@@ -846,7 +1013,8 @@ class Server:
         # no page (the budget is used up, or the result is too long) showed no approximate match.
         steps = _approximate_steps(plan, detailed_hits[:picked["detailed"]]) if shown and detailed_hits else []
         coverage = SEARCH_COVERAGE if in_view is not None else SEARCH_COVERAGE_UNCHECKED
-        rows = lead + picked["rows"] + (earlier.rows(earlier.shown) if earlier else [])
+        in_view_all = lead + approx_in_view
+        rows = in_view_all + picked["rows"] + (earlier.rows(earlier.shown) if earlier else [])
         extra: dict[str, Any] = {}
         if self.project_tools:  # content-free: the scope and counts of sessions, never which sessions
             extra["scope"] = scope
@@ -858,13 +1026,17 @@ class Server:
                          earlier_in_view_skipped=earlier.found.in_view_skipped)
         return ([{"type": "text", "text": text}, {"type": "text", "text": coverage}], None,
                 {"query_chars": len(query), "hits": picked["pages"] if texts else 0, "total_matches": total,
-                 "approximate": bool(steps), **({"approximate_steps": steps} if steps else {}),
-                 "in_view_hits": sum(1 for _, span in lead if span) if shown else 0,
+                 "approximate": bool(steps) or (shown and used_approx_in_view) or (
+                     shown and bool(earlier and earlier.found.approximate and earlier.shown)),
+                 **({"approximate_steps": steps} if steps else {}),
+                 "in_view_hits": sum(1 for _, span in in_view_all if span) if shown else 0,
                  "in_view_more": max(0, in_view_found[0] - IN_VIEW_LIMIT) if shown else 0,
                  "in_view_checked": in_view is not None,
                  "returned": _spans(rows) if shown else [], **extra, **budget})
 
-    def _search_earlier(self, query: str) -> EarlierSearch:
+    def _search_earlier(self, query: str, *, approximate: bool = False, fallback_approximate: bool = False,
+                        context: int = MATCH_CONTEXT, per_page: int = MATCHES_PER_PAGE,
+                        line_chars: int = MATCH_LINE_CHARS) -> EarlierSearch:
         """What the project's earlier sessions hold of ``query`` (``SessionStore.search_earlier``). A
         session whose project view is gone since the server started (project memory turned off for it)
         has no earlier session to search. Each page to be shown comes back as ``_earlier_page`` makes it,
@@ -872,7 +1044,20 @@ class Server:
         search = getattr(self.store, "search_earlier", None)
         if not callable(search):
             return EarlierSearch()
-        return search(query, lambda label, page_id, page: _earlier_page(query, label, page_id, page)) or EarlierSearch()
+
+        def view(label: str, page_id: str, page: dict[str, Any]):
+            return _earlier_page(query, label, page_id, page, context=context, per_page=per_page,
+                                 line_chars=line_chars)
+
+        def approx_view(label: str, page_id: str, page: dict[str, Any], hit: ApproxHit, plan: Plan | None):
+            return _earlier_page(query, label, page_id, page, approximate=(hit, plan), context=context,
+                                 per_page=per_page, line_chars=line_chars)
+
+        try:
+            return (search(query, view, approximate=approximate, fallback_approximate=fallback_approximate,
+                           approx_view=approx_view) or EarlierSearch())
+        except TypeError:  # a test mock implementing the 2-arg signature
+            return search(query, view) or EarlierSearch()
 
     def _approximate(self, query: str) -> tuple[list[tuple[ApproxHit, dict[str, Any]]], int, Plan | None]:
         """The store's approximate matches for ``query`` (D65) that can still be read, best first, each
@@ -885,7 +1070,7 @@ class Server:
         total = getattr(result, "total", len(result)) - (len(by_id) - len(found))
         return [(by_id[page_id], page) for page_id, page in pages], total, getattr(result, "plan", None)
 
-    def _in_view_rows(self, query: str, total: list[int]) -> list[Row] | None:
+    def _in_view_rows(self, query: str, total: list[int], *, approximate: bool = False) -> list[Row] | None:
         """Matching lines of the conversation in view, newest first (B19 b, contract PR #125).
 
         Uses the retained-window snapshot only when the store says it is the current request's
@@ -899,11 +1084,13 @@ class Server:
             return None
         # The current turn's own question is what is asked, not a statement (B22, PR #143); a message
         # matches as a page does (D34).
-        found = retained_matches(snapshot[3], query)
+        found = (retained_matches_approximate(snapshot[3], query) if approximate
+                 else retained_matches(snapshot[3], query))
         total[0] = len(found)
         if not found:
             return []
-        rows: list[Row] = [("[in view, newest first:]", None)]
+        header = "[in view (approximate), newest first:]" if approximate else "[in view, newest first:]"
+        rows: list[Row] = [(header, None)]
         # A retained entry's turn counts turn starts from 1; pages count paged turns from 0, and rotation
         # pages whole turns, so the page that follows a turn shows its count less one. The line shows the
         # page numbering, so a turn reads the same paged or in view (D58); the logged span keeps the entry's.
@@ -920,31 +1107,11 @@ class Server:
         return window() if callable(window) else (None, None)
 
     def _within_room(self, build: Callable[[int | None], list[str] | None], tool: str,
-                     half: bool = False) -> tuple[list[str] | None, dict[str, Any]]:
-        """Build a reply inside this turn's room and charge it, atomically.
-
-        ``build(room_chars)`` returns the reply's text blocks, at most ``room_chars`` characters in
-        all (None: no limit), or None when nothing useful fits. Tokens are the characters divided by
-        the per-call limit's ratio, the smaller of the measured bytes per token and 1.5. With
-        ``half``, ``room_chars`` is half the room that remains (``floor(remaining / 2)`` tokens), so
-        one recall cannot consume the turn (contract PR #96); the rest is read by offset.
-
-        When nothing useful fits, the tool replies ``BUDGET_SPENT`` (or, for recall with some room
-        left, ``RECALL_NEARLY_SPENT``). These and the other fixed control replies are protocol text:
-        never charged, and returned even when the room is smaller than they are (contract PR #103).
-        The longest, the nearly-used-up reply, is about 225 characters: about 60 tokens of real usage
-        (150 at the conservative 1.5 characters per token used for charging), so 15 parallel calls
-        add about 900, well inside the engine's headroom floor (25,000 by default).
-
-        With no room published only the per-call limit applies. If the engine is present (it has
-        recorded the window) but published no room, a ``turn_room_missing`` event makes the missed
-        publish visible. A budgeted call's ``mcp_call`` event also says which room bounded it
-        (``limited_by``: ``main`` or ``side``, D40), how many side rooms are live (``side_rooms``),
-        and for a side limit that room's seconds since its last publish (``limiting_age_s``), so a
-        stale side room holding main's recall down can be told from a live subagent.
-        """
+                     half: bool = False, *, measured: bool = False) -> tuple[list[str] | None, dict[str, Any]]:
+        """Build a reply inside this turn's room and charge it, atomically."""
         window_tokens, ratio = self._window()
-        ratio = min(ratio, MAX_CHARS_PER_TOKEN) if ratio else UNMEASURED_CHARS_PER_TOKEN
+        cap = EXPAND_MAX_CHARS_PER_TOKEN if measured else MAX_CHARS_PER_TOKEN
+        ratio = min(ratio, cap) if ratio else UNMEASURED_CHARS_PER_TOKEN
         out: dict[str, Any] = {"texts": None, "budget": {"turn_budget": "unbudgeted"}}
 
         def charge(remaining: int | None) -> int:
@@ -1048,7 +1215,9 @@ def _with_context_header(entries: list[tuple[list[Row], bool]]) -> list[list[Row
 
 
 def _hit_rows(page_id: str, page: dict[str, Any], query: str,
-              approximate: tuple[ApproxHit, Plan | None] | None = None, *, session: str | None = None) -> list[Row]:
+              approximate: tuple[ApproxHit, Plan | None] | None = None, *, session: str | None = None,
+              context: int = MATCH_CONTEXT, per_page: int = MATCHES_PER_PAGE,
+              line_chars: int = MATCH_LINE_CHARS) -> list[Row]:
     """One search hit: the page line, then its matching lines (>) and context, each with its offset.
 
     An approximate hit (D65) has one more line under the page line, naming the words the page matched
@@ -1073,28 +1242,34 @@ def _hit_rows(page_id: str, page: dict[str, Any], query: str,
         on_page = q is not None and text_matches(text, q)  # else the rest of the query is in the stub only
     else:
         words, q = hit_view(approximate[0], text, approximate[1])
-        rows.append(("  " + words, None))
+        safe_words = words if session is None else words.translate(_ONE_STUB_ROW)
+        rows.append(("  " + safe_words, None))
         on_page = q is not None
-    shown, total = match_lines(text, q, last=True) if on_page else ([], 0)  # the LAST matching lines (B21)
+    shown, total = (match_lines(text, q, context=context, per_page=per_page, line_chars=line_chars, last=True)
+                    if on_page else ([], 0))  # the LAST matching lines (B21)
     rows += [(f"{'>' if is_match else ' '} {start}: {_row(line, session)}",
               (page_id, start, end) if session is None else ("earlier", page_id, start, end))
              for start, end, is_match, line in shown if is_match or not _blanked(text, start, end)]
     if not shown:  # the match is in the stub only: show the stub line as the matching line
         stub = _stub_line(page.get("stub"))
         rows.append((f"> stub: {stub if session is None else stub.translate(_ONE_STUB_ROW)}", None))
-    elif total > MATCHES_PER_PAGE:  # earlier statements stay reachable from the first match's offset
+    elif total > per_page:  # earlier statements stay reachable from the first match's offset
         first = matching_line_starts(text, q)[0]
         target = f"page_id {page_id}" if session is None else f"page_id {page_id}, session {session}"
-        rows.append((f"  [{total - MATCHES_PER_PAGE} more matching lines in this page, the first at offset "
+        rows.append((f"  [{total - per_page} more matching lines in this page, the first at offset "
                      f"{first}; call contexto_recall with {target} and that offset to read them]", None))
     return rows
 
 
-def _earlier_page(query: str, label: str, page_id: str, page: dict[str, Any]) -> tuple[_NewestKey, list[Row]]:
+def _earlier_page(query: str, label: str, page_id: str, page: dict[str, Any], *,
+                  approximate: tuple[ApproxHit, Plan | None] | None = None,
+                  context: int = MATCH_CONTEXT, per_page: int = MATCHES_PER_PAGE,
+                  line_chars: int = MATCH_LINE_CHARS) -> tuple[_NewestKey, list[Row]]:
     """An earlier session's page as a project-scope reply shows it (D69): its ``_newest_key`` and its rows
     (``_hit_rows``). Made while the search runs, as soon as the session's pages are read, so the search
     holds one session's page records at a time, not every shown page's (review B on D69, round 2, N2)."""
-    return _newest_key(page_id, page), _hit_rows(page_id, page, query, session=label)
+    return _newest_key(page_id, page), _hit_rows(page_id, page, query, approximate, session=label,
+                                                 context=context, per_page=per_page, line_chars=line_chars)
 
 
 def _row(text: str, session: str | None) -> str:
@@ -1170,7 +1345,10 @@ class _EarlierPart:
         else:
             taken = self._taken(shown)
             if shown:
-                lines += [EARLIER_HEADER, EARLIER_UNTRUSTED]
+                header = EARLIER_APPROX_HEADER if self.found.approximate else EARLIER_HEADER
+                lines += [header, EARLIER_UNTRUSTED]
+                if self.found.approximate and self.found.plan is not None and self.found.plan.searched():
+                    lines.append(self.found.plan.searched())
             for line, entries, _, _ in taken:
                 if entries:
                     lines.append(line)
@@ -1484,6 +1662,7 @@ class ServeServer(Server):
         except Exception as exc:  # fails this call only, as a result the model can read
             self._diag(f"{name}: internal error finding the session: {type(exc).__name__}")
             return _tool_error(TOOL_FAILED.format(tool=name, error=type(exc).__name__))
+        server.legacy_version = self.legacy_version
         return server._tools_call(params)
 
     def _session_server(self, params: dict[str, Any]) -> Server:
