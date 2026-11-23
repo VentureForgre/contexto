@@ -211,12 +211,15 @@ def digest(run: list[tuple]) -> str:
 # so each kind of store gave the same two hashes.
 # Again with D63 (PR #274), recorded from D63 merged with main 293b3478, the commit before D69, and the
 # same from the merge: D63's paging inside the script's tool loops changes the Claude Code requests and
-# its config field both records. ResponsesInTurn extends in-turn paging to Codex, changing the Codex
-# requests the same way while all four nothing-carried stores stay identical.
+# its config field both records.
+# Again after D71: Config.window_fraction moved to 0.25 and Config gained stable_prefix,
+# cache_ttl_seconds and cold_cache_fraction, updating the Codex rotation window and both epoch records
+# (Claude Code's requests stayed byte-for-byte identical). ResponsesInTurn extends in-turn paging to
+# Codex, updating the Codex requests and epoch record while all four nothing-carried stores stay identical.
 BEFORE_D69 = {MESSAGES: ("f3ce67fee80060c63749d3016bf6ee1f7c1706cdb56c7175c643fe76e452c7a8",
-                         "7b7bed49ae2ddd199bbd502f5bd4a2bbd3450d307dec51c75694b2321e08686a"),
+                         "4dba8fc4935175c4b7be0f779b05e2daa7ab3c4e5dbf30acdb1c3f689c6f7df2"),
               RESPONSES: ("a152d1c5f67274335799026dd797e4334c3322c38614e3bbde6dc15820bd9eae",
-                          "65dc50fa01fd5b1a1911573303842acb32ff440e6d6926fa90856d2ba07d1f1d")}
+                          "c36d1891051ea5137d214d91dad574a811d99dbc57daac30d2c6ec8bc3783bb1")}
 STORES = ("memory", "no_project", "nothing_carried", "memory_off")
 
 

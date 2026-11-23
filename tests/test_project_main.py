@@ -411,11 +411,10 @@ def test_a_first_conversation_classed_as_a_side_request_gets_no_pin_confirmed(re
 
 
 @pytest.mark.parametrize("request_class", [None, "main"])
-def test_a_fork_of_main_has_main_s_key_but_its_own_pins_are_not_confirmed(request_class, home, tmp_path):
-    """Review B round 3, N5: a fork of the main conversation has main's conversation key, so its requests
-    are main's for the room (D40), and main is trusted. Its own pin, made in a request that carries the
-    subagent's ``X-Claude-Code-Agent-Id``, is still never confirmed: with the hint headers off (no class)
-    or with a class of ``main``. Main's own later pin, in a request without the header, is."""
+def test_a_fork_of_main_is_isolated_from_main_and_its_own_pins_are_not_confirmed(request_class, home, tmp_path):
+    """A fork of the main conversation carrying ``X-Claude-Code-Agent-Id`` gets its own isolated key
+    (never colliding with main's state, room, or epoch record), so ``main`` is False and its pins are
+    never confirmed, with hint headers off or with a class of ``main``. Main's own later pin is."""
     root = repo(tmp_path)
     first = new_session(home, "s1", root, 1)
     engine = RewriteEngine(first, config=ROOMY)
@@ -427,7 +426,7 @@ def test_a_fork_of_main_has_main_s_key_but_its_own_pins_are_not_confirmed(reques
     fork = [*history, *messages_call("toolu_agent", "Agent", {"prompt": "read the page"}, "forked"),
             *messages_call("toolu_fork_pin", PIN_TOOL, {"kind": "obligation"}, fork_reply)]
     _, _, events = engine(main_request(fork, OLD), {**headers(OLD, agent=True), **main_hint}, MESSAGES)
-    assert events[-1]["main"] is True  # main's for the room, as D40 says
+    assert events[-1]["main"] is False
     assert first.main_records() == []
     own, own_reply = call_tool(first, "contexto_pin", kind="decision", text="main's own decision")
     later = [*history, *messages_call("toolu_main_pin", PIN_TOOL, {"kind": "decision"}, own_reply), user("next")]

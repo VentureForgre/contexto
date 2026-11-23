@@ -783,7 +783,7 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
                 if original_msg is not None and reader.usage:
                     has_calls = client_calls or reader.tool_calls()
                     usage_events = handler._observe_usage(
-                        path_only, reader.usage, original_msg, has_calls, tuple(reader.call_ids))
+                        path_only, reader.usage, original_msg, has_calls, tuple(reader.call_ids), req_headers_dict)
                 log_turn(meta, reader, usage_events)
             reader = UsageReader("text/event-stream", api="responses")
             holding = False

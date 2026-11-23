@@ -61,9 +61,7 @@ inside a turn.
 
 from __future__ import annotations
 
-import base64
 import bisect
-import functools
 import math
 import re
 import sys
@@ -74,10 +72,17 @@ from dataclasses import replace
 from typing import Any, NamedTuple
 
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
-from contexto.pdfpages import PDF_MAX_PAGES, count_pages  # noqa: F401 (PDF_MAX_PAGES: still importable from here)
+from contexto.pdfpages import PDF_MAX_PAGES  # noqa: F401 (PDF_MAX_PAGES: still importable from here)
 from contexto.proxy import is_client_call
 from contexto.store.render import OWN_TOOL_PREFIX, own_call_ids
-from contexto.tokens import UNCERTAIN_DOCUMENT_TOKENS, TokenEstimator, measured_documents
+from contexto.tokens import (
+    UNCERTAIN_DOCUMENT_TOKENS,
+    TokenEstimator,
+    base64_decoded_size,
+    measured_documents,
+    pdf_page_count,
+    uncertain_document_floor,
+)
 
 STUB_MIN_BYTES = 2_048  # a result is stubbed only when its content is at least this many bytes
 STUB_MIN_RATIO = 2  # and at least this many times its stub
@@ -149,6 +154,9 @@ class InTurn(NamedTuple):
     lists: tuple[tuple[int, int, str, int], ...] = ()
     # One past the turn-start index of the turn whose small-bound room was logged (``turn_room_low``).
     room_low: int = 0
+    # Message index ``p`` of the latest stubbing batch's earliest stub, so a cache breakpoint can be placed
+    # at ``p - 1`` keeping ``M[k..p)`` a 0.1x cache read. 0 when unset.
+    stub_bp: int = 0
 
 
 EMPTY = InTurn()
@@ -179,17 +187,15 @@ class Size(NamedTuple):
     pages: int | None = None  # their page count, when every one is a PDF counted with certainty
 
 
-@functools.lru_cache(maxsize=256)
 def _document(media_type: str, data: str) -> tuple[int, int | None]:
-    """(decoded bytes, certain page count or None) of a base64 document block's data."""
-    try:
-        raw = base64.b64decode(data, validate=False)
-    except (ValueError, TypeError):
-        return len(data), None
+    """(decoded bytes, certain page count or None) of a base64 document block's data.
+    Delegates PDF page counting to ``tokens.pdf_page_count`` so ``PDF_MAX_BASE64``, ``_PDF_PAGES``,
+    and ``_PDF_PARSING`` are respected instead of decoding synchronously under ``transform_lock``."""
+    size = base64_decoded_size(data)
     if media_type != "application/pdf":
-        return len(raw), None
-    counted = count_pages(raw)
-    return len(raw), counted.pages if counted.counted else None
+        return size, None
+    counted = pdf_page_count(data)
+    return size, counted.pages if counted.counted else None
 
 
 class Round(NamedTuple):
@@ -919,7 +925,7 @@ def note_size(text: str) -> int:
 _NOTE_TAIL = ('If you have the contexto_recall tool, call it with a page_id named here to read them (pass the '
               "next offset to continue; a page is long); contexto_search finds lines in them. Without it, you can "
               "run again the calls listed here; the other calls of these rounds are named only in those pages.]")
-_NOTES: OrderedDict[tuple[str, int], str] = OrderedDict()
+_NOTES: OrderedDict[tuple[str, str, int, int, tuple[str, ...]], str] = OrderedDict()
 _TURN_NOTES: OrderedDict[tuple, str] = OrderedDict()
 _NOTES_LOCK = threading.Lock()  # engines of several sessions can share a process
 
@@ -942,9 +948,15 @@ def fold_note(hooks: Any, removed: list[dict], page_id: str) -> str:
     """The note a fold leaves in the turn-start message: how many rounds, which tools, the calls with
     what each ran or read (enough to run them again where Contexto's tools are not available), the ids of
     as many of them as NOTE_IDS_BYTES holds, their size, and the page. ``removed`` is what the folded
-    messages were as sent (a stubbed result is its stub). Kept per page id and count, so the messages are
-    measured once per process."""
-    return _cached(_NOTES, (page_id, len(removed)),
+    messages were as sent (a stubbed result is its stub). Kept per hooks type, page id, count,
+    assistant count and call ids, so the messages are measured once per process."""
+    rounds = (hooks.count_rounds(removed) if hasattr(hooks, "count_rounds")
+              else sum(1 for m in removed if isinstance(m, dict) and m.get("role") == "assistant"))
+    call_ids = (tuple(hooks.call_ids_in(removed)) if hasattr(hooks, "call_ids_in")
+                else tuple(_safe_id(b["id"]) for m in removed if isinstance(m, dict) for b in _blocks(m)
+                           if isinstance(b, dict) and b.get("type") == "tool_use"
+                           and isinstance(b.get("id"), str) and b["id"]))
+    return _cached(_NOTES, (type(hooks).__qualname__, page_id, len(removed), rounds, call_ids),
                    lambda: _fold_note_uncached(hooks, removed, page_id, NOTE_IDS_BYTES))
 
 
@@ -985,11 +997,31 @@ def turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
     then the earlier ones as round numbers and page ids, those ``listed`` covers as one item for each
     folds page there (``InTurn.lists``). The ids left of NOTE_IDS_BYTES after
     the newest fold's go to the folds just before it, newest first, each whole or not at all; older ones
-    are named by their page alone. A pure function of the CLI's blocks and the page ids, kept per turn,
-    folds and folds page, so a request with no new fold builds none. ``sent`` is the view before the
-    folded messages are replaced."""
-    key = (start, tuple(group), listed)
-    return _cached(_TURN_NOTES, key, lambda: _turn_note(hooks, messages, sent, start, group, listed, dialect))
+    are named by their page alone. A pure function of the CLI's blocks and the page ids, kept per
+    dialect, turn, folds, folds page, round spans, and uncovered call ids, so a request with no new fold
+    builds none and resyncs or other sessions never read stale round numbers. ``sent`` is the view before
+    the folded messages are replaced."""
+    earlier = group[:-1]
+    covered = listed[-1][0] if listed else 0
+    if earlier:
+        last = max(b for rs, _ in earlier for _, b in rs)
+        numbers = _round_numbers(messages, start, last, dialect)
+        spans = tuple((numbers[rs[0][0] - start], numbers[rs[-1][1] - 1 - start]) for rs, _ in earlier)
+    else:
+        numbers, spans = None, ()
+    tail_ids = tuple(
+        tuple(
+            _safe_id(b["id"])
+            for a, b_ in rs
+            for i in range(a, b_)
+            if dialect.is_assistant(messages[i])
+            for b in _blocks(messages[i])
+            if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str) and b["id"]
+        )
+        for rs, _ in group[covered:]
+    )
+    key = (dialect.name, start, tuple(group), listed, spans, tail_ids)
+    return _cached(_TURN_NOTES, key, lambda: _turn_note(hooks, messages, sent, start, group, listed, dialect, numbers))
 
 
 def _span(numbers: list[int], start: int, rs: tuple[tuple[int, int], ...]) -> str:
@@ -1009,14 +1041,16 @@ def _listed_item(numbers: list[int], start: int, group: list, before: int, cover
 
 
 def _turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
-               group: list[tuple[tuple[tuple[int, int], ...], str]], listed: Listed, dialect: Any) -> str:
+               group: list[tuple[tuple[tuple[int, int], ...], str]], listed: Listed, dialect: Any,
+               numbers: list[int] | None = None) -> str:
     ranges, page_id = group[-1]
     note = fold_note(hooks, [sent[i] for a, b in ranges for i in range(a, b)], page_id)
     earlier = group[:-1]
     if not earlier:
         return note
-    last = max(b for rs, _ in earlier for _, b in rs)
-    numbers = _round_numbers(messages, start, last, dialect)
+    if numbers is None:
+        last = max(b for rs, _ in earlier for _, b in rs)
+        numbers = _round_numbers(messages, start, last, dialect)
 
     def ids(rs: tuple[tuple[int, int], ...]) -> str:
         return " ".join(hooks.call_ids_in([messages[i] for a, b_ in rs for i in range(a, b_)]))
@@ -1084,6 +1118,53 @@ def index_page(messages: list[dict], start: int, group: list, before: int, child
 
 # The view: the CLI's messages as the epoch sends them ---------------------------------------------
 
+def _message_cache_control(item: dict) -> dict | None:
+    """The first ``cache_control`` dict in ``item`` (including inside ``tool_result`` blocks), or None."""
+    if not isinstance(item, dict):
+        return None
+    for b in _blocks(item):
+        if not isinstance(b, dict):
+            continue
+        if isinstance(b.get("cache_control"), dict):
+            return dict(b["cache_control"])
+        if b.get("type") == "tool_result" and isinstance(b.get("content"), list):
+            for sub in b["content"]:
+                if isinstance(sub, dict) and isinstance(sub.get("cache_control"), dict):
+                    return dict(sub["cache_control"])
+    return None
+
+
+def _is_cacheable_block(block: Any) -> bool:
+    if not isinstance(block, dict):
+        return False
+    btype = block.get("type")
+    if btype in ("thinking", "redacted_thinking"):
+        return False
+    if btype == "text":
+        text = block.get("text")
+        return isinstance(text, str) and bool(text)
+    return isinstance(btype, str) and bool(btype)
+
+
+def _with_cache_control(item: dict, cc: dict) -> dict | None:
+    """Copy ``item`` with ``cache_control`` on its last cacheable block, or None if none exists."""
+    if not isinstance(item, dict):
+        return None
+    content = item.get("content")
+    if isinstance(content, str):
+        if not content:
+            return None
+        return {**item, "content": [{"type": "text", "text": content, "cache_control": dict(cc)}]}
+    if not isinstance(content, list) or not content:
+        return None
+    for j in range(len(content) - 1, -1, -1):
+        if _is_cacheable_block(content[j]):
+            new_blocks = list(content)
+            new_blocks[j] = {**content[j], "cache_control": dict(cc)}
+            return {**item, "content": new_blocks}
+    return None
+
+
 def view(messages: list[dict], state: Any, dialect: Any) -> list[dict]:
     """``messages`` with the epoch's stubs and folds applied: the same length and indexes, a stubbed
     result's content replaced, a folded message replaced by ``FOLDED``, and each fold's note in its
@@ -1131,10 +1212,27 @@ def view(messages: list[dict], state: Any, dialect: Any) -> list[dict]:
         # One note per turn, however many folds (Reviewer B, finding 1): rebuilt at each fold, bounded.
         out[start] = hooks.with_note(out[start], turn_note(hooks, messages, out, start, group,
                                                            listed.get(start, ()), dialect))
+        migrated_cc: dict | None = None
+        earliest_folded = n
         for ranges, _ in group:
             for a, b in ranges:
+                earliest_folded = min(earliest_folded, a)
                 for i in range(a, b):
+                    if migrated_cc is None:
+                        migrated_cc = _message_cache_control(out[i])
                     out[i] = FOLDED
+        # Preserve a cache_control breakpoint that folding removed by migrating it to the last surviving
+        # message before the fold (never increasing the total breakpoint count).
+        if migrated_cc is not None and earliest_folded < n:
+            for idx in range(earliest_folded - 1, state.k - 1, -1):
+                if out[idx] is FOLDED:
+                    continue
+                if _message_cache_control(out[idx]) is not None:
+                    break
+                marked = _with_cache_control(out[idx], migrated_cc)
+                if marked is not None:
+                    out[idx] = marked
+                    break
     if memo is not None and messages is memo.root:
         memo.sent = (edits, dialect, out)
     return out
@@ -1205,7 +1303,8 @@ def after_epoch(edits: InTurn, k: int, strip_upto: int) -> InTurn:
     return edits._replace(
         stubs=tuple(s for s in edits.stubs if s[0] >= k),
         folds=tuple(f for f in edits.folds if f[0] >= k), lists=tuple(x for x in edits.lists if x[0] >= k),
-        strips=_merged([(max(a, strip_upto), b) for a, b in edits.strips]))
+        strips=_merged([(max(a, strip_upto), b) for a, b in edits.strips]),
+        stub_bp=edits.stub_bp if edits.stub_bp > k else 0)
 
 
 def clipped(edits: InTurn, matched: int, messages: list[dict], dialect: Any) -> InTurn:
@@ -1215,9 +1314,10 @@ def clipped(edits: InTurn, matched: int, messages: list[dict], dialect: Any) -> 
     A fold keeps only whole rounds: it is cut back to the last round that ends before ``matched``, so
     that no call stays folded while its results are sent, nor the other way round, whichever role the
     message at ``matched`` has; a fold with no whole round left is dropped. Its note then lists what it
-    still folds, and its page (which holds the rest too) is unchanged. A thinking strip keeps its old
-    end (clipped to the new history's length): the thinking of a message after ``matched`` was produced
-    under the edits before it, which stand."""
+    still folds, and its page (which holds the rest too) is unchanged. Whenever a turn's fold note
+    changes, thinking in ``[start, n)`` is stripped so no surviving thinking block sits after a changed
+    fold note. A thinking strip keeps its old end (clipped to the new history's length): the thinking of
+    a message after ``matched`` was produced under the edits before it, which stand."""
     if edits == EMPTY or extent(edits) <= matched:
         return edits
     n = len(messages)
@@ -1259,17 +1359,36 @@ def clipped(edits: InTurn, matched: int, messages: list[dict], dialect: Any) -> 
     lists = tuple((start, covered, pid, level) for start, covered, pid, level in edits.lists
                   if first(folds, start, covered) == first(edits.folds, start, covered)
                   and covered < sum(1 for f in folds if f[0] == start))
+    # Any turn whose fold note changes (a fold cut/dropped or its folds-page list changed) mutates
+    # messages[start], so thinking in [start, n) must be stripped for prefix-binding safety.
+    old_turns = {s for s, _, _ in edits.folds} | {s for s, _, _, _ in edits.lists}
+    extra_strips: list[tuple[int, int]] = []
+    for start in old_turns:
+        if start >= n:
+            continue
+        old_f = [f for f in edits.folds if f[0] == start]
+        new_f = [f for f in folds if f[0] == start]
+        old_l = [x for x in edits.lists if x[0] == start]
+        new_l = [x for x in lists if x[0] == start]
+        if old_f != new_f or old_l != new_l:
+            extra_strips.append((start, n))
     return edits._replace(stubs=tuple(s for s in edits.stubs if s[0] < matched), folds=tuple(folds), lists=lists,
-                          strips=_merged([(a, min(b, n)) for a, b in edits.strips if a < n]))
+                          strips=_merged([(a, min(b, n)) for a, b in edits.strips if a < n] + extra_strips),
+                          stub_bp=edits.stub_bp if edits.stub_bp < matched else 0)
 
 
 # The epoch record (rule 16) -----------------------------------------------------------------------
 
 def to_record(edits: InTurn) -> dict[str, Any]:
-    return {"stubs": [list(s) for s in edits.stubs],
-            "folds": [[start, [list(r) for r in ranges], page_id] for start, ranges, page_id in edits.folds],
-            "strips": [list(r) for r in edits.strips], "batches": edits.batches, "rewrote": edits.rewrote,
-            "lists": [list(x) for x in edits.lists], "room_low": edits.room_low}
+    rec: dict[str, Any] = {
+        "stubs": [list(s) for s in edits.stubs],
+        "folds": [[start, [list(r) for r in ranges], page_id] for start, ranges, page_id in edits.folds],
+        "strips": [list(r) for r in edits.strips], "batches": edits.batches, "rewrote": edits.rewrote,
+        "lists": [list(x) for x in edits.lists], "room_low": edits.room_low,
+    }
+    if edits.stub_bp:
+        rec["stub_bp"] = edits.stub_bp
+    return rec
 
 
 def from_record(record: Any, n: int) -> InTurn:
@@ -1287,11 +1406,12 @@ def from_record(record: Any, n: int) -> InTurn:
             # A record before Reviewer A's finding 5 holds one folds page a turn, of level 0.
             lists=tuple((int(x[0]), int(x[1]), str(x[2]), int(x[3]) if len(x) > 3 else 0)
                         for x in record.get("lists", [])),
-            room_low=int(record.get("room_low", 0)))
+            room_low=int(record.get("room_low", 0)),
+            stub_bp=int(record.get("stub_bp", 0)))
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("epoch record field in_turn") from error
-    if (extent(edits) > n or edits.rewrote > n or edits.strips != _merged(list(edits.strips))
-            or list(edits.stubs) != sorted(edits.stubs)):
+    if (extent(edits) > n or edits.rewrote > n or edits.stub_bp < 0 or edits.stub_bp > n
+            or edits.strips != _merged(list(edits.strips)) or list(edits.stubs) != sorted(edits.stubs)):
         raise ValueError("epoch record field in_turn")
     return edits
 
@@ -1377,6 +1497,7 @@ class _Candidate(NamedTuple):
     document: bool  # the result holds a document: stubbed once seen, unread only when over the bound alone
     call: dict | None
     result: dict
+    over_bound_doc: bool = False  # unmeasured uncertain PDF exceeding config.bound by conservative floor
 
 
 _DENSE = TokenEstimator()  # counts at FRESH_BYTES_PER_TOKEN, whatever the session has measured
@@ -1453,18 +1574,25 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
 
     costs = dict(state.document_costs)
 
-    def unmeasured(items: list[dict]) -> int:
-        """How many PDFs in ``items`` have pages that are not certain and no cost measured by usage."""
-        return measured_documents([m for m in items if m is not FOLDED], costs)[1]
+    def uncertain_discount(items: list[dict]) -> int:
+        """Excess above each unmeasured uncertain PDF's conservative byte floor that D60 counts it at."""
+        kept = [m for m in items if m is not FOLDED]
+        count, floor, _ = uncertain_document_floor(kept, costs)
+        return UNCERTAIN_DOCUMENT_TOKENS * count - floor
+
+    def raw_tokens(items: list[dict]) -> int:
+        """Estimate with measured uncertain PDFs at their measured cost and unmeasured ones at D60's count."""
+        kept = [m for m in items if m is not FOLDED]
+        over, _ = measured_documents(kept, costs)
+        return rw.estimate_items(estimator, kept) - over
 
     def tokens(items: list[dict]) -> int:
-        """Known estimates only. A PDF whose pages are not certain counts at the cost usage measured for it
-        (Reviewer A at 15293e9c, finding 1), so stubbing it frees that cost. Before usage has measured it,
-        it counts as nothing here (Reviewer A at 7575c76f, finding 1), so it never makes a result look over
-        the bound on its own and paging it never counts as freeing anything."""
-        kept = [m for m in items if m is not FOLDED]
-        over, unknown = measured_documents(kept, costs)
-        return rw.estimate_items(estimator, kept) - over - UNCERTAIN_DOCUMENT_TOKENS * unknown
+        """Known estimates plus a conservative byte floor for unmeasured uncertain PDFs. A PDF whose pages
+        are not certain counts at the cost usage measured for it (Reviewer A at 15293e9c, finding 1), so
+        stubbing it frees that cost. Before usage has measured it, it counts at its conservative byte floor
+        (instead of 0), so small uncounted PDFs are still read once while a massive uncounted PDF cannot
+        silently blow past ``config.bound``."""
+        return raw_tokens(items) - uncertain_discount(items)
 
     def counted(i: int, item: dict, dense: Any = _DENSE) -> int:
         """A sent item's tokens for a decision: a fresh tool result with its margin."""
@@ -1482,9 +1610,10 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             result = hooks.result(messages[i], j)
             if (i, j) in done or result is None or not hooks.stubbable(result):
                 continue
-            certain = not unmeasured([result])  # every PDF in it counted or measured
-            if not certain and i >= last_assistant:
-                continue  # unread and its cost unknown: sent once, as without in-turn paging
+            u_count, u_floor, u_over = uncertain_document_floor([result], costs)
+            certain = u_count == 0  # every PDF in it counted or measured
+            if not certain and i >= last_assistant and u_over == 0 and u_floor <= config.bound:
+                continue  # unread, within bound by floor: sent once so usage can measure it
             call = hooks.call(messages, i, call_id)
             is_own = call_id in own
             text = stub_text(hooks, call, result, "" if is_own else PLACEHOLDER_PAGE)
@@ -1501,9 +1630,11 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             seed = counted(i, sent[i], _SEED) - counted(i, stubbed_item, _SEED)
             if not certain:  # seen, usage missing: stubbed like any result, counted as freeing what is known
                 plain, saving, seed = max(plain, 0), max(saving, 0), max(seed, 0)
+            over_bound_doc = not certain and (u_over > 0 or u_floor > config.bound)
             if plain > 0 or not certain:
                 (seen if i < last_assistant else unseen).append(
-                    _Candidate(i, j, is_own, saving, plain, seed, hooks.has_document(result), call, result))
+                    _Candidate(i, j, is_own, saving, plain, seed, hooks.has_document(result), call, result,
+                               over_bound_doc))
 
     # What the whole ladder could free, and so what cannot be paged.
     rounds = [r for r in hooks.rounds(sent, start, n)[:-1] if r.foldable and r.removed]
@@ -1514,11 +1645,12 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     earlier = tokens(rw.window_items(sent[:start], state.k)) if start > state.k else 0
     freeable = ((earlier if may_page_turns else 0) + sum(counted(i, sent[i]) for r in rounds for i in r.removed)
                 + sum(c.saving for c in seen if c.i not in in_rounds and (c.i >= start or not may_page_turns)))
-    # The estimate holds an uncertain PDF at D60's count until usage measures it: the batch leaves that
-    # count out, so it pages nothing for it (over the bound by usage is the logged over_bound).
+    # The estimate holds an uncertain PDF at D60's count until usage measures it: the batch discounts the
+    # excess above its conservative byte floor, so small uncounted PDFs are read once while massive ones
+    # still apply pressure against ``config.bound``.
     fresh = (sent[previous_n:] if state.last_input_tokens is not None
              else rw.transform_messages(messages, state))
-    unknown = UNCERTAIN_DOCUMENT_TOKENS * unmeasured(fresh)
+    unknown = uncertain_discount(fresh)
     pressure = estimate + margin - unknown
     headway = line - HEADWAY_ROOMS * config.min_turn_room
 
@@ -1533,7 +1665,9 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         return target, max(target, headway)
 
     over_bound = pressure > config.bound
-    base = tokens(rw.transform_messages(messages, state))
+    transformed_before = rw.transform_messages(messages, state)
+    base_raw = raw_tokens(transformed_before)
+    base = tokens(transformed_before)
     # Step 0: the model reads every result whole at least once unless it cannot fit. A result is stubbed
     # on arrival only when the head, what cannot be paged of the messages (the turn-start prompt, the
     # newest round) and the unread results could not be sent under T with everything older paged. The
@@ -1568,7 +1702,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     for c in sorted(unseen, key=lambda c: (-c.saving, c.i, c.j)):
         if least <= read and seeded <= dense_line:
             break
-        if c.document and c.plain <= config.bound:
+        if c.document and not c.over_bound_doc and c.plain <= config.bound:
             continue  # a document is read whole unless it is over the bound on its own (Reviewer B, finding 8)
         huge.append(c)
         least -= c.plain if tight else c.saving
@@ -1590,14 +1724,23 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
     def measured(new: Any) -> int:
         """The anchored estimate of the request under ``new``: the pre-send estimate less what the
         edits took out of the messages, both sides counted by the estimator at one ratio."""
-        return estimate - (base - tokens(rw.transform_messages(messages, new)))
+        return estimate - (base_raw - raw_tokens(rw.transform_messages(messages, new)))
+
+    def current_unknown(new: Any) -> int:
+        new_fresh = (view(messages, new, dialect)[previous_n:]
+                     if state.last_input_tokens is not None and new.k == before.k
+                     else rw.transform_messages(messages, new))
+        return uncertain_discount(new_fresh)
 
     def pressed(new: Any) -> int:
         """``measured`` plus the margin of the fresh results still in the request."""
-        return (measured(new) - unknown
+        return (measured(new) - current_unknown(new)
                 + fresh_margin(view(messages, new, dialect)[previous_n:], estimator, dialect))
 
+    batch_stub_bp: int | None = None
+
     def stub(chosen: list[_Candidate], current: Any) -> Any:
+        nonlocal batch_stub_bp
         by_turn: dict[int, list[_Candidate]] = {}
         for c in chosen:
             if not c.own:
@@ -1609,9 +1752,12 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             ids.update({(c.i, c.j): page_id for c, page_id in zip(group, written)})
         new = [(c.i, c.j, ids.get((c.i, c.j), "")) for c in chosen]
         edits = current.inturn
+        first_stub = min(c.i for c in chosen)
+        batch_stub_bp = first_stub if batch_stub_bp is None else min(batch_stub_bp, first_stub)
         return replace(current, inturn=edits._replace(
             stubs=tuple(sorted([*edits.stubs, *new])),
-            strips=_merged([*edits.strips, (min(c.i for c in chosen), n)])))
+            strips=_merged([*edits.strips, (first_stub, n)]),
+            stub_bp=batch_stub_bp))
 
     counts = {"results": 0, "own_results": 0, "unseen_results": 0, "rounds": 0, "turns": 0, "pages": 0}
     first_changed = n
@@ -1629,10 +1775,11 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             counts["unseen_results"] += len(chosen)
 
     def page_turns() -> None:
-        nonlocal state, cur, first_changed
+        nonlocal state, cur, first_changed, batch_stub_bp
         paged: list[dict] = []
         state = rw.new_epoch(view(messages, state, dialect), request, state, store, config, estimator, start, n,
                              paged, ROTATION_REASON)
+        batch_stub_bp = None
         events.extend(paged)
         counts["turns"] += sum(e.get("turns", 0) for e in paged if e["event"] == "page_out")
         counts["pages"] += sum(e.get("pages", 0) for e in paged if e["event"] == "page_out")
@@ -1645,7 +1792,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         # Reviewer A at 7575c76f, finding 2: every later step is sized from the request as it stands after
         # step 0, not with the stubbed results still counted (which kept steps 1 to 3 from running).
         may_rewrite = cur > config.bound or (not unmeasured_batch and freeable >= config.min_turn_room
-                                             and (not after_rewrite or measured(state) - unknown > show))
+                                             and (not after_rewrite or measured(state) - current_unknown(state) > show))
     target, escalate = sized(cur)
     # Steps 1 to 3 change messages the previous request had: a rewrite of the cached prefix.
     rewriting = may_rewrite and cur > line
@@ -1726,7 +1873,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
                    "turns_paged": counts["turns"], "pages": counts["pages"], "estimate_before": estimate,
                    "estimate_after": after, "margin": margin, "first_changed": first_changed,
                    "resent_tokens": resent, "messages": n})
-    if after - unknown > config.bound:
+    if after - current_unknown(state) > config.bound:
         events.append({"event": "in_turn_exhausted", "epoch": state.epoch, "estimate": after,
                        "bound": config.bound})
     return state, after
@@ -1760,7 +1907,9 @@ def _listed(messages: list[dict], state: Any, store: Any, start: int, hooks: Any
                                  FOLDS_PAGE, [start])[0]
         entries[-FOLDS_FANOUT:] = [(children[-1][0], index, children[0][2] + 1)]
     lists = tuple(x for x in edits.lists if x[0] != start) + tuple((start, *entry) for entry in entries)
-    return replace(state, inturn=edits._replace(lists=tuple(sorted(lists))))
+    return replace(state, inturn=edits._replace(
+        lists=tuple(sorted(lists)),
+        strips=_merged([*edits.strips, (start, len(messages))])))
 
 
 def relisted(messages: list[dict], state: Any, store: Any) -> Any:

@@ -444,12 +444,13 @@ def test_a_launch_that_pages_the_history_again_adds_only_its_new_pages(tmp_path,
     launches = [(range(0, 25), {}), (range(25, 28), {"system": "a changed system prompt"}),
                 (range(28, 31), {"system": "a changed system prompt", "model": "claude-sonnet-5-5"})]
     on_disk, summaries = [], []
+    cfg = {**SMALL, "window_fraction": 0.5}
     for turns, fields in launches:
         store = SessionStore(home, "m1")
-        proxy, engine = launcher.start_proxy(store, token_upstream, "flag", SMALL, False, stderr=io.StringIO(),
+        proxy, engine = launcher.start_proxy(store, token_upstream, "flag", cfg, False, stderr=io.StringIO(),
                                              cli="claude")
         try:
-            store.log({"event": "launch", "cli": "claude", "session": "m1", "config": SMALL, "engine": engine})
+            store.log({"event": "launch", "cli": "claude", "session": "m1", "config": cfg, "engine": engine})
             for t in turns:
                 post(proxy, conversation(t), **fields)
         finally:

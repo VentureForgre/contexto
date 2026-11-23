@@ -16,7 +16,7 @@ contexto run [options] codex [codex arguments]
 |---|---|---|
 | `--bound N` | 150,000 | The bound, in tokens. Above 170,000 needs `--allow-large-bound`. |
 | `--allow-large-bound` | off | Allow `--bound` above 170,000 (Claude Code may then compact on its own). |
-| `--window-fraction F` | 0.5 | Share of the window budget kept as recent turns after a rotation. |
+| `--window-fraction F` | 0.25 | Share of the window budget kept as recent turns after a rotation. |
 | `--headroom-floor N` | 25,000 | The smallest headroom below the bound; a request within it triggers a rotation. |
 | `--session ID` | see [Resuming](claude-code.md) | Full session id to resume or create. Without it, `--resume <id>` and `--continue` reuse the session that served that conversation; anything else gets a new id. A prefix of existing ids is refused (exit 2). |
 | `--upstream URL` | resolved | Upstream base URL for Claude Code requests. |

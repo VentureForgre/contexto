@@ -817,9 +817,10 @@ def test_a_resync_inside_the_window_drops_the_edits_past_the_change():
     assert inturn.clipped(edits, 12, messages, ANTHROPIC) is edits
     assert inturn.clipped(inturn.EMPTY, 0, messages, ANTHROPIC) is inturn.EMPTY
     # The change is in the results message 8: its assistant message 7 cannot stay folded without it, so
-    # the fold is cut back to the whole rounds before it. A strip range keeps its old end.
+    # the fold is cut back to the whole rounds before it. Because turn 0's fold note changes, thinking
+    # from turn 0 through the end of messages is stripped for prefix-binding safety.
     cut = inturn.clipped(edits, 8, messages, ANTHROPIC)
-    assert cut == inturn.InTurn(stubs=((2, 0, "pg_a"),), folds=((0, ((1, 5),), "pg_b"),), strips=((2, 12),),
+    assert cut == inturn.InTurn(stubs=((2, 0, "pg_a"),), folds=((0, ((1, 5),), "pg_b"),), strips=((0, 12),),
                                 batches=3)
     # The change is in the assistant message 3: rounds 1-2 stay folded, whole.
     assert inturn.clipped(edits, 3, messages, ANTHROPIC).folds == ((0, ((1, 3),), "pg_b"),)

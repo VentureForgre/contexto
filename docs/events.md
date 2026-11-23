@@ -315,7 +315,7 @@ The model reads a paged turn back:
   a quarter of the bound.
 - **Window budget** (`W`): `bound - headroom - F`, what is left for turns.
 - **Window target**: the size a rotation cuts the retained turns down to: `W` times
-  `--window-fraction` (0.5 by default). The other half is room to grow before the next rotation. A
+  `--window-fraction` (0.25 by default). The rest is room to grow before the next rotation. A
   rotation made for the room (reason `min_turn_room`) uses `W - min_turn_room` in place of `W`.
 - **Room**: the tokens `contexto_recall`, `contexto_search` and `contexto_state` may return in the
   current turn. A **side room** is a subagent's own.
@@ -871,10 +871,11 @@ rebuilt. The first request after a rotation rewrites the cache from the window o
 
 - `epoch`: the new epoch's number: the conversation's previous epoch plus one.
 - `reason`: `bound` (the estimate passed `bound - headroom`), `min_turn_room` (the recall room for
-  the new turn would have been under `min_turn_room`), `window_minimal` (see
-  [`window_minimal`](#window_minimal)), `head_change` (the system prompt or tools changed),
-  `paged_changed` (see [`resync`](#resync)), or `in_turn` (in-turn paging paged the earlier turns
-  of the window inside a tool loop; an [`in_turn_batch`](#in_turn_batch) follows).
+  the new turn would have been under `min_turn_room`), `cache_cold` (Anthropic's prompt cache had
+  expired since the previous response and window occupancy passed `cold_cache_fraction * W`),
+  `window_minimal` (see [`window_minimal`](#window_minimal)), `head_change` (the system prompt or
+  tools changed), `paged_changed` (see [`resync`](#resync)), or `in_turn` (in-turn paging paged the
+  earlier turns of the window inside a tool loop; an [`in_turn_batch`](#in_turn_batch) follows).
 - `k`: the first message still sent in the new epoch.
 - `retained_messages`: the number of the CLI's messages from `k` on. Messages from before `k` that
   are carried (a `role: "system"` message from a paged turn, or a Codex `developer` item ahead of
@@ -1089,8 +1090,8 @@ messages (a local compaction, a rewind). The engine continues from the longest m
 - `matched`: how many leading messages still match.
 - `previous_messages`: how many messages the previous request had.
 - `messages`: how many this request has.
-- `inflight_thinking_kept`: `paged_changed` only: whether the current turn holds thinking blocks,
-  which are kept.
+- `inflight_thinking_kept`: `paged_changed` only: always false; mid-loop `paged_changed` resyncs
+  strip existing thinking blocks (`strip_upto = n`) so none survives behind a mutated prefix.
 
 ### `over_bound`
 
