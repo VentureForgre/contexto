@@ -16,10 +16,11 @@ The single list is `TESTED_VERSIONS` in `src/contexto/cliversions.py`, oldest to
 | Claude Code | 2.1.302 | session-start signature (D33), context-block kinds (D32), missing-tools notices, the permission refusal of Contexto's tools in `-p` mode (D44), live acceptance on Claude Opus 5.5 (PR #221, [M2-acceptance-opus.md](research/M2-acceptance-opus.md); live run #3 ran on 2.1.301) |
 | Claude Code | 2.1.310 | steps 1 to 6 below at zero spend, and the D44 permission check ([M2-claude-code-2.1.310.md](research/M2-claude-code-2.1.310.md)); tool search is on by default, and three of its shapes are read differently since D46; a live recall check with Contexto's tools deferred (credited at 145,080 tokens; 305,223 with the first attempt), not the full live acceptance |
 | Claude Code | 2.1.314, 2.1.318 | steps 1 to 7 below at zero spend, with the reminders matrix run with tool search on and off, and the D44 permission check ([M2-claude-code-2.1.318.md](research/M2-claude-code-2.1.318.md)); the request shapes are 2.1.310's, and the subagent stop reports put the tools the agent used first, which the engine reads since D56; 2.1.318 passed the full live acceptance (run #4, [M2-acceptance-run4.md](research/M2-acceptance-run4.md)); no live check on 2.1.314 |
+| Claude Code | 2.1.328 | verified against real-CLI tests (hint headers, session start, bench live arms, Vertex/Foundry request paths); version checks use semver compatibility ranges (`>=2.1.302, <2.2.0`) plus runtime structural health signals (`session_start_seen`, `hint_mismatch`) |
 | Codex | 0.154.0 | Responses shapes and context sections, Codex acceptance (D30) |
 | Codex | 0.163.0 | MCP server launch and missing-tools check (v0.2.8); context sections and request shapes rechecked for D38 (Codex steps 1 to 4 below) |
 | Codex | 0.166.0 | Codex steps 1 to 4 below at zero spend for D56: the same context sections and request shapes, and the MCP launch; no live check |
-| Codex | 0.170.0 | Codex steps 1 to 4 below at zero spend: the same context sections and request shapes, and the MCP launch (`smoke.sh preflight`, 0 `mcp_tools_missing`); no live check |
+| Codex | 0.170.0 | Codex steps 1 to 4 below at zero spend (`probe.sh` and `smoke.sh preflight`, 0 `mcp_tools_missing`): the same context sections and request shapes; version checks use semver compatibility ranges (`>=0.154.0, <1.0.0`) |
 
 Hook-output signatures were measured on Claude Code 2.1.301 and re-measured on 2.1.310, 2.1.314 and
 2.1.318 (`HOOK_SIGNATURES_CLAUDE_CODE_VERSION`), not on 2.1.302.
@@ -40,9 +41,11 @@ Hook-output signatures were measured on Claude Code 2.1.301 and re-measured on 2
 | that Claude Code applies the `--settings` `env` block to its own environment, which the marker `CONTEXTO_HINT_HEADERS` exists for (D70) | `src/contexto/hints.py`, `src/contexto/launcher.py` | `tests/test_hint_headers_real_client.py` (the nested tests) |
 | subagent shapes (`AGENT_TOOLS`, `ASYNC_LAUNCH`, `HAND_BACK`, `NOTICE_OPENINGS`, the `<task-notification>`, `resumedAgentId` and `<tools-used-before-summary>` patterns), gated by `SUBAGENT_SHAPES_TESTED` (D40, D56) | `src/contexto/rewrite.py`, `src/contexto/cliversions.py` | `spikes/m2/subagents` |
 
-The subagent shapes are gated by version: when the latest Claude Code version seen in a request's
-`User-Agent` is not in `SUBAGENT_SHAPES_TESTED`, side rooms only expire (15 minutes) and none closes
-early. Step 5 of the routine below re-measures them.
+The subagent shapes are gated by `cliversions.subagent_shapes_supported`: enabled across the
+compatible Claude Code `2.1.x` range (`>=2.1.302, <2.2.0`), with `SUBAGENT_SHAPES_TESTED` naming
+the explicitly measured versions and newer compatible patches automatically falling back to the
+15-minute expiry if runtime structural checks (`session_start_ok` or `hint_mismatch`) detect drift.
+Step 5 of the routine below re-measures them.
 
 The hint headers are documented by Claude Code, not read from its text, and `contexto run claude` asks
 for them (D70). Where a request carries one, it decides in place of the signature beside it: the
@@ -61,9 +64,9 @@ fallback no longer keeps its latest copy (D32). If Codex renames its section tag
 
 - At launch, `contexto run claude|codex` runs `<cli> --version` in its own process group, with stdin
   closed. It reads at most 4 KB of output, until a line with a version, end of file, or 3 seconds,
-  then kills the process group. For a version not in the list it prints one line on stderr:
-  `contexto: warning: Claude Code <v> is not a version Contexto was tested with (tested: ...)`, with
-  what may break and where to report it. The launch always goes on. A CLI that does not answer or
+  then kills the process group. For a version outside the supported semver range it prints one line on
+  stderr: `contexto: warning: Claude Code <v> is outside the version range Contexto supports (supported: ..., tested: ...)`,
+  with what may break and where to report it. The launch always goes on. A CLI that does not answer or
   prints no version is logged, not warned about. `contexto run --no-version-check <cli>` (the flag goes
   before the CLI's name) or `CONTEXTO_NO_VERSION_CHECK=1` skips the check. Ctrl+C during the check
   stops the launch with exit code 130, before the CLI starts. The session log gets a

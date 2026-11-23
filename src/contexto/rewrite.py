@@ -164,7 +164,7 @@ from typing import Any, ClassVar, NamedTuple, Protocol
 
 from contexto import inturn
 from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
-from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions
+from contexto.cliversions import SUBAGENT_SHAPES_TESTED, ClientVersions, subagent_shapes_supported
 from contexto.hints import AGENT_CLASSES, MAIN_CLASSES, NO_HINTS, SIDE_CLASSES, GatewayHints, gateway_hints
 from contexto.mainrecords import MainRecords
 from contexto.pdfpages import PDF_MAX_PAGES
@@ -757,7 +757,7 @@ UNCLASSIFIED = "unclassified"
 # system message arrives as a settings-only message ({"role": "system", "content": [], "output_config":
 # ...}; none in the 2.1.302 matrix, 3 to 12 per opus-5-5 run on 2.1.314 and 2.1.318). It is read as
 # settings, and the latest copy is carried.
-SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.318"
+SESSION_START_SIGNATURE_CLAUDE_CODE_VERSION = "2.1.328"
 SESSION_START_SIGNATURE = re.compile(
     r"\s*(?:<system-reminder>\s*)?(?:The following deferred tools are now available[^\n]*\n(?:[^\n]+\n)*\r?\n\s*)?"
     r"# Environment[ \t]*(?:\r?\n|\Z)")
@@ -878,7 +878,7 @@ def _anthropic_classify_system(messages: list[dict], i: int) -> str:
 # (the same on 2.1.302 with ENABLE_TOOL_SEARCH); the other kinds and their placement are unchanged.
 # D56: the same kinds and placement on 2.1.314 and 2.1.318; 2.1.318's --resume re-sends far fewer old
 # file-changed notes (4 instead of 80 in the last request of each 48-turn resume run).
-CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.318"
+CONTEXT_BLOCK_KINDS_CLAUDE_CODE_VERSION = "2.1.328"
 CONTEXT_BLOCK_KINDS = (
     ("token_countdown", re.compile(r"<total_tokens>")),
     ("plan_mode", re.compile(r"Plan mode is active|## Exited Plan Mode")),
@@ -2569,8 +2569,9 @@ def anchor_hash(hashes: tuple[str, ...] | list[str]) -> str:
 # hand-back, each naming the ``agentId``. Each time the agent stops, main gets a ``<task-notification>``
 # naming the launching call's tool-use id; a ``SendMessage`` resume (its result names the
 # ``resumedAgentId``) runs it again, as a new user turn in its own conversation, and that run's notice
-# names the ``SendMessage`` call. ``cliversions.SUBAGENT_SHAPES_TESTED`` names
-# the CLI versions these shapes were measured on; for any other version rooms only expire.
+# names the ``SendMessage`` call. ``cliversions.subagent_shapes_supported`` gates early side-room
+# closing across the compatible 2.1.x range (explicitly measured on ``SUBAGENT_SHAPES_TESTED``, and
+# guarded by ``session_start_ok`` and ``hint_mismatch`` on newer compatible patches).
 # D56: since 2.1.312 (measured on 2.1.314 and 2.1.318) a run that used tools is reported with their names
 # first, in a ``<tools-used-before-summary>`` element: indented above a foreground hand-back's frame
 # ("  <tools-used-before-summary>Bash</tools-used-before-summary>\n  \n[Subagent hand-back] ..."), at
@@ -3232,6 +3233,8 @@ class RewriteEngine:
         events = [{"event": "hint_mismatch", "header": header, "value": value, "signature": signature}
                   for header, value, signature in found if (header, value, signature) not in self._mismatches]
         self._mismatches.update(found)
+        if found:
+            self.clients.note_hint_mismatch()
         return hints, judged, events
     def _first_trusted(self, key: str) -> bool:
         """D69: whether the engine's first main conversation is trusted. Only when the store is new (no
@@ -3678,12 +3681,17 @@ class RewriteEngine:
         notice of an earlier run cannot close a later run's room, whatever the order. Every ``Agent``
         call with that prompt must be known and stopped that often (twins). Rooms matching no call,
         calls without a result or with a result of an unknown shape, agents still running, any Codex
-        room, and every room when the CLI version is not one the shapes were measured on
-        (``SUBAGENT_SHAPES_TESTED``) keep the 15-minute expiry. Logged as ``side_room_closed`` with
-        reason ``agent_stopped``."""
+        room, and every room when ``cliversions.subagent_shapes_supported`` returns False (outside the
+        supported range, or structural drift detected on a newer patch) keep the 15-minute expiry.
+        Logged as ``side_room_closed`` with reason ``agent_stopped``."""
         if not self._side_rooms or dialect.name != "anthropic":
             return
-        if self.clients.latest.get("claude") not in SUBAGENT_SHAPES_TESTED:
+        claude_ver = self.clients.latest.get("claude")
+        subagent_mismatch = any(sig in ("agent_id", "no_agent_id") for _, _, sig in self._mismatches)
+        untested_drift = claude_ver not in SUBAGENT_SHAPES_TESTED and self.clients.hint_mismatch_seen
+        if not subagent_shapes_supported(claude_ver,
+                                         session_start_ok=self.clients.session_start_ok,
+                                         hint_mismatch=subagent_mismatch or untested_drift):
             return
         by_prompt, stops = agent_runs(messages)
         doomed = []

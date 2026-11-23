@@ -1,9 +1,10 @@
 """The ``plain`` arm: the same headless Claude Code with no Contexto, compacting on its own.
 
 Claude Code has no setting for the token count at which it compacts. Every documented control sets
-the auto-compact window W, and 2.1.322 compacts when its count reaches W minus 33,000 (20,000 for
-the summary's output and 13,000 more; read in the 2.1.322 bundle, not documented, and not confirmed
-by a live run: the only documented figure is that a 1,000,000 window compacts "at about 967K"). So
+the auto-compact window W, and 2.1.322 (re-verified on 2.1.328) compacts when its count reaches
+W minus 33,000 (20,000 for the summary's output and 13,000 more; read in the 2.1.322 bundle, not
+documented, and not confirmed by a live run: the only documented figure is that a 1,000,000 window
+compacts "at about 967K"). So
 for a bound B the arm sets ``CLAUDE_CODE_AUTO_COMPACT_WINDOW = B + 33000``, which outranks the flag
 and the settings. W must be 100,000 to 1,000,000, so this works for bounds from 67,000 to 967,000;
 outside that range the trigger cannot be put at the bound, the nearest window is set and the
