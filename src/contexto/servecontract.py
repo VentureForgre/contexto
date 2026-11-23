@@ -24,6 +24,8 @@ registered.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import errno
 import fcntl
 import hmac
@@ -52,8 +54,20 @@ LOCK_WAIT_S = 0.25  # how long a starting service waits out the instant a status
 LOCAL_PREFIX = "/contexto"
 HEALTH_PATH = LOCAL_PREFIX + "/health"
 RESOLVE_PATH = LOCAL_PREFIX + "/resolve"
+ACTIVE_PATH = LOCAL_PREFIX + "/active"
+MCP_PATH = "/mcp"
+CONTEXTO_SESSION_HEADER = "X-Contexto-Session"
+CONTEXTO_WORKDIR_HEADER = "X-Contexto-Workdir"
+MCP_SESSION_HEADER = "Mcp-Session-Id"
+PROVIDER_NAMES = ("anthropic", "openai", "gemini")
+DEFAULT_PROVIDER_UPSTREAMS = {
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com",
+    "gemini": "https://generativelanguage.googleapis.com",
+}
 MAX_LOCAL_BODY_BYTES = 64 * 1024
 MAX_TOOL_USE_ID_CHARS = 256  # Anthropic's ids are about 30 characters; a longer value is not an id
+MAX_WORKDIR_BYTES = 4096
 UNKNOWN_TOOL_USE = "unknown_tool_use"
 RESOLVE_UNKNOWN = {"error": UNKNOWN_TOOL_USE}
 class ServeFileError(Exception):
@@ -209,6 +223,36 @@ def base_url(port: int, token: str) -> str:
     return f"http://{SERVICE_HOST}:{port}/{token}"
 
 
+def mcp_url(port: int, token: str, session: str | None = None) -> str:
+    """Streamable HTTP MCP endpoint URL for ``contexto serve``."""
+    if session:
+        return f"http://{SERVICE_HOST}:{port}/{token}/s/{session}{MCP_PATH}"
+    return f"http://{SERVICE_HOST}:{port}/{token}{MCP_PATH}"
+
+
+def encode_workdir_segment(workdir: str) -> str:
+    """Encode an absolute directory path into a URL-safe ``/w/<encoded>/`` path segment."""
+    raw = workdir.encode("utf-8")
+    if not raw or len(raw) > MAX_WORKDIR_BYTES or b"\x00" in raw:
+        raise ValueError("invalid workdir")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_workdir_segment(segment: str) -> str | None:
+    """Decode a ``/w/<encoded>/`` segment back into an absolute path string, or None when invalid."""
+    if not segment or len(segment) > MAX_WORKDIR_BYTES * 2:
+        return None
+    pad = "=" * (-len(segment) % 4)
+    try:
+        raw = base64.urlsafe_b64decode((segment + pad).encode("ascii"))
+        text = raw.decode("utf-8")
+    except (ValueError, binascii.Error, UnicodeError):
+        return None
+    if not text or len(raw) > MAX_WORKDIR_BYTES or "\x00" in text or not os.path.isabs(text):
+        return None
+    return text
+
+
 def local_target(token: str, path: str) -> str:
     """The request target of one of the service's own endpoints (``HEALTH_PATH``, ``RESOLVE_PATH``)."""
     return f"/{token}{path}"
@@ -221,15 +265,30 @@ def resolve_request(tool_use_id: str) -> bytes:
     return json.dumps({"tool_use_id": tool_use_id}).encode("utf-8")
 
 
-def requested_tool_use(body: bytes) -> str | None:
-    """The tool-use id a resolve request asks about, or None when the body is not such a request."""
+def resolve_session_request(session_key: str) -> bytes:
+    return json.dumps({"session": session_key}).encode("utf-8")
+
+
+def requested_resolve(body: bytes) -> tuple[str | None, str | None]:
+    """``(tool_use_id, session_key)`` from a resolve request body; both None when invalid."""
     try:
         request = loads_bounded(body)
     except ValueError:
-        return None
-    tool_use_id = request.get("tool_use_id") if isinstance(request, dict) else None
-    if not isinstance(tool_use_id, str) or not 0 < len(tool_use_id) <= MAX_TOOL_USE_ID_CHARS:
-        return None
+        return None, None
+    if not isinstance(request, dict):
+        return None, None
+    tool_use_id = request.get("tool_use_id")
+    if isinstance(tool_use_id, str) and 0 < len(tool_use_id) <= MAX_TOOL_USE_ID_CHARS:
+        return tool_use_id, None
+    session_key = request.get("session")
+    if isinstance(session_key, str) and 0 < len(session_key) <= MAX_TOOL_USE_ID_CHARS:
+        return None, session_key
+    return None, None
+
+
+def requested_tool_use(body: bytes) -> str | None:
+    """The tool-use id a resolve request asks about, or None when the body is not such a request."""
+    tool_use_id, _ = requested_resolve(body)
     return tool_use_id
 
 

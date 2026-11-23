@@ -84,7 +84,11 @@ def _try_price(model: str | None, uncached: int, cache_write: int, cache_read: i
 
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
-MODEL_PATHS = frozenset({MESSAGES_PATH, "/responses", "/v1/responses"})  # a prompt sent for a completion
+MODEL_PATHS = frozenset({
+    MESSAGES_PATH, "/responses", "/v1/responses", "/chat/completions", "/v1/chat/completions",
+})  # static prompt paths sent for a completion (tests/test_stats.py checks == proxy.USAGE_FEEDBACK_PATHS)
+_GEMINI_MODEL_PATH = re.compile(r"^/v1(?:beta|alpha)?/models/[^/:]+:(?:generateContent|streamGenerateContent)$")
+_GEMINI_COUNT_PATH = re.compile(r"^/v1(?:beta|alpha)?/models/[^/:]+:countTokens$")
 _VERTEX_COUNT_TOKENS_RE = re.compile(
     r"^/(?:v1/)?projects/[A-Za-z0-9][A-Za-z0-9._-]*/locations/[A-Za-z0-9][A-Za-z0-9._-]*"
     r"/publishers/anthropic/models/count-tokens:rawPredict\Z"
@@ -106,11 +110,13 @@ def _is_messages_path(path: Any) -> bool:
 def _is_count_tokens_path(path: Any) -> bool:
     return (isinstance(path, str)
             and (path == COUNT_TOKENS_PATH or path in _FOUNDRY_COUNT_TOKENS_PATHS
-                 or bool(_VERTEX_COUNT_TOKENS_RE.match(path))))
+                 or bool(_VERTEX_COUNT_TOKENS_RE.match(path))
+                 or bool(_GEMINI_COUNT_PATH.match(path))))
 
 
 def _is_model_path(path: Any) -> bool:
-    return isinstance(path, str) and (path in MODEL_PATHS or _is_messages_path(path))
+    return (isinstance(path, str)
+            and (path in MODEL_PATHS or _is_messages_path(path) or bool(_GEMINI_MODEL_PATH.match(path))))
 TOOL_NAMES = ("recall", "search", "state", "pin", "close")  # Contexto's MCP tools, without ``contexto_``
 
 # The Claude Code versions on which the compaction summary's wording was measured (the note above
@@ -331,7 +337,7 @@ def log_values(directory: Path, start: int = 0) -> Iterator[Any]:
 
 
 HELD_LINES = 64  # lines kept between one run's exit and the next proxy start; a launch writes a few
-_RUN_MARK = re.compile(rb'"event":\s*"(?:proxy_start|serve_open|launch)"')
+_RUN_MARK = re.compile(rb'"event":\s*"(?:proxy_start|launch|serve_open)"')
 _LOOK_BACK_BYTES = 1 << 16
 
 
@@ -652,7 +658,11 @@ class _Tally:
             # the run's gain (PR #263 review A, round 3).
             if self.run_open and not self.replaying_held:
                 self._stopped, self._pages_stop = True, self._number(event.get("pages"))
-        elif name in ("exit", "serve_close"):
+        elif name == "serve_close":
+            if self.run_open and not self.replaying_held:
+                self._stopped, self._pages_stop = True, self._number(event.get("pages"))
+            self._close_run(None)
+        elif name == "exit":
             self._close_run(None)
         elif name == "proxy_stop_incomplete":  # requests with no line of their own: said, not a fault
             self.requests["in_flight_at_stop"] += self._number(event.get("in_flight")) or 0
@@ -813,9 +823,9 @@ class _Tally:
         not a measured 0: such a request is counted in ``unreported_requests``."""
         if not isinstance(usage, dict):
             return None
-        fresh = self._number(usage.get("input_tokens"))
-        output = self._number(usage.get("output_tokens"))
         if api == "responses":
+            fresh = self._number(usage.get("input_tokens"))
+            output = self._number(usage.get("output_tokens"))
             details = usage.get("input_tokens_details")
             read = self._number(details.get("cached_tokens")) if isinstance(details, dict) else None
             write = self._number(usage.get("cache_write_tokens"))
@@ -823,7 +833,30 @@ class _Tally:
             read_clamped = min(read, prompt) if read is not None and prompt is not None else 0
             write_clamped = min(write, max(0, (prompt or 0) - read_clamped)) if write is not None else 0
             uncached = max(0, (prompt or 0) - read_clamped - write_clamped)
+        elif api == "chat_completions":
+            fresh = self._number(usage.get("prompt_tokens") if "prompt_tokens" in usage else usage.get("input_tokens"))
+            output = self._number(usage.get("completion_tokens") if "completion_tokens" in usage
+                                  else usage.get("output_tokens"))
+            details = usage.get("prompt_tokens_details")
+            read = self._number(details.get("cached_tokens")) if isinstance(details, dict) else None
+            prompt = fresh
+            read_clamped = min(read, prompt) if read is not None and prompt is not None else 0
+            write_clamped = 0
+            uncached = max(0, (prompt or 0) - read_clamped)
+        elif api == "gemini":
+            fresh = self._number(usage.get("promptTokenCount") if "promptTokenCount" in usage
+                                 else usage.get("prompt_token_count"))
+            output = self._number(usage.get("candidatesTokenCount") if "candidatesTokenCount" in usage
+                                  else usage.get("candidates_token_count"))
+            read = self._number(usage.get("cachedContentTokenCount") if "cachedContentTokenCount" in usage
+                                else usage.get("cached_content_token_count"))
+            prompt = fresh
+            read_clamped = min(read, prompt) if read is not None and prompt is not None else 0
+            write_clamped = 0
+            uncached = max(0, (prompt or 0) - read_clamped)
         else:
+            fresh = self._number(usage.get("input_tokens"))
+            output = self._number(usage.get("output_tokens"))
             read = self._number(usage.get("cache_read_input_tokens"))
             write = self._number(usage.get("cache_creation_input_tokens"))
             prompt = (fresh or 0) + (read or 0) + (write or 0)

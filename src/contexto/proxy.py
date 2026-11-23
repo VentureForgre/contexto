@@ -96,13 +96,19 @@ import ssl
 import threading
 import time
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
 from urllib.parse import quote, urlsplit
 
 from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, has_lone_surrogate, loads_bounded
+from contexto.dialects import (
+    dialect_for as registry_dialect_for,
+)
+from contexto.dialects import (
+    model_from_endpoint,
+)
 from contexto.hints import GATED_HINT_HEADERS
 
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
@@ -135,8 +141,9 @@ COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 # without /v1 and the upstream base carries the version path, so Codex sends POST /responses; the
 # /v1 spelling is accepted too. The engine dispatches on endpoint.endswith("/responses").
 RESPONSES_PATHS = frozenset({"/responses", "/v1/responses"})
-TRANSFORMED_PATHS = frozenset({MESSAGES_PATH, COUNT_TOKENS_PATH}) | RESPONSES_PATHS
-USAGE_FEEDBACK_PATHS = frozenset({MESSAGES_PATH}) | RESPONSES_PATHS
+CHAT_COMPLETIONS_PATHS = frozenset({"/chat/completions", "/v1/chat/completions"})
+TRANSFORMED_PATHS = frozenset({MESSAGES_PATH, COUNT_TOKENS_PATH}) | RESPONSES_PATHS | CHAT_COMPLETIONS_PATHS
+USAGE_FEEDBACK_PATHS = frozenset({MESSAGES_PATH}) | RESPONSES_PATHS | CHAT_COMPLETIONS_PATHS
 # Vertex AI and Microsoft Foundry Anthropic Messages paths (measured on Claude Code 2.1.328):
 # - Vertex sends /projects/<p>/locations/<loc>/publishers/anthropic/models/<model>:streamRawPredict
 #   or :rawPredict (and count-tokens:rawPredict), optionally prefixed with /v1.
@@ -155,11 +162,12 @@ FOUNDRY_COUNT_TOKENS_PATHS = frozenset({"/anthropic/v1/messages/count_tokens"})
 
 def classify_path(path: str) -> tuple[str | None, str | None]:
     """Classify a POST path into ``(api, canonical_endpoint)``: ``("messages", "/v1/messages")``,
-    ``("messages", "/v1/messages/count_tokens")``, ``("responses", path)``, or ``(None, None)``.
+    ``("messages", "/v1/messages/count_tokens")``, ``("responses", path)``,
+    ``("chat_completions", path)``, ``("gemini", path)``, or ``(None, None)``.
 
     Recognises direct Anthropic Messages paths, Vertex AI ``:rawPredict`` / ``:streamRawPredict`` /
-    ``count-tokens:rawPredict`` paths, Microsoft Foundry ``/anthropic/v1/messages`` paths, and
-    OpenAI Responses paths."""
+    ``count-tokens:rawPredict`` paths, Microsoft Foundry ``/anthropic/v1/messages`` paths, and any
+    dialect registered in ``contexto.dialects`` (Responses, Chat Completions, Gemini)."""
     if path == MESSAGES_PATH or path in FOUNDRY_MESSAGES_PATHS:
         return "messages", MESSAGES_PATH
     if path == COUNT_TOKENS_PATH or path in FOUNDRY_COUNT_TOKENS_PATHS:
@@ -168,8 +176,9 @@ def classify_path(path: str) -> tuple[str | None, str | None]:
         return "messages", COUNT_TOKENS_PATH
     if VERTEX_MESSAGES_RE.match(path):
         return "messages", MESSAGES_PATH
-    if path in RESPONSES_PATHS:
-        return "responses", path
+    dialect = registry_dialect_for(path)
+    if dialect is not None:
+        return dialect.api_name, path
     return None, None
 
 
@@ -180,7 +189,11 @@ def is_transformed_path(path: str) -> bool:
 
 def is_usage_feedback_path(path: str) -> bool:
     """Whether ``path`` returns model usage fed back to the rewrite engine."""
-    return classify_path(path)[1] in USAGE_FEEDBACK_PATHS
+    api, canonical = classify_path(path)
+    if api is None or canonical is None:
+        return False
+    dialect = registry_dialect_for(canonical)
+    return dialect is not None and not dialect.is_count_endpoint(canonical)
 RESPONSE_END_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
 # D40: Responses tool calls that run on OpenAI's servers (the Responses API reference's hosted tools;
 # ``mcp_call`` is the hosted remote-MCP tool, which OpenAI calls itself). They never reach Contexto's
@@ -220,12 +233,81 @@ AFFINITY_HEADER = "X-Session-Affinity"
 # The one answer to a request the proxy refuses to serve (D53), whatever the reason: the body never says why.
 REFUSED_MESSAGE = "contexto proxy: request refused (not from the local CLI)"
 # Host names (and their subdomains) that serve the vendor APIs directly, including Azure OpenAI,
-# Azure AI Foundry, and Google Vertex AI: each has one identity per credential, so the affinity
-# header is not sent to them (D36). Matching is by host name only; an IP literal upstream gets the header.
+# Azure AI Foundry, and Google Vertex AI / Gemini: each has one identity per credential, so the
+# affinity header is not sent to them (D36). Matching is by host name only; an IP literal upstream
+# gets the header.
 VENDOR_HOSTS = ("anthropic.com", "openai.com", "chatgpt.com", "openai.azure.com", "services.ai.azure.com",
-                "cognitiveservices.azure.com", "aiplatform.googleapis.com")
+                "cognitiveservices.azure.com", "generativelanguage.googleapis.com", "aiplatform.googleapis.com")
 # Regional Vertex AI endpoints use a hyphenated single-label prefix (e.g. us-east5-aiplatform.googleapis.com).
 _VERTEX_REGIONAL_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-aiplatform\.googleapis\.com\Z")
+_ALLOWED_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$|^\[[0-9a-f:.]+\]$")
+_LOCAL_ORIGIN_SCHEMES = frozenset({"vscode-webview", "cursor-webview", "jetbrains", "file"})
+
+
+def normalize_allowed_host(host: str) -> str:
+    """Validate and normalize one opt-in ``--allow-host`` entry (lowercase hostname or bracketed IPv6,
+    no port, no whitespace, no wildcards)."""
+    value = host.strip().lower()
+    if not value or not _ALLOWED_HOST_RE.fullmatch(value):
+        raise ValueError(f"invalid --allow-host value {host!r}: expected a hostname or IP without scheme or port")
+    return value
+
+
+def _host_without_port(host_header: str) -> str:
+    value = host_header.strip().lower()
+    if value.startswith("["):
+        end = value.find("]")
+        return value[: end + 1] if end != -1 else value
+    host, colon, port = value.rpartition(":")
+    if colon and port.isdigit() and 1 <= len(port) <= 5:
+        return host
+    return value
+
+
+def is_local_origin(origin: str, allowed_hosts: frozenset[str] = frozenset()) -> bool:
+    """True when ``Origin`` names a local webview/IDE scheme or an http(s) origin on loopback or one of
+    ``allowed_hosts``. Used only when opt-in ``allow_local_origin`` is enabled on a token-gated service."""
+    value = origin.strip()
+    if not value or value == "null":
+        return False
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return False
+    scheme = parts.scheme.lower()
+    if scheme in _LOCAL_ORIGIN_SCHEMES:
+        return True
+    if scheme not in ("http", "https") or not parts.hostname:
+        return False
+    host = parts.hostname.lower()
+    if host in ("127.0.0.1", "localhost", "::1") or host.endswith(".localhost"):
+        return True
+    return host in allowed_hosts or f"[{host}]" in allowed_hosts
+
+
+def _normalize_base_path(raw_path: str) -> str:
+    """Encode and normalize an upstream base URL path as Claude Code (WHATWG URL) sends it:
+    backslashes become forward slashes, ``.`` and ``..`` segments are resolved, ``|``, ``[``, and ``]``
+    stay literal, and non-ASCII bytes are UTF-8 percent-encoded."""
+    if not raw_path:
+        return ""
+    parts = raw_path.replace("\\", "/").split("/")
+    if parts and parts[0] == "":
+        parts = parts[1:]
+    segments: list[str] = []
+    for seg in parts:
+        if seg == "..":
+            if segments:
+                segments.pop()
+        elif seg == ".":
+            continue
+        else:
+            segments.append(seg)
+    while segments and segments[-1] == "":
+        segments.pop()
+    if not segments:
+        return ""
+    return "/" + "/".join(quote(seg, safe="%!$&'()*+,;=:@-._~|[]") for seg in segments)
 
 Headers = dict[str, str]
 HeaderList = list[tuple[str, str]]
@@ -598,6 +680,8 @@ class UsageReader:
         self.ended = False  # a stream's last event was read: message_stop, or a Responses end event
         self.ending: dict[str, str] = {}  # response_status, incomplete_reason, error_code, stop_reason, error_type
         self.responses_client_calls: bool | None = None  # D40: from a Responses output list, when read
+        self.chat_client_calls: bool | None = None  # Chat Completions tool_calls / finish_reason
+        self.gemini_client_calls: bool | None = None  # Gemini functionCall parts
         self.call_ids: list[str] = []  # D40: ids of the client tool calls seen, in order
         self._call_id_set: set[str] = set()
         self._buffer = bytearray()
@@ -634,18 +718,29 @@ class UsageReader:
                 if self.api == "responses":
                     self._take_responses_usage(body)
                     self._take_responses_end(body)
+                elif self.api == "chat_completions":
+                    self._take_chat_body(body)
+                elif self.api == "gemini":
+                    self._take_gemini_chunk(body)
                 else:
                     self._take_usage(body.get("usage"))
                     self._take_transformations(body)
                     self._take_messages_end(body)
                     for block in body.get("content") if isinstance(body.get("content"), list) else []:
                         self._take_call_id(block)
+            elif isinstance(body, list) and self.api == "gemini":
+                for item in body:
+                    if isinstance(item, dict):
+                        self._take_gemini_chunk(item)
         self._buffer.clear()
 
     def feed_event(self, raw: bytes) -> None:
         """One raw SSE event, as split by ``SSEEventSplitter``. The stream hold's path calls this
         directly, so one splitter serves both the hold and this reader."""
         data = sse_data(raw)
+        if self.api == "chat_completions" and data.strip() == b"[DONE]":
+            self.ended = True
+            return
         try:
             payload = loads_bounded(data) if data else None
         except ValueError:  # invalid, or nested deeper than MAX_JSON_DEPTH: unreadable, not fatal
@@ -670,6 +765,10 @@ class UsageReader:
                 if code is None and isinstance(payload.get("error"), dict):
                     code = payload["error"].get("code")
                 self._keep("error_code", code)
+        elif self.api == "chat_completions":
+            self._take_chat_chunk(payload)
+        elif self.api == "gemini":
+            self._take_gemini_chunk(payload)
         elif payload.get("type") == "message_stop":
             self.ended = True
         elif payload.get("type") == "content_block_start":
@@ -689,9 +788,14 @@ class UsageReader:
     def tool_calls(self) -> bool | None:
         """Whether the response holds a call the client runs (D40), for a response without a stream
         hold: from a Messages ``stop_reason`` (``tool_use`` or not), from a Responses ``output`` list
-        (a client call, see ``HOSTED_CALL_TYPES``, or not), else None for unknown."""
+        (a client call, see ``HOSTED_CALL_TYPES``, or not), Chat Completions ``tool_calls`` /
+        ``finish_reason``, or Gemini ``functionCall`` parts; else None for unknown."""
         if self.api == "responses":
             return self.responses_client_calls
+        if self.api == "chat_completions":
+            return self.chat_client_calls
+        if self.api == "gemini":
+            return self.gemini_client_calls
         reason = self.ending.get("stop_reason")
         return None if reason is None else reason == "tool_use"
 
@@ -721,18 +825,99 @@ class UsageReader:
             self._keep("error_code", response["error"].get("code"))
 
     def _take_call_id(self, item: Any) -> None:
-        """D40: keep the id of a client tool call (a Messages ``tool_use`` block's ``id``, a Responses
-        call item's ``call_id``), which its result carries in the conversation's next request."""
+        """D40: keep the id of a client tool call (Messages ``tool_use``, Responses ``call_id``,
+        Chat Completions ``tool_calls[].id``, Gemini ``functionCall`` id)."""
         if not isinstance(item, dict):
             return
         if self.api == "responses":
             call_id = item.get("call_id", item.get("id")) if is_client_call(item) else None
+        elif self.api == "chat_completions":
+            call_id = item.get("id")
+        elif self.api == "gemini":
+            call_id = item.get("id")
         else:
             call_id = item.get("id") if item.get("type") == "tool_use" else None
         if (isinstance(call_id, str) and call_id and call_id not in self._call_id_set
                 and len(self.call_ids) < MAX_CALL_IDS):
             self._call_id_set.add(call_id)
             self.call_ids.append(call_id)
+
+    def _take_chat_body(self, body: dict[str, Any]) -> None:
+        if isinstance(body.get("usage"), dict):
+            self.usage = _numeric(body["usage"])
+        if isinstance(body.get("error"), dict):
+            self._keep("error_type", body["error"].get("type"))
+            self._keep("error_code", body["error"].get("code"))
+        choices = body.get("choices")
+        if isinstance(choices, list):
+            has_calls = False
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                self._keep("stop_reason", choice.get("finish_reason"))
+                message = choice.get("message")
+                if isinstance(message, dict) and isinstance(message.get("tool_calls"), list):
+                    for tc in message["tool_calls"]:
+                        self._take_call_id(tc)
+                        if isinstance(tc, dict):
+                            has_calls = True
+                if choice.get("finish_reason") == "tool_calls":
+                    has_calls = True
+            self.chat_client_calls = has_calls
+
+    def _take_chat_chunk(self, payload: dict[str, Any]) -> None:
+        if isinstance(payload.get("usage"), dict) and payload["usage"]:
+            self.usage = _numeric(payload["usage"])
+        if isinstance(payload.get("error"), dict):
+            self._keep("error_type", payload["error"].get("type"))
+            self._keep("error_code", payload["error"].get("code"))
+        choices = payload.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                delta = choice.get("delta")
+                if isinstance(delta, dict) and isinstance(delta.get("tool_calls"), list):
+                    for tc in delta["tool_calls"]:
+                        self._take_call_id(tc)
+                    if delta["tool_calls"]:
+                        self.chat_client_calls = True
+                finish = choice.get("finish_reason")
+                if finish is not None:
+                    self._keep("stop_reason", finish)
+                    if self.chat_client_calls is None:
+                        self.chat_client_calls = finish == "tool_calls"
+
+    def _take_gemini_chunk(self, payload: dict[str, Any]) -> None:
+        meta = payload.get("usageMetadata") or payload.get("usage_metadata")
+        if isinstance(meta, dict) and meta:
+            self.usage = _numeric(meta)
+        if isinstance(payload.get("error"), dict):
+            self._keep("error_code", payload["error"].get("status"))
+        candidates = payload.get("candidates")
+        if isinstance(candidates, list):
+            found_call = False
+            for cand in candidates:
+                if not isinstance(cand, dict):
+                    continue
+                content = cand.get("content")
+                parts = content.get("parts") if isinstance(content, dict) else None
+                if isinstance(parts, list):
+                    for part in parts:
+                        if not isinstance(part, dict):
+                            continue
+                        fc = part.get("functionCall") or part.get("function_call")
+                        if isinstance(fc, dict):
+                            self._take_call_id(fc)
+                            found_call = True
+                finish = cand.get("finishReason") or cand.get("finish_reason")
+                if isinstance(finish, str) and finish and finish != "FINISH_REASON_UNSPECIFIED":
+                    self._keep("stop_reason", finish)
+                    self.ended = True
+            if found_call:
+                self.gemini_client_calls = True
+            elif self.gemini_client_calls is None and self.ended:
+                self.gemini_client_calls = False
 
     def _take_messages_end(self, body: dict[str, Any]) -> None:
         self._keep("stop_reason", body.get("stop_reason"))
@@ -867,8 +1052,13 @@ END_ALLOWLISTS: dict[str, frozenset[str]] = {
         "invalid_base64_image", "invalid_image_url", "image_too_large", "image_too_small", "image_parse_error",
         "image_content_policy_violation", "invalid_image_mode", "image_file_too_large",
         "unsupported_image_media_type", "empty_image_file", "failed_to_download_image", "image_file_not_found"}),
-    "stop_reason": frozenset({"end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal",
-                              "model_context_window_exceeded"}),
+    "stop_reason": frozenset({
+        "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal",
+        "model_context_window_exceeded",
+        "stop", "length", "tool_calls", "content_filter", "function_call",
+        "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "LANGUAGE", "OTHER", "BLOCKLIST",
+        "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL", "IMAGE_SAFETY",
+    }),
     "error_type": frozenset({
         "invalid_request_error", "authentication_error", "billing_error", "permission_error", "not_found_error",
         "conflict_error", "request_too_large", "rate_limit_error", "api_error", "timeout_error",
@@ -961,32 +1151,90 @@ class StreamHold:
             if not item_type.endswith("_call"):
                 return None
             return "client" if is_client_call(item) else "hosted"
+        if self.api == "chat_completions":
+            choices = _sse_payload(raw).get("choices")
+            if isinstance(choices, list):
+                for choice in choices:
+                    delta = choice.get("delta") if isinstance(choice, dict) else None
+                    if isinstance(delta, dict) and delta.get("tool_calls"):
+                        return "client"
+            return None
+        if self.api == "gemini":
+            candidates = _sse_payload(raw).get("candidates")
+            if isinstance(candidates, list):
+                for cand in candidates:
+                    content = cand.get("content") if isinstance(cand, dict) else None
+                    parts = content.get("parts") if isinstance(content, dict) else None
+                    if isinstance(parts, list) and any(
+                        isinstance(p, dict) and isinstance(p.get("functionCall") or p.get("function_call"), dict)
+                        for p in parts
+                    ):
+                        return "client"
+            return None
         if kind != "content_block_start":
             return None
         block = _sse_payload(raw).get("content_block")
         return "client" if isinstance(block, dict) and block.get("type") == "tool_use" else None
 
-    def _is_trigger(self, kind: str | None) -> bool:
-        return kind == "message_delta" if self.api == "messages" else kind in RESPONSE_END_EVENTS
+    def _is_trigger(self, kind: str | None, raw: bytes = b"") -> bool:
+        if self.api == "messages":
+            return kind == "message_delta"
+        if self.api == "responses":
+            return kind in RESPONSE_END_EVENTS
+        if self.api == "chat_completions":
+            if sse_data(raw).strip() == b"[DONE]":
+                return True
+            payload = _sse_payload(raw)
+            usage = payload.get("usage")
+            if not (isinstance(usage, dict) and bool(usage)):
+                return False
+            choices = payload.get("choices")
+            if not isinstance(choices, list) or not choices:
+                return True
+            return any(isinstance(c, dict) and c.get("finish_reason") is not None for c in choices)
+        if self.api == "gemini":
+            payload = _sse_payload(raw)
+            meta = payload.get("usageMetadata") or payload.get("usage_metadata")
+            has_usage = isinstance(meta, dict) and bool(meta)
+            cands = payload.get("candidates")
+            has_finish = isinstance(cands, list) and any(
+                isinstance(c, dict)
+                and isinstance((fr := c.get("finishReason") or c.get("finish_reason")), str)
+                and bool(fr) and fr != "FINISH_REASON_UNSPECIFIED"
+                for c in cands
+            )
+            return has_usage and has_finish
+        return False
 
-    def _is_error(self, kind: str | None) -> bool:
-        return kind in ("error", "response.error")
+    def _is_error(self, kind: str | None, raw: bytes = b"") -> bool:
+        if kind in ("error", "response.error"):
+            return True
+        if self.api in ("chat_completions", "gemini"):
+            return isinstance(_sse_payload(raw).get("error"), dict)
+        return False
 
     def feed(self, raw: bytes) -> list[bytes]:
         """One complete raw SSE event in; the raw events to write now, in order."""
         kind = sse_event_type(raw)
-        if self._is_trigger(kind):
+        if self._is_trigger(kind, raw):
             if not self.triggered:
+                # A Gemini or Chat Completions chunk can carry both a tool call and finishReason/usage
+                # in the same final SSE event: record client_calls before on_trigger() observes usage.
+                if not self.client_calls and self.api in ("chat_completions", "gemini"):
+                    call = self._call(kind, raw)
+                    if call == "client":
+                        self.client_calls = True
                 self.triggered = True
                 self.on_trigger()  # publish the real-usage room before anything held reaches the CLI
             return self._release() + [raw]
-        if self._is_error(kind):
+        if self._is_error(kind, raw):
             return self._release_untriggered() + [raw]
         # A comment passes at once only when it ends with its line ending: a tail without one (a stream
         # cut after ": keep-alive") is held and released last, so no held event is glued onto it.
         if kind == "ping" or (sse_is_comment(raw) and raw.endswith((b"\n", b"\r"))):
             return [raw]
-        if kind in ("content_block_start", "response.output_item.added") and not self.client_calls:
+        if not self.client_calls and (kind in ("content_block_start", "response.output_item.added")
+                                      or self.api in ("chat_completions", "gemini")):
             call = self._call(kind, raw)
             if call == "client":
                 self.client_calls = True
@@ -1291,7 +1539,9 @@ class ContextoProxy:
                  observe_usage: ObserveUsage | None = None, observe_thinking: bool = False,
                  upstream_source: str | None = None, affinity_key: str | None = None,
                  on_tool_calls: Callable[[tuple[str, ...]], None] | None = None,
-                 strip_hint_headers: bool = False, allow_websocket: bool = False) -> None:
+                 strip_hint_headers: bool = False, allowed_hosts: Iterable[str] = (),
+                 allow_local_origin: bool = False, transform_lock: threading.Lock | None = None,
+                 allow_websocket: bool = False) -> None:
         parts = urlsplit(upstream)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("upstream must be an http(s) base URL")
@@ -1303,10 +1553,7 @@ class ContextoProxy:
         self.affinity_header = affinity_key if affinity_key and not is_vendor_host(parts.hostname) else None
         self.upstream_port = parts.port or (443 if parts.scheme == "https" else 80)
         self.upstream_netloc = parts.netloc.rsplit("@", 1)[-1]
-        # A request line is ASCII. A path character that is not (``é``, or U+FFFD from a settings file
-        # read with a bad UTF-8 byte) goes out percent-encoded as UTF-8, as Claude Code sends it; an
-        # escape already in the URL, and the characters a path may hold, are kept as they are.
-        self.base_path = quote(parts.path.rstrip("/"), safe="/%!$&'()*+,;=:@-._~")
+        self.base_path = _normalize_base_path(parts.path)
         self.session_log = log
         self.transform = transform
         self.observe_usage = observe_usage
@@ -1317,9 +1564,11 @@ class ContextoProxy:
         self.upstream_source = upstream_source
         # D70: leave Claude Code's gated hint headers out of what is sent upstream (module docstring).
         self.strip_hint_headers = strip_hint_headers
+        self.allowed_hosts: frozenset[str] = frozenset(normalize_allowed_host(h) for h in allowed_hosts)
+        self.allow_local_origin = bool(allow_local_origin)
         # Opt-in RFC 6455 WebSocket relay on Responses endpoints (contexto.ws); HTTP remains default.
         self.allow_websocket = allow_websocket
-        self.transform_lock = threading.Lock()
+        self.transform_lock = transform_lock or threading.Lock()
         self._io_lock = threading.Lock()
         self._ssl_lock = threading.Lock()
         self._ssl_context: ssl.SSLContext | None = None
@@ -1455,8 +1704,9 @@ def _no_body_response(status: int, method: str) -> bool:
 
 
 def _request_item_count(request: dict[str, Any], endpoint: str) -> int:
-    """Count of messages/items in a parsed request body (``input`` for Responses, ``messages`` for Messages)."""
-    field = "input" if endpoint in RESPONSES_PATHS else "messages"
+    """Count of messages/items in a parsed request body for ``endpoint``'s dialect."""
+    dialect = registry_dialect_for(endpoint)
+    field = dialect.field if dialect is not None else "messages"
     items = request.get(field)
     return len(items) if isinstance(items, list) else 0
 
@@ -1577,6 +1827,22 @@ class _Handler(BaseHTTPRequestHandler):
         then the client only sees the connection close."""
         return "none" if self._response_started else "local_502"
 
+    def _host_allowed(self, host_value: str) -> bool:
+        lower = host_value.strip().lower()
+        if LOCAL_HOST_HEADER.fullmatch(lower):
+            return True
+        owner = getattr(self, "owner", None)
+        allowed = getattr(owner, "allowed_hosts", frozenset())
+        if not allowed:
+            return False
+        host_only = _host_without_port(lower)
+        # Validate optional port when matching an allowed host
+        if host_only != lower:
+            port_part = lower[len(host_only):]
+            if not (port_part.startswith(":") and port_part[1:].isdigit() and 1 <= len(port_part) - 1 <= 5):
+                return False
+        return host_only in allowed
+
     def _refusal(self) -> str | None:
         """Why the request is not from the local CLI (``"origin"`` or ``"host"``), or None (D53).
         Claude Code and Codex send one Host, the proxy's own address, and no Origin. A browser sends
@@ -1584,10 +1850,16 @@ class _Handler(BaseHTTPRequestHandler):
         page sends its own name as Host, so neither can drive the proxy or write to the store. The
         name is checked, not the port (D59): a browser cannot put another port in Host on a
         connection to this socket, and an SSH or container forward to it sends its own port."""
-        if self.headers.get("Origin") is not None:
+        origins = self.headers.get_all("Origin") or []
+        if len(origins) > 1:
             return "origin"
+        if len(origins) == 1:
+            owner = getattr(self, "owner", None)
+            if not (getattr(owner, "allow_local_origin", False)
+                    and is_local_origin(origins[0], getattr(owner, "allowed_hosts", frozenset()))):
+                return "origin"
         hosts = self.headers.get_all("Host") or []
-        if len(hosts) != 1 or not LOCAL_HOST_HEADER.fullmatch(hosts[0].strip().lower()):
+        if len(hosts) != 1 or not self._host_allowed(hosts[0]):
             return "host"
         return None
 
@@ -1685,8 +1957,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(request, dict):
             entry["transform_skipped"] = "request body is not an object"
             return body, headers, None
-        entry["model"] = _scalar_summary(request.get("model"))  # a client value: never logged raw
-        entry["stream"] = bool(request.get("stream"))
+        raw_model = request.get("model") if request.get("model") is not None else model_from_endpoint(endpoint)
+        entry["model"] = _scalar_summary(raw_model)  # a client value: never logged raw
+        entry["stream"] = bool(request.get("stream")) or endpoint.endswith(":streamGenerateContent")
         entry["original_message_count"] = _request_item_count(request, endpoint)
         preserves = getattr(owner.transform, "preserves_input", False) is True
         before: bytes | None = None
@@ -1890,7 +2163,7 @@ class _Handler(BaseHTTPRequestHandler):
         # not an abort: a CLI may return on message_stop or response.completed.
         delivered_end = False
         _, feedback_endpoint = classify_path(entry["path"])
-        feedback = (original is not None and feedback_endpoint in USAGE_FEEDBACK_PATHS
+        feedback = (original is not None and is_usage_feedback_path(entry["path"])
                     and 200 <= response.status < 300)
 
         def observe() -> None:
@@ -2055,8 +2328,8 @@ class _Handler(BaseHTTPRequestHandler):
             entry["stream_hold"] = {"held_events": hold.held_events, "triggered": hold.triggered}
         reader.finish()
         announce()  # a JSON body's ids are known only now, and what completes it is still held (hold_json)
-        if entry.get("api") == "responses":
-            usage = reader.usage or None  # Responses usage kept as given (see UsageReader)
+        if entry.get("api") in ("responses", "chat_completions", "gemini"):
+            usage = reader.usage or None  # Responses, Chat Completions, and Gemini usage kept as given
         else:
             usage = {k: reader.usage.get(k) for k in USAGE_KEYS} if reader.usage else None
         entry.update(status=response.status, response_bytes=response_bytes, duration_ms=_ms(started), usage=usage)
@@ -2113,9 +2386,11 @@ class _Handler(BaseHTTPRequestHandler):
         forwarded, because an unread request cannot be kept bounded."""
         message = (f"contexto: cannot read a request body with Content-Encoding {encoding}: {reason}. Run the CLI "
                    f"through 'contexto run', or disable request compression.")
-        if api == "responses":
+        if api in ("responses", "chat_completions"):
             payload = {"error": {"message": message, "type": "invalid_request_error", "param": None,
                                  "code": "unsupported_content_encoding"}}
+        elif api == "gemini":
+            payload = {"error": {"code": 415, "message": message, "status": "INVALID_ARGUMENT"}}
         else:
             payload = {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
         self.owner.log({"event": "encoded_body_rejected", "encoding": encoding, "endpoint": endpoint,
