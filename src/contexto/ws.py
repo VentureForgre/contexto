@@ -10,11 +10,11 @@ How the relay keeps a WebSocket conversation bounded:
   are rewritten through the proxy's ``transform`` under ``transform_lock``, with the same fail-open
   rules as HTTP POST (rule 14: on a transform or serialization failure the client's original frame is
   forwarded unchanged).
-- Server frames from the first tool call (``response.output_item.added`` whose item type ends in
-  ``_call``) are held (up to ``MAX_HELD_BYTES``) until the turn's terminal event
+- Server frames from the first client tool call (``response.output_item.added`` whose item matches
+  ``is_client_call``) are held (up to ``MAX_HELD_BYTES``) until the turn's terminal event
   (``response.completed``, ``response.incomplete``, ``response.failed``, or an error / close), so
   ``observe_usage`` publishes the real-usage recall room before the CLI sees any tool call (matching
-  ``StreamHold`` on SSE).
+  ``StreamHold`` on SSE; hosted calls such as ``web_search_call`` stream live).
 - ``Sec-WebSocket-Extensions`` is stripped from the upstream upgrade request so permessage-deflate
   is not negotiated and frames remain readable without compression extensions.
 - A non-101 upstream response (for example 401, 404, 426, or 501) is forwarded back to the client as
@@ -391,12 +391,14 @@ def _read_http_fallback_body(reader: _ByteReader, status: int, headers: list[tup
 
 
 def _open_upstream_socket(owner: Any) -> socket.socket:
-    from contexto.proxy import UPSTREAM_TIMEOUT_S
+    from contexto.proxy import UPSTREAM_TIMEOUT_S, _set_nodelay
 
     sock = socket.create_connection((owner.upstream_host, owner.upstream_port), timeout=UPSTREAM_TIMEOUT_S)
+    _set_nodelay(sock)
     if owner.scheme == "https":
         try:
-            ctx = ssl.create_default_context()
+            get_ctx = getattr(owner, "_get_ssl_context", None)
+            ctx = get_ctx() if callable(get_ctx) else ssl.create_default_context()
             return ctx.wrap_socket(sock, server_hostname=owner.upstream_host)
         except BaseException:
             sock.close()
@@ -685,6 +687,14 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
             queue_pending(original, meta)
             return payload
 
+        flush = getattr(owner.transform, "flush_deferred", None)
+        if callable(flush):
+            try:
+                with owner._io_lock:
+                    flush()
+            except Exception:
+                pass
+
         meta["transform_events"] = [_scalar_summary(e) for e in events if isinstance(e, dict)]
         meta["over_bound"] = any(bool(e.get("over_bound")) for e in events if isinstance(e, dict))
         epochs = [e["epoch"] for e in events if isinstance(e, dict) and "epoch" in e]
@@ -867,12 +877,10 @@ def handle_websocket(handler: Any, owner: Any, path_only: str) -> None:
                     continue
                 if kind == "response.output_item.added":
                     out_item = event_obj.get("item")
-                    item_type = str(out_item.get("type", "")) if isinstance(out_item, dict) else ""
-                    if item_type.endswith("_call"):
+                    if is_client_call(out_item):
+                        client_calls = True
                         if not hold_overflowed:
                             holding = True
-                        if is_client_call(out_item):
-                            client_calls = True
                 append_or_send(wire_frame)
         except WSProtocolError as exc:
             with state_lock:

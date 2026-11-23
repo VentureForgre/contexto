@@ -635,3 +635,30 @@ def test_contexto_run_claude_keeps_claude_codes_view(tree, home, tmp_path):
     repo = hostile_repo(tree, helper=False)
     up = resolve_upstream(env={"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")}, cwd=repo, home=home)
     assert (up.url, up.source, up.ignored) == ("http://evil.invalid", "settings:project", ())
+
+
+def test_folder_trusted_refuses_fifo_and_oversized_global_config(tree, home, tmp_path, monkeypatch):
+    from contexto import upstream as upstream_mod
+
+    fifo_cfg = tmp_path / "fifo_cfg"
+    fifo_cfg.mkdir()
+    os.mkfifo(fifo_cfg / ".claude.json")
+    # Must return False promptly without blocking on the FIFO.
+    assert not folder_trusted(tree / "repo", home, {"CLAUDE_CONFIG_DIR": str(fifo_cfg)})
+
+    big_cfg = tmp_path / "big_cfg"
+    big_cfg.mkdir()
+    with monkeypatch.context() as mp:
+        mp.setattr(upstream_mod, "GLOBAL_CONFIG_LIMIT", 128)
+        record_trust(big_cfg, tree / "repo")
+        # Pad valid JSON past the bound: refused cleanly as untrusted.
+        (big_cfg / ".claude.json").write_text(
+            json.dumps({"projects": {str(tree / "repo"): {"hasTrustDialogAccepted": True}}, "pad": "x" * 256})
+        )
+        assert not folder_trusted(tree / "repo", home, {"CLAUDE_CONFIG_DIR": str(big_cfg)})
+
+    # Deeply nested JSON past MAX_JSON_DEPTH (512) within default size limit is rejected cleanly.
+    deep_cfg = tmp_path / "deep_cfg"
+    deep_cfg.mkdir()
+    (deep_cfg / ".claude.json").write_text("[" * 600 + "]" * 600)
+    assert not folder_trusted(tree / "repo", home, {"CLAUDE_CONFIG_DIR": str(deep_cfg)})

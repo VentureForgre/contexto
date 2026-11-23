@@ -132,8 +132,9 @@ def test_every_request_of_a_long_session_stays_under_the_bound_and_its_estimate_
         counted = with_text.estimate - without.estimate
         assert 0.9 * real_start <= counted <= 1.1 * real_start
         assert with_text.room == CONFIG.bound - with_text.estimate - CONFIG.headroom_floor - with_text.margin
-        assert with_text.margin == without.margin  # the same tool results in both
-        assert without.room - with_text.room == counted
+        # Same tool results in both; separate tool-ratio delta learning can differ by 1 token from int() truncation.
+        assert abs(with_text.margin - without.margin) <= 1
+        assert without.room - with_text.room == counted + (with_text.margin - without.margin)
     assert all(marks(row.upstream) == 1 for row in carry.rows[first:])  # then the preamble holds it, once
     print(f"\n{endpoint} carried section {start} tokens ({len(text.encode())} bytes): first estimate "
           f"{carry.rows[0].estimate} (control {control.rows[0].estimate}), first room {carry.rows[0].room} "

@@ -1495,6 +1495,7 @@ class _Candidate(NamedTuple):
 
 _DENSE = TokenEstimator()  # counts at FRESH_BYTES_PER_TOKEN, whatever the session has measured
 _DENSE.observe(round(FRESH_BYTES_PER_TOKEN * 1_000_000), 1_000_000)
+_DENSE.observe(round(FRESH_BYTES_PER_TOKEN * 1_000_000), 1_000_000, tool_result=True)
 _SEED = TokenEstimator()  # never observed: tool output at the seed's 1.5 bytes a token, other text at 3.5
 
 

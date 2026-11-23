@@ -136,5 +136,6 @@ def test_the_engines_rule_17_reproduces_the_recommended_row():
     # D63: the example line says a hit can come from the running turn, 141 bytes, 36 tokens at 4 a token.
     # 18,536 and $7.3239 since it names the turn a page was written in instead: 9 bytes shorter. 18,524
     # and $7.325 since D69's search of earlier sessions: the pin line also names a search or recall of an
-    # earlier session, 49 bytes, 12 tokens at 4 a token.
-    assert s["window_budget"][0] == 18_524 and s["usd"] == 7.325
+    # earlier session, 49 bytes, 12 tokens at 4 a token. 18,523 and $7.325 with TokenEstimator EWMA +
+    # separate prose vs tool_result ratios (1 token of rounding in the preamble estimate).
+    assert s["window_budget"][0] == 18_523 and s["usd"] == 7.325

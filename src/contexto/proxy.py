@@ -35,7 +35,7 @@ reduced to scalars, on that request's log entry as ``usage_events``, and a real 
 entry's ``over_bound``; this is the only place they are logged (packet A2e). A callable that takes a
 ``tool_calls`` keyword also gets whether the response holds a tool call the client runs (D40): from
 the stream hold when there is one (whether a client call started it; a hosted Responses call such
-as ``web_search_call`` holds the stream but does not count), else from a Messages ``stop_reason`` or
+as ``web_search_call`` streams live and does not hold or count), else from a Messages ``stop_reason`` or
 a Responses ``output`` list, else None for unknown. One that takes ``tool_call_ids`` gets the ids of
 the client calls seen (``tool_use`` ids, Responses ``call_id``), so the engine can tell which request
 continues which side room. Calls to the
@@ -87,6 +87,7 @@ import hmac
 import http.client
 import inspect
 import json
+import os
 import re
 import select
 import socket
@@ -102,7 +103,7 @@ from typing import Any, Protocol
 from urllib.parse import quote, urlsplit
 
 from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, has_lone_surrogate, loads_bounded
-from contexto.hints import without_hint_headers
+from contexto.hints import GATED_HINT_HEADERS
 
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
     from compression import zstd as _zstd
@@ -116,6 +117,18 @@ LOCAL_HOST_HEADER = re.compile(r"(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?")
 # local history, which may legitimately be many times the bound, so the cap guards against a
 # decompression bomb rather than enforcing the bound.
 MAX_DECODED_BODY_BYTES = 64 * 1024 * 1024
+# Uncompressed/wire inbound request body cap (configurable independently of MAX_DECODED_BODY_BYTES).
+MAX_REQUEST_BODY_BYTES = MAX_DECODED_BODY_BYTES
+MAX_CONTENT_ENCODINGS = 8  # cap on stacked Content-Encoding layers
+MAX_CHUNK_TRAILERS = 64  # cap on trailer header lines in a chunked request body
+MAX_CHUNK_TRAILER_BYTES = 65536  # cap on total trailer bytes in a chunked request body
+MAX_CALL_IDS = 4096  # per-response client tool call id cap
+UPSTREAM_POOL_MAX_IDLE = 8  # idle keep-alive upstream connections kept per proxy
+UPSTREAM_POOL_IDLE_TTL_S = 30.0  # evict pooled upstream connections idle longer than this
+IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE"})
+_STALE_POOL_ERRORS = (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
+                      http.client.CannotSendRequest)
+_HEX_CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 MESSAGES_PATH = "/v1/messages"
 COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 # OpenAI Responses API for the Codex adapter (lane A packet A5). Codex's base_url is the proxy root
@@ -171,7 +184,7 @@ def is_usage_feedback_path(path: str) -> bool:
 RESPONSE_END_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
 # D40: Responses tool calls that run on OpenAI's servers (the Responses API reference's hosted tools;
 # ``mcp_call`` is the hosted remote-MCP tool, which OpenAI calls itself). They never reach Contexto's
-# MCP server and do not open a side room; the stream hold still holds on them. Any other ``*_call``
+# MCP server, do not open a side room, and stream live without activating StreamHold. Any other ``*_call``
 # item, known (``function_call``, ``custom_tool_call``, ``local_shell_call``, ``computer_call``) or
 # not, counts as a call the client runs, so a new type fails safe.
 HOSTED_CALL_TYPES = frozenset({"web_search_call", "file_search_call", "image_generation_call",
@@ -215,9 +228,74 @@ VENDOR_HOSTS = ("anthropic.com", "openai.com", "chatgpt.com", "openai.azure.com"
 _VERTEX_REGIONAL_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-aiplatform\.googleapis\.com\Z")
 
 Headers = dict[str, str]
+HeaderList = list[tuple[str, str]]
 TransformResult = tuple[dict[str, Any], Headers, list[dict[str, Any]]]
 Transform = Callable[[dict[str, Any], Headers, str], TransformResult]
 ObserveUsage = Callable[[str, dict[str, int], dict[str, Any]], None]
+
+
+class BodyTooLargeError(ValueError):
+    """An inbound request body exceeded ``MAX_REQUEST_BODY_BYTES``."""
+
+
+def _headers_to_dict(header_list: HeaderList | Headers) -> Headers:
+    """Single-value view of ``header_list`` for transforms, combining repeated headers per RFC 9110."""
+    if isinstance(header_list, dict):
+        return dict(header_list)
+    names: dict[str, str] = {}
+    values: dict[str, list[str]] = {}
+    for name, value in header_list:
+        lower = name.lower()
+        names.setdefault(lower, name)
+        values.setdefault(lower, []).append(value)
+    return {names[lower]: ("; " if lower == "cookie" else ", ").join(vals) for lower, vals in values.items()}
+
+
+def _merge_headers(raw_headers: HeaderList | Headers, before: Headers, after: Headers) -> HeaderList:
+    """Apply transform header changes (``before`` -> ``after``) onto ``raw_headers`` while preserving
+    untouched repeated headers verbatim."""
+    raw_list: HeaderList = list(raw_headers.items()) if isinstance(raw_headers, dict) else raw_headers
+    before_lower = {k.lower(): v for k, v in before.items()}
+    after_lower: dict[str, tuple[str, str]] = {}
+    for k, v in after.items():
+        after_lower[k.lower()] = (k, v)
+    out: HeaderList = []
+    emitted: set[str] = set()
+    for name, value in raw_list:
+        lower = name.lower()
+        if lower not in after_lower:
+            continue  # removed by transform
+        new_name, new_value = after_lower[lower]
+        if new_value == before_lower.get(lower):
+            out.append((name, value))  # unchanged: keep every repeated occurrence verbatim
+        elif lower not in emitted:
+            out.append((new_name, new_value))  # modified: emit updated value once
+            emitted.add(lower)
+    seen = {name.lower() for name, _ in raw_list}
+    for name, value in after.items():
+        if name.lower() not in seen:
+            out.append((name, value))
+    return out
+
+
+def _strip_hint_header_list(header_list: HeaderList) -> HeaderList:
+    """``header_list`` without the six gated hint headers (D70), preserving repeated headers."""
+    return [(name, value) for name, value in header_list if name.lower() not in GATED_HINT_HEADERS]
+
+
+def _remove_header(header_list: HeaderList, lower_name: str) -> HeaderList:
+    return [(name, value) for name, value in header_list if name.lower() != lower_name]
+
+
+def _parse_content_encodings(values: list[str]) -> list[str]:
+    """Split one or more ``Content-Encoding`` header values into ordered lowercase coding names."""
+    codings: list[str] = []
+    for raw in values:
+        for part in raw.split(","):
+            token = part.strip().lower()
+            if token:
+                codings.append(token)
+    return codings
 
 
 class SessionLog(Protocol):
@@ -380,15 +458,7 @@ def _decode_streams(make: Callable[[], Any], body: bytes, limit: int, multi: boo
             raise EncodedBodyError("there is data after the end of the compressed stream")
 
 
-def decode_request_body(body: bytes, encoding: str, limit: int = MAX_DECODED_BODY_BYTES) -> bytes:
-    """Decode a gzip, deflate, or (Python 3.14+) zstd request body, refusing anything over ``limit``.
-
-    gzip members (RFC 1952) and zstd frames may be concatenated; every one is decoded and the
-    results joined. Anything after the last complete member or frame that is not another one,
-    zero padding included, is refused (intake, A1c). A zlib or raw deflate stream is single: trailing
-    bytes after it are refused. The ``limit`` applies to the total. Raises EncodedBodyError for an
-    unsupported encoding, a corrupt or truncated body, trailing data, or a body over ``limit``; a
-    partial body is never returned."""
+def _decode_one_encoding(body: bytes, encoding: str, limit: int) -> bytes:
     if encoding == "gzip":
         forms = [(lambda: zlib.decompressobj(16 + zlib.MAX_WBITS), True)]
     elif encoding == "deflate":  # HTTP deflate is zlib-wrapped; some clients send raw deflate
@@ -408,6 +478,30 @@ def decode_request_body(body: bytes, encoding: str, limit: int = MAX_DECODED_BOD
         except _NotThisForm:
             continue
     raise EncodedBodyError("the body could not be decoded")
+
+
+def decode_request_body(body: bytes, encoding: str, limit: int = MAX_DECODED_BODY_BYTES) -> bytes:
+    """Decode a gzip, deflate, or (Python 3.14+) zstd request body (including stacked comma-separated
+    encodings applied in reverse order per RFC 9110), refusing anything over ``limit``.
+
+    gzip members (RFC 1952) and zstd frames may be concatenated; every one is decoded and the
+    results joined. Anything after the last complete member or frame that is not another one,
+    zero padding included, is refused (intake, A1c). A zlib or raw deflate stream is single: trailing
+    bytes after it are refused. The ``limit`` applies to every layer. Raises EncodedBodyError for an
+    unsupported encoding, a corrupt or truncated body, trailing data, or a body over ``limit``; a
+    partial body is never returned."""
+    codings = _parse_content_encodings([encoding])
+    if len(codings) > MAX_CONTENT_ENCODINGS:
+        raise EncodedBodyError(f"too many stacked content encodings (at most {MAX_CONTENT_ENCODINGS})")
+    layers = [c for c in codings if c != "identity"]
+    if not layers:
+        if len(body) > limit:
+            raise EncodedBodyError(f"the body decodes to more than {limit:,} bytes")
+        return body
+    current = body
+    for coding in reversed(layers):
+        current = _decode_one_encoding(current, coding, limit)
+    return current
 
 
 def _scalar_summary(value: Any, depth: int = 0) -> Any:
@@ -430,23 +524,40 @@ def _scalar_summary(value: Any, depth: int = 0) -> Any:
 class _SideDecoder:
     """Decompresses a side copy of the response for usage parsing; relayed bytes are untouched."""
 
-    def __init__(self, encoding: str | None) -> None:
-        encoding = (encoding or "identity").strip().lower()
-        self.supported = encoding in ("", "identity", "gzip", "deflate")
-        self._obj = (zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == "gzip"
-                     else zlib.decompressobj() if encoding == "deflate" else None)
-        self.encoding = encoding
+    def __init__(self, encoding: str | None, *, limit: int = MAX_DECODED_BODY_BYTES) -> None:
+        raw = (encoding or "identity").strip().lower()
+        codings = _parse_content_encodings([raw])
+        layers = [c for c in codings if c != "identity"]
+        self.encoding = ", ".join(layers) if layers else "identity"
+        self.supported = len(layers) <= MAX_CONTENT_ENCODINGS and all(c in ("gzip", "deflate") for c in layers)
+        self._remaining = limit
+        self._objs = (
+            [zlib.decompressobj(16 + zlib.MAX_WBITS) if c == "gzip" else zlib.decompressobj()
+             for c in reversed(layers)]
+            if self.supported else []
+        )
 
     def decode(self, chunk: bytes) -> bytes:
-        if not self.supported:
-            return b""
-        if self._obj is None:
-            return chunk
-        try:
-            return self._obj.decompress(chunk)
-        except zlib.error:
-            self.supported = False
-            return b""
+        if not self.supported or not self._objs:
+            return chunk if self.supported else b""
+        data = chunk
+        for obj in self._objs:
+            if not data:
+                break
+            if self._remaining <= 0:
+                self.supported = False
+                return b""
+            try:
+                out = obj.decompress(data, self._remaining + 1)
+            except zlib.error:
+                self.supported = False
+                return b""
+            if len(out) > self._remaining:
+                self.supported = False
+                return b""
+            data = out
+        self._remaining -= len(data)
+        return data
 
 
 def _numeric(value: Any, depth: int = 0) -> Any:
@@ -488,6 +599,7 @@ class UsageReader:
         self.ending: dict[str, str] = {}  # response_status, incomplete_reason, error_code, stop_reason, error_type
         self.responses_client_calls: bool | None = None  # D40: from a Responses output list, when read
         self.call_ids: list[str] = []  # D40: ids of the client tool calls seen, in order
+        self._call_id_set: set[str] = set()
         self._buffer = bytearray()
         self._events = SSEEventSplitter()
         self._overflow = False
@@ -617,7 +729,9 @@ class UsageReader:
             call_id = item.get("call_id", item.get("id")) if is_client_call(item) else None
         else:
             call_id = item.get("id") if item.get("type") == "tool_use" else None
-        if isinstance(call_id, str) and call_id and call_id not in self.call_ids and len(self.call_ids) < 256:
+        if (isinstance(call_id, str) and call_id and call_id not in self._call_id_set
+                and len(self.call_ids) < MAX_CALL_IDS):
+            self._call_id_set.add(call_id)
             self.call_ids.append(call_id)
 
     def _take_messages_end(self, body: dict[str, Any]) -> None:
@@ -632,7 +746,10 @@ class UsageReader:
 
     def _take_usage(self, usage: Any) -> None:
         if isinstance(usage, dict):
-            self.usage.update({k: v for k, v in usage.items() if k in USAGE_KEYS and isinstance(v, int)})
+            self.usage.update({
+                k: v for k, v in usage.items()
+                if k in USAGE_KEYS and isinstance(v, int) and not isinstance(v, bool)
+            })
 
     def _take_transformations(self, container: dict[str, Any]) -> None:
         """Merge an ``input_transformations`` list (at the top level or under ``usage``) into the
@@ -807,7 +924,8 @@ class StreamHold:
       EVERY event is held in order until ``message_delta`` (the usage publish runs first), an
       ``error`` event, or end of stream, then released in its original order.
     - Responses: the hold starts at the first ``response.output_item.added`` whose item type is a
-      tool call (``*_call``: ``custom_tool_call``, ``function_call``, and others) and ends at
+      client tool call (``is_client_call``: ``custom_tool_call``, ``function_call``, and others;
+      hosted calls such as ``web_search_call`` stream live without activating the hold) and ends at
       ``response.completed``, ``response.incomplete``, ``response.failed``, an error, or end of stream.
     - Keepalives pass during the hold: ``ping`` events, and comment-only events such as the
       ``: keep-alive`` lines CLIProxyAPI sends when its ``streaming.keepalive-seconds`` is set (D35).
@@ -857,9 +975,10 @@ class StreamHold:
     def feed(self, raw: bytes) -> list[bytes]:
         """One complete raw SSE event in; the raw events to write now, in order."""
         kind = sse_event_type(raw)
-        if self._is_trigger(kind) and not self.triggered:
-            self.triggered = True
-            self.on_trigger()  # publish the real-usage room before anything held reaches the CLI
+        if self._is_trigger(kind):
+            if not self.triggered:
+                self.triggered = True
+                self.on_trigger()  # publish the real-usage room before anything held reaches the CLI
             return self._release() + [raw]
         if self._is_error(kind):
             return self._release_untriggered() + [raw]
@@ -869,9 +988,10 @@ class StreamHold:
             return [raw]
         if kind in ("content_block_start", "response.output_item.added") and not self.client_calls:
             call = self._call(kind, raw)
-            if call is not None:
-                self.holding = True  # any call holds the stream, hosted ones included
-                self.client_calls = call == "client"
+            if call == "client":
+                self.client_calls = True
+                if not self.triggered:
+                    self.holding = True
         if self.holding:
             self.held.append(raw)
             self.held_events += 1
@@ -891,6 +1011,23 @@ class StreamHold:
         return out
 
 
+def _set_nodelay(sock: socket.socket | None) -> None:
+    """Disable Nagle's algorithm so small HTTP/SSE writes do not stall on Linux's 40 ms delayed ACK."""
+    if sock is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+
+
+class _UpstreamHTTP(http.client.HTTPConnection):
+    """HTTPConnection with TCP_NODELAY set on connect."""
+
+    def connect(self) -> None:
+        super().connect()
+        _set_nodelay(self.sock)
+
+
 class _UpstreamHTTPS(http.client.HTTPSConnection):
     """HTTPSConnection whose connect() records whether it reached TLS, so a failure names the step
     (contract rule 8, PR #95). Upstream connections never use a CONNECT tunnel."""
@@ -903,8 +1040,84 @@ class _UpstreamHTTPS(http.client.HTTPSConnection):
     def connect(self) -> None:
         self.phase = "connect"
         http.client.HTTPConnection.connect(self)
+        _set_nodelay(self.sock)
         self.phase = "tls"
         self.sock = self.tls_context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _is_socket_dirty(conn: http.client.HTTPConnection) -> bool:
+    """True when an idle pooled connection is closed, errored, or has unread/EOF bytes waiting."""
+    sock = conn.sock
+    if sock is None:
+        return True
+    try:
+        if isinstance(sock, ssl.SSLSocket) and sock.pending() > 0:
+            return True
+        poller = select.poll()
+        poller.register(sock, select.POLLIN)
+        return bool(poller.poll(0))
+    except (OSError, ValueError):
+        return True
+
+
+class _UpstreamPool:
+    """Thread-safe LIFO pool of idle HTTP/HTTPS upstream keep-alive connections."""
+
+    def __init__(self, *, max_idle: int = UPSTREAM_POOL_MAX_IDLE,
+                 idle_ttl_s: float = UPSTREAM_POOL_IDLE_TTL_S) -> None:
+        self._max_idle = max_idle
+        self._idle_ttl_s = idle_ttl_s
+        self._lock = threading.Lock()
+        self._idle: list[tuple[http.client.HTTPConnection, float]] = []
+        self._closed = False
+
+    def acquire(self) -> http.client.HTTPConnection | None:
+        """Return the most recently used clean idle connection, or None if none is available."""
+        while True:
+            with self._lock:
+                if self._closed or not self._idle:
+                    return None
+                conn, since = self._idle.pop()
+            if time.monotonic() - since > self._idle_ttl_s or _is_socket_dirty(conn):
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+            return conn
+
+    def release(self, conn: http.client.HTTPConnection) -> None:
+        """Return a clean keep-alive connection to the pool, evicting the oldest if full."""
+        if _is_socket_dirty(conn):
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+        evicted: http.client.HTTPConnection | None = None
+        with self._lock:
+            if self._closed or self._max_idle <= 0:
+                evicted = conn
+            else:
+                self._idle.append((conn, time.monotonic()))
+                if len(self._idle) > self._max_idle:
+                    evicted = self._idle.pop(0)[0]
+        if evicted is not None:
+            try:
+                evicted.close()
+            except OSError:
+                pass
+
+    def close_all(self) -> None:
+        """Close every idle connection and prevent further pooling."""
+        with self._lock:
+            self._closed = True
+            conns, self._idle = [conn for conn, _ in self._idle], []
+        for conn in conns:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
 
 def _shut(conn: http.client.HTTPConnection) -> None:
@@ -924,8 +1137,9 @@ class _ClientWatch:
     generating. Otherwise the proxy notices only when a write to the client fails, and nothing is
     written while it waits for the response head or holds a tool call: upstream then ran, and
     billed, to the end of a response nobody reads. The watch only peeks, so a byte the client sends
-    (a pipelined request) ends it and the request is served as before. ``close`` ends the watch and
-    closes the upstream connection, whatever path the request took."""
+    (a pipelined request) ends it and the request is served as before. ``close`` wakes the watch
+    thread via an internal pipe, joins it before the handler can close the client socket (preventing
+    fd-reuse races), and closes any attached upstream connection."""
 
     def __init__(self, client: socket.socket) -> None:
         self.client = client
@@ -933,7 +1147,41 @@ class _ClientWatch:
         self._upstream: http.client.HTTPConnection | None = None
         self._lock = threading.Lock()
         self._done = threading.Event()
-        threading.Thread(target=self._run, name="contexto-client-watch", daemon=True).start()
+        self._closed = False
+        self._wake_r: int | None = None
+        self._wake_w: int | None = None
+        try:
+            wake_r, wake_w = os.pipe()
+            try:
+                os.set_blocking(wake_r, False)
+                os.set_blocking(wake_w, False)
+            except OSError:
+                for fd in (wake_r, wake_w):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                raise
+            self._wake_r, self._wake_w = wake_r, wake_w
+        except OSError:
+            self._wake_r = self._wake_w = None
+        self._thread = threading.Thread(target=self._run, name="contexto-client-watch", daemon=True)
+        try:
+            self._thread.start()
+        except BaseException:
+            self._close_wake_fds()
+            raise
+
+    def _close_wake_fds(self) -> None:
+        with self._lock:
+            fds = (self._wake_r, self._wake_w)
+            self._wake_r = self._wake_w = None
+        for fd in fds:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def attach(self, conn: http.client.HTTPConnection) -> None:
         """The connected upstream connection to shut if the client goes away (or has already)."""
@@ -942,33 +1190,82 @@ class _ClientWatch:
             if self.gone:
                 _shut(conn)
 
-    def close(self) -> None:
-        self._done.set()
+    def detach(self) -> http.client.HTTPConnection | None:
+        """Atomically detach and return the upstream connection for pooling if the client is still
+        present, else return None so ``close`` shuts/closes it."""
         with self._lock:
-            if self._upstream is not None:
-                self._upstream.close()
+            if self.gone:
+                return None
+            conn, self._upstream = self._upstream, None
+            return conn
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._done.set()
+            if self._wake_w is not None:
+                try:
+                    os.write(self._wake_w, b"\x00")
+                except OSError:
+                    pass
+        self._thread.join(timeout=1.0)
+        with self._lock:
+            upstream, self._upstream = self._upstream, None
+            alive = self._thread.is_alive()
+            fds = (None, None) if alive else (self._wake_r, self._wake_w)
+            if not alive:
+                self._wake_r = self._wake_w = None
+        if upstream is not None:
+            upstream.close()
+        for fd in fds:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def _run(self) -> None:
         poller = select.poll()  # not select.select, which cannot watch a descriptor above 1023
         try:
-            poller.register(self.client, select.POLLIN)  # a close or a reset is reported as readable
-        except (OSError, ValueError):  # the client's socket is already closed: nothing to watch
-            return
-        while not self._done.is_set():
             try:
-                if not poller.poll(CLIENT_WATCH_INTERVAL_S * 1000):
+                client_fd = self.client.fileno()
+                if client_fd < 0:
+                    return
+                poller.register(client_fd, select.POLLIN)  # a close or a reset is reported as readable
+                if self._wake_r is not None:
+                    poller.register(self._wake_r, select.POLLIN)
+            except (OSError, ValueError):  # the client's socket is already closed: nothing to watch
+                return
+            poll_ms = 5000 if self._wake_r is not None else int(CLIENT_WATCH_INTERVAL_S * 1000)
+            peek_flags = socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)
+            while not self._done.is_set():
+                try:
+                    events = poller.poll(poll_ms)
+                except OSError:
+                    break
+                if not events:
                     continue
-                if self.client.recv(1, socket.MSG_PEEK):
-                    return  # the client sent more, so it is still there
-            except OSError:  # a reset, or a socket the handler has closed
-                pass
-            if self._done.is_set():
-                return  # the request is over: a close now is the client ending a kept-alive connection
-            with self._lock:
-                self.gone = True
-                if self._upstream is not None:
-                    _shut(self._upstream)
-            return
+                if self._done.is_set() or any(fd == self._wake_r for fd, _ in events):
+                    return
+                try:
+                    if self.client.recv(1, peek_flags):
+                        return  # the client sent more, so it is still there
+                except BlockingIOError:
+                    continue  # spurious wakeup: keep watching
+                except OSError:  # a reset, or a socket the handler has closed
+                    pass
+                if self._done.is_set():
+                    return  # the request is over: a close now is the client ending a kept-alive connection
+                with self._lock:
+                    self.gone = True
+                    if self._upstream is not None:
+                        _shut(self._upstream)
+                return
+        finally:
+            if self._closed:
+                self._close_wake_fds()
 
 
 class _LoopbackServer(ThreadingHTTPServer):
@@ -982,6 +1279,11 @@ class _LoopbackServer(ThreadingHTTPServer):
         socketserver.TCPServer.server_bind(self)
         host, port = self.server_address[:2]
         self.server_name, self.server_port = str(host), port
+
+    def get_request(self) -> tuple[socket.socket, Any]:
+        conn, addr = super().get_request()
+        _set_nodelay(conn)
+        return conn, addr
 
 
 class ContextoProxy:
@@ -1018,6 +1320,16 @@ class ContextoProxy:
         # Opt-in RFC 6455 WebSocket relay on Responses endpoints (contexto.ws); HTTP remains default.
         self.allow_websocket = allow_websocket
         self.transform_lock = threading.Lock()
+        self._io_lock = threading.Lock()
+        self._ssl_lock = threading.Lock()
+        self._ssl_context: ssl.SSLContext | None = None
+        self._pool = _UpstreamPool()
+        self._observe_sig_cache: tuple[ObserveUsage | None, bool, bool, bool] = (
+            observe_usage,
+            _takes_keyword(observe_usage, "tool_calls"),
+            _takes_keyword(observe_usage, "tool_call_ids"),
+            _takes_keyword(observe_usage, "headers"),
+        )
         self.last_epoch: Any = None  # the engine's epoch from its last successful transform
         self._in_flight = 0  # requests being handled; idle keep-alive connections are not counted
         self._idle = threading.Condition()
@@ -1100,7 +1412,10 @@ class ContextoProxy:
                 in_flight = self._in_flight
             if in_flight:
                 self.log({"event": "proxy_stop_incomplete", "in_flight": in_flight})
+            self._pool.close_all()
             self.log({"event": "proxy_stop", **self._store_pages()})
+        else:
+            self._pool.close_all()
 
     def serve_forever(self, port: int = 0) -> None:
         """Block until interrupted, starting the server first if needed."""
@@ -1112,17 +1427,38 @@ class ContextoProxy:
         except KeyboardInterrupt:
             self.stop()
 
+    def _get_ssl_context(self) -> ssl.SSLContext:
+        ctx = self._ssl_context
+        if ctx is not None:
+            return ctx
+        with self._ssl_lock:
+            if self._ssl_context is None:
+                self._ssl_context = ssl.create_default_context()
+            return self._ssl_context
+
     def connection(self) -> http.client.HTTPConnection:
         if self.scheme == "https":
             return _UpstreamHTTPS(self.upstream_host, self.upstream_port,
-                                  timeout=UPSTREAM_TIMEOUT_S, context=ssl.create_default_context())
-        return http.client.HTTPConnection(self.upstream_host, self.upstream_port, timeout=UPSTREAM_TIMEOUT_S)
+                                  timeout=UPSTREAM_TIMEOUT_S, context=self._get_ssl_context())
+        return _UpstreamHTTP(self.upstream_host, self.upstream_port, timeout=UPSTREAM_TIMEOUT_S)
 
     def log(self, event: dict[str, Any]) -> None:
         try:
             self.session_log.log({"ts": utc_now(), **event})
         except Exception:  # a broken log must never break the user's session
             pass
+
+
+def _no_body_response(status: int, method: str) -> bool:
+    """RFC 9110 §6.4.1 / §8.6: responses that never carry a message body."""
+    return method == "HEAD" or status in (204, 304) or 100 <= status < 200
+
+
+def _request_item_count(request: dict[str, Any], endpoint: str) -> int:
+    """Count of messages/items in a parsed request body (``input`` for Responses, ``messages`` for Messages)."""
+    field = "input" if endpoint in RESPONSES_PATHS else "messages"
+    items = request.get(field)
+    return len(items) if isinstance(items, list) else 0
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1143,23 +1479,58 @@ class _Handler(BaseHTTPRequestHandler):
 
     do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = do_GET
 
-    def _read_body(self) -> bytes:
-        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+    def _read_exact(self, size: int) -> bytes:
+        data = self.rfile.read(size)
+        if len(data) != size:
+            raise ValueError("unexpected EOF in request body")
+        return data
+
+    def _read_body(self, limit: int | None = None) -> bytes:
+        cap = MAX_REQUEST_BODY_BYTES if limit is None else limit
+        te_values = self.headers.get_all("Transfer-Encoding") or []
+        cl_values = self.headers.get_all("Content-Length") or []
+        if te_values:
+            if cl_values:
+                raise ValueError("Transfer-Encoding and Content-Length both present")
+            te_codings = _parse_content_encodings(te_values)
+            if te_codings != ["chunked"]:
+                raise ValueError("unsupported Transfer-Encoding")
             body = bytearray()
             while True:
-                size = int(self.rfile.readline().split(b";", 1)[0].strip() or b"0", 16)
-                if size < 0:  # read(-1) would wait for the client to close the connection
-                    raise ValueError("negative chunk size")
+                line = self.rfile.readline(65536)
+                if not line or not line.endswith(b"\n"):
+                    raise ValueError("unexpected EOF in chunked body")
+                raw_size = line.split(b";", 1)[0].strip()
+                if not raw_size or not _HEX_CHUNK_SIZE.fullmatch(raw_size):
+                    raise ValueError("invalid chunk size")
+                size = int(raw_size, 16)
                 if size == 0:
-                    while self.rfile.readline() not in (b"\r\n", b"\n", b""):
-                        pass
-                    return bytes(body)
-                body += self.rfile.read(size)
-                self.rfile.readline()
-        length = int(self.headers.get("Content-Length") or 0)
-        if length < 0:
-            raise ValueError("negative Content-Length")
-        return self.rfile.read(length) if length else b""
+                    trailer_lines = 0
+                    trailer_bytes = 0
+                    while True:
+                        trailer = self.rfile.readline(65536)
+                        if trailer in (b"\r\n", b"\n"):
+                            return bytes(body)
+                        if not trailer or not trailer.endswith(b"\n"):
+                            raise ValueError("unexpected EOF in chunked trailer")
+                        trailer_lines += 1
+                        trailer_bytes += len(trailer)
+                        if trailer_lines > MAX_CHUNK_TRAILERS or trailer_bytes > MAX_CHUNK_TRAILER_BYTES:
+                            raise ValueError("chunked trailers too large")
+                if size > cap - len(body):
+                    raise BodyTooLargeError(f"request body exceeds {cap:,} bytes")
+                body += self._read_exact(size)
+                crlf = self.rfile.readline(65536)
+                if crlf not in (b"\r\n", b"\n"):
+                    raise ValueError("malformed chunk terminator")
+        if not cl_values:
+            return b""
+        length = _parse_content_length(cl_values)
+        if length is None:
+            raise ValueError("invalid or conflicting Content-Length")
+        if length > cap:
+            raise BodyTooLargeError(f"request body exceeds {cap:,} bytes")
+        return self._read_exact(length) if length else b""
 
     def _handle(self) -> None:
         with self.owner._idle:
@@ -1174,7 +1545,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _handle_counted(self) -> None:
         self._response_started = False
         self._upstream_sent = False
-        self._raw: tuple[bytes, Headers] | None = None
+        self._raw: tuple[bytes, HeaderList] | None = None
         try:
             self._handle_request()
         except Exception as exc:
@@ -1249,17 +1620,24 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             body = self._read_body()
+        except BodyTooLargeError:
+            self.owner.log({"event": "request", "method": self.command, "path": path_only, "status": 413,
+                            "error": "request body too large"})
+            self.close_connection = True
+            self._send_local_error(413, "contexto proxy: request body too large", "request_too_large", close=True)
+            return
         except ValueError:
             self.owner.log({"event": "request", "method": self.command, "path": path_only, "status": 400,
                             "error": "malformed request framing"})
-            self._send_local_error(400, "contexto proxy: malformed request framing", "invalid_request_error")
             self.close_connection = True
+            self._send_local_error(400, "contexto proxy: malformed request framing",
+                                   "invalid_request_error", close=True)
             return
-        headers: Headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}
+        headers: HeaderList = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP]
         affinity = self.owner.affinity_header
-        if affinity and not any(k.lower() == AFFINITY_HEADER.lower() for k in headers):
-            headers[AFFINITY_HEADER] = affinity
-        self._raw = (body, dict(headers))
+        if affinity and not any(k.lower() == AFFINITY_HEADER.lower() for k, _ in headers):
+            headers.append((AFFINITY_HEADER, affinity))
+        self._raw = (body, list(headers))
         entry: dict[str, Any] = {"event": "request", "method": self.command, "path": path_only,
                                  "original_request_bytes": len(body)}
         original = None
@@ -1268,10 +1646,11 @@ class _Handler(BaseHTTPRequestHandler):
             entry["api"] = api
             # The proxy must read these responses (usage, and the stream hold of PR #74), so it asks
             # upstream for an unencoded body instead of forwarding the CLI's Accept-Encoding.
-            headers = {k: v for k, v in headers.items() if k.lower() != "accept-encoding"}
-            headers["Accept-Encoding"] = "identity"
-            encoding = (self.headers.get("Content-Encoding") or "").strip().lower()
-            if encoding not in ("", "identity"):
+            headers = _remove_header(headers, "accept-encoding")
+            headers.append(("Accept-Encoding", "identity"))
+            codings = _parse_content_encodings(self.headers.get_all("Content-Encoding") or [])
+            if any(c != "identity" for c in codings):
+                encoding = ", ".join(codings)
                 # Contract rule 15 (PR #58): decode, transform as usual, forward uncompressed.
                 try:
                     decoded = decode_request_body(body, encoding, MAX_DECODED_BODY_BYTES)
@@ -1281,14 +1660,15 @@ class _Handler(BaseHTTPRequestHandler):
                 entry.update(request_content_encoding=encoding, wire_request_bytes=len(body),
                              original_request_bytes=len(decoded))
                 body = decoded
-                headers = {k: v for k, v in headers.items() if k.lower() != "content-encoding"}
-                self._raw = (body, dict(headers))
+                headers = _remove_header(headers, "content-encoding")
+                self._raw = (body, list(headers))
             body, headers, original = self._transform(body, headers, entry, canonical_endpoint)
         entry["request_bytes"] = len(body)
         self._forward(body, headers, entry, started, original)
 
-    def _transform(self, body: bytes, headers: Headers, entry: dict[str, Any],
-                   endpoint: str) -> tuple[bytes, Headers, dict[str, Any] | None]:
+    def _transform(self, body: bytes, headers: HeaderList | Headers, entry: dict[str, Any],
+                   endpoint: str) -> tuple[bytes, HeaderList, dict[str, Any] | None]:
+        headers = list(headers.items()) if isinstance(headers, dict) else headers
         owner = self.owner
         try:
             request = self._parse(body)
@@ -1307,7 +1687,7 @@ class _Handler(BaseHTTPRequestHandler):
             return body, headers, None
         entry["model"] = _scalar_summary(request.get("model"))  # a client value: never logged raw
         entry["stream"] = bool(request.get("stream"))
-        entry["original_message_count"] = len(request.get("messages") or [])
+        entry["original_message_count"] = _request_item_count(request, endpoint)
         preserves = getattr(owner.transform, "preserves_input", False) is True
         before: bytes | None = None
         if preserves:
@@ -1327,10 +1707,15 @@ class _Handler(BaseHTTPRequestHandler):
                 prime(request)  # D60: count the request's PDFs before taking the lock that every session waits on
             except Exception:  # an optimisation only: the transform counts them under the lock instead
                 pass
+        header_view = _headers_to_dict(headers)
         try:
-            with owner.transform_lock:
-                new_request, new_headers, events = owner.transform(request, dict(headers), endpoint)
-            if not isinstance(new_request, dict) or not isinstance(new_headers, dict):
+            if owner.transform is identity_transform:
+                new_request, new_headers_dict, events = identity_transform(request, dict(header_view), endpoint)
+            else:
+                transform_headers = dict(header_view)
+                with owner.transform_lock:
+                    new_request, new_headers_dict, events = owner.transform(request, transform_headers, endpoint)
+            if not isinstance(new_request, dict) or not isinstance(new_headers_dict, dict):
                 raise TypeError("transform must return (dict, dict, list)")
         except Exception as exc:
             # Contract rule 14, genuine bugs: never alter the request on a failed transform, even
@@ -1340,16 +1725,24 @@ class _Handler(BaseHTTPRequestHandler):
             self._log_transform_error(type(exc).__name__, "transform", endpoint)
             entry["message_count"] = entry["original_message_count"]
             if owner.observe_thinking:
-                headers = add_beta(headers, THINKING_BINDING_BETA)
+                headers = _merge_headers(headers, header_view, add_beta(header_view, THINKING_BINDING_BETA))
             return body, headers, original
+        flush = getattr(owner.transform, "flush_deferred", None)
+        if callable(flush):
+            try:
+                with owner._io_lock:
+                    flush()
+            except Exception:
+                pass
         entry["transform_events"] = [_scalar_summary(e) for e in events if isinstance(e, dict)]
         entry["over_bound"] = any(bool(e.get("over_bound")) for e in events if isinstance(e, dict))
         epochs = [e["epoch"] for e in events if isinstance(e, dict) and "epoch" in e]
         if epochs:
             entry["epoch"] = owner.last_epoch = _scalar_summary(epochs[-1])
         if owner.observe_thinking:
-            new_headers = add_beta(new_headers, THINKING_BINDING_BETA)
-        entry["message_count"] = len(new_request.get("messages") or [])
+            new_headers_dict = add_beta(new_headers_dict, THINKING_BINDING_BETA)
+        new_headers = _merge_headers(headers, header_view, new_headers_dict)
+        entry["message_count"] = _request_item_count(new_request, endpoint)
         if before is None and same_wire(new_request, request):
             return body, new_headers, original  # unchanged: the CLI's own bytes, nothing serialized
         try:
@@ -1368,7 +1761,7 @@ class _Handler(BaseHTTPRequestHandler):
         it once (``contexto.serve``)."""
         return loads_bounded(body)
 
-    def _forward(self, body: bytes, headers: Headers, entry: dict[str, Any], started: float,
+    def _forward(self, body: bytes, headers: HeaderList, entry: dict[str, Any], started: float,
                  original: dict[str, Any] | None) -> None:
         watch = _ClientWatch(self.connection)
         try:
@@ -1376,7 +1769,7 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             watch.close()  # also closes upstream on a path that raised before the relay's own close
 
-    def _relay(self, body: bytes, headers: Headers, entry: dict[str, Any], started: float,
+    def _relay(self, body: bytes, headers: HeaderList, entry: dict[str, Any], started: float,
                original: dict[str, Any] | None, watch: _ClientWatch) -> None:
         owner = self.owner
         # Contract rule 8 (PR #95): each upstream step is named, so a failure says where it happened:
@@ -1385,12 +1778,22 @@ class _Handler(BaseHTTPRequestHandler):
         # for byte, on a new connection: upstream cannot act on a request it never fully received,
         # unless it has already answered it (D53: an early 413 is forwarded, not retried).
         # From wait_headers on, upstream may be running it, so that failure is a 502 and the CLI decides.
+        # Stale keep-alive sockets taken from the pool are transparently replaced with a fresh connection
+        # per RFC 9112 §9.8 when they drop before send completes, or in wait_headers for idempotent methods.
         retried = False
+        pool_retried = False
+        early_response = False
+        allow_pool = True
+        outgoing_headers = _strip_hint_header_list(headers) if owner.strip_hint_headers else headers
         while True:
-            conn = owner.connection()  # a new connection per request: nothing is pooled or reused
-            phase, phase_started = "connect", time.monotonic()
+            conn = owner._pool.acquire() if allow_pool else None
+            reused = conn is not None
+            if conn is None:
+                conn = owner.connection()
+            phase, phase_started = ("send" if reused else "connect"), time.monotonic()
             try:
-                conn.connect()
+                if not reused:
+                    conn.connect()
                 watch.attach(conn)
                 phase, phase_started = "send", time.monotonic()
                 path_only = urlsplit(self.path).path
@@ -1407,7 +1810,7 @@ class _Handler(BaseHTTPRequestHandler):
                 conn.putheader("Host", owner.upstream_netloc)
                 # D70: the one place a request's headers are written upstream, so this also covers
                 # the CLI's own request on every fail-open path.
-                for name, value in (without_hint_headers(headers) if owner.strip_hint_headers else headers).items():
+                for name, value in outgoing_headers:
                     conn.putheader(name, value)
                 if body or self.command in ("POST", "PUT", "PATCH"):
                     conn.putheader("Content-Length", str(len(body)))
@@ -1433,13 +1836,21 @@ class _Handler(BaseHTTPRequestHandler):
                     early = self._early_response(conn)
                     if early is not None:
                         response = early
+                        early_response = True
                         entry["upstream_answered_early"] = type(exc).__name__
                         break
                 conn.close()
+                if reused and not pool_retried and isinstance(exc, _STALE_POOL_ERRORS) and (
+                    phase == "send" or self.command in IDEMPOTENT_METHODS
+                ):
+                    pool_retried = True
+                    allow_pool = False
+                    continue  # stale keep-alive socket closed by upstream: open fresh connection
                 failure = {"upstream_phase": phase, "phase_ms": _ms(phase_started),
                            "errno": getattr(exc, "errno", None)}
                 if not retried and phase in RETRYABLE_PHASES:
                     retried = True
+                    allow_pool = False
                     owner.log({"event": "upstream_retry", "path": entry["path"], "error": type(exc).__name__,
                                "elapsed_ms": _ms(started), **failure})
                     continue
@@ -1455,10 +1866,14 @@ class _Handler(BaseHTTPRequestHandler):
 
         content_type = response.getheader("Content-Type")
         reader = UsageReader(content_type, entry.get("api", "messages"))
-        decoder = _SideDecoder(response.getheader("Content-Encoding"))
-        length = response.getheader("Content-Length")
-        chunked = length is None and self.command != "HEAD"
-        expected = None if chunked else _declared_length(length, response, self.command)
+        resp_encodings = response.headers.get_all("Content-Encoding") or []
+        decoder = _SideDecoder(", ".join(resp_encodings) if resp_encodings else None)
+        raw_cl_values = response.headers.get_all("Content-Length") or []
+        valid_cl = _parse_content_length(raw_cl_values)
+        no_body = _no_body_response(response.status, self.command)
+        interim_1xx = 100 <= response.status < 200
+        chunked = (not no_body) and (bool(response.chunked) or valid_cl is None or response.length != valid_cl)
+        expected = None if (chunked or no_body) else valid_cl
         response_bytes = 0
         # The client must not see the response complete before the engine has its usage and the
         # session log has the entry: Claude Code sends its next request right away, and the engine
@@ -1560,31 +1975,39 @@ class _Handler(BaseHTTPRequestHandler):
                     self.send_header(name, value)
             if chunked:
                 self.send_header("Transfer-Encoding", "chunked")
-            elif length is not None:
-                self.send_header("Content-Length", length)
+            elif valid_cl is not None and not interim_1xx and response.status != 204:
+                self.send_header("Content-Length", str(valid_cl))
+            if interim_1xx:
+                self.close_connection = True
             self.end_headers()
-            while chunk := read_upstream():
-                response_bytes += len(chunk)
-                if hold is not None:
-                    for raw in splitter.feed(chunk):
-                        reader.feed_event(raw)  # usage is read before the hold can trigger on it
-                        announce()
-                        write_events(hold.feed(raw))
-                    continue
-                reader.feed(decoder.decode(chunk))
-                announce()
-                if json_body:
-                    pending, held = hold_json(held, chunk)
-                    if pending:
-                        self.wfile.write(b"%x\r\n%s\r\n" % (len(pending), pending) if chunked else pending)
-                elif chunked:
-                    self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
-                else:
-                    if held:
-                        self.wfile.write(held)
-                    held = chunk
-                self.wfile.flush()
-                delivered_end = chunked and reader.ended
+            if no_body:
+                try:
+                    response.read()  # marks http.client response closed so keep-alive socket can be pooled
+                except (OSError, http.client.HTTPException) as exc:
+                    raise _UpstreamReadError from exc
+            else:
+                while chunk := read_upstream():
+                    response_bytes += len(chunk)
+                    if hold is not None:
+                        for raw in splitter.feed(chunk):
+                            reader.feed_event(raw)  # usage is read before the hold can trigger on it
+                            announce()
+                            write_events(hold.feed(raw))
+                        continue
+                    reader.feed(decoder.decode(chunk))
+                    announce()
+                    if json_body:
+                        pending, held = hold_json(held, chunk)
+                        if pending:
+                            self.wfile.write(b"%x\r\n%s\r\n" % (len(pending), pending) if chunked else pending)
+                    elif chunked:
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                    else:
+                        if held:
+                            self.wfile.write(held)
+                        held = chunk
+                    self.wfile.flush()
+                    delivered_end = chunked and reader.ended
             if hold is not None:
                 if tail := splitter.flush():  # a final event without its blank line (see SSEEventSplitter)
                     reader.feed_event(tail)
@@ -1609,14 +2032,21 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             relay_ok = False
         finally:
-            conn.close()
             if watch.gone:  # the client left and upstream was shut for it: whatever failed after is that
                 entry.pop("error", None)
                 if not delivered_end:
                     entry["client_aborted"] = True
                 self.close_connection = True
                 relay_ok = False
-            if hold is not None and hold.held:  # upstream failed mid-hold: observe, then release in order
+            pooled = None
+            if relay_ok and not early_response and not interim_1xx and not response.will_close and response.isclosed():
+                pooled = watch.detach()
+            if pooled is not None:
+                owner._pool.release(pooled)
+            else:
+                conn.close()
+            if not watch.gone and not entry.get("client_aborted") and hold is not None and hold.held:
+                # upstream failed mid-hold while client is still listening: observe, then release in order
                 try:
                     write_events(hold.eof())
                 except OSError:
@@ -1638,7 +2068,8 @@ class _Handler(BaseHTTPRequestHandler):
             entry.update(reader.end_fields())  # packet A23: how the response ended, content-free
         else:
             entry["usage_unavailable"] = f"response content-encoding {decoder.encoding}"
-        observe()  # streams without a trigger event and non-SSE responses: after the body, before completion
+        if not entry.get("client_aborted"):
+            observe()  # streams without a trigger event and non-SSE responses: after the body, before completion
         owner.log(entry)
         if 400 <= response.status < 500:
             owner.log({"event": "upstream_4xx", "status": response.status, "path": entry["path"],
@@ -1702,39 +2133,70 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _observe_usage(self, endpoint: str, usage: dict[str, Any], original: dict[str, Any],
                        tool_calls: bool | None = None, tool_call_ids: tuple[str, ...] = (),
-                       headers: Headers | None = None) -> list[dict[str, Any]]:
+                       headers: HeaderList | Headers | None = None) -> list[dict[str, Any]]:
         """Run the usage callback; return the dict events it reports (anything else is ignored)."""
         callback = self.owner.observe_usage
         if callback is None:
             return []
+        cached_cb, takes_tool_calls, takes_tool_call_ids, takes_headers = self.owner._observe_sig_cache
+        if callback is not cached_cb:
+            takes_tool_calls = _takes_keyword(callback, "tool_calls")
+            takes_tool_call_ids = _takes_keyword(callback, "tool_call_ids")
+            takes_headers = _takes_keyword(callback, "headers")
+            self.owner._observe_sig_cache = (callback, takes_tool_calls, takes_tool_call_ids, takes_headers)
+        extra: dict[str, Any] = {}
+        if takes_tool_calls:  # D40
+            extra["tool_calls"] = tool_calls
+        if takes_tool_call_ids:
+            extra["tool_call_ids"] = tool_call_ids
+        if headers is not None and takes_headers:
+            extra["headers"] = _headers_to_dict(headers)
+        usage_copy = dict(usage)
         try:
             with self.owner.transform_lock:
-                extra: dict[str, Any] = {}
-                if _takes_keyword(callback, "tool_calls"):  # D40
-                    extra["tool_calls"] = tool_calls
-                if _takes_keyword(callback, "tool_call_ids"):
-                    extra["tool_call_ids"] = tool_call_ids
-                if headers is not None and _takes_keyword(callback, "headers"):
-                    extra["headers"] = dict(headers)
                 if extra:
-                    events = callback(endpoint, dict(usage), original, **extra)
+                    events = callback(endpoint, usage_copy, original, **extra)
                 else:
-                    events = callback(endpoint, dict(usage), original)
+                    events = callback(endpoint, usage_copy, original)
         except Exception as exc:
             self.owner.log({"event": "observe_usage_error", "error": type(exc).__name__})
             return []
+        flush = getattr(self.owner.transform, "flush_deferred", None)
+        if callable(flush):
+            try:
+                with self.owner._io_lock:
+                    flush()
+            except Exception:
+                pass
         return [e for e in events if isinstance(e, dict)] if isinstance(events, list) else []
 
-    def _send_local_error(self, status: int, message: str, error_type: str = "api_error") -> None:
+    def _send_local_error(self, status: int, message: str, error_type: str = "api_error",
+                          *, close: bool = False) -> None:
         body = json.dumps({"type": "error", "error": {"type": error_type, "message": message}}).encode()
         try:
             self.send_response_only(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if close:
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
         except OSError:
             pass
+
+
+def _parse_content_length(values: list[str]) -> int | None:
+    """Parse one or more ``Content-Length`` header values; None when absent, invalid, or conflicting."""
+    if not values:
+        return None
+    parsed: set[int] = set()
+    for raw in values:
+        for part in raw.split(","):
+            text = part.strip()
+            if not text or not text.isascii() or not text.isdigit():
+                return None
+            parsed.add(int(text))
+    return parsed.pop() if len(parsed) == 1 else None
 
 
 def _declared_length(length: str | None, response: http.client.HTTPResponse, method: str) -> int | None:

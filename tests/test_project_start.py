@@ -217,12 +217,15 @@ def digest(run: list[tuple]) -> str:
 # (Claude Code's requests stayed byte-for-byte identical).
 # Updated for Claude Code 2.1.328: only ``signature_version`` and ``tested_versions`` inside the
 # synthetic run's ``session_start_unrecognised`` event changed; every request and the epoch record
-# hash are byte-for-byte identical. ResponsesInTurn extends in-turn paging to Codex, updating the
-# Codex requests and epoch record while all four nothing-carried stores stay identical.
-BEFORE_D69 = {MESSAGES: ("a3ca01b545de028a9605b750ff4cd7b36f248be355ad5ce0b1e4370e86c7372a",
+# hash are byte-for-byte identical.
+# Again with TokenEstimator EWMA + separate prose vs dense tool_result ratios: Turn 1 prose no longer
+# overwrites the 1.5 tool seed, changing the first tool round's pre-measurement estimate and subsequent
+# EWMA-decayed estimates; ResponsesInTurn extends in-turn paging to Codex. All four nothing-carried
+# store kinds remain byte-for-byte identical.
+BEFORE_D69 = {MESSAGES: ("d7bdde076c35c1de04198af1b3d276db6ac626b79f420ed1e0d8a922d93b3dae",
                          "4dba8fc4935175c4b7be0f779b05e2daa7ab3c4e5dbf30acdb1c3f689c6f7df2"),
-              RESPONSES: ("a152d1c5f67274335799026dd797e4334c3322c38614e3bbde6dc15820bd9eae",
-                          "c36d1891051ea5137d214d91dad574a811d99dbc57daac30d2c6ec8bc3783bb1")}
+              RESPONSES: ("88f5c05b1c53b657ad73b9ed95b0c35aa774e30821b995d323c2a65ebf2b1d18",
+                          "1fa6a0cffaf837267ffcf885fb64458ebe31d5a6f78dcdbbe8f5d1871935f819")}
 STORES = ("memory", "no_project", "nothing_carried", "memory_off")
 
 
