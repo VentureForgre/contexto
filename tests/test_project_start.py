@@ -218,10 +218,13 @@ def digest(run: list[tuple]) -> str:
 # Updated for Claude Code 2.1.328: only ``signature_version`` and ``tested_versions`` inside the
 # synthetic run's ``session_start_unrecognised`` event changed; every request and the epoch record
 # hash are byte-for-byte identical.
-BEFORE_D69 = {MESSAGES: ("a3ca01b545de028a9605b750ff4cd7b36f248be355ad5ce0b1e4370e86c7372a",
+# Again with TokenEstimator EWMA + separate prose vs dense tool_result ratios: Turn 1 prose no longer
+# overwrites the 1.5 tool seed, changing the first tool round's pre-measurement estimate and subsequent
+# EWMA-decayed estimates; all four nothing-carried store kinds remain byte-for-byte identical.
+BEFORE_D69 = {MESSAGES: ("d7bdde076c35c1de04198af1b3d276db6ac626b79f420ed1e0d8a922d93b3dae",
                          "4dba8fc4935175c4b7be0f779b05e2daa7ab3c4e5dbf30acdb1c3f689c6f7df2"),
-              RESPONSES: ("12f81069915093a2adb79dabd7286405ed6163728cc9d1d71394d639c2e4d651",
-                          "564da66aef225fd608ee614e68e99abc0fae3b8c48097ad243a0cef0f6392a0e")}
+              RESPONSES: ("d9e7269bdef69fb34fa6ad2a147cde26f0862a4d4c5663cc45f12382e5fe0dfa",
+                          "0f4c14284a3cb78863a7adb177266f5f51d464d0a0ac3ee4b586480075b61bf3")}
 STORES = ("memory", "no_project", "nothing_carried", "memory_off")
 
 

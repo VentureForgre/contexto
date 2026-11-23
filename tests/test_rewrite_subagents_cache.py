@@ -378,7 +378,7 @@ def test_inturn_document_delegates_to_tokens_pdf_page_count(monkeypatch):
 
     # Pre-cached PDF in _PDF_PAGES: must hit _PDF_PAGES without calling count_pages.
     sample = base64.b64encode(b"%PDF-1.7\nsynthetic").decode("ascii")
-    tokens._cache_count((len(sample), hash(sample)), tokens.PdfCount(7, True))
+    tokens._cache_count(tokens._content_digest(sample), tokens.PdfCount(7, True))
     size2, pages2 = inturn._document("application/pdf", sample)
     assert pages2 == 7 and size2 == len(b"%PDF-1.7\nsynthetic")
 

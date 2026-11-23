@@ -178,6 +178,8 @@ from contexto.tokens import (
     MediaCost,
     TokenEstimator,
     estimate_tokens,
+    measure_item_tool_bytes,
+    measure_messages,
     measured_documents,
     media_cost,
     media_keys,
@@ -211,6 +213,7 @@ MEDIA_RATIO_CEILING = TEXT_BYTES_PER_TOKEN
 # D48: bytes a token a request with media may teach the ratio; outside it the media's cost was not bounded
 # well enough (a document far over its floor of 0, or a floor far over its cost), so the request is not learned.
 MEDIA_TEXT_RATIO_RANGE = (1.5, 6.0)
+TOOL_TEXT_RATIO_RANGE = (0.5, 8.0)  # dense tool output can run below 1.5 bytes a token
 # D48: before a ratio is measured, a request with media teaches the first one only when its media's cost is
 # known to this share of its usage (estimate minus floor), so the first ratio errs low by at most about this.
 MEDIA_FIRST_UNCERTAINTY = 0.1
@@ -242,6 +245,7 @@ class Measured(NamedTuple):
     text_bytes: int  # bytes sent, media left out
     real: int  # its real input tokens
     keys: tuple  # its media's content keys
+    tool_bytes: int = 0  # media-stripped bytes of tool_result / *_output blocks in text_bytes
 
 
 class _ByteCount(TokenEstimator):
@@ -315,6 +319,7 @@ class EpochState:
     head_changed: bool = False  # a new epoch is due at the next turn start
     hashes: tuple[str, ...] = ()  # normalised hashes of the previous request's messages
     last_sent_bytes: int = 0
+    last_sent_tool_bytes: int = 0  # media-stripped tool_result / *_output bytes in the last sent request
     last_sent_media: MediaCost = MediaCost()  # D48: the images and documents in those bytes
     last_sent_media_keys: tuple = ()  # D48: their content keys, in order (media_keys)
     # D48: whether that request only appended to the last measured one (same epoch, window, degraded state
@@ -2066,6 +2071,89 @@ def appends_to(previous: Measured | None, scope: tuple, hashes: tuple[str, ...])
     return anchor_hash(hashes[:previous.count]) == previous.prefix
 
 
+def _sent_tool_bytes(items: list[dict], dialect: Dialect) -> int:
+    """Media-stripped canonical JSON bytes of ``tool_result`` / ``*_output`` content in ``items``."""
+    if dialect.field == "input":
+        return measure_item_tool_bytes(items)
+    return measure_messages(items).tool
+
+
+def _record_usage(estimator: TokenEstimator, state: EpochState, text_bytes: int, tool_bytes: int,
+                  real: int, media: MediaCost, keys: tuple) -> None:
+    """Update ``estimator``'s prose and tool-result EWMA ratios from one attributed response.
+
+    Pure-prose turns (including Turn 1) update only the prose ratio, leaving the dense ``1.5``
+    ``tool_result`` seed intact until actual tool output is observed. Appended tool rounds
+    isolate the appended ``tool_result`` / ``*_output`` bytes and tokens so tool output learns
+    its own ratio without polluting prose.
+    """
+    previous = state.last_measured
+    low, high = MEDIA_TEXT_RATIO_RANGE
+    tlow, thigh = TOOL_TEXT_RATIO_RANGE
+    appended: tuple[int, int] | None = None
+    if state.last_sent_appends and previous is not None:
+        if keys:
+            appended = appended_usage(previous, text_bytes, real, keys)
+            if appended is None and previous.keys == keys and tool_bytes > previous.tool_bytes:
+                added_bytes, added_tokens = text_bytes - previous.text_bytes, real - previous.real
+                delta_tool = tool_bytes - previous.tool_bytes
+                if (added_bytes > 0 and added_tokens > 0 and delta_tool >= added_bytes * 0.5
+                        and tlow <= added_bytes / added_tokens <= thigh):
+                    appended = (added_bytes, added_tokens)
+        elif not previous.keys and (tool_bytes > previous.tool_bytes or previous.tool_bytes > 0):
+            added_bytes, added_tokens = text_bytes - previous.text_bytes, real - previous.real
+            if added_bytes > 0 and added_tokens > 0:
+                appended = (added_bytes, added_tokens)
+    if appended is not None and previous is not None:
+        delta_bytes, delta_tokens = appended
+        delta_tool = max(0, tool_bytes - previous.tool_bytes)
+        delta_prose = max(0, delta_bytes - delta_tool)
+        if delta_tool == 0:
+            if (low <= delta_bytes / delta_tokens <= high) if keys else (tlow <= delta_bytes / delta_tokens <= thigh):
+                estimator.observe(delta_bytes, delta_tokens)
+            return
+        if delta_tool >= delta_bytes * 0.5:
+            if estimator.measured_bytes_per_token is None and low <= delta_bytes / delta_tokens <= high:
+                estimator.observe(delta_bytes, delta_tokens)
+            prose_ratio = estimator.measured_bytes_per_token or TEXT_BYTES_PER_TOKEN
+            tool_tokens = delta_tokens - (delta_prose / prose_ratio)
+            if tool_tokens > 0 and tlow <= delta_tool / tool_tokens <= thigh:
+                estimator.observe(delta_tool, tool_tokens, tool_result=True)
+            return
+        if estimator.measured_tool_bytes_per_token:
+            prose_tokens = delta_tokens - (delta_tool / estimator.measured_tool_bytes_per_token)
+            if prose_tokens > 0 and low <= delta_prose / prose_tokens <= high:
+                estimator.observe(delta_prose, prose_tokens)
+            return
+        if (low <= delta_bytes / delta_tokens <= high) if keys else (tlow <= delta_bytes / delta_tokens <= thigh):
+            estimator.observe(delta_bytes, delta_tokens)
+        return
+    text_b, text_t = text_usage(state.last_sent_bytes, real, media, estimator.measured_bytes_per_token)
+    if text_t is None:
+        return
+    if tool_bytes == 0:
+        estimator.observe(text_b, text_t)
+        return
+    # When media has floor < estimate slack and a prose ratio is already known, text_usage synthesizes
+    # text_t from measured_bytes_per_token; never let that synthetic value teach tool_result or deconvolve.
+    if media.tokens > media.floor and estimator.measured_bytes_per_token is not None:
+        if real - text_b / estimator.measured_bytes_per_token > media.tokens:
+            estimator.observe(text_b, text_t)
+        return
+    prose_bytes = max(0, text_b - tool_bytes)
+    if estimator.measured_bytes_per_token and tool_bytes >= text_b * 0.5:
+        tool_tokens = text_t - (prose_bytes / estimator.measured_bytes_per_token)
+        if tool_tokens > 0 and tlow <= tool_bytes / tool_tokens <= thigh:
+            estimator.observe(tool_bytes, tool_tokens, tool_result=True)
+            return
+    if estimator.measured_tool_bytes_per_token and prose_bytes > 0:
+        prose_tokens = text_t - (tool_bytes / estimator.measured_tool_bytes_per_token)
+        if prose_tokens > 0 and low <= prose_bytes / prose_tokens <= high:
+            estimator.observe(prose_bytes, prose_tokens)
+            return
+    estimator.observe(text_b, text_t)
+
+
 def sent_media(items: list, *, measure_bytes: bool = True) -> MediaCost:
     """The images and documents in ``items``: their bytes, estimate, and least cost (D48). The least cost
     is 0 on a dialect whose API can charge less than Claude's floor (Codex: OpenAI prices by tiles,
@@ -2084,7 +2172,8 @@ def forward_original(request: dict, messages: list[dict], state: EpochState, rea
     events.append({"event": "request", "epoch": state.epoch, "k": state.k, "messages": len(messages),
                    "upstream_messages": len(messages), "sent_bytes": sent, "degraded": True,
                    "fallback_failed": True})
-    return request, replace(state, degraded=True, last_sent_bytes=sent, last_sent_media=media,
+    return request, replace(state, degraded=True, last_sent_bytes=sent,
+                            last_sent_tool_bytes=_sent_tool_bytes(messages, _dialect()), last_sent_media=media,
                             last_sent_media_keys=media_keys(split_media(messages)[1]), last_sent_appends=False,
                             last_sent_anchor=(0, ""),
                             last_estimate=None, last_input_tokens=None, pending_usage=usage_identity(messages),
@@ -2186,7 +2275,8 @@ def send(request: dict, messages: list[dict], previous_n: int, fingerprint: str,
         room_margin = inturn.fresh_margin(inturn.view(messages, state, _dialect())[previous_n:], estimator,
                                           _dialect())
         state = inturn.note_room_low(messages, state, config, sent_estimate + room_margin, events)
-    state = replace(state, hashes=hashes, last_sent_bytes=sent, room_margin=room_margin,
+    state = replace(state, hashes=hashes, last_sent_bytes=sent,
+                    last_sent_tool_bytes=_sent_tool_bytes(sent_items, _dialect()), room_margin=room_margin,
                     last_sent_media=sent_media(sent_items), last_estimate=sent_estimate,
                     last_sent_media_keys=media_keys(split_media(sent_items)[1]),
                     last_sent_appends=appends_to(state.last_measured, scope, hashes), last_sent_scope=scope,
@@ -3858,16 +3948,9 @@ class RewriteEngine:
             # estimate (text_usage).
             media, keys = state.last_sent_media, state.last_sent_media_keys
             text_bytes = state.last_sent_bytes - media.bytes
-            appended = (appended_usage(state.last_measured, text_bytes, real, keys)
-                        if state.last_sent_appends else None)
-            if appended is not None:
-                self.estimator.observe(*appended)
-            else:
-                text_bytes, text_tokens = text_usage(state.last_sent_bytes, real, media,
-                                                     self.estimator.measured_bytes_per_token)
-                if text_tokens is not None:
-                    self.estimator.observe(text_bytes, text_tokens)
-            measured = (Measured(state.last_sent_scope, *state.last_sent_anchor, text_bytes, real, keys)
+            tool_bytes = state.last_sent_tool_bytes
+            _record_usage(self.estimator, state, text_bytes, tool_bytes, real, media, keys)
+            measured = (Measured(state.last_sent_scope, *state.last_sent_anchor, text_bytes, real, keys, tool_bytes)
                         if state.last_sent_anchor[0] else None)
             state = replace(state, last_input_tokens=real, pending_usage=None, last_measured=measured,
                             document_costs=measured_costs(state, real), pending_documents=None,
