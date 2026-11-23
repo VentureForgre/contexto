@@ -180,6 +180,7 @@ from contexto.proxy import (
     EncodedBodyError,
     _Handler,
     _LoopbackServer,
+    _parse_content_encodings,
     classify_path,
     decode_request_body,
     is_local_origin,
@@ -974,11 +975,19 @@ class ServeService:
             in_flight = self._in_flight
         with self._lock:
             sessions = list(self._sessions.values())
+            extra_passthroughs = list(self.passthroughs.values())
             self._sessions.clear()
             self._routes.clear()
+            self.passthroughs.clear()
             self._freed.notify_all()
         for session in sessions:
             self._close(session, "shutdown")
+        self.passthrough.stop()
+        for extra in extra_passthroughs:
+            try:
+                extra.stop()
+            except Exception:
+                pass
         with self._unchecked_changed:
             self._unchecked.clear()
             self._vouched.clear()
@@ -1553,6 +1562,10 @@ class ServeService:
             self._finish(session, "shutdown")
             return
         try:
+            session.proxy.stop()
+        except Exception:
+            pass
+        try:
             session.store.release()
         except Exception:
             pass
@@ -1573,6 +1586,17 @@ class ServeService:
     def _finish(self, session: _Session, reason: str) -> None:
         """With the session's guard held: the exit-time work that applies (the missing-tools report,
         the recorder's last-seen times), a log line in both logs, and the store's lock released."""
+        def _stop_proxies() -> None:
+            session.proxy.stop()
+            with session._proxy_lock:
+                extras = list(session.proxies.values())
+                session.proxies.clear()
+            for extra in extras:
+                try:
+                    extra.stop()
+                except Exception:
+                    pass
+
         def _log_close() -> None:
             close_event: dict[str, Any] = {"event": "serve_close", "reason": reason, "requests": session.requests}
             pages = count_store_pages(session.store.pages_dir)
@@ -1580,7 +1604,8 @@ class ServeService:
                 close_event["pages"] = pages
             session.store.log(close_event)
 
-        for step in (lambda: report_missing_tools(session.proxy), session.recorder.flush, _log_close):
+        for step in (lambda: report_missing_tools(session.proxy), session.recorder.flush,
+                     _stop_proxies, _log_close):
             try:
                 step()
             except Exception:
@@ -1895,12 +1920,12 @@ class _ServeHandler(_Handler):
         except (ValueError, OSError):
             pass
 
-    def _read_body(self) -> bytes:
+    def _read_body(self, limit: int | None = None) -> bytes:
         """The request body, read once: the route reads it, and ``_Handler`` gets the same bytes (or the
         same framing error, which it answers with its 400)."""
         if self._body is None:
             try:
-                self._body = super()._read_body()
+                self._body = super()._read_body(limit)
             except ValueError as exc:
                 self._body = exc
         if isinstance(self._body, ValueError):
@@ -1932,8 +1957,9 @@ class _ServeHandler(_Handler):
             body = self._read_body()
         except ValueError:
             return None  # _Handler answers 400
-        encoding = (self.headers.get("Content-Encoding") or "").strip().lower()
-        if encoding not in ("", "identity"):
+        codings = _parse_content_encodings(self.headers.get_all("Content-Encoding") or [])
+        if any(c != "identity" for c in codings):
+            encoding = ", ".join(codings)
             try:
                 body = decode_request_body(body, encoding, MAX_DECODED_BODY_BYTES)
             except EncodedBodyError:

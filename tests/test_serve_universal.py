@@ -78,6 +78,7 @@ class RecordingUpstream:
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+        self.server.daemon_threads = True
         self.port = self.server.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}"
         threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
