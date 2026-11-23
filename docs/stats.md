@@ -253,7 +253,7 @@ not tool calls and are not counted.
 | `tools.recall`, `tools.search`, `tools.state`, `tools.pin`, `tools.close` | One object per tool. |
 | `tools.recall.calls` | Calls that succeeded (the same three keys exist for each tool). A call that found the recall room used up and returned little or nothing succeeded, and is counted here and in `tools.out_of_room`. |
 | `tools.recall.failed` | Calls that returned an error to the model. The text shows them: `2 failed (1 recall, 1 pin)`. |
-| `tools.recall.charged_tokens` | What the tool's replies were charged against the turn's recall room. It is a budget charge, not a count of tokens read: the reply's characters divided by the session's measured characters per token, capped at 1.5, so that a reply can never cost more than it was charged. A page stored with an estimate of 2,285 tokens was charged 5,322 when recalled whole. Do not compare it with `pages.tokens_estimate`, which counts text at 3.5 bytes a token. Always 0 for `pin` and `close`. |
+| `tools.recall.charged_tokens` | What the tool's replies were charged against the turn's recall room. It is a budget charge, not a count of tokens read: the reply's characters divided by the session's measured characters per token, capped at 1.5 (or up to 3.5 for `contexto_search` with `expand=true`), so that a reply can never cost more than it was charged. A page stored with an estimate of 2,285 tokens was charged 5,322 when recalled whole. Do not compare it with `pages.tokens_estimate`, which counts text at 3.5 bytes a token. Always 0 for `pin` and `close`. |
 | `tools.out_of_room` | Successful calls that found the turn's recall room used up, so they returned little or nothing. The text says how many of the calls these were. |
 | `pins.readable` | `false` when the ledger is damaged, and when the caller asked for the log only (`session_stats(..., store=False)`, as `contexto state`'s fault report does); the two counts are then `null`. |
 | `pins.active_records` | Records in the ledger that nothing supersedes, now. |
@@ -500,6 +500,7 @@ that is in neither.
 | `start_text_unavailable` | The records carried from earlier sessions could not be read for a request; the text already sent was kept. |
 | `main_records_unavailable` | A pin the main conversation made could not be recorded as the main conversation's, so a later session may not carry it. |
 | `trusted_conversations_unavailable` | The list of main conversations the proxy trusted could not be written, so a later launch may not trust this one. |
+| `meta_corrupt` | The session's `meta.json` is corrupt (not valid UTF-8 JSON or not a JSON object), so a metadata write was refused rather than silently wiping it. |
 
 A launch opens its session before it starts the proxy, so `ledger_repaired`, `pruned_while_opening`
 and `affinity_salt_unavailable` are logged just before a run's proxy start. They are counted in
@@ -526,8 +527,8 @@ Events that are **not** counted, because they happen in normal use:
   conversation in flight.
 - `resync`: `/rewind`, or an edit to an earlier message.
 - `rotation_noop`, `epoch_not_resumed`, `head_changed`, `window_minimal`, `side_room_expired`,
-  `hold_skipped`, `upstream_retry`, `stale_temp_removed`: the engine's and the proxy's ordinary
-  bookkeeping.
+  `hold_skipped`, `upstream_retry`, `stale_temp_removed`, `sessions_auto_pruned`: the engine's,
+  store's and proxy's ordinary bookkeeping.
 - `estimate_error`: the estimate was more than 10% under the real count; the next request is sized
   from the real one.
 - `pdf_allowance`, `pdf_pages_uncertain`: sizing notes about a PDF, which the launcher prints.

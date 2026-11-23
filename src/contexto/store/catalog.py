@@ -36,8 +36,10 @@ budget is ``CONTEXTO_SEARCH_CACHE_MB`` (default 64), or ``contexto mcp --search-
 
 from __future__ import annotations
 
+import gzip
 import heapq
 import os
+import stat
 import threading
 import zlib
 from collections.abc import Callable
@@ -46,9 +48,35 @@ from pathlib import Path
 from typing import Any
 
 from contexto.canonical import loads_bounded
-from contexto.private import read_regular_text
+from contexto.private import read_regular, read_regular_text
 from contexto.store.pages import current_stub, index_line, search_entry
 from contexto.store.search import SearchEntry
+
+
+def page_id_from_name(name: str) -> str | None:
+    """Extract the page id from a page filename (``.json`` or ``.json.gz``), or None."""
+    if not name.startswith("pg_"):
+        return None
+    if name.endswith(".json"):
+        return name.removesuffix(".json")
+    if name.endswith(".json.gz"):
+        return name.removesuffix(".json.gz")
+    return None
+
+
+def read_page_text(path: Path) -> str:
+    """Read a page file's UTF-8 JSON text, transparently decompressing ``.json.gz`` pages.
+
+    Raises OSError for I/O or non-regular file errors, and ValueError for corrupt gzip or non-UTF-8 content.
+    """
+    if path.name.endswith(".json.gz"):
+        raw = read_regular(path)
+        try:
+            data = gzip.decompress(raw)
+        except (gzip.BadGzipFile, EOFError, zlib.error, OSError) as e:
+            raise ValueError(f"damaged gzip page {path.name}: {e}") from e
+        return data.decode("utf-8")
+    return read_regular_text(path)
 
 Signature = tuple[int, int, int]  # inode, size, modification time (ns)
 
@@ -194,7 +222,7 @@ class PageCatalog:
                 if entry is not None and entry.search is not None:
                     out.append(entry.search)
                 else:  # not read for search yet: fetch reads it
-                    out.append(SearchEntry(name.removesuffix(".json"), -1, None))
+                    out.append(SearchEntry(page_id_from_name(name) or name, -1, None))
         return out, lambda i: self._fetch(*listing[i]), [name for name, _ in listing]
 
     def all_present(self, names: list[str]) -> bool:
@@ -208,11 +236,14 @@ class PageCatalog:
     def add(self, path: Path, page: dict[str, Any]) -> None:
         """Record a page this process has just written or found stored, without reading it again."""
         try:
-            signature = _signature(path.stat())
+            signature = _signature(os.stat(path, follow_symlinks=False))
         except OSError:
             return  # the next listing reads it
+        pid = page_id_from_name(path.name)
+        if pid is None:
+            return
         try:
-            view = _view(check_page(current_stub(page), path.name.removesuffix(".json")))
+            view = _view(check_page(current_stub(page), pid))
         except (KeyError, TypeError, ValueError, AttributeError):
             return  # a stored page with a malformed stub: the next listing reads it, and logs it
         with self._lock:
@@ -227,7 +258,17 @@ class PageCatalog:
         line = entry.lines.get(salient)
         if line is not None:
             return line
-        page = self._read(self.pages_dir / f"{entry.id}.json")[0] if salient else entry.view
+        if salient:
+            json_path = self.pages_dir / f"{entry.id}.json"
+            gz_path = self.pages_dir / f"{entry.id}.json.gz"
+            try:
+                json_regular = stat.S_ISREG(os.stat(json_path, follow_symlinks=False).st_mode)
+            except OSError:
+                json_regular = False
+            path = json_path if json_regular else gz_path
+            page = self._read(path)[0]
+        else:
+            page = entry.view
         if page is None:  # unreadable now (logged): the line without identifiers, not kept
             return index_line(entry.view, False)
         line = entry.lines[salient] = index_line(page, salient)
@@ -236,16 +277,30 @@ class PageCatalog:
     # Under the lock
 
     def _listing(self) -> dict[str, Signature]:
-        """The page files now, by name; entries for files that are gone or changed are dropped."""
+        """The page files now, by name; entries for files that are gone or changed are dropped.
+
+        Uses ``follow_symlinks=False`` consistently so symlinks in ``pages/`` are never followed.
+        Supports both ``.json`` and ``.json.gz`` pages, preferring ``.json`` if both exist for one id.
+        """
         listing: dict[str, Signature] = {}
+        by_id: dict[str, str] = {}
         try:
             with os.scandir(self.pages_dir) as it:
                 for de in it:
-                    if de.name.startswith("pg_") and de.name.endswith(".json") and de.is_file():
-                        try:
-                            listing[de.name] = _signature(de.stat())
-                        except FileNotFoundError:  # quarantined between the listing and the stat
-                            continue
+                    pid = page_id_from_name(de.name)
+                    if pid is None or not de.is_file(follow_symlinks=False):
+                        continue
+                    try:
+                        sig = _signature(de.stat(follow_symlinks=False))
+                    except FileNotFoundError:  # quarantined between the listing and the stat
+                        continue
+                    prev = by_id.get(pid)
+                    if prev is not None:
+                        if prev.endswith(".json"):
+                            continue  # prefer uncompressed .json over .json.gz
+                        listing.pop(prev, None)
+                    by_id[pid] = de.name
+                    listing[de.name] = sig
         except FileNotFoundError:
             listing = {}
         for name in [n for n, e in self._entries.items() if listing.get(n) != e.signature]:
@@ -390,18 +445,19 @@ class PageCatalog:
         a failed read adds ``will_retry`` (not for a file gone since the listing, which the next listing
         leaves out)."""
         try:
-            text = read_regular_text(path)  # a FIFO in a page's place is refused without blocking (D58)
+            text = read_page_text(path)  # a FIFO in a page's place is refused without blocking (D58)
         except OSError as e:
             event = {"event": "page_unreadable", "path": path.name, "error": str(e)}
             if not isinstance(e, FileNotFoundError):
                 event["will_retry"] = True
             self._log(event)
             return None, False
-        except ValueError as e:  # not UTF-8
+        except ValueError as e:  # not UTF-8 or damaged gzip
             self._log({"event": "page_unreadable", "path": path.name, "error": str(e)})
             return None, True
+        pid = page_id_from_name(path.name) or path.name.removesuffix(".json")
         try:
-            return load_page(text, path.name.removesuffix(".json")), False
+            return load_page(text, pid), False
         except (ValueError, KeyError, TypeError, AttributeError) as e:
             self._log({"event": "page_unreadable", "path": path.name, "error": str(e)})
             return None, True
@@ -463,7 +519,7 @@ def check_page(page: Any, page_id: str | None = None) -> dict[str, Any]:
         raise TypeError("page stub is not an object")
     if not isinstance(stub["user_text"], str):
         raise TypeError("page stub user_text is not a string")
-    for name in ("system_text", "reminder_text"):
+    for name in ("system_text", "reminder_text", "assistant_text"):
         if name in stub and not isinstance(stub[name], str):
             raise TypeError(f"page stub {name} is not a string")
     for name in ("tools", "paths"):

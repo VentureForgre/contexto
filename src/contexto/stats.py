@@ -33,12 +33,14 @@ they agree.
 from __future__ import annotations
 
 import errno
+import gzip
 import json
 import math
 import os
 import re
 import stat
 import time
+import zlib
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -144,6 +146,7 @@ FAULT_EVENTS = {
     "start_text_unavailable": "the records carried from earlier sessions could not be read for a request",
     "main_records_unavailable": "a pin of the main conversation could not be recorded, so it may not be carried",
     "trusted_conversations_unavailable": "the list of trusted main conversations could not be written",
+    "meta_corrupt": "the session's meta.json is corrupt, so a metadata write was refused rather than wiping it",
 }
 # Deliberately not faults. The first group are the log's ordinary records, most with a number of their
 # own; the second happen in normal use; docs/stats.md gives the reason for each.
@@ -156,7 +159,7 @@ NOT_FAULT_EVENTS = frozenset({
     "stale_temp_removed", "estimate_error", "pdf_allowance", "pdf_pages_uncertain", "cli_version_untested",
     "proxy_stop_incomplete", "carried_text_growing", "sizing_not_restored", "window_budget_warning",
     "hint_mismatch", "start_text", "start_text_changed", "project_memory", "main_record_unmatched",
-    "in_turn_batch", "in_turn_exhausted",
+    "in_turn_batch", "in_turn_exhausted", "sessions_auto_pruned",
     # contexto serve: its session records, then the events it writes to serve.log, which stats never reads.
     "serve_open", "serve_close",
     "serve_start", "serve_stop", "serve_error", "session_open", "session_open_failed", "session_close",
@@ -860,44 +863,66 @@ def _seconds(first: datetime | None, last: datetime | None) -> int | None:
         return None
 
 
+def _page_id_from_name(name: str) -> str | None:
+    if not name.startswith("pg_"):
+        return None
+    if name.endswith(".json"):
+        return name.removesuffix(".json")
+    if name.endswith(".json.gz"):
+        return name.removesuffix(".json.gz")
+    return None
+
+
 def _page_tokens(path: Path, size: int) -> int | None:
-    """The token estimate stored in one page file, from its first and last bytes; the whole file is
-    parsed only when they are not a canonical page's. None when the file is not a readable page named
-    by its own id: one with a damaged start and an intact end is not a page the store can read, so its
-    estimate is not added."""
+    """The token estimate stored in one page file (``.json`` or ``.json.gz``), from its first and last
+    bytes for uncompressed canonical pages; gzipped or non-canonical pages are parsed in full. None when
+    the file is not a readable page named by its own id."""
+    page_id = _page_id_from_name(path.name)
+    if page_id is None:
+        return None
     try:
         fd = open_regular(path)
     except OSError:
         return None
     try:
-        head = _PAGE_HEAD.match(os.pread(fd, _PAGE_HEAD_BYTES, 0))
-        tail = _PAGE_TAIL.search(os.pread(fd, _PAGE_TAIL_BYTES, max(0, size - _PAGE_TAIL_BYTES)))
-        if head and tail and head.group(1).decode() == path.stem:
-            return int(tail.group(1))
+        if not path.name.endswith(".json.gz"):
+            head = _PAGE_HEAD.match(os.pread(fd, _PAGE_HEAD_BYTES, 0))
+            tail = _PAGE_TAIL.search(os.pread(fd, _PAGE_TAIL_BYTES, max(0, size - _PAGE_TAIL_BYTES)))
+            if head and tail and head.group(1).decode() == page_id:
+                return int(tail.group(1))
         chunks = []
         while chunk := os.read(fd, 1 << 20):
             chunks.append(chunk)
-        page = json.loads(b"".join(chunks))
-    except (OSError, ValueError, RecursionError):
+        raw = b"".join(chunks)
+        if path.name.endswith(".json.gz"):
+            raw = gzip.decompress(raw)
+        page = json.loads(raw)
+    except (OSError, ValueError, RecursionError, EOFError, zlib.error):
         return None
     finally:
         os.close(fd)
-    if not isinstance(page, dict) or page.get("id") != path.stem or not isinstance(page.get("messages"), list):
+    if not isinstance(page, dict) or page.get("id") != page_id or not isinstance(page.get("messages"), list):
         return None
     return _nat(page.get("tokens"))
 
 
 def _is_page_name(name: str) -> bool:
-    return name.startswith("pg_") and name.endswith(".json")
+    return _page_id_from_name(name) is not None
 
 
 def count_pages(pages_dir: Path) -> int | None:
-    """How many page files ``pages_dir`` holds: regular ``pg_*.json`` files, counted from the directory
-    listing alone. No file is opened or parsed, so the proxy can record the count when it starts and
-    stops. 0 for a directory that does not exist yet; None when it cannot be listed."""
+    """How many page files ``pages_dir`` holds: regular ``pg_*.json`` / ``pg_*.json.gz`` files
+    (deduplicated by page id), counted from the directory listing alone. No file is opened or parsed,
+    so the proxy can record the count when it starts and stops. 0 for a directory that does not exist
+    yet; None when it cannot be listed."""
     try:
+        seen: set[str] = set()
         with os.scandir(pages_dir) as entries:
-            return sum(1 for entry in entries if _is_page_name(entry.name) and entry.is_file(follow_symlinks=False))
+            for entry in entries:
+                pid = _page_id_from_name(entry.name)
+                if pid is not None and entry.is_file(follow_symlinks=False):
+                    seen.add(pid)
+        return len(seen)
     except FileNotFoundError:
         return 0
     except OSError:
@@ -906,9 +931,9 @@ def count_pages(pages_dir: Path) -> int | None:
 
 def page_totals(pages_dir: Path, *, tokens: bool = True) -> dict[str, Any]:
     """The pages a session holds on disk: how many, the bytes their files take, and (with ``tokens``)
-    the sum of the token estimates made when each was paged. Only regular ``pg_*.json`` files count;
-    one that cannot be read is counted in ``unreadable`` and adds no tokens. Every value is None when
-    the directory cannot be listed."""
+    the sum of the token estimates made when each was paged. Only regular ``pg_*.json`` / ``pg_*.json.gz``
+    files count (preferring ``.json`` if both exist for one id); one that cannot be read is counted in
+    ``unreadable`` and adds no tokens. Every value is None when the directory cannot be listed."""
     out: dict[str, Any] = {"count": 0, "tokens_estimate": 0 if tokens else None, "file_bytes": 0, "unreadable": 0}
     try:
         entries = list(os.scandir(pages_dir))
@@ -916,8 +941,10 @@ def page_totals(pages_dir: Path, *, tokens: bool = True) -> dict[str, Any]:
         return out
     except OSError:
         return dict.fromkeys(out)
+    chosen: dict[str, tuple[os.DirEntry[str], os.stat_result]] = {}
     for entry in entries:
-        if not _is_page_name(entry.name):
+        pid = _page_id_from_name(entry.name)
+        if pid is None:
             continue
         try:
             status = entry.stat(follow_symlinks=False)
@@ -925,6 +952,10 @@ def page_totals(pages_dir: Path, *, tokens: bool = True) -> dict[str, Any]:
             continue
         if not stat.S_ISREG(status.st_mode):
             continue
+        if pid in chosen and entry.name.endswith(".json.gz"):
+            continue  # prefer uncompressed .json when both exist
+        chosen[pid] = (entry, status)
+    for entry, status in chosen.values():
         out["count"] += 1
         out["file_bytes"] += status.st_size
         if tokens:

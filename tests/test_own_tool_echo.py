@@ -182,6 +182,10 @@ OWN = {
     # Reviewer B on PR #242: exec as a function call whose JSON arguments hold the code (quotes escaped).
     "codex_exec_json_arguments": codex_turn("function_call", "exec", {
         "code": 'return await tools["mcp__contexto__contexto_search"]({query: "ECHOED-QUERY"});'}),
+    # Any configured MCP server prefix is recognized for Contexto's echo tools.
+    "custom_server_prefix": codex_turn("function_call", "mcp__contexto_x__contexto_search", {"query": "ECHOED-QUERY"}),
+    "custom_server_exec": codex_turn("custom_tool_call", "exec",
+                                     'return await tools["mcp__my_ctx__contexto_recall"]({page_id: "ECHOED-QUERY"});'),
 }
 def claude_call(name, tool_input, output):
     return [{"role": "user", "content": "what was it"},
@@ -206,7 +210,7 @@ OTHER = {
                                                              "input": {"command": "ECHOED-QUERY"}}]},
                           {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
                                                         "content": OUTPUT}]}],
-    "another_server": codex_turn("function_call", "mcp__contexto_x__contexto_search", {"query": "ECHOED-QUERY"}),
+    "other_mcp_tool": codex_turn("function_call", "mcp__other__search", {"query": "ECHOED-QUERY"}),
     "exec_mixed": codex_turn("custom_tool_call", "exec",
                              'await tools["mcp__contexto__contexto_search"]({query: "x"});\n'
                              'return await tools.exec_command({cmd: "ECHOED-QUERY"});'),

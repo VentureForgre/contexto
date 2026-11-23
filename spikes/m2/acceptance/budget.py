@@ -47,7 +47,7 @@ OTHER_BYTES_PER_TOKEN = 3.0  # every non-log byte, as the stub dry run models it
 # test_head_follows_contexto_tool_bytes fails when either changes without this.
 HEAD_MEASURED = 47_600
 CONTEXTO_TOOL_BYTES_AT_MEASURE = 2_743  # main c8f0b08
-CONTEXTO_TOOL_BYTES = 3_872  # D65 3,070; D69 3,285; D63 3,435; D69's project tool list (scope, session)
+CONTEXTO_TOOL_BYTES = 4_514  # D65 3,070; D69 3,285; D63 3,435; D69 project 3,872; pin topic/owner + search expand/context_lines/approximate 4,514
 CONTEXTO_INSTRUCTIONS_BYTES_AT_MEASURE = 426  # main c8f0b08 (unchanged until D51)
 CONTEXTO_INSTRUCTIONS_BYTES = 926  # D65 747; D69 878; the project instructions (no pin from an earlier session)
 HEAD = (HEAD_MEASURED

@@ -26,7 +26,8 @@ import os
 import re
 import shutil
 import stat
-from collections.abc import Iterator
+import time
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,8 @@ from contexto.store import LIVE_LOCK, SessionNotFoundError
 from contexto.store.sessions import ACTIVITY_NAMES, disk_usage_fd
 
 ACTIVE_GRACE_S = 600  # a session changed this recently counts as in use, lock or not
+RETENTION_MAX_AGE_ENV = "CONTEXTO_RETENTION_MAX_AGE"
+RETENTION_KEEP_ENV = "CONTEXTO_RETENTION_KEEP"
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 _DURATION = re.compile(r"(\d+)([smhdw])")
@@ -310,7 +313,7 @@ class Candidate:
 
 
 def select(home: Path, *, older_than: int | None, keep: int | None, session_id: str | None,
-           now: float) -> list[Candidate]:
+           now: float, measure_size: bool = True) -> list[Candidate]:
     """Sessions every given condition selects, most recent activity first.
 
     ``keep`` keeps the ``keep`` sessions with the most recent activity (ranked over all sessions);
@@ -332,7 +335,8 @@ def select(home: Path, *, older_than: int | None, keep: int | None, session_id: 
             except (ValueError, SessionNotFoundError):  # not a valid id, or changed while listing
                 continue
             try:
-                every.append(Candidate(name, _last_activity(fd), disk_usage_fd(fd), ident))
+                size = disk_usage_fd(fd) if measure_size else 0
+                every.append(Candidate(name, _last_activity(fd), size, ident))
             finally:
                 os.close(fd)
     every.sort(key=lambda c: (c.last_activity, c.id), reverse=True)
@@ -342,3 +346,58 @@ def select(home: Path, *, older_than: int | None, keep: int | None, session_id: 
     if older_than is not None:
         chosen = [c for c in chosen if now - c.last_activity >= older_than]
     return chosen
+
+
+def retention_policy(environ: Mapping[str, str] | None = None) -> tuple[int | None, int | None]:
+    """Optional automatic retention policy from environment variables (disabled when unset).
+
+    ``CONTEXTO_RETENTION_MAX_AGE`` is a duration (e.g. ``30d``, ``12h``) parsed by ``parse_duration``;
+    ``CONTEXTO_RETENTION_KEEP`` is a positive integer count of the most recently active sessions to keep.
+    Invalid values are ignored (returning None for that bound) so a misconfigured env var never breaks
+    session startup.
+    """
+    env = os.environ if environ is None else environ
+    max_age: int | None = None
+    keep: int | None = None
+    raw_age = env.get(RETENTION_MAX_AGE_ENV, "").strip()
+    if raw_age:
+        try:
+            max_age = parse_duration(raw_age)
+        except ValueError:
+            max_age = None
+    raw_keep = env.get(RETENTION_KEEP_ENV, "").strip()
+    if raw_keep:
+        try:
+            parsed = int(raw_keep)
+            if parsed > 0:
+                keep = parsed
+        except ValueError:
+            keep = None
+    return max_age, keep
+
+
+def auto_prune(home: Path, *, max_age: int | None = None, keep: int | None = None,
+               now: float | None = None, grace: float = ACTIVE_GRACE_S,
+               exclude: set[str] | frozenset[str] = frozenset()) -> list[str]:
+    """Prune idle sessions beyond ``max_age`` seconds and/or past the newest ``keep`` sessions.
+
+    Returns the list of pruned session ids. Live sessions, recently active sessions (within ``grace``),
+    excluded sessions, and any session that cannot be safely removed are skipped without raising.
+    """
+    if max_age is None and keep is None:
+        return []
+    now_ts = time.time() if now is None else now
+    try:
+        candidates = select(home, older_than=max_age, keep=keep, session_id=None, now=now_ts, measure_size=False)
+    except (UnsafeSessionPathError, SessionNotFoundError, OSError, ValueError):
+        return []
+    pruned: list[str] = []
+    for candidate in candidates:
+        if candidate.id in exclude:
+            continue
+        try:
+            remove_session(home, candidate.id, now=now_ts, grace=grace, expect=candidate.ident)
+            pruned.append(candidate.id)
+        except (SessionLiveError, SessionNotFoundError, UnsafeSessionPathError, ValueError, OSError):
+            continue
+    return pruned
