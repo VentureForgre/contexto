@@ -159,7 +159,7 @@ NOT_FAULT_EVENTS = frozenset({
     "stale_temp_removed", "estimate_error", "pdf_allowance", "pdf_pages_uncertain", "cli_version_untested",
     "proxy_stop_incomplete", "carried_text_growing", "sizing_not_restored", "window_budget_warning",
     "hint_mismatch", "start_text", "start_text_changed", "project_memory", "main_record_unmatched",
-    "in_turn_batch", "in_turn_exhausted", "sessions_auto_pruned",
+    "in_turn_batch", "in_turn_exhausted", "websocket_session", "websocket_turn", "sessions_auto_pruned",
     # contexto serve: its session records, then the events it writes to serve.log, which stats never reads.
     "serve_open", "serve_close",
     "serve_start", "serve_stop", "serve_error", "session_open", "session_open_failed", "session_close",
@@ -442,7 +442,7 @@ def fault_notices(event: Any, session_id: str | None = None) -> list[tuple[str, 
     once and a second cause is still said. Never raises: it runs on every event the proxy logs."""
     if not isinstance(event, dict):
         return []
-    found = [event] if event.get("event") != "request" else [
+    found = [event] if event.get("event") not in ("request", "websocket_turn") else [
         *_events(event.get("transform_events")), *_events(event.get("usage_events"))]
     return [(f"store_fault_{store_fault_cause(e)}", store_fault_message(e, session_id))
             for e in found if e.get("event") in ("store_error", "page_conflict")]
@@ -600,7 +600,7 @@ class _Tally:
                     self._run_first = self._run_first or at
                     self._run_last = at
         name = self._text(event.get("event"))
-        if name == "request":
+        if name in ("request", "websocket_turn"):
             self._request(event, when)
         elif name == "mcp_call":
             self._tool(event)
@@ -660,7 +660,8 @@ class _Tally:
 
     def _request(self, event: dict[str, Any], when: str | None) -> None:
         path = event.get("path")
-        model = event.get("method") == "POST" and _is_model_path(path)
+        is_ws = event.get("event") == "websocket_turn"
+        model = (is_ws or event.get("method") == "POST") and _is_model_path(path)
         if not model:
             self.requests["count_tokens" if _is_count_tokens_path(path) else "other"] += 1
             return
@@ -762,7 +763,7 @@ class _Tally:
             if unpaged:
                 self.over["degraded"] += 1
 
-        prompt = self._usage(event.get("usage"), event.get("api"))
+        prompt = self._usage(event.get("usage"), event.get("api") or ("responses" if is_ws else None))
         estimate = self._number(engine.get("sent_estimate"))
         estimate = estimate if estimate is not None else self._number(engine.get("estimate"))
         if prompt is not None:

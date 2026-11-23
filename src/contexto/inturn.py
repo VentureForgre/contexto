@@ -54,9 +54,9 @@ indexes, with a folded message replaced by ``FOLDED``. A stub and a fold note ar
 CLI's own blocks and the page id, so they are byte-identical on every request. The epoch record carries
 the state (rule 16), written when a batch runs.
 
-**Dialects.** The protocol-specific parts are behind ``Dialect.in_turn`` (``MessagesInTurn`` here). A
-dialect whose ``in_turn`` is None, as the Responses dialect's is in this release, never pages inside a
-turn.
+**Dialects.** The protocol-specific parts are behind ``Dialect.in_turn`` (``MessagesInTurn`` for
+Claude Code and ``ResponsesInTurn`` for Codex). A dialect whose ``in_turn`` is None never pages
+inside a turn.
 """
 
 from __future__ import annotations
@@ -71,8 +71,9 @@ from contextvars import ContextVar
 from dataclasses import replace
 from typing import Any, NamedTuple
 
-from contexto.canonical import canonical_bytes, canonical_json, utf8
+from contexto.canonical import canonical_bytes, canonical_json, loads_bounded, utf8
 from contexto.pdfpages import PDF_MAX_PAGES  # noqa: F401 (PDF_MAX_PAGES: still importable from here)
+from contexto.proxy import is_client_call
 from contexto.store.render import OWN_TOOL_PREFIX, own_call_ids
 from contexto.tokens import (
     UNCERTAIN_DOCUMENT_TOKENS,
@@ -222,6 +223,10 @@ class MessagesInTurn:
         block = blocks[j] if 0 <= j < len(blocks) else None
         return block if isinstance(block, dict) and block.get("type") == "tool_result" else None
 
+    def result_call_id(self, result: dict) -> str:
+        call_id = result.get("tool_use_id")
+        return call_id if isinstance(call_id, str) else ""
+
     def call(self, items: list[dict], i: int, call_id: str) -> dict | None:
         """The call a result at ``items[i]`` answers: the ``tool_use`` block with that id in the nearest
         assistant message before it."""
@@ -323,6 +328,29 @@ class MessagesInTurn:
         blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
         return {**item, "content": [*blocks, {"type": "text", "text": note}]}
 
+    def note_page_items(self, texts: list[str]) -> list[dict]:
+        """The items of a folds page or index page carrying ``texts``."""
+        return [{"role": "user", "content": [{"type": "text", "text": text} for text in texts]}]
+
+    def thinking_count(self, item: dict) -> int:
+        return sum(1 for b in _blocks(item) if isinstance(b, dict) and b.get("type") in _rw().THINKING_TYPES)
+
+    def round_numbers(self, messages: list[dict], start: int, upto: int) -> list[int]:
+        numbers, count = [], 0
+        for i in range(start, upto):
+            if messages[i].get("role") == "assistant":
+                count += 1
+            numbers.append(count)
+        return numbers
+
+    def count_rounds(self, items: list[dict]) -> int:
+        return sum(1 for item in items if item.get("role") == "assistant")
+
+    def call_ids_in(self, items: list[dict]) -> list[str]:
+        return [_safe_id(b["id"]) for item in items if item.get("role") == "assistant"
+                for b in _blocks(item) if isinstance(b, dict) and b.get("type") == "tool_use"
+                and isinstance(b.get("id"), str) and b["id"]]
+
     def user_authored(self, item: dict) -> bool:
         """Whether a user message inside a tool loop holds something the user put there, next to the tool
         results: a text block that is not a context block (Claude Code's ``<system-reminder>`` text) and
@@ -393,6 +421,330 @@ class MessagesInTurn:
 
 
 MESSAGES = MessagesInTurn()
+
+_RESPONSES_TEXT_TYPES = frozenset({"input_text", "output_text", "text"})
+_RESPONSES_LOCATOR_KEYS = ("cmd", *LOCATOR_KEYS)
+
+
+def _is_responses_output(item: Any) -> bool:
+    return isinstance(item, dict) and str(item.get("type", "")).endswith("_output")
+
+
+def _responses_call_id(item: dict) -> str:
+    call_id = item.get("call_id", item.get("id"))
+    return call_id if isinstance(call_id, str) else ""
+
+
+def _parse_data_url(url: str) -> tuple[str, str] | None:
+    if not url.startswith("data:") or ";base64," not in url[:100]:
+        return None
+    head, _, data = url.partition(",")
+    media_type = head[5:].split(";", 1)[0].strip()
+    return (media_type, data) if data else None
+
+
+def _responses_dialect():
+    from contexto.codex import RESPONSES as dialect
+
+    return dialect
+
+
+class ResponsesInTurn:
+    """In-turn paging primitives for the OpenAI Responses API (Codex).
+
+    Responses history is flat: each model step emits a ``reasoning`` item (optional), an assistant
+    ``message`` (optional), and zero or more ``*_call`` items (client calls such as ``function_call``,
+    ``custom_tool_call``, ``local_shell_call``, and hosted calls such as ``web_search_call``),
+    followed by one ``*_output`` item per client call.
+    """
+
+    def results(self, item: dict) -> list[tuple[int, str]]:
+        if not _is_responses_output(item):
+            return []
+        call_id = _responses_call_id(item)
+        return [(0, call_id)] if call_id else []
+
+    def result(self, item: dict, j: int) -> dict | None:
+        return item if j == 0 and _is_responses_output(item) else None
+
+    def result_call_id(self, result: dict) -> str:
+        return _responses_call_id(result)
+
+    def call(self, items: list[dict], i: int, call_id: str) -> dict | None:
+        if not call_id:
+            return None
+        for x in range(i - 1, -1, -1):
+            item = items[x]
+            if (isinstance(item, dict) and str(item.get("type", "")).endswith("_call")
+                    and _responses_call_id(item) == call_id):
+                return item
+        return None
+
+    def stubbable(self, result: dict) -> bool:
+        output = result.get("output")
+        if isinstance(output, str):
+            return True
+        return isinstance(output, list) and all(
+            isinstance(p, dict) and (p.get("type") in ("input_image", "input_file")
+                                     or (p.get("type") in _RESPONSES_TEXT_TYPES and isinstance(p.get("text"), str)))
+            for p in output)
+
+    def has_media(self, result: dict) -> bool:
+        output = result.get("output")
+        return isinstance(output, list) and any(
+            isinstance(p, dict) and (p.get("type") == "input_image"
+                                     or (p.get("type") == "input_file"
+                                         and not (isinstance(p.get("file_data"), str)
+                                                  and p["file_data"].startswith("data:text/"))))
+            for p in output)
+
+    def has_document(self, result: dict) -> bool:
+        output = result.get("output")
+        return isinstance(output, list) and any(
+            isinstance(p, dict) and p.get("type") == "input_file"
+            and not (isinstance(p.get("file_data"), str) and p["file_data"].startswith("data:text/"))
+            for p in output)
+
+    def size(self, result: dict) -> Size:
+        output = result.get("output")
+        if isinstance(output, str):
+            texts, images = [output], 0
+            parts: list[Any] = []
+        else:
+            parts = output if isinstance(output, list) else []
+            texts = [p["text"] for p in parts if isinstance(p, dict)
+                     and p.get("type") in _RESPONSES_TEXT_TYPES and isinstance(p.get("text"), str)]
+            images = sum(1 for p in parts if isinstance(p, dict) and p.get("type") == "input_image")
+        text = "\n".join(texts)
+        documents, document_bytes, pages = 0, 0, 0
+        for p in parts:
+            if not (isinstance(p, dict) and p.get("type") == "input_file"):
+                continue
+            file_data = p.get("file_data")
+            if isinstance(file_data, str) and file_data.startswith("data:text/"):
+                continue
+            documents += 1
+            parsed = _parse_data_url(file_data) if isinstance(file_data, str) else None
+            if parsed is not None:
+                size, count = _document(parsed[0], parsed[1])
+            else:
+                size, count = len(canonical_bytes(p)), None
+            document_bytes += size
+            pages = None if pages is None or count is None else pages + count
+        return Size(len(utf8(text)), text.count("\n") + 1 if text else 0, images, documents, document_bytes,
+                    pages if documents else None)
+
+    def content_bytes(self, result: dict) -> int:
+        return len(canonical_bytes(result.get("output")))
+
+    def with_stubs(self, item: dict, texts: dict[int, str]) -> dict:
+        return {**item, "output": texts[0]} if 0 in texts else item
+
+    def result_page(self, call: dict | None, result: dict) -> list[dict]:
+        return [call, result] if call is not None else [result]
+
+    def describe(self, call: dict | None, limit: int = LOCATOR_CHARS) -> tuple[str, str, str]:
+        if not isinstance(call, dict):
+            return "unknown", "input: {}", "{}"
+        kind = call.get("type", "")
+        raw_name = call.get("name")
+        name = (raw_name if isinstance(raw_name, str) and raw_name
+                else (kind if isinstance(kind, str) and kind else "unknown"))
+        tool_input: Any = None
+        if kind == "function_call":
+            raw = call.get("arguments")
+            if isinstance(raw, str):
+                try:
+                    tool_input = loads_bounded(raw)
+                except ValueError:
+                    tool_input = raw
+            else:
+                tool_input = raw
+        elif kind == "custom_tool_call":
+            tool_input = call.get("input")
+        elif kind == "local_shell_call":
+            tool_input = call.get("action")
+        else:
+            tool_input = call.get("arguments", call.get("input", call.get("action")))
+        arguments = canonical_json(tool_input) if isinstance(tool_input, (dict, list, str)) else "{}"
+        locator = f"input: {_clip(arguments, limit)}"
+        if isinstance(tool_input, dict):
+            def text(key: str) -> str | None:
+                value = tool_input.get(key)
+                if isinstance(value, str) and value:
+                    return value
+                if (key in ("command", "cmd") and isinstance(value, list) and value
+                        and all(isinstance(v, str) for v in value)):
+                    return " ".join(value)
+                return None
+
+            key = next((k for k in _RESPONSES_LOCATOR_KEYS if text(k) is not None), None)
+            if key is not None:
+                locator = f"{key}: {_clip(text(key), limit)}"
+                where = next((text(k) for k in PATH_KEYS if text(k) is not None), None)
+                if key in SEARCH_KEYS and where is not None:
+                    locator += f" (in {_clip(where, limit)})"
+        return name, locator, _clip(arguments)
+
+    def with_note(self, item: dict, note: str) -> dict:
+        content = item.get("content")
+        parts = [{"type": "input_text", "text": content}] if isinstance(content, str) else list(content or [])
+        return {**item, "content": [*parts, {"type": "input_text", "text": note}]}
+
+    def note_page_items(self, texts: list[str]) -> list[dict]:
+        return [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": t} for t in texts]}]
+
+    def thinking_count(self, item: dict) -> int:
+        return 1 if isinstance(item, dict) and item.get("type") == "reasoning" else 0
+
+    def user_authored(self, item: dict) -> bool:
+        if not isinstance(item, dict) or item.get("type", "message") != "message" or item.get("role") != "user":
+            return False
+        dialect = _responses_dialect()
+        if dialect.is_system_like(item):
+            return False
+        content = item.get("content")
+        if isinstance(content, str):
+            return bool(content.strip())
+        if not isinstance(content, list):
+            return False
+        from contexto.codex import is_context_part
+
+        for part in content:
+            if not isinstance(part, dict) or is_context_part(part):
+                continue
+            if part.get("type") in _RESPONSES_TEXT_TYPES:
+                text = part.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+            return True
+        return False
+
+    @staticmethod
+    def _starts_new_round(item: dict, in_round: bool, seen_non_model: bool, has_non_reasoning: bool) -> bool:
+        if not in_round or seen_non_model:
+            return True
+        return item.get("type") == "reasoning" and has_non_reasoning
+
+    def rounds(self, items: list[dict], start: int, end: int) -> list[Round]:
+        dialect = _responses_dialect()
+        rounds: list[Round] = []
+        current: list[int] | None = None
+        foldable = True
+        seen_non_model = False
+        has_non_reasoning = False
+        pending_calls: set[str] = set()
+        for i in range(start, end):
+            item = items[i]
+            if i == start:
+                continue
+            if item is FOLDED:
+                if current is not None:
+                    seen_non_model = True
+                continue
+            if dialect.is_assistant(item):
+                if self._starts_new_round(item, current is not None, seen_non_model, has_non_reasoning):
+                    if current is not None:
+                        rounds.append(Round(tuple(current), foldable and not pending_calls))
+                    current, foldable = [i], True
+                    seen_non_model, has_non_reasoning, pending_calls = False, False, set()
+                else:
+                    assert current is not None
+                    current.append(i)
+                if item.get("type") != "reasoning":
+                    has_non_reasoning = True
+                if is_client_call(item):
+                    cid = _responses_call_id(item)
+                    if cid:
+                        pending_calls.add(cid)
+                    else:
+                        foldable = False
+                continue
+            if current is None:
+                continue
+            if dialect.is_system_like(item):
+                continue
+            if _is_responses_output(item):
+                seen_non_model = True
+                cid = _responses_call_id(item)
+                if cid and cid in pending_calls:
+                    pending_calls.discard(cid)
+                else:
+                    foldable = False
+                current.append(i)
+                continue
+            foldable = False
+            seen_non_model = True
+            current.append(i)
+        if current is not None:
+            rounds.append(Round(tuple(current), foldable and not pending_calls))
+        return rounds
+
+    def round_numbers(self, messages: list[dict], start: int, upto: int) -> list[int]:
+        dialect = _responses_dialect()
+        numbers: list[int] = []
+        count = 0
+        in_round = False
+        seen_non_model = False
+        has_non_reasoning = False
+        for i in range(start, upto):
+            item = messages[i]
+            if i != start and dialect.is_assistant(item):
+                if self._starts_new_round(item, in_round, seen_non_model, has_non_reasoning):
+                    count += 1
+                    in_round, seen_non_model, has_non_reasoning = True, False, False
+                if item.get("type") != "reasoning":
+                    has_non_reasoning = True
+            elif i != start and in_round and not dialect.is_system_like(item):
+                seen_non_model = True
+            numbers.append(count)
+        return numbers
+
+    def count_rounds(self, items: list[dict]) -> int:
+        dialect = _responses_dialect()
+        count = 0
+        in_round = False
+        seen_non_model = False
+        has_non_reasoning = False
+        for item in items:
+            if dialect.is_assistant(item):
+                if self._starts_new_round(item, in_round, seen_non_model, has_non_reasoning):
+                    count += 1
+                    in_round, seen_non_model, has_non_reasoning = True, False, False
+                if item.get("type") != "reasoning":
+                    has_non_reasoning = True
+            elif in_round and not dialect.is_system_like(item):
+                seen_non_model = True
+        return count
+
+    def call_ids_in(self, items: list[dict]) -> list[str]:
+        ids: list[str] = []
+        for item in items:
+            if isinstance(item, dict) and is_client_call(item):
+                cid = _responses_call_id(item)
+                if cid:
+                    ids.append(_safe_id(cid))
+        return ids
+
+    def note_facts(self, items: list[dict]) -> tuple[int, list[str], list[str], list[str]]:
+        rounds = self.count_rounds(items)
+        tools: list[str] = []
+        calls: list[str] = []
+        ids: list[str] = []
+        for item in items:
+            if not (isinstance(item, dict) and str(item.get("type", "")).endswith("_call")):
+                continue
+            name, locator, _ = self.describe(item, NOTE_CALL_CHARS)
+            tools.append(name)
+            calls.append(f"{name} {locator}")
+            if is_client_call(item):
+                cid = _responses_call_id(item)
+                if cid:
+                    ids.append(_safe_id(cid))
+        return rounds, tools, calls, ids
+
+
+RESPONSES = ResponsesInTurn()
 
 
 # Stubs and notes: pure functions of the CLI's blocks and the page id -----------------------------
@@ -573,7 +925,7 @@ def note_size(text: str) -> int:
 _NOTE_TAIL = ('If you have the contexto_recall tool, call it with a page_id named here to read them (pass the '
               "next offset to continue; a page is long); contexto_search finds lines in them. Without it, you can "
               "run again the calls listed here; the other calls of these rounds are named only in those pages.]")
-_NOTES: OrderedDict[tuple[str, str, int, int], str] = OrderedDict()
+_NOTES: OrderedDict[tuple[str, str, int, int, tuple[str, ...]], str] = OrderedDict()
 _TURN_NOTES: OrderedDict[tuple, str] = OrderedDict()
 _NOTES_LOCK = threading.Lock()  # engines of several sessions can share a process
 
@@ -598,14 +950,13 @@ def fold_note(hooks: Any, removed: list[dict], page_id: str) -> str:
     as many of them as NOTE_IDS_BYTES holds, their size, and the page. ``removed`` is what the folded
     messages were as sent (a stubbed result is its stub). Kept per hooks type, page id, count,
     assistant count and call ids, so the messages are measured once per process."""
-    assistants = sum(1 for m in removed if isinstance(m, dict) and m.get("role") == "assistant")
-    call_ids = tuple(
-        _safe_id(b["id"])
-        for m in removed if isinstance(m, dict)
-        for b in _blocks(m)
-        if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str) and b["id"]
-    )
-    return _cached(_NOTES, (type(hooks).__qualname__, page_id, len(removed), assistants, call_ids),
+    rounds = (hooks.count_rounds(removed) if hasattr(hooks, "count_rounds")
+              else sum(1 for m in removed if isinstance(m, dict) and m.get("role") == "assistant"))
+    call_ids = (tuple(hooks.call_ids_in(removed)) if hasattr(hooks, "call_ids_in")
+                else tuple(_safe_id(b["id"]) for m in removed if isinstance(m, dict) for b in _blocks(m)
+                           if isinstance(b, dict) and b.get("type") == "tool_use"
+                           and isinstance(b.get("id"), str) and b["id"]))
+    return _cached(_NOTES, (type(hooks).__qualname__, page_id, len(removed), rounds, call_ids),
                    lambda: _fold_note_uncached(hooks, removed, page_id, NOTE_IDS_BYTES))
 
 
@@ -625,7 +976,10 @@ def _fold_note_uncached(hooks: Any, removed: list[dict], page_id: str, ids_budge
 
 def _round_numbers(messages: list[dict], start: int, upto: int, dialect: Any) -> list[int]:
     """For each index in ``[start, upto)``, the number of the turn's tool round it is part of (1 for the
-    first assistant message after the turn start)."""
+    first round after the turn start)."""
+    hooks = dialect.in_turn
+    if hooks is not None and hasattr(hooks, "round_numbers"):
+        return hooks.round_numbers(messages, start, upto)
     numbers, count = [], 0
     for i in range(start, upto):
         if dialect.is_assistant(messages[i]):
@@ -656,14 +1010,7 @@ def turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
     else:
         numbers, spans = None, ()
     tail_ids = tuple(
-        tuple(
-            _safe_id(b["id"])
-            for a, b_ in rs
-            for i in range(a, b_)
-            if dialect.is_assistant(messages[i])
-            for b in _blocks(messages[i])
-            if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str) and b["id"]
-        )
+        tuple(hooks.call_ids_in([messages[i] for a, b_ in rs for i in range(a, b_)]))
         for rs, _ in group[covered:]
     )
     key = (dialect.name, start, tuple(group), listed, spans, tail_ids)
@@ -699,9 +1046,7 @@ def _turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
         numbers = _round_numbers(messages, start, last, dialect)
 
     def ids(rs: tuple[tuple[int, int], ...]) -> str:
-        return " ".join(_safe_id(b["id"]) for a, b_ in rs for i in range(a, b_) if dialect.is_assistant(messages[i])
-                        for b in _blocks(messages[i]) if isinstance(b, dict) and b.get("type") == "tool_use"
-                        and isinstance(b.get("id"), str) and b["id"])
+        return " ".join(hooks.call_ids_in([messages[i] for a, b_ in rs for i in range(a, b_)]))
 
     covered = listed[-1][0] if listed else 0
     budget = NOTE_IDS_BYTES - sum(len(i) + 1 for i in note_calls(note))
@@ -727,17 +1072,22 @@ def folds_page(hooks: Any, sent: list[dict], group: list[tuple[tuple[tuple[int, 
     """The messages of a folds page of level 0: the detailed note of each fold in ``group``, in order,
     with every call id, so a reader follows each to its rounds page. ``sent`` is the view with no fold
     applied."""
-    return [{"role": "user", "content": [
-        {"type": "text", "text": _fold_note_uncached(hooks, [sent[i] for a, b in rs for i in range(a, b)], pid, None)}
-        for rs, pid in group]}]
+    return hooks.note_page_items([
+        _fold_note_uncached(hooks, [sent[i] for a, b in rs for i in range(a, b)], pid, None)
+        for rs, pid in group])
 
 
 def index_line(messages: list[dict], numbers: list[int], start: int, group: list, before: int, covered: int,
                page_id: str, level: int, dialect: Any) -> str:
     """An index page's line for one folds page of the level below: how many rounds it leads to, which,
     and the page (``note_page`` reads the id back)."""
-    rounds = sum(1 for rs, _ in group[before:covered] for a, b in rs for i in range(a, b)
-                 if dialect.is_assistant(messages[i]))
+    hooks = dialect.in_turn
+    if hooks is not None and hasattr(hooks, "count_rounds"):
+        rounds = sum(hooks.count_rounds([messages[i] for a, b in rs for i in range(a, b)])
+                     for rs, _ in group[before:covered])
+    else:
+        rounds = sum(1 for rs, _ in group[before:covered] for a, b in rs for i in range(a, b)
+                     if dialect.is_assistant(messages[i]))
     item = _listed_item(numbers, start, group, before, covered, page_id, level)
     span, rest = item.split(" in ", 1)
     plural = "s" if rounds != 1 else ""
@@ -753,6 +1103,9 @@ def index_page(messages: list[dict], start: int, group: list, before: int, child
     for covered, page_id, level in children:
         lines.append(index_line(messages, numbers, start, group, first, covered, page_id, level, dialect))
         first = covered
+    hooks = dialect.in_turn
+    if hooks is not None and hasattr(hooks, "note_page_items"):
+        return hooks.note_page_items(lines)
     return [{"role": "user", "content": [{"type": "text", "text": line} for line in lines]}]
 
 
@@ -842,7 +1195,7 @@ def view(messages: list[dict], state: Any, dialect: Any) -> list[dict]:
         for j, page_id in entries:
             result = hooks.result(item, j)
             if result is not None:
-                texts[j] = stub_text(hooks, hooks.call(messages, i, result["tool_use_id"]), result, page_id)
+                texts[j] = stub_text(hooks, hooks.call(messages, i, hooks.result_call_id(result)), result, page_id)
         if texts:
             out[i] = hooks.with_stubs(item, texts)
     listed: dict[int, Listed] = {}
@@ -893,10 +1246,13 @@ def thinking_shape(messages: list[dict], state: Any, dialect: Any) -> dict[str, 
     first = edits.strips[0][0] if edits.strips else len(messages)
     last = edits.strips[-1][1] if edits.strips else len(messages)
     shape = {"kept_before": 0, "stripped": 0, "kept_between": 0, "kept_after": 0}
+    hooks = dialect.in_turn
     for i in range(state.k, len(messages)):
         if sent[i] is FOLDED:
             continue
-        count = sum(1 for b in _blocks(messages[i]) if isinstance(b, dict) and b.get("type") in _rw().THINKING_TYPES)
+        count = (hooks.thinking_count(messages[i]) if hooks is not None and hasattr(hooks, "thinking_count")
+                 else sum(1 for b in _blocks(messages[i]) if isinstance(b, dict)
+                          and b.get("type") in _rw().THINKING_TYPES))
         if not count:
             continue
         if i < state.strip_upto or strips_thinking(edits, i):
@@ -958,17 +1314,33 @@ def clipped(edits: InTurn, matched: int, messages: list[dict], dialect: Any) -> 
     if edits == EMPTY or extent(edits) <= matched:
         return edits
     n = len(messages)
-    starts_round = matched >= n or dialect.is_assistant(messages[matched])
+    hooks = dialect.in_turn
+    starts = _rw()._turn_starts(messages, dialect)
     folds = []
     for start, ranges, page_id in edits.folds:
         removed = [i for a, b in ranges for i in range(a, b)]
         if start >= matched or not removed:
             continue
         if removed[-1] >= matched:
-            # The cut: ``matched`` itself when a round starts there, else the call message of the round
-            # that ``matched`` is part of, which goes back into the request with the rest of its round.
-            calls = [i for i in removed if i < matched and dialect.is_assistant(messages[i])]
-            cut = matched if starts_round else (calls[-1] if calls else removed[0])
+            # The cut: keep only whole foldable rounds strictly before ``matched``; if ``matched``
+            # truncates or modifies any round (including pure truncation where ``matched == n``,
+            # turn-boundary edits, or mid-round replacements), that whole round goes back into the
+            # request so no call stays folded without its output or vice versa.
+            turn_end = next((t for t in starts if t > start), n)
+            cut = matched
+            if hooks is not None:
+                removed_set = set(removed)
+                for rnd in hooks.rounds(messages, start, min(turn_end, n)):
+                    if not rnd.removed or not any(i in removed_set for i in rnd.removed):
+                        continue
+                    if (rnd.removed[-1] >= matched or not rnd.foldable
+                            or (matched == n and rnd.removed[-1] == matched - 1
+                                and dialect.is_assistant(messages[rnd.removed[-1]])
+                                and hooks.call_ids_in([messages[i] for i in rnd.removed]))):
+                        cut = min(cut, rnd.removed[0])
+            elif matched < n and not dialect.is_assistant(messages[matched]):
+                calls = [i for i in removed if i < matched and dialect.is_assistant(messages[i])]
+                cut = calls[-1] if calls else removed[0]
             removed = [i for i in removed if i < cut]
         if removed:
             folds.append((start, _spans(removed), page_id))
@@ -1440,7 +1812,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
             if left <= target:
                 break
             folded.append(r)
-            left -= sum(counted(i, rw.strip_thinking(sent[i])) for i in r.removed)
+            left -= sum(counted(i, s) for i in r.removed if (s := rw.strip_thinking(sent[i])) is not None)
         if folded:
             removed = [i for r in folded for i in r.removed]
             # The page holds the rounds as sent, a stubbed result as its stub (its original is in its own
@@ -1485,7 +1857,7 @@ def _batch(request: dict, messages: list[dict], previous_n: int, estimate: int, 
         resent = tokens(rw.transform_messages(messages, state))
     else:
         sent = view(messages, state, dialect)
-        resent = tokens([rw.strip_thinking(sent[i]) for i in range(first_changed, n)])
+        resent = tokens([s for i in range(first_changed, n) if (s := rw.strip_thinking(sent[i])) is not None])
     only_huge = bool(huge) and counts["results"] == len(huge) and not counts["rounds"] and not counts["turns"]
     events.append({"event": "in_turn_batch", "epoch": state.epoch,
                    "trigger": "result" if only_huge else "bound" if over_bound else "room",

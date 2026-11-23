@@ -195,60 +195,68 @@ def render_page(page: dict[str, Any], searchable: bool = False) -> str:
     turn = page.get("turn")
     messages = page.get("messages")
     own = own_call_ids(messages) if searchable else set()
+    dev_only = is_developer_only_page(messages)
     for message in messages if isinstance(messages, list) else []:
         if not isinstance(message, dict):
             lines.append("[malformed message omitted]")
             continue
         if is_responses_item(message) or is_chat_completions_item(message) or is_gemini_item(message):
-            item_lines = _dialect_lines(turn, message, own if searchable else set())
+            item_lines = _dialect_lines(turn, message, own if searchable else set(), include_developer=dev_only)
             lines.extend(_blank(item_lines) if is_own_item(message, own) else item_lines)
             continue
-        role = message.get("role", "unknown")
-        lines.append(f"[turn {turn}] {role}:")
-        content = message.get("content")
-        if isinstance(content, str):
-            lines.append(content)
-            continue
-        if not isinstance(content, list):
-            lines.append("[malformed content omitted]" if content is not None else "")
-            continue
-        for block in content:
-            if not isinstance(block, dict):
-                lines.append("[malformed block omitted]")
-                continue
-            kind = block.get("type")
-            mark = len(lines)
-            if kind == "text":
-                lines.append(_text(block))
-            elif kind in ("thinking", "redacted_thinking", "reasoning"):
-                continue
-            elif kind == "tool_use":
-                tool_input = block.get("input", {})
-                try:
-                    args = json.dumps(tool_input, ensure_ascii=False, sort_keys=True)
-                except (ValueError, TypeError, RecursionError):  # cannot be written: shown as its text
-                    args = tool_input if isinstance(tool_input, str) else f"<{type(tool_input).__name__}>"
-                lines.append(f"tool_use {block.get('name', '')} {args}")
-            elif kind == "tool_result":
-                lines.append("tool_result:")
-                inner = block.get("content")
-                if isinstance(inner, str):
-                    lines.append(inner)
-                elif isinstance(inner, list):
-                    for part in inner:
-                        if not isinstance(part, dict):
-                            lines.append("[malformed block omitted]")
-                        elif part.get("type") == "text":
-                            lines.append(_text(part))
-                        else:
-                            lines.append(f"[{part.get('type', 'block')} omitted]")
-                elif inner is not None:  # a number or an object: damaged, not an empty output
-                    lines.append("[malformed content omitted]")
-            else:
-                lines.append(f"[{kind} omitted]")
-            if is_own_block(block, own):
-                lines[mark:] = _blank(lines[mark:])
+        lines.extend(_render_message(turn, message, own))
     return "\n".join(lines)
+
+
+def _render_message(turn: Any, message: dict[str, Any], own: set[str]) -> list[str]:
+    """Render one normalized Messages-API message dict into lines without dialect re-classification."""
+    lines: list[str] = []
+    role = message.get("role", "unknown")
+    lines.append(f"[turn {turn}] {role}:")
+    content = message.get("content")
+    if isinstance(content, str):
+        lines.append(content)
+        return lines
+    if not isinstance(content, list):
+        lines.append("[malformed content omitted]" if content is not None else "")
+        return lines
+    for block in content:
+        if not isinstance(block, dict):
+            lines.append("[malformed block omitted]")
+            continue
+        kind = block.get("type")
+        mark = len(lines)
+        if kind == "text":
+            lines.append(_text(block))
+        elif kind in ("thinking", "redacted_thinking", "reasoning"):
+            continue
+        elif kind == "tool_use":
+            tool_input = block.get("input", {})
+            try:
+                args = json.dumps(tool_input, ensure_ascii=False, sort_keys=True)
+            except (ValueError, TypeError, RecursionError):  # cannot be written: shown as its text
+                args = tool_input if isinstance(tool_input, str) else f"<{type(tool_input).__name__}>"
+            lines.append(f"tool_use {block.get('name', '')} {args}")
+        elif kind == "tool_result":
+            lines.append("tool_result:")
+            inner = block.get("content")
+            if isinstance(inner, str):
+                lines.append(inner)
+            elif isinstance(inner, list):
+                for part in inner:
+                    if not isinstance(part, dict):
+                        lines.append("[malformed block omitted]")
+                    elif part.get("type") == "text":
+                        lines.append(_text(part))
+                    else:
+                        lines.append(f"[{part.get('type', 'block')} omitted]")
+            elif inner is not None:  # a number or an object: damaged, not an empty output
+                lines.append("[malformed content omitted]")
+        else:
+            lines.append(f"[{kind} omitted]")
+        if is_own_block(block, own):
+            lines[mark:] = _blank(lines[mark:])
+    return lines
 
 
 def _text(block: dict[str, Any]) -> str:
@@ -287,43 +295,52 @@ def is_gemini_item(message: dict[str, Any]) -> bool:
     return "parts" in message and "content" not in message and isinstance(message.get("parts"), list)
 
 
-def _dialect_lines(turn: Any, item: dict[str, Any], own: set[str] | None = None) -> list[str]:
-    """Render one non-Anthropic dialect item through ``as_message`` and ``render_page``."""
-    message = as_message(item)
-    if message is None:
-        return []
-    rendered = render_page({"turn": turn, "messages": [message]})
-    if not own:
-        return rendered.split("\n")
-    # Blank individual own blocks (e.g., mixed assistant text + own tool_use in Chat Completions / Gemini)
-    lines = []
-    role = message.get("role", "unknown")
-    content = message.get("content")
-    if isinstance(content, list) and any(is_own_block(b, own) for b in content):
-        lines.append(f"[turn {turn}] {role}:")
-        for block in content:
-            part = render_page({"turn": turn, "messages": [{"role": role, "content": [block]}]}).split("\n")[1:]
-            lines.extend(_blank(part) if is_own_block(block, own) else part)
-        return lines
-    return rendered.split("\n")
+def is_developer_only_page(messages: Any) -> bool:
+    """True when ``messages`` holds only Responses ``developer`` or ``system`` message items (for example a
+    carried Codex developer message paged by the bounded fallback). Standalone developer pages are
+    rendered, stubbed and searched as context pages (ranked after turn pages), matching Claude Code's
+    standalone ``system`` pages, while developer items mixed into a regular turn stay omitted."""
+    return (isinstance(messages, list) and bool(messages)
+            and all(isinstance(m, dict) and is_responses_item(m) and m.get("type", "message") == "message"
+                    and m.get("role") in ("developer", "system") for m in messages))
 
 
-def _responses_lines(turn: Any, item: dict[str, Any]) -> list[str]:
+def _dialect_lines(turn: Any, item: dict[str, Any], own: set[str] | None = None, *,
+                   include_developer: bool = False) -> list[str]:
+    """Render one non-Anthropic dialect item through ``as_message`` and ``_render_message``."""
+    message = as_message(item, include_developer=include_developer)
+    return [] if message is None else _render_message(turn, message, own or set())
+
+
+def _responses_lines(turn: Any, item: dict[str, Any], *, include_developer: bool = False) -> list[str]:
     """One Responses item's lines (M2 B20)."""
-    return _dialect_lines(turn, item)
+    return _dialect_lines(turn, item, include_developer=include_developer)
 
 
-def as_message(message: Any) -> dict[str, Any] | None:
+def as_message(message: Any, *, include_developer: bool = False) -> dict[str, Any] | None:
     """A page message as a Messages API message: a Messages API message as it is (the same object),
     a Responses, Chat Completions, or Gemini item through its dialect's ``retained_blocks``, or None
     for an item that is not searchable (system-like, reasoning, other types). Rendering, search, and
-    the stub all read pages through this one mapping (B23), so what search matches is what the page shows."""
+    the stub all read pages through this one mapping (B23), so what search matches is what the page shows.
+
+    With ``include_developer`` (for a standalone paged Codex ``developer`` or ``system`` context page),
+    the message's text parts are returned under its role, including tagged sections, so recall and search
+    find it the way they find a paged Claude Code ``system`` message."""
     if not isinstance(message, dict):
         return message
     dialect = None
     if is_responses_item(message):
-        from contexto.codex import RESPONSES
+        from contexto.codex import RESPONSES, _damaged_block, _is_damaged_part, _is_text_part, _parts
 
+        if (include_developer and message.get("type", "message") == "message"
+                and message.get("role") in ("developer", "system")):
+            role = message["role"]
+            content = message.get("content")
+            if content is not None and not isinstance(content, (str, list)):
+                return {"role": role, "content": [_damaged_block()]}
+            blocks = [_damaged_block() if _is_damaged_part(p) else {"type": "text", "text": p["text"]}
+                      for p in _parts(message) if _is_damaged_part(p) or _is_text_part(p)]
+            return {"role": role, "content": blocks} if blocks else None
         dialect = RESPONSES
     elif is_chat_completions_item(message):
         from contexto.dialects.chat_completions import CHAT_COMPLETIONS

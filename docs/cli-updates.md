@@ -20,7 +20,7 @@ The single list is `TESTED_VERSIONS` in `src/contexto/cliversions.py`, oldest to
 | Codex | 0.154.0 | Responses shapes and context sections, Codex acceptance (D30) |
 | Codex | 0.163.0 | MCP server launch and missing-tools check (v0.2.8); context sections and request shapes rechecked for D38 (Codex steps 1 to 4 below) |
 | Codex | 0.166.0 | Codex steps 1 to 4 below at zero spend for D56: the same context sections and request shapes, and the MCP launch; no live check |
-| Codex | 0.170.0 | lead and context-section openings rechecked at zero spend against a local stub; version checks use semver compatibility ranges (`>=0.154.0, <1.0.0`) |
+| Codex | 0.170.0 | Codex steps 1 to 4 below at zero spend (`probe.sh` and `smoke.sh preflight`, 0 `mcp_tools_missing`): the same context sections and request shapes; version checks use semver compatibility ranges (`>=0.154.0, <1.0.0`) |
 
 Hook-output signatures were measured on Claude Code 2.1.301 and re-measured on 2.1.310, 2.1.314 and
 2.1.318 (`HOOK_SIGNATURES_CLAUDE_CODE_VERSION`), not on 2.1.302.

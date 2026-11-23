@@ -493,18 +493,22 @@ def test_the_newest_page_shown_in_detail_is_a_real_turn_page_when_one_matches(st
     assert set(found[5:]) == set(blocks)
 
 
-def test_codex_developer_pages_are_context_pages_and_hold_no_searchable_text(store):
-    # The fallback pages a carried Codex developer item on its own (test_carried_bound). Search reads
-    # Responses items through as_message, which drops system-like items (B23), so such a page never
-    # matches; it is still classed as context, so it would rank after every turn page if it did.
+def test_codex_developer_pages_are_context_pages_and_rank_after_turn_pages(store):
+    # The fallback pages a carried Codex developer item on its own (test_carried_bound). Standalone
+    # developer pages are searchable through as_message(..., include_developer=True) and classed as
+    # context pages, so they rank after every matching turn page.
     import test_codex as codex
     from contexto.store.pages import build_page, is_context_page
 
     dev = build_page(b"k" * 32, [codex.dev("synthetic standing note: HTTP_TIMEOUT_S is 30")], 3)
     assert is_context_page(dev)
     assert not is_context_page(build_page(b"k" * 32, [codex.prompt("HTTP_TIMEOUT_S"), codex.dev("note")], 3))
-    store.page_out([[codex.dev("synthetic standing note: HTTP_TIMEOUT_S is 30")]], 3)
-    assert store.search("HTTP_TIMEOUT_S") == []
+    [dev_pid, turn_pid] = store.page_out(
+        [[codex.dev("synthetic standing note: HTTP_TIMEOUT_S is 30")],
+         [codex.prompt("HTTP_TIMEOUT_S is 45"), codex.answer("updated")]],
+        3,
+    )
+    assert store.search("HTTP_TIMEOUT_S") == [turn_pid, dev_pid]
 
 
 STATED = ("The deploy config changed and the current state is green. Fixed the timeout in "

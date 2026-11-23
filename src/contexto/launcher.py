@@ -1511,7 +1511,7 @@ def session_affinity_key(store: Any, upstream_url: str) -> str | None:
 
 def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dict[str, int | float],
                 observe_thinking: bool, *, stderr=None, cli: str | None = None,
-                strip_hint_headers: bool = False) -> tuple[ContextoProxy, str]:
+                strip_hint_headers: bool = False, allow_websocket: bool = False) -> tuple[ContextoProxy, str]:
     """Build the rewrite engine for ``store`` and start the proxy on 127.0.0.1 with a free port.
     Returns ``(proxy, engine_name)``; the caller stops the proxy. Shared by claude and codex. With
     ``cli="claude"`` the engine is wrapped in a ``SessionRecorder`` (``proxy.transform``), so the
@@ -1533,7 +1533,7 @@ def start_proxy(store: Any, upstream_url: str, upstream_source: str, config: dic
         proxy = ContextoProxy(upstream_url, NoticeLog(store, stderr or sys.stderr), transform,
                               observe_usage=observe_usage, observe_thinking=observe_thinking,
                               upstream_source=upstream_source, affinity_key=key,
-                              strip_hint_headers=strip_hint_headers)
+                              strip_hint_headers=strip_hint_headers, allow_websocket=allow_websocket)
     except ValueError as exc:
         raise LaunchError(f"invalid upstream (from {upstream_source}): {exc}", EXIT_USAGE) from exc
     try:

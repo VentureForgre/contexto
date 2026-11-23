@@ -56,6 +56,32 @@ def find_stubs(dialect: str, request: dict) -> list[StubRef]:
     listed fold's note with every call id, and one of a higher level a line in fold-note form for each
     folds page it names, which this function reads the same way. Codex has no in-turn paging yet, so no
     stubs."""
+    if dialect == "codex":
+        found = []
+        for item in request.get("input") or []:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("type", "message")
+            if kind == "message" and item.get("role") == "user":
+                content = item.get("content")
+                for part in content if isinstance(content, list) else []:
+                    if (isinstance(part, dict) and part.get("type") in ("input_text", "text")
+                            and inturn.note_page(part.get("text")) is not None):
+                        for page, ids in inturn.note_refs(part["text"]):
+                            found.append(StubRef(page, ()))
+                            if ids:
+                                found.append(StubRef(page, ids))
+                continue
+            if isinstance(kind, str) and kind.endswith("_output"):
+                call_id = item.get("call_id", item.get("id"))
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                page = inturn.stub_page(item.get("output"))
+                if page is not None:
+                    found.append(StubRef(page, (call_id,)))
+                elif inturn.is_own_stub(item.get("output")):
+                    found.append(StubRef(None, (call_id,)))
+        return found
     if dialect != "claude":
         return []
     found = []

@@ -119,3 +119,27 @@ def test_render_and_matching_see_the_same_text_in_both_dialects(turn):
     for text in _texts(turn):
         for piece in filter(None, text.split("\n")):
             assert piece in rendered or json.dumps(piece, ensure_ascii=False)[1:-1] in rendered
+
+
+def test_standalone_paged_codex_developer_item_is_searchable_stubbed_and_ranked_as_context(store):
+    from contexto.store.pages import is_context_page
+
+    dev_item = [{"type": "message", "role": "developer",
+                 "content": [{"type": "input_text", "text": "DEV-POLICY-MARKER: always verify migrations"}]}]
+    turn_item = [{"type": "message", "role": "user",
+                  "content": [{"type": "input_text", "text": "DEV-POLICY-MARKER mentioned in user turn"}]},
+                 {"type": "message", "role": "assistant",
+                  "content": [{"type": "output_text", "text": "acknowledged"}]}]
+    [dev_pid, turn_pid] = store.page_out([dev_item, turn_item], 0)
+    dev_page = store.get_page(dev_pid)
+    assert is_context_page(dev_page) is True
+    assert dev_page["stub"]["system_text"].startswith("DEV-POLICY-MARKER")
+    assert dev_page["stub"]["user_text"] == ""
+    assert "[earlier system message] DEV-POLICY-MARKER" in store.index_text(4000)
+
+    # Search finds both and ranks the user turn before the context (developer) page.
+    assert store.search("DEV-POLICY-MARKER") == [turn_pid, dev_pid]
+    reply = call(store, "contexto_search", {"query": "DEV-POLICY-MARKER"})
+    assert dev_pid in reply and "DEV-POLICY-MARKER: always verify migrations" in reply
+    recalled = call(store, "contexto_recall", {"page_id": dev_pid, "offset": 0})
+    assert "DEV-POLICY-MARKER: always verify migrations" in recalled
