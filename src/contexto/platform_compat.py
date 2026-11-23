@@ -371,6 +371,28 @@ def socket_peek(sock: Any, n: int, *, wait: bool) -> bytes:
     return sock.recv(n, socket.MSG_PEEK)
 
 
+def shutdown_socket(sock: Any) -> None:
+    """Shut down ``sock`` for both reading and writing, unblocking peer threads in ``recv()``.
+
+    On POSIX, ``shutdown(SHUT_RDWR)`` wakes any thread blocked in ``recv()`` without closing the
+    descriptor. On Windows (Winsock), ``shutdown(SD_BOTH)`` does not abort an already-pending
+    ``recv()`` or ``select()`` until the remote peer closes or ``closesocket()`` is called, so we
+    also close the raw socket handle via ``_socket.socket.close`` after ``shutdown``.
+    """
+    import _socket
+    import socket
+
+    try:
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except OSError:
+        pass
+    if IS_WINDOWS:
+        try:
+            _socket.socket.close(sock)
+        except OSError:
+            pass
+
+
 def _read_fd_until_win32(fd: int, *, max_bytes: int, deadline: float, chunk_size: int,
                          stop: Callable[[bytes], bool] | None,
                          read_fn: Callable[[int, int], bytes]) -> tuple[bytes, bool]:

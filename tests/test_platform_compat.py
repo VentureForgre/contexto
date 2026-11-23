@@ -839,3 +839,17 @@ def test_plan_codex_refused_symlink_or_junction_never_unlinks_target_config(monk
             cwd=tmp_path, home=tmp_path, codex_home_dir=target,
         )
     assert real_cfg.read_text(encoding="utf-8") == 'model = "keep-me"\n'
+
+
+def test_shutdown_socket_closes_raw_handle_on_simulated_windows(monkeypatch):
+    """On Windows, shutdown_socket also closes the raw handle so pending recv()/select() unblocks immediately."""
+    s1, s2 = socket.socketpair()
+    f = s1.makefile("rb")
+    try:
+        monkeypatch.setattr(platform_compat, "IS_WINDOWS", True)
+        platform_compat.shutdown_socket(s1)
+        assert s1.fileno() == -1
+    finally:
+        f.close()
+        s1.close()
+        s2.close()

@@ -104,7 +104,7 @@ from urllib.parse import quote, urlsplit
 
 from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, has_lone_surrogate, loads_bounded
 from contexto.hints import GATED_HINT_HEADERS
-from contexto.platform_compat import IS_WINDOWS
+from contexto.platform_compat import IS_WINDOWS, shutdown_socket
 
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
     from compression import zstd as _zstd
@@ -1126,10 +1126,7 @@ def _shut(conn: http.client.HTTPConnection) -> None:
     The plain socket's shutdown, not ``SSLSocket.shutdown``, which drops TLS state that read uses."""
     sock = conn.sock
     if sock is not None:
-        try:
-            socket.socket.shutdown(sock, socket.SHUT_RDWR)
-        except OSError:
-            pass
+        shutdown_socket(sock)
 
 
 class _ClientWatch:
@@ -1400,10 +1397,7 @@ class ContextoProxy:
             with self._idle:
                 active_ws = list(self._ws_sockets)
             for sock in active_ws:
-                try:
-                    socket.socket.shutdown(sock, socket.SHUT_RDWR)
-                except OSError:
-                    pass
+                shutdown_socket(sock)
             deadline = time.monotonic() + STOP_DRAIN_S
             with self._idle:
                 try:
