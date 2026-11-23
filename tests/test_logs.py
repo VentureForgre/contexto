@@ -133,6 +133,26 @@ def test_logs_escapes_terminal_control_sequences(tmp_path, monkeypatch, capsys):
     assert "bad" in out
 
 
+class _FollowBuffer(io.StringIO):
+    """Buffer that signals on each flushed line and stops ``follow_log`` once ``stop_at`` lines arrive."""
+
+    def __init__(self, *, on_line=None, stop_at: int | None = None) -> None:
+        super().__init__()
+        self._on_line = on_line
+        self._stop_at = stop_at
+        self._seen = 0
+
+    def flush(self) -> None:
+        super().flush()
+        count = len(self.getvalue().splitlines())
+        while self._seen < count:
+            self._seen += 1
+            if self._on_line is not None:
+                self._on_line(self._seen)
+        if self._stop_at is not None and count >= self._stop_at:
+            raise KeyboardInterrupt
+
+
 def test_logs_follow_streams_appended_partial_and_rotated_lines(tmp_path):
     log = tmp_path / "log.jsonl"
     # Start with one complete line and one partial (unterminated) line
@@ -144,13 +164,16 @@ def test_logs_follow_streams_appended_partial_and_rotated_lines(tmp_path):
     initial, offset, ident = logs_cmd._read_existing(log, set(), False, 50, follow=True)
     assert [e["event"] for e in initial] == ["launch"]
 
-    buf = io.StringIO()
+    saw_exit = threading.Event()
+    buf = _FollowBuffer(on_line=lambda n: saw_exit.set() if n == 1 else None, stop_at=2)
 
     def writer() -> None:
-        time.sleep(0.03)
+        time.sleep(0.02)
         with log.open("a", encoding="utf-8") as fh:
             fh.write('"exit", "code": 0}\n')
-        time.sleep(0.05)
+        # Wait until follow_log has emitted the completed line before rotating the file.
+        if not saw_exit.wait(timeout=5.0):
+            return
         # Simulate log rotation (replace file with a brand-new inode)
         tmp_new = tmp_path / "log.jsonl.new"
         tmp_new.write_text(
@@ -161,8 +184,10 @@ def test_logs_follow_streams_appended_partial_and_rotated_lines(tmp_path):
 
     t = threading.Thread(target=writer, daemon=True)
     t.start()
-    code = logs_cmd.follow_log(log, offset, set(), False, True, buf, ident=ident, poll_s=0.02, max_polls=15)
+    code = logs_cmd.follow_log(log, offset, set(), False, True, buf, ident=ident, poll_s=0.005, max_polls=1000)
     t.join(timeout=5)
+    assert not t.is_alive()
+    assert saw_exit.is_set()
     assert code == 0
     rows = [json.loads(line) for line in buf.getvalue().splitlines()]
     assert [r["event"] for r in rows] == ["exit", "proxy_error"]
@@ -196,15 +221,16 @@ def test_logs_refuses_symlink_escapes_status_ignores_bool_bound_and_waits_for_ne
 
     # follow_log waits for a log file that does not exist yet
     missing_log = tmp_path / "delayed.jsonl"
-    buf = io.StringIO()
+    buf = _FollowBuffer(stop_at=1)
 
     def create_later() -> None:
-        time.sleep(0.03)
+        time.sleep(0.02)
         missing_log.write_text(json.dumps({"ts": "2026-10-01T12:00:00Z", "event": "exit", "code": 0}) + "\n",
                                encoding="utf-8")
 
     t = threading.Thread(target=create_later, daemon=True)
     t.start()
-    assert logs_cmd.follow_log(missing_log, 0, set(), False, True, buf, poll_s=0.02, max_polls=15) == 0
+    assert logs_cmd.follow_log(missing_log, 0, set(), False, True, buf, poll_s=0.005, max_polls=1000) == 0
     t.join(timeout=5)
+    assert not t.is_alive()
     assert [json.loads(x)["event"] for x in buf.getvalue().splitlines()] == ["exit"]
