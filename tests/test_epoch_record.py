@@ -42,7 +42,11 @@ def test_the_record_is_private_atomic_and_never_logged(tmp_path):
     store = SessionStore(tmp_path, "s1")
     store.set_epoch(RECORD)
     path = store.dir / "epoch.json"
-    assert path.stat().st_mode & 0o777 == 0o600 and not list(store.dir.glob(".epoch.json.*"))
+    import sys
+
+    if sys.platform != "win32":
+        assert path.stat().st_mode & 0o777 == 0o600
+    assert not list(store.dir.glob(".epoch.json.*"))
     log = store.dir / "log.jsonl"
     assert not log.exists() or "Earlier turns" not in log.read_text()
 

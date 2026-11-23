@@ -653,24 +653,25 @@ def test_a_store_still_failing_at_exit_is_not_reported_as_recovered(tmp_path):
 
 
 def test_reading_pins_never_waits_for_the_ledger_lock_and_creates_nothing(tmp_path):
-    import fcntl
     import threading
+
+    from contexto.platform_compat import O_BINARY, flock_ex, unlock_and_close
 
     store = SessionStore(tmp_path, "lk")
     store.pin("obligation", "synthetic standing rule")
     store.pin("decision", "synthetic decision")
     write_log(tmp_path, "lk", [*launch(0), request(1)])
     lock = store.dir / "ledger.lock"
-    holder = os.open(lock, os.O_RDWR)
+    holder = os.open(lock, os.O_RDWR | O_BINARY)
     try:
-        fcntl.flock(holder, fcntl.LOCK_EX)  # a stuck writer: an MCP server on a hung filesystem
+        flock_ex(holder)  # a stuck writer: an MCP server on a hung filesystem
         found: dict = {}
         reader = threading.Thread(target=lambda: found.update(session_stats(tmp_path, "lk")["pins"]), daemon=True)
         reader.start()
         reader.join(15)
         waiting = reader.is_alive()
     finally:
-        os.close(holder)
+        unlock_and_close(holder)
     assert not waiting, "session_stats waited for the ledger's lock"
     assert found == {"readable": True, "active_records": 2, "open_obligations": 1}
     # A session inspected by stats is not changed: no lock file is made, and its mode is left alone.

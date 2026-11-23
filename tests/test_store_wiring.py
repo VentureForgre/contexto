@@ -98,7 +98,8 @@ def test_workdir_is_stored_privately_in_meta_json(tmp_path):
     store.set_workdir(tmp_path)
     assert json.loads((store.dir / "meta.json").read_text()) == {
         "workdir": str(tmp_path.resolve()), "project": str(project_root(tmp_path))}  # D69: the project root too
-    assert (store.dir / "meta.json").stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert (store.dir / "meta.json").stat().st_mode & 0o777 == 0o600
     assert SessionStore(tmp_path, "s1").workdir() == tmp_path.resolve()
 
 
@@ -199,7 +200,10 @@ def test_a_symlink_out_of_the_workdir_is_stale_and_not_followed(tmp_path):
     work.mkdir()
     outside.mkdir()
     (outside / "secret.txt").write_bytes(b"x")
-    (work / "link.txt").symlink_to(outside / "secret.txt")
+    try:
+        (work / "link.txt").symlink_to(outside / "secret.txt")
+    except OSError:
+        pytest.skip("symlinks require elevated privileges on this Windows host")
     store = SessionStore(tmp_path / "home", "s1")
     store.set_workdir(work)
     rid = store.pin("event", "linked", epistemic="verified",

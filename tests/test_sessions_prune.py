@@ -1,6 +1,5 @@
 """``contexto sessions prune`` (D37): selection, dry run, live-session refusal, symlink safety, partial failure."""
 
-import fcntl
 import gc
 import json
 import os
@@ -321,12 +320,14 @@ def test_store_resumed_during_a_prune_waits_and_starts_empty_with_a_warning(home
     assert store.page_out([[{"role": "user", "content": "again"}]], 1)  # the new directory is usable
     events = [json.loads(line)["event"] for line in (path / "log.jsonl").read_text().splitlines()]
     assert "pruned_while_opening" in events
-    probe = os.open(path / LIVE_LOCK, os.O_RDWR)
+    from contexto.platform_compat import O_BINARY, flock_ex_nb, unlock_and_close
+
+    probe = os.open(path / LIVE_LOCK, os.O_RDWR | O_BINARY)
     try:
         with pytest.raises(BlockingIOError):  # and the new store holds the lock on the new file
-            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            flock_ex_nb(probe)
     finally:
-        os.close(probe)
+        unlock_and_close(probe)
 
 
 def test_hold_live_retries_when_the_directory_vanishes_mid_create(tmp_path, monkeypatch):

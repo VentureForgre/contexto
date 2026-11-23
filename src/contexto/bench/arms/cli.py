@@ -52,7 +52,6 @@ import json
 import os
 import queue
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -66,6 +65,7 @@ from typing import Any
 
 from contexto.bench import script as bench_script
 from contexto.bench.arms import Stop, Unit, UnitResult, ledger_stop, stop_pending
+from contexto.platform_compat import O_BINARY, new_process_group_kwargs, terminate_process_group
 
 STRIPPED_PREFIXES = ("ANTHROPIC_", "CLAUDE_", "CLAUDECODE", "CONTEXTO_", "OPENRIG_")
 STRIPPED_NAMES = frozenset({"DISABLE_AUTO_COMPACT", "DISABLE_COMPACT", "FORCE_PROMPT_CACHING_5M", "MAX_THINKING_TOKENS",
@@ -104,18 +104,26 @@ for line in iter(sys.stdin.buffer.readline, b""):
     if line == b"exited\n":
         group = None
 if group is not None:
-    for signum in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(group, signum)
-        except OSError:
-            break
-        deadline = time.monotonic() + 1.5
-        while time.monotonic() < deadline:
+    killpg = getattr(os, "killpg", None)
+    sigkill = getattr(signal, "SIGKILL", None)
+    if killpg is not None and sigkill is not None:
+        for signum in (signal.SIGTERM, sigkill):
             try:
-                os.killpg(group, 0)
+                killpg(group, signum)
             except OSError:
-                sys.exit(0)
-            time.sleep(0.05)
+                break
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                try:
+                    killpg(group, 0)
+                except OSError:
+                    sys.exit(0)
+                time.sleep(0.05)
+    else:
+        try:
+            os.kill(group, signal.SIGTERM)
+        except OSError:
+            pass
 """
 
 
@@ -137,7 +145,7 @@ def isolated_config(unit: Unit) -> Path:
     config.mkdir(parents=True, exist_ok=True)
     settings = {"permissions": {"allow": [READ_TOOL]}, **unit.credentials.claude_settings()}
     path = config / "settings.json"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | O_BINARY, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
         f.write("\n")
@@ -212,7 +220,7 @@ class Watchdog:
         try:
             self.process: subprocess.Popen | None = subprocess.Popen(
                 [sys.executable, "-I", "-S", "-c", WATCHDOG], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, start_new_session=True)
+                stderr=subprocess.DEVNULL, **new_process_group_kwargs())
         except (OSError, subprocess.SubprocessError):  # the session goes on without it
             self.process = None
 
@@ -253,7 +261,7 @@ class Session:
         self.results = 0  # result events read from it
         try:
             self.proc = subprocess.Popen(self.command, cwd=self.cwd, env=self.env, stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, **new_process_group_kwargs())
         except BaseException:
             self.watchdog.done()
             raise
@@ -467,13 +475,7 @@ class Session:
         """Stop the child and everything it started: SIGTERM to its process group, then SIGKILL if
         the child has not exited. The group is signalled only while the child has not been reaped,
         so its id cannot have passed to another process."""
-        for signum in (signal.SIGTERM, signal.SIGKILL):
-            if self.proc.poll() is not None:
-                break
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(self.proc.pid, signum)
-            self._wait(KILL_TIMEOUT_S)
-        return self.proc.poll()
+        return terminate_process_group(self.proc, grace_timeout=KILL_TIMEOUT_S, wait_fn=self._wait)
 
 
 def run_session(unit: Unit, command: list[str], env: dict[str, str]) -> UnitResult:

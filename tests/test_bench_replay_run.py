@@ -931,7 +931,8 @@ def test_a_replay_with_out_that_stops_keeps_its_store_without_the_private_files(
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 @pytest.mark.parametrize("with_out", [False, True], ids=["temporary", "out"])
-@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize("signum", [s for name in ("SIGINT", "SIGTERM", "SIGHUP")
+                                    if (s := getattr(signal, name, None)) is not None])
 def test_a_signal_stops_the_replay_cleanly(tmp_path, signum, with_out):
     """A real signal to a real replay: one line, exit 128 + N, no traceback, and the temporary store and
     the ports are gone; with ``--out`` the kept store has no ``page.key`` or ``affinity.salt``. Only the

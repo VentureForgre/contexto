@@ -113,7 +113,7 @@ def test_state_json_and_raw_do_not_combine(home, capsys):
     assert exc.value.code == 2 and out.out == "" and "not allowed with" in out.err
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads any directory")
 def test_state_json_with_unreadable_pages_is_still_json_and_exits_1(home, capsys):
     store, _ = make(home, "s1")
     store.pin("decision", "keep it small")

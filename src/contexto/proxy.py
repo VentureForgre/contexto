@@ -89,7 +89,7 @@ import inspect
 import json
 import os
 import re
-import select
+import selectors
 import socket
 import socketserver
 import ssl
@@ -104,6 +104,7 @@ from urllib.parse import quote, urlsplit
 
 from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, has_lone_surrogate, loads_bounded
 from contexto.hints import GATED_HINT_HEADERS
+from contexto.platform_compat import IS_WINDOWS
 
 try:  # Python 3.14+ ships zstd in the standard library; feature-detected (contract rule 15)
     from compression import zstd as _zstd
@@ -1053,9 +1054,9 @@ def _is_socket_dirty(conn: http.client.HTTPConnection) -> bool:
     try:
         if isinstance(sock, ssl.SSLSocket) and sock.pending() > 0:
             return True
-        poller = select.poll()
-        poller.register(sock, select.POLLIN)
-        return bool(poller.poll(0))
+        with selectors.DefaultSelector() as selector:
+            selector.register(sock, selectors.EVENT_READ)
+            return bool(selector.select(0.0))
     except (OSError, ValueError):
         return True
 
@@ -1150,21 +1151,22 @@ class _ClientWatch:
         self._closed = False
         self._wake_r: int | None = None
         self._wake_w: int | None = None
-        try:
-            wake_r, wake_w = os.pipe()
+        if not IS_WINDOWS:
             try:
-                os.set_blocking(wake_r, False)
-                os.set_blocking(wake_w, False)
+                wake_r, wake_w = os.pipe()
+                try:
+                    os.set_blocking(wake_r, False)
+                    os.set_blocking(wake_w, False)
+                except OSError:
+                    for fd in (wake_r, wake_w):
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                    raise
+                self._wake_r, self._wake_w = wake_r, wake_w
             except OSError:
-                for fd in (wake_r, wake_w):
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
-                raise
-            self._wake_r, self._wake_w = wake_r, wake_w
-        except OSError:
-            self._wake_r = self._wake_w = None
+                self._wake_r = self._wake_w = None
         self._thread = threading.Thread(target=self._run, name="contexto-client-watch", daemon=True)
         try:
             self._thread.start()
@@ -1227,42 +1229,42 @@ class _ClientWatch:
                     pass
 
     def _run(self) -> None:
-        poller = select.poll()  # not select.select, which cannot watch a descriptor above 1023
         try:
-            try:
-                client_fd = self.client.fileno()
-                if client_fd < 0:
-                    return
-                poller.register(client_fd, select.POLLIN)  # a close or a reset is reported as readable
-                if self._wake_r is not None:
-                    poller.register(self._wake_r, select.POLLIN)
-            except (OSError, ValueError):  # the client's socket is already closed: nothing to watch
-                return
-            poll_ms = 5000 if self._wake_r is not None else int(CLIENT_WATCH_INTERVAL_S * 1000)
-            peek_flags = socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)
-            while not self._done.is_set():
+            with selectors.DefaultSelector() as selector:
                 try:
-                    events = poller.poll(poll_ms)
-                except OSError:
-                    break
-                if not events:
-                    continue
-                if self._done.is_set() or any(fd == self._wake_r for fd, _ in events):
+                    client_fd = self.client.fileno()
+                    if client_fd < 0:
+                        return
+                    selector.register(self.client, selectors.EVENT_READ)  # a close or a reset is reported as readable
+                    if self._wake_r is not None:
+                        selector.register(self._wake_r, selectors.EVENT_READ)
+                except (OSError, ValueError):  # the client's socket is already closed: nothing to watch
                     return
-                try:
-                    if self.client.recv(1, peek_flags):
-                        return  # the client sent more, so it is still there
-                except BlockingIOError:
-                    continue  # spurious wakeup: keep watching
-                except OSError:  # a reset, or a socket the handler has closed
-                    pass
-                if self._done.is_set():
-                    return  # the request is over: a close now is the client ending a kept-alive connection
-                with self._lock:
-                    self.gone = True
-                    if self._upstream is not None:
-                        _shut(self._upstream)
-                return
+                poll_s = 5.0 if self._wake_r is not None else CLIENT_WATCH_INTERVAL_S
+                peek_flags = socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)
+                while not self._done.is_set():
+                    try:
+                        events = selector.select(poll_s)
+                    except (OSError, ValueError):
+                        break
+                    if not events:
+                        continue
+                    if self._done.is_set() or any(key.fileobj == self._wake_r for key, _ in events):
+                        return
+                    try:
+                        if self.client.recv(1, peek_flags):
+                            return  # the client sent more, so it is still there
+                    except BlockingIOError:
+                        continue  # spurious wakeup: keep watching
+                    except (OSError, ValueError):  # a reset, or a socket the handler has closed
+                        pass
+                    if self._done.is_set():
+                        return  # the request is over: a close now is the client ending a kept-alive connection
+                    with self._lock:
+                        self.gone = True
+                        if self._upstream is not None:
+                            _shut(self._upstream)
+                    return
         finally:
             if self._closed:
                 self._close_wake_fds()

@@ -30,12 +30,13 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from contexto.platform_compat import quote_command, run_shell_command
 
 ENV_KEY = "ANTHROPIC_API_KEY"
 HELPER_VAR = "CONTEXTO_BENCH_KEY_HELPER"
@@ -53,8 +54,8 @@ class CredentialError(Exception):
 def run_helper(command: str) -> str:
     """The key a helper command prints. Raises ``CredentialError`` without showing its output."""
     try:
-        proc = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, timeout=HELPER_TIMEOUT_S,
-                              stdin=subprocess.DEVNULL)
+        proc = run_shell_command(command, capture_output=True, text=True, timeout=HELPER_TIMEOUT_S,
+                                 stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         raise CredentialError(f"the key helper did not finish in {HELPER_TIMEOUT_S} seconds") from None
     except OSError as exc:
@@ -120,7 +121,7 @@ class Credentials:
         helper source, nothing for an environment key."""
         if self.source == "env":
             return {}
-        return {"apiKeyHelper": f"{shlex.quote(sys.executable)} -P -m contexto.bench.credentials"}
+        return {"apiKeyHelper": quote_command([sys.executable, "-P", "-m", "contexto.bench.credentials"])}
 
 
 def resolve(key_helper: str | None, settings: Path | None, environ: Mapping[str, str] | None = None) -> Credentials:

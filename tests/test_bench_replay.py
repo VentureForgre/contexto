@@ -1098,7 +1098,7 @@ def test_dump_writes_the_whole_session_to_read(small, tmp_path):
     turns = sorted((root / "turns").iterdir())
     assert [p.read_text("utf-8") for p in turns] == list(small.turns)
     assert turns[0].name == "turn-001-log.txt" and turns[-1].name == f"turn-{len(small.turns):03d}-probe.txt"
-    assert {str(p.relative_to(root / "files")): p.read_text("utf-8")
+    assert {p.relative_to(root / "files").as_posix(): p.read_text("utf-8")
             for p in (root / "files").rglob("*.txt")} == small.files
     assert (root / "script.json").read_text("utf-8") == small.to_json()
     steps = [json.loads(line) for line in (root / "model-steps.jsonl").read_text("utf-8").splitlines()]

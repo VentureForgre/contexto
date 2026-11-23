@@ -1669,7 +1669,9 @@ def test_snapshot_and_both_room_publishes_share_the_request_sequence_in_the_real
     engine(request(history(3) + [user("newer")]), {}, MESSAGES)
     assert store.retained_current()[2] == store.room_stamp() == stamp + 1
     if kind == "session":
-        assert oct((tmp_path / "sessions" / "a14" / "retained.json").stat().st_mode & 0o777) == "0o600"
+        import sys
+        if sys.platform != "win32":
+            assert oct((tmp_path / "sessions" / "a14" / "retained.json").stat().st_mode & 0o777) == "0o600"
 
 
 

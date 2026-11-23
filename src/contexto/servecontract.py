@@ -25,7 +25,6 @@ registered.
 from __future__ import annotations
 
 import errno
-import fcntl
 import hmac
 import ipaddress
 import json
@@ -40,6 +39,17 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from contexto.canonical import loads_bounded
+from contexto.platform_compat import (
+    IS_WINDOWS,
+    O_BINARY,
+    O_NOFOLLOW,
+    O_NONBLOCK,
+    flock_ex_nb,
+    flock_sh_nb,
+    has_group_or_other_perms,
+    is_owned_by_current_user,
+    unlock_and_close,
+)
 from contexto.private import open_private, private_dir
 
 TOKEN_FILE = "serve.token"
@@ -72,21 +82,26 @@ def _read_private(home: Path, name: str) -> bytes:
     """The bytes of ``home/name``: opened without following a symlink and without blocking on a FIFO,
     and required to be a regular file of the current user with no group or other permission bit, at
     most ``MAX_FILE_BYTES`` long. ``ServeFileError`` otherwise."""
+    target = Path(home) / name
+    if O_NOFOLLOW == 0 and os.path.islink(target):
+        raise ServeFileError(name, "symlink", "is a symlink, and it is never read through one")
     try:
-        fd = os.open(Path(home) / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(target, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_BINARY)
     except FileNotFoundError:
         raise ServeFileError(name, "missing", "is missing") from None
     except OSError as exc:
         if exc.errno in (errno.ELOOP, errno.EMLINK):  # EMLINK on FreeBSD
             raise ServeFileError(name, "symlink", "is a symlink, and it is never read through one") from None
+        if IS_WINDOWS and exc.errno == errno.EACCES and target.is_dir():
+            raise ServeFileError(name, "not_regular", "is not a regular file") from None
         raise ServeFileError(name, "unreadable", f"cannot be read ({type(exc).__name__})") from None
     try:
         status = os.fstat(fd)
         if not stat.S_ISREG(status.st_mode):
             raise ServeFileError(name, "not_regular", "is not a regular file")
-        if status.st_uid != os.geteuid():
+        if not is_owned_by_current_user(status):
             raise ServeFileError(name, "owner", "belongs to another user")
-        if stat.S_IMODE(status.st_mode) & 0o077:
+        if has_group_or_other_perms(status):
             raise ServeFileError(name, "mode", f"has mode {stat.S_IMODE(status.st_mode):04o}: it must be readable "
                                                f"by its owner only (0600)")
         data = os.read(fd, MAX_FILE_BYTES + 1)
@@ -139,7 +154,7 @@ def hold_lock(home: Path, wait_s: float = LOCK_WAIT_S) -> int | None:
     deadline = time.monotonic() + wait_s
     while True:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            flock_ex_nb(fd)
             return fd
         except BlockingIOError:
             if time.monotonic() >= deadline:
@@ -155,23 +170,27 @@ def service_running(home: Path) -> bool:
     """Whether a service holds ``home``'s lock: a non-blocking shared lock attempt on ``serve.lock``
     fails. False when the file is missing, is not the user's own private regular file, or is not
     locked. Nothing is created and nothing is sent."""
+    target = Path(home) / LOCK_FILE
+    if O_NOFOLLOW == 0 and os.path.islink(target):
+        return False
     try:
-        fd = os.open(Path(home) / LOCK_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(target, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_BINARY)
     except OSError:
         return False
     try:
         status = os.fstat(fd)
-        if not stat.S_ISREG(status.st_mode) or status.st_uid != os.geteuid() or stat.S_IMODE(status.st_mode) & 0o077:
+        if (not stat.S_ISREG(status.st_mode) or not is_owned_by_current_user(status)
+                or has_group_or_other_perms(status)):
             return False
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            flock_sh_nb(fd)
         except BlockingIOError:
             return True
         return False  # the shared lock was granted: nobody serves; closing the descriptor drops it
     except OSError:
         return False
     finally:
-        os.close(fd)
+        unlock_and_close(fd)
 
 
 def running_state(home: Path) -> dict[str, int | None] | None:

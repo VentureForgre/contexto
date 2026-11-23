@@ -52,7 +52,8 @@ def test_page_id_is_keyed_hmac_over_canonical_json(store):
 
 def test_key_is_private_stable_and_per_store(tmp_path):
     a = SessionStore(tmp_path, "a")
-    assert (a.dir / "page.key").stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert (a.dir / "page.key").stat().st_mode & 0o777 == 0o600
     again = SessionStore(tmp_path, "a")
     t = turn("same")
     assert a.page_out([t], 1) == again.page_out([t], 1)

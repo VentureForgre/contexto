@@ -54,7 +54,10 @@ def test_the_snapshot_is_private_atomic_and_survives_a_restart(tmp_path):
     store = SessionStore(tmp_path, "s1")
     request(store)
     path = store.dir / "retained.json"
-    assert path.stat().st_mode & 0o777 == 0o600
+    import sys
+
+    if sys.platform != "win32":
+        assert path.stat().st_mode & 0o777 == 0o600
     assert not list(store.dir.glob(".retained.json.*"))  # no temp file left behind
     reopened = SessionStore(tmp_path, "s1")
     assert reopened.retained() == store.retained()

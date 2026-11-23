@@ -216,7 +216,7 @@ def test_a_table_that_cannot_be_read_is_refused(tmp_path):
     ('"extra": {"deeper": [Infinity]}}', r"field 'extra.deeper\[0\]': not a finite number"),
     ('"format": 1}', "the key 'format' appears twice"),
     ('"extra": ' + "[" * 200_000, "nested too deeply"),
-])
+], ids=["nan", "infinity", "duplicate_key", "deep_json"])
 def test_a_price_file_is_read_strictly(tmp_path, text, words):
     path = tmp_path / "prices.json"
     path.write_text(json.dumps(prices.load())[:-1] + ", " + text, encoding="utf-8")

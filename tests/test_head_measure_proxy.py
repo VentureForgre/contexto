@@ -123,7 +123,8 @@ def loop(session, msgs, start, steps, reply="usage", connect_at=None):
 @pytest.mark.parametrize("missing", ["no usage", "output only", "529"])
 @pytest.mark.parametrize("system_text, config, change", [(SEAT_SYSTEM, SEAT, big_server),
                                                          (LIVE_SYSTEM, Config(bound=60_000), big_server),
-                                                         (LIVE_SYSTEM, QA, no_change)])
+                                                         (LIVE_SYSTEM, QA, no_change)],
+                         ids=["seat_big", "live_big", "live_qa"])
 @pytest.mark.parametrize("late", [1, 8, 12])
 def test_a_late_first_usage_through_the_proxy_measures_the_whole_head(make_proxy, counting_upstream, missing,
                                                                      system_text, config, change, late):

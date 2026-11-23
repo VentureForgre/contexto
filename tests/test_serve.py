@@ -1080,7 +1080,8 @@ def test_the_command_forwards_the_hint_headers_only_when_asked(home, running, up
         assert service.stop() == 0
 
 
-@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize("signum", [s for name in ("SIGINT", "SIGTERM", "SIGHUP")
+                                    if (s := getattr(signal, name, None)) is not None])
 def test_the_command_serves_until_a_signal_and_shuts_down_cleanly(home, running, upstream, signum):
     service = running()
     assert service.pid == service.process.pid

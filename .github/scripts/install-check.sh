@@ -47,11 +47,35 @@ fail() {
   exit 1
 }
 
+native_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+venv_py() {
+  if [ -x "$1/Scripts/python.exe" ]; then
+    printf '%s/Scripts/python.exe' "$1"
+  else
+    printf '%s/bin/python' "$1"
+  fi
+}
+
+venv_contexto() {
+  if [ -x "$1/Scripts/contexto.exe" ]; then
+    printf '%s/Scripts/contexto.exe' "$1"
+  else
+    printf '%s/bin/contexto' "$1"
+  fi
+}
+
 # expect_output WANT COMMAND...: the command exits 0 and prints exactly WANT.
 expect_output() {
   local want="$1" got
   shift
-  got="$("$@")" || fail "'$*' exited $?"
+  got="$("$@" | tr -d '\r')" || fail "'$*' exited $?"
   [ "$got" = "$want" ] || fail "'$*' printed '$got', expected '$want'"
   echo "ok: $* -> $got"
 }
@@ -60,10 +84,11 @@ expect_output() {
 # --no-index: Contexto has no runtime dependencies, so nothing may be fetched for it, and the sdist
 # builds without an index too (uv has uv_build built in for the range pyproject.toml allows).
 new_env() {
-  local env="$work/$1" artifact="$2" installed
+  local env="$work/$1" artifact="$2" installed py_exe
   uv venv --quiet --no-project "$env"
-  uv pip install --quiet --no-cache --no-index --python "$env/bin/python" "$artifact"
-  installed="$(uv pip freeze --quiet --python "$env/bin/python")"
+  py_exe="$(venv_py "$env")"
+  uv pip install --quiet --no-cache --no-index --python "$py_exe" "$artifact"
+  installed="$(uv pip freeze --quiet --python "$py_exe" | tr -d '\r')"
   case "$installed" in
     "contexto-proxy @ file://"*) ;;
     *) fail "expected only contexto-proxy in $env, found: $installed" ;;
@@ -72,7 +97,13 @@ new_env() {
 }
 
 site_packages() {
-  "$work/$1/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'
+  local raw
+  raw="$("$(venv_py "$work/$1")" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' | tr -d '\r')"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -u "$raw"
+  else
+    printf '%s' "$raw"
+  fi
 }
 
 echo "== Build the sdist and the wheel"
@@ -93,24 +124,25 @@ cd "$work/run"
 
 echo "== Install the wheel into an empty environment"
 new_env wheel-env "$wheel"
-py="$work/wheel-env/bin/python"
+py="$(venv_py "$work/wheel-env")"
+ctx="$(venv_contexto "$work/wheel-env")"
 "$py" --version
-"$py" - "$work/wheel-env" <<'PY'
+"$py" - "$(native_path "$work/wheel-env")" <<'PY'
 import os
 import sys
 
 import contexto
 
-env = os.path.realpath(sys.argv[1])
-where = os.path.realpath(contexto.__file__)
+env = os.path.normcase(os.path.realpath(sys.argv[1]))
+where = os.path.normcase(os.path.realpath(contexto.__file__))
 if not where.startswith(env + os.sep):
     sys.exit(f"install-check: contexto was imported from {where}, not from {env}")
 print(f"ok: contexto is imported from {where}")
 PY
 
-expect_output "$expect" "$work/wheel-env/bin/contexto" --version
+expect_output "$expect" "$ctx" --version
 expect_output "$expect" "$py" -m contexto --version
-help="$("$work/wheel-env/bin/contexto" --help)" || fail "'contexto --help' exited $?"
+help="$("$ctx" --help | tr -d '\r')" || fail "'contexto --help' exited $?"
 for word in "usage: contexto" proxy run sessions; do
   case "$help" in
     *"$word"*) ;;
@@ -120,10 +152,11 @@ done
 echo "ok: contexto --help"
 
 echo "== Read the store, offline"
+home_native="$(native_path "$work/home")"
 # A real command against an empty data directory: it lists no sessions and exits 0.
-CONTEXTO_HOME="$work/home" expect_output "[]" "$work/wheel-env/bin/contexto" sessions list --json
+CONTEXTO_HOME="$home_native" expect_output "[]" "$ctx" sessions list --json
 # The same command with an audit hook that refuses name lookups, connections and child processes.
-CONTEXTO_HOME="$work/home" "$py" - <<'PY'
+CONTEXTO_HOME="$home_native" "$py" - <<'PY'
 import sys
 
 REFUSED = {
@@ -151,7 +184,7 @@ PY
 
 echo "== Install the sdist into a second empty environment"
 new_env sdist-env "$sdist"
-expect_output "$expect" "$work/sdist-env/bin/contexto" --version
+expect_output "$expect" "$(venv_contexto "$work/sdist-env")" --version
 # The sdist must build the same package the wheel holds: same files, same metadata.
 wheel_site="$(site_packages wheel-env)"
 sdist_site="$(site_packages sdist-env)"
@@ -163,4 +196,4 @@ for name in METADATA entry_points.txt; do
 done
 echo "ok: the sdist installs the same package and metadata as the wheel"
 
-echo "install-check passed on $("$py" --version)"
+echo "install-check passed on $("$py" --version | tr -d '\r')"

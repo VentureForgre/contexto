@@ -590,7 +590,6 @@ def test_a_session_pruned_while_its_open_waits_for_the_lock_is_refused_and_not_r
                                                                                          monkeypatch):
     """The window forced: ``sessions prune`` holds the session's lock and deletes it while the open
     waits for that lock, as ``hold_live`` sees it."""
-    import fcntl
     import shutil
 
     from contexto import store as store_module
@@ -598,16 +597,16 @@ def test_a_session_pruned_while_its_open_waits_for_the_lock_is_refused_and_not_r
     pruned = SessionStore(home, "pruned")
     pruned.release()
     service.known[ID_A] = "pruned"
-    flock = fcntl.flock
+    real_flock_sh = store_module.flock_sh
     removed = []
 
-    def prune_meanwhile(fd, operation):
-        if operation == fcntl.LOCK_SH and not removed:
+    def prune_meanwhile(fd):
+        if not removed:
             removed.append(True)
             shutil.rmtree(home / "sessions" / "pruned")  # what prune does, under its exclusive lock
-        return flock(fd, operation)
+        return real_flock_sh(fd)
 
-    monkeypatch.setattr(store_module.fcntl, "flock", prune_meanwhile)
+    monkeypatch.setattr(store_module, "flock_sh", prune_meanwhile)
     server, _ = served
     refused(tool(server, "contexto_state", {}), "cannot be opened", "removed while it was being opened")
     assert removed and list((home / "sessions").iterdir()) == []
@@ -644,22 +643,21 @@ def test_a_store_opened_without_create_needs_its_lock_file(home):
 
 def test_session_mode_still_opens_a_session_pruned_while_it_opens(home, monkeypatch):
     """``--session`` mode is unchanged: the store's own open recreates the session and says so."""
-    import fcntl
     import shutil
 
     from contexto import store as store_module
 
     SessionStore(home, "kept").release()
-    flock = fcntl.flock
+    real_flock_sh = store_module.flock_sh
     removed = []
 
-    def prune_meanwhile(fd, operation):
-        if operation == fcntl.LOCK_SH and not removed:
+    def prune_meanwhile(fd):
+        if not removed:
             removed.append(True)
             shutil.rmtree(home / "sessions" / "kept")
-        return flock(fd, operation)
+        return real_flock_sh(fd)
 
-    monkeypatch.setattr(store_module.fcntl, "flock", prune_meanwhile)
+    monkeypatch.setattr(store_module, "flock_sh", prune_meanwhile)
     store = SessionStore(home, "kept")
     assert removed and store.dir.is_dir()
     assert '"pruned_while_opening"' in (store.dir / "log.jsonl").read_text()
@@ -701,7 +699,7 @@ def test_a_symlinked_serve_json_is_not_read(home, service, served, tmp_path):
     assert service.received == []
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 file")
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads a mode 000 file")
 def test_an_unreadable_token_file_means_the_service_cannot_be_asked(home, service, served):
     (home / servecontract.TOKEN_FILE).chmod(0o000)
     try:

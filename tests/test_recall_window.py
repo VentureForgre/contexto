@@ -72,7 +72,8 @@ def test_set_window_keeps_workdir_and_the_file_stays_private(tmp_path):
     meta = json.loads((store.dir / "meta.json").read_text())
     assert meta == {"workdir": str(tmp_path.resolve()), "project": str(project_root(tmp_path)),  # D69
                     "window_tokens": 33_000, "bytes_per_token": 1.8}
-    assert (store.dir / "meta.json").stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert (store.dir / "meta.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_malformed_window_metadata_reads_as_unknown(tmp_path):

@@ -20,6 +20,18 @@ import stat
 import time
 from pathlib import Path
 
+from contexto.platform_compat import (
+    IS_WINDOWS,
+    O_BINARY,
+    O_DIRECTORY,
+    O_NOFOLLOW,
+    O_NONBLOCK,
+    fchmod_private,
+    is_link_or_junction,
+    pid_alive,
+    set_blocking,
+)
+
 DIR_MODE = 0o700
 FILE_MODE = 0o600
 AFFINITY_SALT_FILE = "affinity.salt"
@@ -28,14 +40,22 @@ AFFINITY_SALT_BYTES = 32
 
 def _chmod_dir_nofollow(path: Path) -> None:
     """Narrow ``path`` to ``DIR_MODE`` without following a symlink at ``path``, refusing non-directories."""
+    if IS_WINDOWS or O_DIRECTORY == 0:
+        try:
+            st = os.stat(path, follow_symlinks=False)
+        except OSError:
+            raise
+        if is_link_or_junction(path) or not stat.S_ISDIR(st.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", str(path))
+        return
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
     except OSError as e:
         if e.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
             raise NotADirectoryError(errno.ENOTDIR, "not a directory", str(path)) from e
         raise
     try:
-        os.fchmod(fd, DIR_MODE)
+        fchmod_private(fd, DIR_MODE)
     finally:
         os.close(fd)
 
@@ -77,12 +97,14 @@ class NotRegularFileError(OSError):
 def _open_nofollow(path: Path, flags: int, mode: int = 0o777) -> int:
     """``os.open`` with ``O_NOFOLLOW``; a symlink at ``path``, or a directory opened for writing, is refused
     as ``NotRegularFileError``, so every caller treats it as it treats a FIFO there (D58)."""
+    if O_NOFOLLOW == 0 and os.path.islink(path):
+        raise NotRegularFileError(f"{path} is a symlink")
     try:
-        return os.open(path, flags | os.O_NOFOLLOW, mode)
+        return os.open(path, flags | O_NOFOLLOW | O_BINARY, mode)
     except OSError as e:
         if e.errno in (errno.ELOOP, errno.EMLINK) and os.path.islink(path):  # EMLINK on FreeBSD
             raise NotRegularFileError(f"{path} is a symlink") from e
-        if e.errno == errno.EISDIR:
+        if e.errno == errno.EISDIR or (IS_WINDOWS and e.errno == errno.EACCES and os.path.isdir(path)):
             raise NotRegularFileError(f"{path} is a directory") from e
         raise
 
@@ -100,11 +122,11 @@ def open_private(path: Path, flags: int, *, create: bool = True) -> int:
     A symlink at ``path`` is never followed (``NotRegularFileError``), and anything but a regular file there
     is refused (``NotRegularFileError``) without blocking: the open is ``O_NONBLOCK``, so a FIFO does
     not wait for a reader. The descriptor is then made blocking again."""
-    fd = _open_nofollow(path, flags | (os.O_CREAT if create else 0) | os.O_NONBLOCK, FILE_MODE)
+    fd = _open_nofollow(path, flags | (os.O_CREAT if create else 0) | O_NONBLOCK, FILE_MODE)
     _check_regular(fd, path)
     try:
-        os.set_blocking(fd, True)
-        os.fchmod(fd, FILE_MODE)
+        set_blocking(fd, True)
+        fchmod_private(fd, FILE_MODE)
     except BaseException:
         os.close(fd)
         raise
@@ -115,8 +137,16 @@ def open_regular(path: Path, *, follow: bool = False) -> int:
     """A read-only descriptor for the regular file at ``path``. Never blocks on a FIFO and refuses
     anything but a regular file (``NotRegularFileError``), a symlink included unless ``follow``, for a
     file that is not Contexto's own (a pinned file source)."""
-    flags = os.O_RDONLY | os.O_NONBLOCK
-    fd = os.open(path, flags) if follow else _open_nofollow(path, flags)
+    flags = os.O_RDONLY | O_NONBLOCK | O_BINARY
+    if follow:
+        try:
+            fd = os.open(path, flags)
+        except OSError as e:
+            if IS_WINDOWS and e.errno == errno.EACCES and os.path.isdir(path):
+                raise NotRegularFileError(f"{path} is a directory") from e
+            raise
+    else:
+        fd = _open_nofollow(path, flags)
     _check_regular(fd, path)
     return fd
 
@@ -200,15 +230,7 @@ def remove_stale_temps(directory: Path, min_age_s: float = STALE_TEMP_AGE_S) -> 
 
 
 def _alive(pid: int) -> bool:
-    if pid == os.getpid():
-        return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OverflowError, ValueError):
-        return pid > 0  # another user's process, or an id that cannot be one: leave the file
-    return True
+    return pid_alive(pid)
 
 
 _LINK_UNSUPPORTED = frozenset({
@@ -221,6 +243,8 @@ _LINK_UNSUPPORTED = frozenset({
 
 def fsync_dir(path: Path) -> None:
     """Flush directory entries of ``path`` to disk; ignores filesystems where directory fsync is unsupported."""
+    if IS_WINDOWS:
+        return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
         fd = os.open(path, flags)
@@ -329,7 +353,11 @@ def affinity_salt(home: Path) -> bytes:
         write_new(path, secrets.token_bytes(AFFINITY_SALT_BYTES).hex().encode("ascii"))
     # O_NOFOLLOW: a symlink raises OSError (ELOOP). O_NONBLOCK: a FIFO opens at once and fails the
     # regular-file check below instead of blocking the launch.
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    if O_NOFOLLOW == 0 and os.path.islink(path):
+        raise OSError(errno.ELOOP, "symlink refused", str(path))
+    if IS_WINDOWS and os.path.isdir(path):
+        raise ValueError(f"{path} is not a regular file")
+    fd = os.open(path, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_BINARY)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError(f"{path} is not a regular file")

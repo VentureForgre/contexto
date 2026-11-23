@@ -51,7 +51,6 @@ server uses.
 from __future__ import annotations
 
 import errno
-import fcntl
 import gzip
 import json
 import math
@@ -70,6 +69,15 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes, canonical_json
 from contexto.paths import session_dir
+from contexto.platform_compat import (
+    O_NOFOLLOW,
+    chmod_private,
+    flock_ex,
+    flock_sh,
+    is_link_or_junction,
+    pread,
+    unlock_and_close,
+)
 from contexto.private import (
     NotRegularFileError,
     fsync_dir,
@@ -152,7 +160,7 @@ def refuse_symlinked_session(session_path: Path) -> None:
     list`` leaves one out and prune refuses it. FileNotFoundError when the link's target is missing,
     else NotADirectoryError; both are OSErrors, which the commands report as a session they cannot open."""
     path = Path(session_path)
-    if not path.is_symlink():
+    if not is_link_or_junction(path):
         return
     if not path.exists():
         raise FileNotFoundError(errno.ENOENT, "session directory is a symlink to a missing target", str(path))
@@ -163,7 +171,7 @@ def refuse_symlinked_session(session_path: Path) -> None:
 def _open_live(path: Path, create: bool) -> int:
     """``live.lock`` at ``path``, opened for ``hold_live``. Without ``create`` a missing file is made only
     in a session directory that holds something else: ``FileNotFoundError`` for an empty one."""
-    flags = os.O_RDWR | os.O_NOFOLLOW
+    flags = os.O_RDWR | O_NOFOLLOW
     if create:
         return open_private(path, flags)
     try:
@@ -213,7 +221,7 @@ def hold_live(session_path: Path, *, create: bool = True) -> tuple[int, bool]:
             raise LockFileDamagedError(path, e) from e
         except FileNotFoundError as e:
             if os.path.lexists(path.parent):  # not removed by prune: retrying cannot fix it
-                if path.parent.is_symlink():
+                if is_link_or_junction(path.parent):
                     raise FileNotFoundError(errno.ENOENT, "session directory is a symlink to a missing target",
                                             str(path.parent)) from e
                 if not create:  # empty: prune has unlinked the lock and is about to remove the directory
@@ -226,16 +234,16 @@ def hold_live(session_path: Path, *, create: bool = True) -> tuple[int, bool]:
             pruned = True  # prune removed the directory between the mkdir, the chmod, or the open
             continue
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH)
+            flock_sh(fd)
             held, current = os.fstat(fd), os.stat(path, follow_symlinks=False)
             if (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino):
                 return fd, pruned
         except FileNotFoundError:
             pass
         except BaseException:
-            os.close(fd)
+            unlock_and_close(fd)
             raise
-        os.close(fd)
+        unlock_and_close(fd)
         if not create:
             raise SessionRemovedError(f"session {path.parent.name!r} was removed while it was being opened")
         pruned = True  # prune unlinked the lock file while this process waited for it
@@ -650,10 +658,6 @@ def redact(event: Any) -> Any:
 
 
 def _release_store(live_fd: int, fts_box: list[Any]) -> None:
-    try:
-        os.close(live_fd)
-    except OSError:
-        pass
     fts = fts_box[0] if fts_box else None
     if fts is not None:
         fts_box[0] = None
@@ -661,6 +665,10 @@ def _release_store(live_fd: int, fts_box: list[Any]) -> None:
             fts.close()
         except Exception:
             pass
+    try:
+        unlock_and_close(live_fd)
+    except OSError:
+        pass
 
 
 class SessionStore(LedgerOps):
@@ -1006,10 +1014,10 @@ class SessionStore(LedgerOps):
         except NotRegularFileError as e:
             raise LockFileDamagedError(path, e) from e
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            flock_ex(lock)
             yield
         finally:
-            os.close(lock)
+            unlock_and_close(lock)
 
     def charge_turn_room(self, charge: Callable[[int | None], int]) -> dict[str, Any] | None:
         """Charge this turn's room atomically without holding ``meta.lock`` across ``charge`` (response
@@ -1109,12 +1117,12 @@ class SessionStore(LedgerOps):
         except NotRegularFileError as e:  # a symlink, FIFO or directory in its place (D59)
             raise LockFileDamagedError(self.dir / "meta.lock", e) from e
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            flock_ex(lock)
             state.depth = 1
             yield
         finally:
             state.depth = 0
-            os.close(lock)  # releases the flock
+            unlock_and_close(lock)  # releases the flock
 
     def _read_meta_strict(self) -> dict[str, Any]:
         """Read ``meta.json`` for a mutating operation: distinguishes missing (``FileNotFoundError`` ->
@@ -1222,7 +1230,7 @@ class SessionStore(LedgerOps):
         Writing pages through a store opened this way loads (or creates) the page key on first use.
         """
         path = session_dir(home, session_id)
-        if path.is_symlink():
+        if is_link_or_junction(path):
             raise SessionNotFoundError(f"session {session_id!r} under {Path(home) / 'sessions'} is a symlink, "
                                        "not a session directory")
         if not path.is_dir():
@@ -1401,8 +1409,8 @@ class SessionStore(LedgerOps):
             if earlier is None:
                 raise PageNotFoundError(f"no stored or quarantined page {page_id}") from None
             return earlier
-        if not target.is_symlink() and target.is_file():
-            os.chmod(target, 0o600)
+        if not is_link_or_junction(target) and target.is_file():
+            chmod_private(target, 0o600)
         fsync_dir(quarantine)
         fsync_dir(self.pages_dir)
         self.log({"event": "page_quarantined", "page_id": page_id, "path": f"quarantine/{target.name}"})
@@ -1629,10 +1637,10 @@ class SessionStore(LedgerOps):
         line = canonical_bytes(record) + b"\n"
         fd = open_private(self.dir / "log.jsonl", os.O_RDWR | os.O_APPEND)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            flock_ex(fd)
             size = os.fstat(fd).st_size
-            if size and os.pread(fd, 1, size - 1) != b"\n":
+            if size and pread(fd, 1, size - 1) != b"\n":
                 line = b"\n" + line
             write_all(fd, line)
         finally:
-            os.close(fd)
+            unlock_and_close(fd)

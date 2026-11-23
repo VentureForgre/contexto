@@ -24,7 +24,6 @@ import os
 import sqlite3
 import stat
 import threading
-import urllib.parse
 import weakref
 import zlib
 from collections.abc import Callable, Iterator
@@ -32,6 +31,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from contexto.platform_compat import is_link_or_junction
 from contexto.private import open_private
 from contexto.store.pages import search_entry
 from contexto.store.search import (
@@ -113,7 +113,9 @@ def _fts_quote(term: str) -> str:
 
 
 def _is_regular_or_missing(path: Path) -> bool:
-    """True if ``path`` does not exist or is a regular file (never a symlink, FIFO, or directory)."""
+    """True if ``path`` does not exist or is a regular file (never a symlink, junction, FIFO, or directory)."""
+    if is_link_or_junction(path):
+        return False
     try:
         st = os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
@@ -124,6 +126,8 @@ def _is_regular_or_missing(path: Path) -> bool:
 
 
 def _is_regular(path: Path) -> bool:
+    if is_link_or_junction(path):
+        return False
     try:
         st = os.stat(path, follow_symlinks=False)
     except OSError:
@@ -132,8 +136,8 @@ def _is_regular(path: Path) -> bool:
 
 
 def _file_uri(path: Path, *, read_only: bool) -> str:
-    encoded = urllib.parse.quote(str(path.resolve()), safe="/")
-    return f"file:{encoded}?mode=ro" if read_only else f"file:{encoded}"
+    uri = path.resolve().as_uri()
+    return f"{uri}?mode=ro" if read_only else uri
 
 
 def _close_conn_box(box: list[sqlite3.Connection | None]) -> None:

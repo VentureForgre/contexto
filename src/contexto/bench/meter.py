@@ -95,7 +95,7 @@ from __future__ import annotations
 import http.client
 import json
 import math
-import select
+import selectors
 import socket
 import ssl
 import threading
@@ -462,26 +462,26 @@ class _ClientWatch:
                 self._upstream.close()
 
     def _run(self) -> None:
-        poller = select.poll()
-        try:
-            poller.register(self.client, select.POLLIN)
-        except (OSError, ValueError):
-            return
-        while not self._done.is_set():
+        with selectors.DefaultSelector() as selector:
             try:
-                if not poller.poll(50):
-                    continue
-                if self.client.recv(1, socket.MSG_PEEK):
-                    return  # the client sent more: it is still there
-            except OSError:
-                pass
-            if self._done.is_set():
+                selector.register(self.client, selectors.EVENT_READ)
+            except (OSError, ValueError):
                 return
-            with self._lock:
-                self.gone = True
-                if self._upstream is not None:
-                    _shut(self._upstream)
-            return
+            while not self._done.is_set():
+                try:
+                    if not selector.select(0.05):
+                        continue
+                    if self.client.recv(1, socket.MSG_PEEK):
+                        return  # the client sent more: it is still there
+                except (OSError, ValueError):
+                    pass
+                if self._done.is_set():
+                    return
+                with self._lock:
+                    self.gone = True
+                    if self._upstream is not None:
+                        _shut(self._upstream)
+                return
 
 
 def _shut(conn: http.client.HTTPConnection) -> None:

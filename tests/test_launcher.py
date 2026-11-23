@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import signal
@@ -403,7 +402,7 @@ def test_claude_version_runs_without_a_session_or_proxy(env, tmp_path):
     assert not (Path(env["CONTEXTO_HOME"]) / "sessions").exists()
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only directory")
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX mode 0500 / non-root only")
 def test_an_unwritable_contexto_home_exits_1_not_2(env, upstream, tmp_path):
     """D57: 2 is a usage error; a store that cannot be opened is Contexto failing to start (1). A home that
     is a file is refused up front as a usage error (D55, test_a_contexto_home_that_is_a_file_is_refused_unchanged)."""
@@ -1090,7 +1089,8 @@ def _tmp_env(env, tmp_path) -> Path:
     return tmp
 
 
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize("signum", [s for name in ("SIGTERM", "SIGHUP")
+                                    if (s := getattr(signal, name, None)) is not None])
 def test_a_signal_during_the_version_check_cleans_up(env, upstream, tmp_path, signum):
     tmp = _tmp_env(env, tmp_path)
     marker = tmp_path / "version-running"
@@ -1107,8 +1107,12 @@ def test_a_signal_during_the_version_check_cleans_up(env, upstream, tmp_path, si
     assert events[-1] == dict(events[-1], event="exit", code=128 + signum)
 
 
-@pytest.mark.parametrize("signum, child_gets", [(signal.SIGQUIT, signal.SIGQUIT), (signal.SIGUSR1, signal.SIGTERM),
-                                                (signal.SIGUSR2, signal.SIGTERM)])
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals only")
+@pytest.mark.parametrize("signum, child_gets", [
+    (s, s if name == "SIGQUIT" else signal.SIGTERM)
+    for name in ("SIGQUIT", "SIGUSR1", "SIGUSR2")
+    if (s := getattr(signal, name, None)) is not None
+])
 def test_other_terminating_signals_end_claude_and_clean_up(env, upstream, tmp_path, signum, child_gets):
     tmp = _tmp_env(env, tmp_path)
     env["FAKE_SLEEP"] = "60"
@@ -1342,9 +1346,11 @@ def test_launches_started_together_never_share_an_automatically_picked_session(t
 
 
 def _hold_choose_lock(home: Path) -> int:
+    from contexto.platform_compat import O_BINARY, flock_ex
+
     home.mkdir(parents=True, exist_ok=True)
-    fd = os.open(home / launcher.CHOOSE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    fd = os.open(home / launcher.CHOOSE_LOCK, os.O_RDWR | os.O_CREAT | O_BINARY, 0o600)
+    flock_ex(fd)
     return fd
 
 

@@ -20,6 +20,7 @@ def permissive_umask():
     os.umask(old)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes only")
 def test_session_dirs_0700_and_files_0600_under_a_permissive_umask(tmp_path, permissive_umask):
     home = tmp_path / "home"
     store = SessionStore(home, "s1")
@@ -33,6 +34,7 @@ def test_session_dirs_0700_and_files_0600_under_a_permissive_umask(tmp_path, per
         assert mode(f) == 0o600, f
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes only")
 def test_an_existing_home_keeps_its_mode_and_sessions_dir_is_narrowed(tmp_path):
     # D55: CONTEXTO_HOME is the user's choice (it may be $HOME or a shared directory), so an existing one
     # is not chmodded; sessions/ and everything under it is Contexto's own.
@@ -44,6 +46,7 @@ def test_an_existing_home_keeps_its_mode_and_sessions_dir_is_narrowed(tmp_path):
     assert mode(home) == 0o755 and mode(home / "sessions") == 0o700
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes only")
 def test_a_home_that_is_a_file_is_refused_before_any_chmod(tmp_path):
     home = tmp_path / "home"
     home.write_text("x")
@@ -53,6 +56,7 @@ def test_a_home_that_is_a_file_is_refused_before_any_chmod(tmp_path):
     assert mode(home) == 0o644
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes only")
 def test_existing_wide_session_dirs_are_narrowed(tmp_path):
     session = tmp_path / "sessions" / "s1"
     (session / "pages").mkdir(parents=True)
@@ -93,6 +97,7 @@ def test_concurrent_first_use_agrees_on_one_complete_key(tmp_path):
     assert len(keys) == 1 and len(keys.pop()) == 64
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes and symlinks")
 def test_private_dir_refuses_symlinks_without_chmodding_target(tmp_path):
     from contexto.private import private_dir
 
@@ -128,7 +133,9 @@ def test_write_new_falls_back_safely_when_hard_link_is_unsupported(tmp_path, mon
     monkeypatch.setattr(os, "link", no_link)
     target = tmp_path / "page.json"
     assert write_new(target, b'{"ok":1}') is True
-    assert target.read_bytes() == b'{"ok":1}' and mode(target) == 0o600
+    assert target.read_bytes() == b'{"ok":1}'
+    if sys.platform != "win32":
+        assert mode(target) == 0o600
     assert list(tmp_path.iterdir()) == [target]  # temp file cleaned up
 
     # Existing file is never overwritten.
@@ -139,7 +146,10 @@ def test_write_new_falls_back_safely_when_hard_link_is_unsupported(tmp_path, mon
     outside = tmp_path / "outside.txt"
     outside.write_bytes(b"original")
     sym = tmp_path / "sym.json"
-    sym.symlink_to(outside)
+    try:
+        sym.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks require elevated privileges on this Windows host")
     assert write_new(sym, b"overwrite") is False
     assert outside.read_bytes() == b"original"
 
