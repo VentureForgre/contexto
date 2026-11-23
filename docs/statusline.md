@@ -72,9 +72,11 @@ yours. So Contexto adds its line only when that cannot happen. All of these must
    reads it), and the managed settings file and its drop-ins
    (`/Library/Application Support/ClaudeCode/` on macOS, `/etc/claude-code/` on Linux:
    `managed-settings.json` and `managed-settings.d/*.json`).
-2. Every one of those files that exists can be read as a JSON object. A file with a syntax error, or
-   one Contexto has no permission to read, may hold your status line, so nothing is added. (An empty
-   file holds none and does not count.)
+2. Every one of those files that exists and is readable by Claude Code can be read as a JSON object
+   by `read_settings_file` (D70). A file with a syntax error, non-regular file (FIFO/socket),
+   oversized file (> 4 MiB), or non-object `env` may hold your status line, so nothing is added; a
+   file you have no permission to open is treated as absent, because Claude Code runs as you and
+   cannot read it either. (An empty file holds none and does not count.)
 3. None of them sets `disableAllHooks` to `true`, which also turns a custom status line off, and the
    managed files do not set `allowManagedHooksOnly`.
 4. You did not turn it off (next section).

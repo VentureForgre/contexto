@@ -57,11 +57,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--observe-thinking", action="store_true",
                         help="add the thinking-binding beta so dropped thinking is reported and logged "
                              "(changes the request: one extra anthropic-beta flag)")
-    parser.add_argument("--no-in-turn-paging", action="store_true",
-                        help="do not page inside a running turn: a tool loop that outgrows the bound is sent "
-                             "whole, as before v0.6.0 (also CONTEXTO_IN_TURN_PAGING=0)")
-    parser.add_argument("--in-turn-paging", dest="in_turn_paging_on", action="store_true",
-                        help=argparse.SUPPRESS)
+    itp = parser.add_mutually_exclusive_group()
+    itp.add_argument("--no-in-turn-paging", action="store_true",
+                     help="do not page inside a running turn: a tool loop that outgrows the bound is sent "
+                          "whole, as before v0.6.0 (also CONTEXTO_IN_TURN_PAGING=0)")
+    itp.add_argument("--in-turn-paging", dest="in_turn_paging_on", action="store_true",
+                     help=argparse.SUPPRESS)
     parser.add_argument("--max-sessions", type=int, default=None,
                         help=f"sessions open at once (default {DEFAULT_MAX_SESSIONS}); the least recently used "
                              "one is closed to make room, and reopened by its next request")

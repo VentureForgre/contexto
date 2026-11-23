@@ -782,8 +782,15 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             print(f"contexto: warning: cannot read the Codex version ({version_error}) and 'codex --help' does not "
                   f"list {NO_DAEMON_FLAG}, so it is not passed; Codex may leave a background app-server running "
                   "after it exits.", file=stderr, flush=True)
-        if not launcher.check_cli_version("codex", codex, store, enabled=options.version_check,
-                                          stderr=stderr, installed=installed):
+        try:
+            version_ok = launcher.check_cli_version(
+                "codex", codex, store, enabled=options.version_check,
+                stderr=stderr, installed=installed, explicit=options.version_check_explicit)
+        except TypeError:  # a test stand-in without the explicit keyword
+            version_ok = launcher.check_cli_version(
+                "codex", codex, store, enabled=options.version_check,
+                stderr=stderr, installed=installed)
+        if not version_ok:
             code = launcher.EXIT_INTERRUPTED  # Ctrl+C during the version check; codex never started
             return code
         warning = launcher.start_warning(options.bound, options.headroom_floor, ASSUMED_OVERHEAD,

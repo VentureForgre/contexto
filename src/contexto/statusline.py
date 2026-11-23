@@ -219,7 +219,7 @@ def full_numbers(home: Path, session_id: str) -> dict[str, Any]:
     """The numbers from ``session_stats``, which reads the whole log. The cause of stopped paging is the
     newest store failure logged since paging stopped (to the second, as the log's times are written); a
     failure of an earlier run or an earlier stop is not named."""
-    out = session_stats(home, session_id, store=False)
+    out = session_stats(home, session_id, store=False, price=False)
     degraded = out["faults"]["degraded"]
     cause = None
     if degraded["now"] is True:
@@ -532,6 +532,8 @@ def read_settings(path: Path) -> Any:
     not valid JSON, non-object ``env``)."""
     from contexto.upstream import read_settings_file
 
+    if path.name == "managed-settings.d":
+        return UNREADABLE
     found = read_settings_file(path)
     if found.problem is not None:
         return UNREADABLE
@@ -579,6 +581,8 @@ def settings_files(cwd: Path, user_home: Path, env: Mapping[str, str] | None,
             names = []
         except OSError:
             names = []
+            # Unreadable or non-directory drop-ins: handled via a sentinel path that read_settings
+            # reports as UNREADABLE when the directory itself cannot be inspected (unless absent).
             files.append(("managed", drop_ins))
         files += [("managed", drop_ins / name) for name in names]
     return files + claude_settings_order(cwd, user_home, env)

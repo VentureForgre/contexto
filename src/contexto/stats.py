@@ -50,29 +50,31 @@ from contexto.private import open_regular
 STATS_VERSION = 1  # the ``--json`` shape; raised only when a documented key changes meaning or goes
 SAVED_BYTES_PER_TOKEN = 3.5  # seed text ratio used to estimate input tokens saved from bytes saved
 _PRICE_TABLE: dict[str, Any] | None = None
+_PRICE_FN: Any = None
 
 
-def _price_table() -> dict[str, Any] | None:
-    """Lazily load and cache the shipped price table so ``statusline`` never pays for it."""
-    global _PRICE_TABLE
+def _price_table() -> tuple[dict[str, Any] | None, Any]:
+    """Lazily load and cache the shipped price table and pricer so ``statusline`` never pays for it."""
+    global _PRICE_TABLE, _PRICE_FN
     if _PRICE_TABLE is None:
         try:
             from contexto.bench import prices
 
             _PRICE_TABLE = prices.load()
+            _PRICE_FN = prices.try_request_cost
         except Exception:
-            return None
-    return _PRICE_TABLE
+            return None, None
+    return _PRICE_TABLE, _PRICE_FN
 
 
 def _try_price(model: str | None, uncached: int, cache_write: int, cache_read: int, output: int) -> float | None:
-    table = _price_table()
-    if table is None or not model:
+    if not model:
+        return None
+    table, fn = _price_table()
+    if table is None or fn is None:
         return None
     try:
-        from contexto.bench import prices
-
-        return prices.try_request_cost(
+        return fn(
             {"uncached": uncached, "cache_write": cache_write, "cache_read": cache_read, "output": output},
             model, "5m", table)
     except Exception:
@@ -789,18 +791,20 @@ class _Tally:
             write = self._number(usage.get("cache_write_tokens"))
             prompt = fresh
             read_clamped = min(read, prompt) if read is not None and prompt is not None else 0
-            uncached = max(0, (prompt or 0) - read_clamped)
+            write_clamped = min(write, max(0, (prompt or 0) - read_clamped)) if write is not None else 0
+            uncached = max(0, (prompt or 0) - read_clamped - write_clamped)
         else:
             read = self._number(usage.get("cache_read_input_tokens"))
             write = self._number(usage.get("cache_creation_input_tokens"))
             prompt = (fresh or 0) + (read or 0) + (write or 0)
             read_clamped = min(read, prompt) if read is not None else 0
+            write_clamped = write or 0
             uncached = fresh or 0
         if not prompt:
             return None
         self.requests["with_usage"] += 1
         out_tokens = output or 0
-        write_tokens = write or 0
+        write_tokens = write_clamped
         self.tokens["input"] += prompt
         self.tokens["output"] += out_tokens
         self.tokens["cache_read"] += read_clamped
@@ -977,7 +981,7 @@ def _fault_report(tally: _Tally, session_id: str, earlier_run: bool) -> dict[str
 
 
 def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_tokens: bool = True,
-                  store: bool = True) -> dict[str, Any]:
+                  store: bool = True, price: bool = True) -> dict[str, Any]:
     """One session's numbers as a plain dict of JSON values (the ``contexto stats --json`` shape,
     ``STATS_VERSION``; docs/stats.md defines each key).
 
@@ -993,7 +997,7 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
         from contexto.store import SessionNotFoundError
 
         raise SessionNotFoundError(f"no session {session_id!r} under {Path(home) / 'sessions'}")
-    tally, lines, unreadable, missing = _Tally(), 0, 0, False
+    tally, lines, unreadable, missing = _Tally(price=price), 0, 0, False
     start, runs, launch = _last_run_tail(directory) if last_run else (0, 0, None)
     cli, bound = None, None
     if launch is not None:  # the launch a run without its own line (a bare proxy) inherits from
@@ -1016,7 +1020,7 @@ def session_stats(home: Path, session_id: str, *, last_run: bool = False, page_t
                 runs += 1
                 cli, bound = tally.cli or cli, tally.bound if tally.bound is not None else bound
                 if last_run:
-                    tally = _Tally()
+                    tally = _Tally(price=price)
                 tally.start_run(event)
                 tally.replaying_held = True
                 for earlier in held:

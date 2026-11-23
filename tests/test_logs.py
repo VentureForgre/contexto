@@ -175,3 +175,36 @@ def test_logs_refuses_fifo_without_blocking(tmp_path, monkeypatch, capsys):
     os.mkfifo(home / "sessions" / "s1" / "log.jsonl")
     code, _, err = _run_cli(monkeypatch, home, ["logs", "s1"], capsys)
     assert code == 1 and "cannot read" in err
+
+
+def test_logs_refuses_symlink_escapes_status_ignores_bool_bound_and_waits_for_new_file(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    s = SessionStore(home, "s1")
+    s.release()
+    target = tmp_path / "outside.jsonl"
+    target.write_text(json.dumps({"event": "exit", "code": 0}) + "\n", encoding="utf-8")
+    (home / "sessions" / "s1" / "log.jsonl").symlink_to(target)
+    code, _, err = _run_cli(monkeypatch, home, ["logs", "s1"], capsys)
+    assert code == 1 and "cannot read" in err
+
+    # Status control-char escaping and bool bound ignored
+    line = logs_cmd.format_event({"ts": "2026-10-01T12:00:00Z", "event": "request", "method": "POST",
+                                  "path": "/v1/messages", "status": "200\x1b[31m"})
+    assert "\x1b" not in line and "200" in line
+    line_bool = logs_cmd.format_event({"ts": "2026-10-01T12:00:00Z", "event": "launch", "config": {"bound": True}})
+    assert "bound=" not in line_bool
+
+    # follow_log waits for a log file that does not exist yet
+    missing_log = tmp_path / "delayed.jsonl"
+    buf = io.StringIO()
+
+    def create_later() -> None:
+        time.sleep(0.03)
+        missing_log.write_text(json.dumps({"ts": "2026-10-01T12:00:00Z", "event": "exit", "code": 0}) + "\n",
+                               encoding="utf-8")
+
+    t = threading.Thread(target=create_later, daemon=True)
+    t.start()
+    assert logs_cmd.follow_log(missing_log, 0, set(), False, True, buf, poll_s=0.02, max_polls=15) == 0
+    t.join(timeout=5)
+    assert [json.loads(x)["event"] for x in buf.getvalue().splitlines()] == ["exit"]

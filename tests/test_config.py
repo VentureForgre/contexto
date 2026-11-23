@@ -226,8 +226,8 @@ observe_thinking = true
     env_off = {
         "CONTEXTO_QUIET": "1",
         "CONTEXTO_NO_STATUSLINE": "1",
-        "CONTEXTO_NO_IN_TURN_PAGING": "1",
-        "CONTEXTO_NO_PROJECT_MEMORY": "1",
+        "CONTEXTO_IN_TURN_PAGING": "0",
+        "CONTEXTO_PROJECT_MEMORY": "0",
         "CONTEXTO_NO_VERSION_CHECK": "1",
     }
     opts_cli = launcher.options_from_args(args_cli, config=cfg, env=env_off)
@@ -238,7 +238,25 @@ observe_thinking = true
     assert opts_cli.statusline is True
     assert opts_cli.in_turn_paging is True
     assert opts_cli.project_memory is True
+    assert launcher.project_memory_wanted(opts_cli, env=env_off) is True
     assert opts_cli.version_check is True
+
+    # 4. Unrecognized CONTEXTO_PROJECT_MEMORY is ignored without flipping config.toml project_memory=false
+    opts_bad_pm = launcher.options_from_args(args, config=cfg, env={"CONTEXTO_PROJECT_MEMORY": "bogus"})
+    assert opts_bad_pm.project_memory is False
+    assert launcher.project_memory_wanted(opts_bad_pm, env={"CONTEXTO_PROJECT_MEMORY": "bogus"}) is False
+
+    # 5. CONTEXTO_PROJECT_MEMORY=0 resolves into LaunchOptions.project_memory=False
+    opts_pm_off = launcher.options_from_args(args, config=FileConfig(), env={"CONTEXTO_PROJECT_MEMORY": "0"})
+    assert opts_pm_off.project_memory is False
+
+    # 6. Contradictory CLI boolean pairs are refused by argparse
+    for bad_argv in (["run", "--quiet", "--no-quiet", "claude"],
+                     ["run", "--no-in-turn-paging", "--in-turn-paging", "claude"],
+                     ["serve", "--no-in-turn-paging", "--in-turn-paging"]):
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(bad_argv)
+        assert exc_info.value.code == 2
 
 
 def test_upstream_and_codex_upstream_precedence(tmp_path):
@@ -325,20 +343,40 @@ def test_sessions_prune_applies_retention_config_defaults(tmp_path, monkeypatch,
         t = old + i * 60
         for p in [s.dir, *s.dir.rglob("*")]:
             os.utime(p, (t, t))
-    _write_cfg(home, "[retention]\nkeep = 2\n")
+    _write_cfg(home, '[retention]\nolder_than = "365d"\nkeep = 2\n')
     monkeypatch.setenv("CONTEXTO_HOME", str(home))
     parser = cli.build_parser()
-    # Dry-run by default (no --yes) with no CLI --keep/--older-than uses [retention].keep = 2
+    # Dry-run with no CLI selection flags applies [retention] (both older_than=365d and keep=2 -> none older than 365d)
     args = parser.parse_args(["sessions", "prune"])
-    code = sessions_cmd.run_prune(args)
-    assert code == 0
-    out = capsys.readouterr().out
-    assert "2 session" in out
-    # Explicit CLI --keep overrides config.toml
+    assert sessions_cmd.run_prune(args) == 0
+    assert "No sessions to remove" in capsys.readouterr().out
+    # Explicit CLI --keep 3 does NOT silently AND config.toml's older_than=365d!
     args2 = parser.parse_args(["sessions", "prune", "--keep", "3"])
     assert sessions_cmd.run_prune(args2) == 0
     out2 = capsys.readouterr().out
     assert "1 session" in out2
+    # Config with only keep = 2 selects 2 sessions when no CLI flag is passed
+    _write_cfg(home, "[retention]\nkeep = 2\n")
+    args3 = parser.parse_args(["sessions", "prune"])
+    assert sessions_cmd.run_prune(args3) == 0
+    assert "2 session" in capsys.readouterr().out
+
+
+def test_symlinked_config_and_huge_int_overflow(tmp_path):
+    # Dotfile symlink to a regular config file is followed
+    target = tmp_path / "dotfiles_config.toml"
+    target.write_text("bound = 123456\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / CONFIG_FILE).symlink_to(target)
+    cfg = load_config(home=home)
+    assert cfg.exists is True and cfg.bound == 123456
+
+    # Huge integer overflowing float raises ConfigError cleanly
+    h2 = tmp_path / "h2"
+    _write_cfg(h2, f"[serve]\nidle_minutes = {'9' * 400}\n")
+    with pytest.raises(ConfigError, match="finite number"):
+        load_config(home=h2)
 
 
 def test_cli_exits_usage_on_invalid_config(tmp_path):

@@ -113,17 +113,17 @@ def session_ids(home: Path) -> list[str]:
 
 def _log_highlights(home: Path, session_id: str) -> tuple[str | None, int | None, int]:
     """``(cli, peak_tokens, faults)`` from the session's ``log.jsonl`` via ``stats.session_stats``
-    (log-only, never opens pages or ledger)."""
+    (log-only, never opens pages or ledger, never loads prices)."""
     from contexto.stats import session_stats
 
     try:
-        out = session_stats(home, session_id, store=False)
+        out = session_stats(home, session_id, store=False, price=False)
     except Exception:
         return None, None, 0
     return out.get("cli"), out["prompt"]["peak_tokens"], int(out["faults"]["total"] or 0)
 
 
-def session_info(home: Path, session_id: str) -> SessionInfo:
+def session_info(home: Path, session_id: str, *, highlights: bool = True) -> SessionInfo:
     store = SessionStore.open_existing(home, session_id)
     created, last = _times(store.dir)
     pages = sum(1 for p in store.pages_dir.glob("pg_*.json") if p.is_file()) if store.pages_dir.is_dir() else 0
@@ -131,14 +131,17 @@ def session_info(home: Path, session_id: str) -> SessionInfo:
         records = len(store.ledger.records())
     except LedgerError:
         records = None
-    cli_name, peak_tokens, fault_count = _log_highlights(home, session_id)
+    if highlights:
+        cli_name, peak_tokens, fault_count = _log_highlights(home, session_id)
+    else:
+        cli_name, peak_tokens, fault_count = None, None, 0
     return SessionInfo(session_id, _iso(created), pages, records, _iso(last), disk_usage(store.dir),
                        cli=cli_name, peak_tokens=peak_tokens, faults=fault_count)
 
 
-def list_sessions(home: Path) -> list[SessionInfo]:
+def list_sessions(home: Path, *, highlights: bool = True) -> list[SessionInfo]:
     """Every session, most recent activity first; ties by id, so the order is stable."""
-    infos = [session_info(home, i) for i in session_ids(home)]
+    infos = [session_info(home, i, highlights=highlights) for i in session_ids(home)]
     return sorted(infos, key=lambda s: (s.last_activity, s.id), reverse=True)
 
 
@@ -240,7 +243,7 @@ def select_session(home: Path, explicit: str | None, named_by: str = "--session"
     elif os.environ.get("CONTEXTO_SESSION"):
         how, sid = "CONTEXTO_SESSION", os.environ["CONTEXTO_SESSION"]
     else:
-        sessions = list_sessions(home)
+        sessions = list_sessions(home, highlights=False)
         if not sessions:
             raise SessionNotFoundError(no_sessions_yet(home))
         chosen = next((i for i, s in enumerate(sessions) if not is_empty(s) or in_use(home, s.id)), 0)

@@ -73,9 +73,16 @@ any unique prefix, such as `7f3a`; an ambiguous prefix is an error that lists th
 the choice to stderr (for example `session 7f3a91c2... (most recent)`), so stdout carries only the
 text. A mistyped `--session` is an error, never a new session.
 
-- `contexto sessions list [--json]`: one row per session, most recent activity first: id, created
-  time, page count, pinned record count (`?` if the ledger cannot be read), last activity in UTC,
-  and size on disk, then the total size. `--json` gives the size as `size_bytes`.
+- `contexto sessions list [--json]`: one row per session, most recent activity first: id, CLI
+  (`claude`, `codex`, or `-`), created time, page count, pinned record count (`?` if the ledger
+  cannot be read), peak prompt tokens (`-` if none), fault badge (`!N` when faults were logged,
+  else `-`), last activity in UTC, and size on disk, then the total size. `--json` includes `cli`,
+  `peak_tokens`, `faults`, and `size_bytes`.
+- `contexto logs [SESSION] [--session ID] [-f|--follow] [-n N] [--event TYPE] [--faults] [--serve] [--json]`:
+  view or live-tail a session's `log.jsonl` (or `$CONTEXTO_HOME/serve.log` with `--serve`). Filters
+  by event name (`--event`, repeatable or comma-separated) or faults (`--faults`, including requests
+  with nested fault events), escapes terminal control sequences, and handles log rotation/truncation
+  under `--follow`.
 - `contexto sessions show ID [--all] [--json]`: created and last activity times; page, record,
   active record and open obligation counts; session log event, over-bound turn and upstream 4xx
   counts; a counter that goes up at each rotation (`Last epoch`); whether the ledger verifies; then

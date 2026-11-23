@@ -1641,3 +1641,73 @@ def test_doctor_live_flag_probes_upstream_and_default_stays_zero_network(both, c
     by_id = {c["id"]: c for c in json.loads(out)["checks"]}
     assert code == 1 and by_id["live-upstream"]["status"] == "fail"
     assert "unreachable" in by_id["live-upstream"]["summary"]
+
+
+def test_doctor_live_never_sends_credentials_to_untrusted_project_or_serve(both, capsys, fast_mcp, monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    received: list[tuple[str | None, str | None]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            received.append((self.headers.get("x-api-key"), self.headers.get("authorization")))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        # Untrusted project settings file sets ANTHROPIC_BASE_URL -> doctor --live must NOT send API key!
+        write_settings(both.cwd / ".claude" / "settings.json",
+                       {"env": {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}"}})
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret-must-not-leak")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-must-not-leak")
+        monkeypatch.setenv("CONTEXTO_CODEX_UPSTREAM", f"http://127.0.0.1:{port}/v1")
+
+        code, out, _ = run(capsys, "--live", "--json")
+        by_id = {c["id"]: c for c in json.loads(out)["checks"]}
+        assert code == 0 and by_id["live-upstream"]["status"] == "pass"
+        assert "auth skipped (untrusted project)" in by_id["live-upstream"]["summary"]
+        assert received and all(k is None and a is None for k, a in received)
+
+        # Surrogate in upstream path must not crash into guarded's bug handler
+        write_settings(both.cwd / ".claude" / "settings.json",
+                       {"env": {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}/a\ud800"}})
+        monkeypatch.delenv("CONTEXTO_CODEX_UPSTREAM", raising=False)
+        code, out, _ = run(capsys, "--live", "--json")
+        by_id = {c["id"]: c for c in json.loads(out)["checks"]}
+        assert by_id["live-upstream"]["status"] == "skip"
+        assert "the check itself failed" not in by_id["live-upstream"]["summary"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_doctor_statusline_env_overrides_config_and_serve_lock_checks(both, capsys, fast_mcp, monkeypatch):
+    both.store.mkdir(parents=True, exist_ok=True)
+    (both.store / "config.toml").write_text("statusline = false\n", encoding="utf-8")
+    monkeypatch.setenv("CONTEXTO_NO_STATUSLINE", "0")
+    _, found = checks(capsys)
+    assert found["statusline"]["status"] == "pass" and found["statusline"]["details"]["state"] == "added"
+
+    # Symlinked serve.lock -> warn
+    real = both.tmp / "real.lock"
+    real.write_text("")
+    (both.store / "serve.lock").symlink_to(real)
+    _, found = checks(capsys)
+    assert found["serve"]["status"] == "warn" and "symlink" in found["serve"]["summary"]
+
+    # Bad mode serve.lock -> warn
+    (both.store / "serve.lock").unlink()
+    (both.store / "serve.lock").write_text("")
+    (both.store / "serve.lock").chmod(0o644)
+    _, found = checks(capsys)
+    assert found["serve"]["status"] == "warn" and "0644" in found["serve"]["summary"]

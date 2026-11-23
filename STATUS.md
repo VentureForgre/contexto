@@ -865,8 +865,8 @@ Still open:
   one multi-word query at 3,000 pages sized like real turns).
 - D70, `contexto serve`: not confirmed in an IDE, the desktop app, the TypeScript SDK, the GitHub
   Action, a claude.ai (OAuth) login or on Linux with a real client (steps in `docs/serve.md`).
-  `contexto stats` on a session the service made now reads its `cli` and `bound` from `serve_open`
-  (run count still counts `proxy_start` launches only). `contexto run codex` does not apply the serve-upstream refusal that
+  `contexto stats` on a session the service made now reads its `cli`, `bound`, and run count from
+  `serve_open` / `serve_close`. `contexto run codex` does not apply the serve-upstream refusal that
   `contexto run claude` and `contexto doctor` do. A base path is not yet encoded exactly as Claude
   Code sends it in three small cases: `|`, `[` and `]` are percent-encoded where Claude Code sends
   them as they are, a backslash goes out as `%5C` where Claude Code turns it into `/`, and a `..`

@@ -44,35 +44,40 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--observe-thinking", action="store_true",
                         help="add the thinking-binding beta so dropped thinking is reported and logged "
                              "(changes the request: one extra anthropic-beta flag)")
-    parser.add_argument("--no-version-check", action="store_true",
-                        help="do not compare the CLI's --version with the versions Contexto was tested with "
-                             "(also CONTEXTO_NO_VERSION_CHECK=1)")
-    parser.add_argument("--version-check", dest="version_check_on", action="store_true",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--quiet", action="store_true",
-                        help="do not print the summary when the CLI exits; warnings are still printed "
-                             "(also CONTEXTO_QUIET=1)")
-    parser.add_argument("--no-quiet", dest="quiet_off", action="store_true",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--no-statusline", action="store_true",
-                        help="claude only: do not add Contexto's status line to Claude Code (it is added only "
-                             "when no settings file has a statusLine; also CONTEXTO_NO_STATUSLINE=1)")
-    parser.add_argument("--statusline", dest="statusline_on", action="store_true",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--no-project-memory", action="store_true",
-                        help="keep this session out of project memory: it carries nothing from the earlier "
-                             "sessions of this directory's project (a resumed session stops sending what it "
-                             "carried: at once before its first rotation; after it, from its next rotation), "
-                             "cannot search them, and gives nothing to "
-                             f"later ones (also {PROJECT_MEMORY_ENV}=0, false, off or no). The session records "
-                             "it, so resuming it later stays off without this option")
-    parser.add_argument("--project-memory", dest="project_memory_on", action="store_true",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--no-in-turn-paging", action="store_true",
-                        help="do not page inside a running turn: a tool loop that outgrows the bound is sent "
-                             "whole, as before v0.6.0 (also CONTEXTO_IN_TURN_PAGING=0)")
-    parser.add_argument("--in-turn-paging", dest="in_turn_paging_on", action="store_true",
-                        help=argparse.SUPPRESS)
+    vc = parser.add_mutually_exclusive_group()
+    vc.add_argument("--no-version-check", action="store_true",
+                    help="do not compare the CLI's --version with the versions Contexto was tested with "
+                         "(also CONTEXTO_NO_VERSION_CHECK=1)")
+    vc.add_argument("--version-check", dest="version_check_on", action="store_true",
+                    help=argparse.SUPPRESS)
+    q = parser.add_mutually_exclusive_group()
+    q.add_argument("--quiet", action="store_true",
+                   help="do not print the summary when the CLI exits; warnings are still printed "
+                        "(also CONTEXTO_QUIET=1)")
+    q.add_argument("--no-quiet", dest="quiet_off", action="store_true",
+                   help=argparse.SUPPRESS)
+    sl = parser.add_mutually_exclusive_group()
+    sl.add_argument("--no-statusline", action="store_true",
+                    help="claude only: do not add Contexto's status line to Claude Code (it is added only "
+                         "when no settings file has a statusLine; also CONTEXTO_NO_STATUSLINE=1)")
+    sl.add_argument("--statusline", dest="statusline_on", action="store_true",
+                    help=argparse.SUPPRESS)
+    pm = parser.add_mutually_exclusive_group()
+    pm.add_argument("--no-project-memory", action="store_true",
+                    help="keep this session out of project memory: it carries nothing from the earlier "
+                         "sessions of this directory's project (a resumed session stops sending what it "
+                         "carried: at once before its first rotation; after it, from its next rotation), "
+                         "cannot search them, and gives nothing to "
+                         f"later ones (also {PROJECT_MEMORY_ENV}=0, false, off or no). The session records "
+                         "it, so resuming it later stays off without this option")
+    pm.add_argument("--project-memory", dest="project_memory_on", action="store_true",
+                    help=argparse.SUPPRESS)
+    itp = parser.add_mutually_exclusive_group()
+    itp.add_argument("--no-in-turn-paging", action="store_true",
+                     help="do not page inside a running turn: a tool loop that outgrows the bound is sent "
+                          "whole, as before v0.6.0 (also CONTEXTO_IN_TURN_PAGING=0)")
+    itp.add_argument("--in-turn-paging", dest="in_turn_paging_on", action="store_true",
+                     help=argparse.SUPPRESS)
     parser.add_argument("cli", choices=["claude", "codex"], help="the CLI to run")
     parser.add_argument("cli_args", nargs=argparse.REMAINDER, help="arguments passed to the CLI unchanged")
     try:
@@ -88,7 +93,7 @@ def run(args: argparse.Namespace) -> int:
     if args.cli == "codex":
         try:
             from contexto.codex import run_codex
-        except ImportError:
+        except Exception:
             print("contexto: codex support is not installed in this build", file=sys.stderr)
             return 2
         return run_codex(args)

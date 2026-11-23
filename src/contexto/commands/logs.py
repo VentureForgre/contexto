@@ -105,7 +105,7 @@ def format_event(event: dict[str, Any]) -> str:
         if method or path:
             parts.append(f"{method} {path}".strip())
         if status is not None:
-            parts.append(str(status))
+            parts.append(safe_text(str(status)))
         model = event.get("model")
         if isinstance(model, str) and model:
             parts.append(f"model={safe_text(model)}")
@@ -148,7 +148,7 @@ def format_event(event: dict[str, Any]) -> str:
         if isinstance(event.get("cli"), str):
             parts.append(f"cli={safe_text(event['cli'])}")
         cfg = event.get("config")
-        if isinstance(cfg, dict) and isinstance(cfg.get("bound"), int):
+        if isinstance(cfg, dict) and type(cfg.get("bound")) is int:
             parts.append(f"bound={cfg['bound']:,}")
         if isinstance(event.get("upstream_source"), str):
             parts.append(f"upstream={safe_text(event['upstream_source'])}")
@@ -185,35 +185,53 @@ def _parse_line(raw: bytes) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
+MAX_LINE_BYTES = 4 << 20  # 4 MiB per log line (matches stats.LOG_BLOCK_BYTES)
+
+
 def _read_existing(path: Path, events: set[str], faults_only: bool, limit: int,
                    *, follow: bool = False) -> tuple[list[dict[str, Any]], int, tuple[int, int]]:
-    """Read existing complete lines from ``path``; returns ``(matching_events, byte_offset, (dev, ino))``."""
+    """Stream existing lines from ``path`` in bounded chunks; returns ``(matching_events, byte_offset, (dev, ino))``."""
     fd = open_regular(path)
+    matched: deque[dict[str, Any]] | list[dict[str, Any]] = deque(maxlen=limit) if limit > 0 else []
+    offset = 0
+    buf = b""
+    drop_until_nl = False
     try:
         st = os.fstat(fd)
         ident = (st.st_dev, st.st_ino)
-        chunks: list[bytes] = []
         while chunk := os.read(fd, 1 << 20):
-            chunks.append(chunk)
-        data = b"".join(chunks)
+            if drop_until_nl:
+                nl = chunk.find(b"\n")
+                if nl < 0:
+                    offset += len(chunk)
+                    continue
+                offset += nl + 1
+                chunk = chunk[nl + 1:]
+                drop_until_nl = False
+            buf += chunk
+            while True:
+                nl = buf.find(b"\n")
+                if nl < 0:
+                    break
+                line = buf[:nl]
+                offset += nl + 1
+                buf = buf[nl + 1:]
+                if line.strip():
+                    parsed = _parse_line(line)
+                    if parsed is not None and matches_filter(parsed, events, faults_only):
+                        matched.append(parsed)
+            if len(buf) > MAX_LINE_BYTES:
+                offset += len(buf)
+                buf = b""
+                drop_until_nl = True
     finally:
         os.close(fd)
-    if follow:
-        cut = data.rfind(b"\n")
-        if cut < 0:
-            return [], 0, ident
-        offset = cut + 1
-        body = data[:offset]
-    else:
-        offset = len(data)
-        body = data
-    matched: deque[dict[str, Any]] | list[dict[str, Any]] = deque(maxlen=limit) if limit > 0 else []
-    for line in body.splitlines():
-        if not line.strip():
-            continue
-        parsed = _parse_line(line)
-        if parsed is not None and matches_filter(parsed, events, faults_only):
-            matched.append(parsed)
+    if not follow and buf and not drop_until_nl:
+        offset += len(buf)
+        if buf.strip():
+            parsed = _parse_line(buf)
+            if parsed is not None and matches_filter(parsed, events, faults_only):
+                matched.append(parsed)
     return list(matched), offset, ident
 
 
@@ -229,6 +247,7 @@ def follow_log(path: Path, offset: int, events: set[str], faults_only: bool, as_
                poll_s: float = POLL_INTERVAL_S, max_polls: int | None = None) -> int:
     """Tail new lines appended to ``path`` starting at ``offset`` until KeyboardInterrupt or ``max_polls``."""
     buf = b""
+    drop_until_nl = False
     polls = 0
     try:
         while max_polls is None or polls < max_polls:
@@ -245,11 +264,19 @@ def follow_log(path: Path, offset: int, events: set[str], faults_only: bool, as_
                 if (ident is not None and cur_ident != ident) or size < offset:  # rotated or truncated
                     offset = 0
                     buf = b""
+                    drop_until_nl = False
                 ident = cur_ident
                 if size > offset:
                     os.lseek(fd, offset, os.SEEK_SET)
                     new_data = os.read(fd, min(1 << 20, size - offset))
                     offset += len(new_data)
+                    if drop_until_nl:
+                        nl = new_data.find(b"\n")
+                        if nl < 0:
+                            new_data = b""
+                        else:
+                            new_data = new_data[nl + 1:]
+                            drop_until_nl = False
                     buf += new_data
                     while b"\n" in buf:
                         line, buf = buf.split(b"\n", 1)
@@ -258,6 +285,9 @@ def follow_log(path: Path, offset: int, events: set[str], faults_only: bool, as_
                         parsed = _parse_line(line)
                         if parsed is not None and matches_filter(parsed, events, faults_only):
                             _emit(parsed, as_json, stdout)
+                    if len(buf) > MAX_LINE_BYTES:
+                        buf = b""
+                        drop_until_nl = True
             finally:
                 os.close(fd)
             polls += 1
@@ -304,9 +334,16 @@ def run(args: argparse.Namespace) -> int:
     except OSError as exc:
         return fail(f"cannot read {label}: {exc.strerror or type(exc).__name__}")
 
-    for item in initial:
-        _emit(item, bool(args.json), sys.stdout)
-    if args.follow:
-        return follow_log(log_path, offset, event_filter, bool(args.faults), bool(args.json), sys.stdout,
-                          ident=ident)
+    try:
+        for item in initial:
+            _emit(item, bool(args.json), sys.stdout)
+        if args.follow:
+            return follow_log(log_path, offset, event_filter, bool(args.faults), bool(args.json), sys.stdout,
+                              ident=ident)
+    except BrokenPipeError:
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+        return EXIT_OK
     return EXIT_OK

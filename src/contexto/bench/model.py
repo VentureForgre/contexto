@@ -319,7 +319,8 @@ class Script:
             if 0 <= d.turn < n and (not d.label.strip() or f"DECISION {d.label}:" not in self.turns[d.turn]):
                 problems.append(f"decisions: the label of {where} is not asked for in that turn, so no reply "
                                 "can be judged right")
-            elif 0 <= d.turn < n and d.probe in by_id and d.value == by_id[d.probe].answer:
+            elif (0 <= d.turn < n and d.probe in by_id and d.value == by_id[d.probe].answer
+                  and d.reply == f"DECISION {d.label}: {d.value}"):
                 from contexto.bench.script import decision_reply_ok
 
                 try:
@@ -331,10 +332,12 @@ class Script:
         problems += [f"decisions: decision turn {i + 1} has no decision" for i, kind in enumerate(self.kinds)
                      if kind == "decision" and i not in seen]
 
+        folded_all = {p.casefold(): p for p in self.files}
         folded_paths: dict[str, str] = {}
         for path in self.files:
             parts = path.split("/")
-            above = next((a for a in ("/".join(parts[:i]) for i in range(1, len(parts))) if a in self.files), None)
+            above = next((folded_all[k] for k in ("/".join(parts[:i]).casefold() for i in range(1, len(parts)))
+                          if k in folded_all), None)
             problem = _path_problem(path) or (f"is below the file {above!r}" if above else None)
             if problem:
                 problems.append(f"files: {path!r} {problem}")

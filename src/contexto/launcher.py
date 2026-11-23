@@ -961,7 +961,12 @@ def project_memory_wanted(options: LaunchOptions, stderr=None, env: dict[str, st
         print(f"contexto: {PROJECT_MEMORY_ENV}={shown!r} is not a value Contexto knows and is ignored: 0, false, "
               f"off or no turns project memory off; 1, true, on, yes or unset leaves it on",
               file=stderr or sys.stderr, flush=True)
-    return options.project_memory and on
+        return options.project_memory
+    if env is not None and (env.get(PROJECT_MEMORY_ENV) or "").strip():
+        return on
+    if env is None and (os.environ.get(PROJECT_MEMORY_ENV) or "").strip():
+        return on
+    return options.project_memory
 
 
 def record_project_memory(store: Any, wanted: bool) -> None:
@@ -1355,10 +1360,11 @@ def options_from_args(args: Any, *, config: FileConfig | None = None,
 
     pm_cli = _cli_bool(args, "project_memory_on", "no_project_memory")
     pm_env_set = bool((active_env.get(PROJECT_MEMORY_ENV) or "").strip())
+    pm_env_on, pm_env_unknown = project_memory_env(dict(active_env)) if pm_env_set else (True, None)
     if pm_cli is not None:
         project_memory = pm_cli
-    elif pm_env_set:
-        project_memory = True  # project_memory_wanted reads env and warns on unknown values
+    elif pm_env_set and pm_env_unknown is None:
+        project_memory = pm_env_on
     elif cfg.project_memory is not None:
         project_memory = cfg.project_memory
     else:

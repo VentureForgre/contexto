@@ -162,7 +162,10 @@ def _float_range(data: Mapping[str, Any], key: str, path: Path, section: str = "
     full = f"{section}.{key}" if section else key
     if type(val) not in (int, float):
         raise _fail(path, full, f"expected a number, got {type(val).__name__}")
-    fval = float(val)
+    try:
+        fval = float(val)
+    except OverflowError:
+        raise _fail(path, full, "must be a finite number") from None
     if not math.isfinite(fval):
         raise _fail(path, full, "must be a finite number")
     if gt is not None and not fval > gt:
@@ -194,6 +197,8 @@ def _read_bytes(path: Path) -> bytes | None:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except (FileNotFoundError, NotADirectoryError):
         return None
+    except ValueError:
+        raise _fail(path, None, "invalid path") from None
     except OSError as exc:
         raise _fail(path, None, f"cannot be opened ({exc.strerror or type(exc).__name__})") from None
     try:

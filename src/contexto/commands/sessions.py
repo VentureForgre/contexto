@@ -8,7 +8,7 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from contexto.commands._common import EXIT_ERROR, EXIT_OK, EXIT_USAGE, SESSION_HELP, fail
+from contexto.commands._common import EXIT_ERROR, EXIT_OK, EXIT_USAGE, SESSION_HELP, fail, safe_text
 from contexto.config import ConfigError, load_config
 from contexto.paths import contexto_home, session_dir
 from contexto.store import SessionNotFoundError, SessionStore
@@ -111,7 +111,8 @@ def run_list(args: argparse.Namespace) -> int:
         print(f"{message[0].upper()}{message[1:]}.")
         return EXIT_OK
     rows = [("ID", "CLI", "CREATED", "PAGES", "RECORDS", "PEAK", "FAULTS", "LAST ACTIVITY", "SIZE")]
-    rows += [(s.id, s.cli or "-", s.created, str(s.pages), "?" if s.records is None else str(s.records),
+    rows += [(s.id, safe_text(s.cli) if s.cli else "-", s.created, str(s.pages),
+              "?" if s.records is None else str(s.records),
               "-" if s.peak_tokens is None else f"{s.peak_tokens:,}",
               "-" if not s.faults else f"!{s.faults}", s.last_activity,
               human_size(s.size_bytes)) for s in sessions]
@@ -146,9 +147,10 @@ def run_prune(args: argparse.Namespace) -> int:
                 print(json.dumps({"error": str(exc)}, indent=2, sort_keys=True))
             fail(str(exc))
             return EXIT_USAGE
-        if older_than is None:
+        # Apply [retention] defaults only when no selection flag was passed on the CLI:
+        # combining a single CLI flag (e.g. --keep 5) with a config older_than would silently AND them.
+        if older_than is None and keep is None:
             older_than = cfg.retention.older_than
-        if keep is None:
             keep = cfg.retention.keep
     if older_than is None and keep is None and args.session is None:
         args.prune_parser.error("say which sessions: --older-than DURATION, --keep N, or --session ID")
