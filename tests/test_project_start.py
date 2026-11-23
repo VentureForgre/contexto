@@ -215,10 +215,13 @@ def digest(run: list[tuple]) -> str:
 # Again after D71: Config.window_fraction moved to 0.25 and Config gained stable_prefix,
 # cache_ttl_seconds and cold_cache_fraction, updating the Codex rotation window and both epoch records
 # (Claude Code's requests stayed byte-for-byte identical).
+# Updated for Claude Code 2.1.328: only ``signature_version`` and ``tested_versions`` inside the
+# synthetic run's ``session_start_unrecognised`` event changed; every request and the epoch record
+# hash are byte-for-byte identical.
 # Again with TokenEstimator EWMA + separate prose vs dense tool_result ratios: Turn 1 prose no longer
 # overwrites the 1.5 tool seed, changing the first tool round's pre-measurement estimate and subsequent
 # EWMA-decayed estimates; all four nothing-carried store kinds remain byte-for-byte identical.
-BEFORE_D69 = {MESSAGES: ("fa987af6a66c3fca29a4df85eb46e92cc51e1d19f732123875264282ccedc141",
+BEFORE_D69 = {MESSAGES: ("d7bdde076c35c1de04198af1b3d276db6ac626b79f420ed1e0d8a922d93b3dae",
                          "4dba8fc4935175c4b7be0f779b05e2daa7ab3c4e5dbf30acdb1c3f689c6f7df2"),
               RESPONSES: ("d9e7269bdef69fb34fa6ad2a147cde26f0862a4d4c5663cc45f12382e5fe0dfa",
                           "0f4c14284a3cb78863a7adb177266f5f51d464d0a0ac3ee4b586480075b61bf3")}

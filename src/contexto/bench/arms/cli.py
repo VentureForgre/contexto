@@ -83,7 +83,8 @@ KEPT_NAMES = frozenset({"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"})
 ENV = {"DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 READ_TOOL = "Read"
 THRASHING = "Autocompact is thrashing"
-CLAUDE_ARGS = ("-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose")
+CLAUDE_ARGS = ("-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+               "--disable-slash-commands", "--setting-sources", "user")
 CLOSE_TIMEOUT_S = 60
 UNMETERED_GRACE_S = 30  # how long a result with no metered request waits for a sign that it answered no turn
 KILL_TIMEOUT_S = 10
