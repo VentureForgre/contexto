@@ -103,14 +103,9 @@ from urllib.parse import quote, urlsplit
 
 from contexto.canonical import MAX_JSON_DEPTH, JSONTooDeepError, has_lone_surrogate, loads_bounded
 from contexto.dialects import (
-    api_for as dialect_api_for,
-)
-from contexto.dialects import (
     dialect_for as registry_dialect_for,
 )
 from contexto.dialects import (
-    is_transformed_path,
-    is_usage_feedback_path,
     model_from_endpoint,
 )
 from contexto.hints import without_hint_headers
@@ -136,6 +131,56 @@ RESPONSES_PATHS = frozenset({"/responses", "/v1/responses"})
 CHAT_COMPLETIONS_PATHS = frozenset({"/chat/completions", "/v1/chat/completions"})
 TRANSFORMED_PATHS = frozenset({MESSAGES_PATH, COUNT_TOKENS_PATH}) | RESPONSES_PATHS | CHAT_COMPLETIONS_PATHS
 USAGE_FEEDBACK_PATHS = frozenset({MESSAGES_PATH}) | RESPONSES_PATHS | CHAT_COMPLETIONS_PATHS
+# Vertex AI and Microsoft Foundry Anthropic Messages paths (measured on Claude Code 2.1.328):
+# - Vertex sends /projects/<p>/locations/<loc>/publishers/anthropic/models/<model>:streamRawPredict
+#   or :rawPredict (and count-tokens:rawPredict), optionally prefixed with /v1.
+# - Foundry sends /v1/messages (already MESSAGES_PATH) or /anthropic/v1/messages (and count_tokens).
+VERTEX_COUNT_TOKENS_RE = re.compile(
+    r"^/(?:v1/)?projects/[A-Za-z0-9][A-Za-z0-9._-]*/locations/[A-Za-z0-9][A-Za-z0-9._-]*"
+    r"/publishers/anthropic/models/count-tokens:rawPredict\Z"
+)
+VERTEX_MESSAGES_RE = re.compile(
+    r"^/(?:v1/)?projects/[A-Za-z0-9][A-Za-z0-9._-]*/locations/[A-Za-z0-9][A-Za-z0-9._-]*"
+    r"/publishers/anthropic/models/[A-Za-z0-9][A-Za-z0-9._@-]*:(?:streamRawPredict|rawPredict)\Z"
+)
+FOUNDRY_MESSAGES_PATHS = frozenset({"/anthropic/v1/messages"})
+FOUNDRY_COUNT_TOKENS_PATHS = frozenset({"/anthropic/v1/messages/count_tokens"})
+
+
+def classify_path(path: str) -> tuple[str | None, str | None]:
+    """Classify a POST path into ``(api, canonical_endpoint)``: ``("messages", "/v1/messages")``,
+    ``("messages", "/v1/messages/count_tokens")``, ``("responses", path)``,
+    ``("chat_completions", path)``, ``("gemini", path)``, or ``(None, None)``.
+
+    Recognises direct Anthropic Messages paths, Vertex AI ``:rawPredict`` / ``:streamRawPredict`` /
+    ``count-tokens:rawPredict`` paths, Microsoft Foundry ``/anthropic/v1/messages`` paths, and any
+    dialect registered in ``contexto.dialects`` (Responses, Chat Completions, Gemini)."""
+    if path == MESSAGES_PATH or path in FOUNDRY_MESSAGES_PATHS:
+        return "messages", MESSAGES_PATH
+    if path == COUNT_TOKENS_PATH or path in FOUNDRY_COUNT_TOKENS_PATHS:
+        return "messages", COUNT_TOKENS_PATH
+    if VERTEX_COUNT_TOKENS_RE.match(path):
+        return "messages", COUNT_TOKENS_PATH
+    if VERTEX_MESSAGES_RE.match(path):
+        return "messages", MESSAGES_PATH
+    dialect = registry_dialect_for(path)
+    if dialect is not None:
+        return dialect.api_name, path
+    return None, None
+
+
+def is_transformed_path(path: str) -> bool:
+    """Whether ``path`` carries a model or token-count body the proxy transforms."""
+    return classify_path(path)[0] is not None
+
+
+def is_usage_feedback_path(path: str) -> bool:
+    """Whether ``path`` returns model usage fed back to the rewrite engine."""
+    api, canonical = classify_path(path)
+    if api is None or canonical is None:
+        return False
+    dialect = registry_dialect_for(canonical)
+    return dialect is not None and not dialect.is_count_endpoint(canonical)
 RESPONSE_END_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
 # D40: Responses tool calls that run on OpenAI's servers (the Responses API reference's hosted tools;
 # ``mcp_call`` is the hosted remote-MCP tool, which OpenAI calls itself). They never reach Contexto's
@@ -174,11 +219,14 @@ USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_t
 AFFINITY_HEADER = "X-Session-Affinity"
 # The one answer to a request the proxy refuses to serve (D53), whatever the reason: the body never says why.
 REFUSED_MESSAGE = "contexto proxy: request refused (not from the local CLI)"
-# Host names (and their subdomains) that serve the vendor APIs directly, including Azure OpenAI
-# and Azure AI Foundry: each has one identity per key, so the affinity header is not sent to them
-# (D36). Matching is by host name only; an IP literal upstream gets the header.
+# Host names (and their subdomains) that serve the vendor APIs directly, including Azure OpenAI,
+# Azure AI Foundry, and Google Vertex AI / Gemini: each has one identity per credential, so the
+# affinity header is not sent to them (D36). Matching is by host name only; an IP literal upstream
+# gets the header.
 VENDOR_HOSTS = ("anthropic.com", "openai.com", "chatgpt.com", "openai.azure.com", "services.ai.azure.com",
-                "googleapis.com")
+                "cognitiveservices.azure.com", "generativelanguage.googleapis.com", "aiplatform.googleapis.com")
+# Regional Vertex AI endpoints use a hyphenated single-label prefix (e.g. us-east5-aiplatform.googleapis.com).
+_VERTEX_REGIONAL_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-aiplatform\.googleapis\.com\Z")
 _ALLOWED_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$|^\[[0-9a-f:.]+\]$")
 _LOCAL_ORIGIN_SCHEMES = frozenset({"vscode-webview", "cursor-webview", "jetbrains", "file"})
 
@@ -344,12 +392,15 @@ def affinity_key(session_id: str, salt: bytes) -> str:
 
 
 def is_vendor_host(host: str) -> bool:
-    """True for a vendor API host name or a subdomain of one. The name is IDNA-normalized first, as
-    the socket layer does when it connects (a soft hyphen in ``api.anthro\xadpic.com`` maps away); a
+    """True for a vendor API host name or a subdomain of one (including regional Google Vertex AI
+    ``<region>-aiplatform.googleapis.com`` endpoints). The name is IDNA-normalized first, as the
+    socket layer does when it connects (a soft hyphen in ``api.anthro\xadpic.com`` maps away); a
     name that cannot be normalized counts as a vendor host, so it gets no header."""
     try:
         host = host.encode("idna").decode("ascii").lower().rstrip(".")
     except UnicodeError:
+        return True
+    if _VERTEX_REGIONAL_HOST_RE.match(host):
         return True
     return any(host == vendor or host.endswith("." + vendor) for vendor in VENDOR_HOSTS)
 
@@ -1449,8 +1500,9 @@ class _Handler(BaseHTTPRequestHandler):
         entry: dict[str, Any] = {"event": "request", "method": self.command, "path": path_only,
                                  "original_request_bytes": len(body)}
         original = None
-        if self.command == "POST" and is_transformed_path(path_only):
-            entry["api"] = dialect_api_for(path_only) or "messages"
+        api, canonical_endpoint = classify_path(path_only) if self.command == "POST" else (None, None)
+        if api is not None and canonical_endpoint is not None:
+            entry["api"] = api
             # The proxy must read these responses (usage, and the stream hold of PR #74), so it asks
             # upstream for an unencoded body instead of forwarding the CLI's Accept-Encoding.
             headers = {k: v for k, v in headers.items() if k.lower() != "accept-encoding"}
@@ -1468,7 +1520,7 @@ class _Handler(BaseHTTPRequestHandler):
                 body = decoded
                 headers = {k: v for k, v in headers.items() if k.lower() != "content-encoding"}
                 self._raw = (body, dict(headers))
-            body, headers, original = self._transform(body, headers, entry, path_only)
+            body, headers, original = self._transform(body, headers, entry, canonical_endpoint)
         entry["request_bytes"] = len(body)
         self._forward(body, headers, entry, started, original)
 
@@ -1583,7 +1635,16 @@ class _Handler(BaseHTTPRequestHandler):
                 conn.connect()
                 watch.attach(conn)
                 phase, phase_started = "send", time.monotonic()
-                conn.putrequest(self.command, owner.base_path + self.path, skip_host=True,
+                path_only = urlsplit(self.path).path
+                if (owner.base_path == "/v1" and path_only.startswith("/v1/projects/")
+                        and classify_path(path_only)[0] == "messages"):
+                    upstream_path = self.path
+                elif (owner.base_path == "/anthropic"
+                      and path_only in (FOUNDRY_MESSAGES_PATHS | FOUNDRY_COUNT_TOKENS_PATHS)):
+                    upstream_path = self.path
+                else:
+                    upstream_path = owner.base_path + self.path
+                conn.putrequest(self.command, upstream_path, skip_host=True,
                                 skip_accept_encoding=True)
                 conn.putheader("Host", owner.upstream_netloc)
                 # D70: the one place a request's headers are written upstream, so this also covers
@@ -1655,14 +1716,16 @@ class _Handler(BaseHTTPRequestHandler):
         # D59: the client has the stream's last event, so a close after it (before the terminator) is
         # not an abort: a CLI may return on message_stop or response.completed.
         delivered_end = False
-        feedback = (original is not None and is_usage_feedback_path(entry["path"]) and 200 <= response.status < 300)
+        _, feedback_endpoint = classify_path(entry["path"])
+        feedback = (original is not None and is_usage_feedback_path(entry["path"])
+                    and 200 <= response.status < 300)
 
         def observe() -> None:
             nonlocal observed
-            if feedback and not observed and reader.usage:
+            if feedback and not observed and reader.usage and feedback_endpoint is not None:
                 observed = True
                 # Packet A2e: the returned events go on this request's entry, logged once with it.
-                usage_events = self._observe_usage(entry["path"], reader.usage, original,
+                usage_events = self._observe_usage(feedback_endpoint, reader.usage, original,
                                                    hold.client_calls if hold is not None else reader.tool_calls(),
                                                    tuple(reader.call_ids), headers)
                 if usage_events:

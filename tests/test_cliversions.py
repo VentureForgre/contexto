@@ -122,13 +122,15 @@ def test_client_version_from_the_measured_user_agents():
 
 
 def test_untested_warning_is_one_line_naming_tested_versions_report_and_silence():
-    line = untested_warning("claude", "2.1.999")
-    assert "\n" not in line and line.startswith("warning: Claude Code 2.1.999 ")
-    assert "tested: 2.1.302, 2.1.310, 2.1.314, 2.1.318" in line and REPORT_URL in line
+    line = untested_warning("claude", "2.2.0")
+    assert "\n" not in line and line.startswith("warning: Claude Code 2.2.0 ")
+    assert f"tested: {', '.join(TESTED_VERSIONS['claude'])}" in line and REPORT_URL in line
+    assert "supported: >=2.1.302, <2.2.0" in line
     # The flag goes before the CLI's name: after it, it would be passed to the CLI.
     assert "contexto run --no-version-check claude" in line and f"{NO_CHECK_ENV}=1" in line
-    codex = untested_warning("codex", "0.170.0")
-    assert "Codex 0.170.0" in codex and "tested: 0.154.0, 0.163.0, 0.166.0" in codex and "\n" not in codex
+    codex = untested_warning("codex", "1.0.0")
+    assert "Codex 1.0.0" in codex and f"tested: {', '.join(TESTED_VERSIONS['codex'])}" in codex and "\n" not in codex
+    assert "supported: >=0.154.0, <1.0.0" in codex
     assert "contexto run --no-version-check codex" in codex
 
 
@@ -227,11 +229,16 @@ def test_launch_check_events_and_warning(tmp_path):
     tested = fake_cli(tmp_path, "print('2.1.302 (Claude Code)')", "tested")
     event, warning = launch_check("claude", str(tested), env={})
     assert event == {"event": "cli_version_check", "cli": "claude", "version": "2.1.302", "tested": True,
-                     "tested_versions": "2.1.302, 2.1.310, 2.1.314, 2.1.318"} and warning is None
-    newer = fake_cli(tmp_path, "print('2.1.400 (Claude Code)')", "newer")
+                     "tested_versions": ", ".join(TESTED_VERSIONS["claude"])} and warning is None
+    # A weekly patch in the same supported 2.1.x family (>= 2.1.302) is compatible without warning.
+    patch = fake_cli(tmp_path, "print('2.1.350 (Claude Code)')", "patch")
+    event, warning = launch_check("claude", str(patch), env={})
+    assert event["tested"] is True and event["version"] == "2.1.350" and warning is None
+    # A version outside the supported range (next minor / major or below min) warns.
+    newer = fake_cli(tmp_path, "print('2.2.0 (Claude Code)')", "newer")
     event, warning = launch_check("claude", str(newer), env={})
-    assert event["tested"] is False and event["version"] == "2.1.400"
-    assert warning == untested_warning("claude", "2.1.400")
+    assert event["tested"] is False and event["version"] == "2.2.0"
+    assert warning == untested_warning("claude", "2.2.0")
     event, warning = launch_check("codex", "contexto-no-such-cli-on-path", env={})
     assert event["version"] is None and event["tested"] is None and event["error"] == "not_found" and warning is None
 
@@ -239,7 +246,7 @@ def test_launch_check_events_and_warning(tmp_path):
 @pytest.mark.parametrize("value,skipped", [("1", True), ("yes", True), ("true", True), ("0", False),
                                            ("false", False), ("", False)])
 def test_launch_check_is_silenced_by_flag_or_env(tmp_path, value, skipped):
-    newer = fake_cli(tmp_path, "print('2.1.400 (Claude Code)')")
+    newer = fake_cli(tmp_path, "print('2.2.0 (Claude Code)')")
     event, warning = launch_check("claude", str(newer), env={NO_CHECK_ENV: value})
     assert (event.get("skipped") is True) == skipped and (warning is None) == skipped
     event, warning = launch_check("claude", str(newer), enabled=False, env={})
@@ -355,17 +362,22 @@ def names(events: list[dict]) -> list[str]:
 
 def test_client_versions_logs_each_version_once_and_warns_once():
     check = ClientVersions()
+    tested_str = ", ".join(TESTED_VERSIONS["claude"])
     request = claude_request([prompt("probe", ATTRIBUTION), environment()])
     first = check.observe(request, {"User-Agent": CLAUDE_UA}, ANTHROPIC)
     assert first == [{"event": "cli_version", "cli": "claude", "client": "claude-cli", "version": "2.1.302",
-                      "tested": True, "tested_versions": "2.1.302, 2.1.310, 2.1.314, 2.1.318"}]
+                      "tested": True, "tested_versions": tested_str}]
     assert check.observe(request, {"User-Agent": CLAUDE_UA}, ANTHROPIC) == []
-    newer = check.observe(request, {"user-agent": "claude-cli/2.1.400 (external, cli)"}, ANTHROPIC)
+    # A weekly patch in 2.1.x is compatible and does not emit cli_version_untested.
+    patch = check.observe(request, {"user-agent": "claude-cli/2.1.328 (external, cli)"}, ANTHROPIC)
+    assert names(patch) == ["cli_version"] and patch[0]["tested"] is True
+    # A version outside the supported range emits cli_version_untested once per engine.
+    newer = check.observe(request, {"user-agent": "claude-cli/2.2.0 (external, cli)"}, ANTHROPIC)
     assert names(newer) == ["cli_version", "cli_version_untested"]
     assert newer[0]["tested"] is False and newer[1] == {"event": "cli_version_untested", "cli": "claude",
-                                                        "version": "2.1.400",
-                                                        "tested_versions": "2.1.302, 2.1.310, 2.1.314, 2.1.318"}
-    again = check.observe(request, {"user-agent": "claude-cli/2.1.401 (external, cli)"}, ANTHROPIC)
+                                                        "version": "2.2.0",
+                                                        "tested_versions": tested_str}
+    again = check.observe(request, {"user-agent": "claude-cli/2.2.1 (external, cli)"}, ANTHROPIC)
     assert names(again) == ["cli_version"]  # the warning is once per engine
     assert check.observe(request, {"user-agent": "curl/8.7.1"}, ANTHROPIC) == []
 
@@ -387,12 +399,12 @@ def test_session_start_unrecognised_once_on_the_first_request_with_tools_and_con
     assert check.observe(side, {}, ANTHROPIC) == []  # no tool list: a side request, not judged
     plain = claude_request([prompt("tools, but no injected context")])
     assert check.observe(plain, {}, ANTHROPIC) == [] and not check.session_start_judged  # cannot tell: still open
-    ua = {"user-agent": "claude-cli/2.1.400 (external, cli)"}
+    ua = {"user-agent": "claude-cli/2.2.0 (external, cli)"}
     events = check.observe(renamed, ua, ANTHROPIC)
     assert names(events) == ["cli_version", "cli_version_untested", "session_start_unrecognised"]
     assert events[-1] == {"event": "session_start_unrecognised", "dialect": "anthropic",
-                          "signature_version": "2.1.318", "cli_version": "2.1.400",
-                          "tested_versions": "2.1.302, 2.1.310, 2.1.314, 2.1.318"}
+                          "signature_version": TESTED_VERSIONS["claude"][-1], "cli_version": "2.2.0",
+                          "tested_versions": ", ".join(TESTED_VERSIONS["claude"])}
     assert check.observe(renamed, ua, ANTHROPIC) == []
 
 
@@ -419,8 +431,8 @@ def test_codex_session_start_unrecognised():
     events = check.observe({"input": codex_lead(sections=False)}, {"user-agent": CODEX_UA}, RESPONSES)
     assert names(events) == ["cli_version", "session_start_unrecognised"]
     assert events[-1] == {"event": "session_start_unrecognised", "dialect": "responses",
-                          "signature_version": "0.166.0", "cli_version": "0.163.0",
-                          "tested_versions": "0.154.0, 0.163.0, 0.166.0"}
+                          "signature_version": TESTED_VERSIONS["codex"][-1], "cli_version": "0.163.0",
+                          "tested_versions": ", ".join(TESTED_VERSIONS["codex"])}
     ok = ClientVersions()
     assert names(ok.observe({"input": codex_lead()}, {"user-agent": CODEX_UA}, RESPONSES)) == ["cli_version"]
 
@@ -443,7 +455,7 @@ def test_engine_logs_the_events_before_its_request_event_and_keeps_the_rewrite()
     request = claude_request([prompt("probe", ATTRIBUTION), environment(RENAMED)])
     reference = RewriteEngine(MemoryStore(), config=Config(bound=150_000))
     expected, _, _ = reference(copy_of(request), {}, "/v1/messages")
-    ua = {"User-Agent": "claude-cli/2.1.400 (external, cli)"}
+    ua = {"User-Agent": "claude-cli/2.2.0 (external, cli)"}
     upstream, headers, events = engine(copy_of(request), dict(ua), "/v1/messages")
     found = names(events)
     assert {"cli_version", "cli_version_untested", "session_start_unrecognised"} <= set(found)
@@ -527,12 +539,12 @@ def test_check_cli_version_logs_and_prints_one_line(tmp_path, monkeypatch):
     from contexto import launcher
 
     monkeypatch.delenv(NO_CHECK_ENV, raising=False)
-    newer = fake_cli(tmp_path, "print('2.1.400 (Claude Code)')")
+    newer = fake_cli(tmp_path, "print('2.2.0 (Claude Code)')")
     store, err = ListStore(), io.StringIO()
     assert launcher.check_cli_version("claude", str(newer), store, stderr=err) is True
-    assert err.getvalue() == f"contexto: {untested_warning('claude', '2.1.400')}\n"
-    assert store.events == [{"event": "cli_version_check", "cli": "claude", "version": "2.1.400", "tested": False,
-                             "tested_versions": "2.1.302, 2.1.310, 2.1.314, 2.1.318"}]
+    assert err.getvalue() == f"contexto: {untested_warning('claude', '2.2.0')}\n"
+    assert store.events == [{"event": "cli_version_check", "cli": "claude", "version": "2.2.0", "tested": False,
+                             "tested_versions": ", ".join(TESTED_VERSIONS["claude"])}]
     err = io.StringIO()
     assert launcher.check_cli_version("claude", str(newer), store, enabled=False, stderr=err) is True
     assert err.getvalue() == "" and store.events[-1]["skipped"] is True

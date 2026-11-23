@@ -180,6 +180,7 @@ from contexto.proxy import (
     EncodedBodyError,
     _Handler,
     _LoopbackServer,
+    classify_path,
     decode_request_body,
     is_local_origin,
     normalize_allowed_host,
@@ -358,12 +359,14 @@ def mcp_http_config_payload(port: int, token: str, session: str | None = None) -
 
 
 def cloud_provider_warning(found: CloudProvider) -> str:
-    """The warning for what ``contexto.upstream.cloud_provider`` found: the check ``contexto run claude``
-    refuses a launch by, read from this process's environment and directory (D70). The service warns
-    and does not refuse: its clients are started elsewhere, with their own environment and directory,
-    and a Claude Code started here would bypass it."""
+    """The warning for what ``contexto.upstream.cloud_provider`` found: read from this process's
+    environment and directory (D70). The service warns on all cloud-provider switches (including
+    Vertex AI and Microsoft Foundry) because ``print-settings`` only sets ``ANTHROPIC_BASE_URL`` and
+    clients are started elsewhere; to route Vertex AI or Foundry through Contexto automatically, use
+    ``contexto run claude`` (or configure ``--upstream`` and the provider base-URL env var manually,
+    whose paths ``serve`` transforms)."""
     return (f"warning: {cloud_provider_note(found)}. A Claude Code client with a cloud-provider switch on does "
-            f"not reach contexto serve, and its prompt is not bounded.")
+            f"not reach contexto serve via ANTHROPIC_BASE_URL, and its prompt is not bounded.")
 
 
 def check_upstream_loop(upstream: Upstream, port: int, token: str) -> None:
@@ -1168,7 +1171,8 @@ class ServeService:
             event["error"] = error
         self.log.log(event)
         why = UNBOUNDED_REASONS.get(reason)
-        if why is None or path != MESSAGES_PATH:
+        _, canonical = classify_path(path)
+        if why is None or canonical != MESSAGES_PATH:
             return
         now = self.clock()
         with self._lock:
@@ -1775,7 +1779,8 @@ class _ServeHandler(_Handler):
         if path_only == MCP_PATH:
             self._mcp(url_session)
             return
-        dialect = registry_dialect_for(path_only)
+        _, canonical_path = classify_path(path_only) if self.command == "POST" else (None, None)
+        dialect = registry_dialect_for(canonical_path or path_only)
         session: _Session | None = None
         try:
             session = self._route(path_only, dialect=dialect, url_session=url_session,
@@ -1915,8 +1920,10 @@ class _ServeHandler(_Handler):
         """The session this request belongs to (leased), or None for a request that has none. Runs the
         service's pluggable session routing chain (explicit URL segment -> client headers/body ->
         deterministic content-prefix fingerprint)."""
+        _, canonical = classify_path(path_only) if self.command == "POST" else (None, None)
+        effective_path = canonical or path_only
         if dialect is None:
-            dialect = registry_dialect_for(path_only)
+            dialect = registry_dialect_for(effective_path)
         if self.command != "POST" or dialect is None:
             return None
         if (self.headers.get("Upgrade") or "").lower() == "websocket":
@@ -1937,16 +1944,16 @@ class _ServeHandler(_Handler):
             self._parsed, request = (body, exc), None
         else:
             self._parsed = (body, request)
-        ctx = RouteContext(method=self.command, path=path_only, headers=self.headers, request=request,
+        ctx = RouteContext(method=self.command, path=effective_path, headers=self.headers, request=request,
                            dialect=dialect, url_session=url_session, url_workdir=url_workdir, provider=provider)
         match: RouteMatch | None = None
         for router in self.service.routers:
             match = router(ctx)
             if match is not None:
                 break
-        is_generation = not dialect.is_count_endpoint(path_only)
+        is_generation = not dialect.is_count_endpoint(effective_path)
         if match is None:
-            if is_generation and path_only == MESSAGES_PATH:
+            if is_generation and effective_path == MESSAGES_PATH:
                 raise _Unrouted("no_session_id")
             return None
         header_workdir = _validate_workdir(self.headers.get(CONTEXTO_WORKDIR_HEADER))

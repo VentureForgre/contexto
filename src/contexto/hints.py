@@ -138,7 +138,8 @@ def contexto_set_hints_on(settings: dict) -> bool:
 
 
 def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None = None, home: Path | None = None,
-                       files: SettingsFiles | None = None, managed: Path | None = None) -> str:
+                       files: SettingsFiles | None = None, managed: Path | None = None,
+                       extra_settings: dict | None = None) -> str:
     """What ``contexto run claude`` does about the hint headers for a launch from ``cwd``:
 
     - ``forwarded``: the user had the hints on, so the upstream was already getting them. Contexto
@@ -149,7 +150,8 @@ def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None
     - ``stripped``: neither. Contexto asks for them and the proxy removes the six before it forwards.
 
     "On" is the value Claude Code would run with without Contexto's ``--settings`` file
-    (``contexto.upstream.claude_env_value``): the managed settings file's, else the first settings
+    (``contexto.upstream.claude_env_value``): the managed settings file's, else a user ``--settings``
+    ``env`` block, else the first settings
     file ``env`` block that sets ``CLAUDE_CODE_GATEWAY_HINT_HEADERS``, else the process environment's.
     Measured on 2.1.322: ``1``, ``true``, ``yes``, ``on`` and ``TRUE`` send the headers, ``0``,
     ``false`` and ``2`` do not, and a settings file's value wins over the environment's in both
@@ -174,10 +176,11 @@ def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None
     project file) gives ``stripped``, not ``off``.
 
     "Off" is, when the hints are not on, one of ``0``, ``false``, ``no``, ``off`` in the process
-    environment (unless it is an outer launch's, as above), in the user settings file, or in the
-    managed settings file, which outranks Contexto's ``--settings``. A project file's off value is not
-    the user's choice and Contexto's ``--settings`` value outranks it (measured), so it leaves the
-    launch ``stripped``. A settings file that cannot be read decides nothing."""
+    environment (unless it is an outer launch's, as above), in a user ``--settings``, in the user
+    settings file, or in the managed settings file, which outranks Contexto's ``--settings``. A project
+    file's off value is not the user's choice and Contexto's ``--settings`` value outranks it
+    (measured), so it leaves the launch ``stripped``. A settings file that cannot be read decides
+    nothing."""
     env = os.environ if env is None else env
     home = home or Path.home()
     files = files or SettingsFiles()
@@ -186,16 +189,18 @@ def hint_headers_state(*, env: Mapping[str, str] | None = None, cwd: Path | None
     # that launch's; an off value never is.
     own = env.get(HINT_MARKER_KEY) != STRIPPED or not env_truthy(env.get(HINT_HEADERS_KEY))
     found = claude_env_value(HINT_HEADERS_KEY, env=env, cwd=cwd, home=home, files=files, managed=managed,
-                             process_env=own, skip=contexto_set_hints_on)
+                             process_env=own, skip=contexto_set_hints_on, extra_settings=extra_settings)
     if env_truthy(found.value):
         return FORWARDED
     # A discounted file still applies in Claude Code: when its on value is what Claude Code would run
     # with, the hints are sent whatever off value lies below it, so they are removed, never left on.
     applied = claude_env_value(HINT_HEADERS_KEY, env=env, cwd=cwd, home=home, files=files, managed=managed,
-                               process_env=own)
+                               process_env=own, extra_settings=extra_settings)
     if env_truthy(applied.value):
         return STRIPPED
+    flag_val = settings_env(extra_settings, HINT_HEADERS_KEY) if isinstance(extra_settings, dict) else None
     said = (env.get(HINT_HEADERS_KEY) if own else None,
+            flag_val,
             settings_file_env(files, user_settings_path(home, env), HINT_HEADERS_KEY),
             settings_file_env(files, managed, HINT_HEADERS_KEY))
     return OFF if any(env_falsy(value) for value in said) else STRIPPED

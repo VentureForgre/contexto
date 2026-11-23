@@ -53,7 +53,7 @@ CONTEXTO_TOOLS = ("mcp__contexto__contexto_recall", "mcp__contexto__contexto_pin
                   "mcp__contexto__contexto_state", "mcp__contexto__contexto_search")
 # The newest Claude Code version in contexto.cliversions.TESTED_VERSIONS, and the interactive CLI's
 # User-Agent with it.
-CLAUDE_CODE_VERSION = "2.1.318"
+CLAUDE_CODE_VERSION = "2.1.328"
 USER_AGENT = f"claude-cli/{CLAUDE_CODE_VERSION} (external, cli)"
 CLAUDE_CODE_SESSION = "5ca1e000-0000-4000-8000-000000000001"  # made up; the form of Claude Code's session id
 # The request headers the engine reads, as the driver sends them (run.Client) and fast-forward passes them.

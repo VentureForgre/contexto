@@ -50,13 +50,13 @@ tool command, a hook, an MCP server) inherits it. The block therefore also holds
 pointed at another base URL inherits the ``1`` too and sends the hints to that URL, where no Contexto
 proxy removes them. The explicit off above is the way out: Contexto then sets nothing to inherit.
 
-Cloud providers (D70): with ``CLAUDE_CODE_USE_BEDROCK``, ``CLAUDE_CODE_USE_VERTEX``,
-``CLAUDE_CODE_USE_FOUNDRY``, ``CLAUDE_CODE_USE_MANTLE`` or ``CLAUDE_CODE_USE_ANTHROPIC_AWS`` on, Claude
-Code sends every request to that provider and none to ``ANTHROPIC_BASE_URL`` (measured on 2.1.322;
-``CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`` too, measured on 2.1.318: ``upstream.CLOUD_PROVIDER_KEYS``),
-so the session would run with no bound and nothing would say so. The launch is refused before a
-session is opened when a switch is on in the process environment or in any settings file Contexto
-can find, whichever of them Claude Code would apply (``check_cloud_provider``).
+Cloud providers (D70): Google Vertex AI (``CLAUDE_CODE_USE_VERTEX``) and Microsoft Foundry
+(``CLAUDE_CODE_USE_FOUNDRY``) are intercepted via ``ANTHROPIC_VERTEX_BASE_URL`` and
+``ANTHROPIC_FOUNDRY_BASE_URL`` (clearing ``ANTHROPIC_FOUNDRY_RESOURCE`` so the Foundry SDK accepts
+``baseURL``). Unsupported switches (``CLAUDE_CODE_USE_BEDROCK``, ``CLAUDE_CODE_USE_MANTLE``,
+``CLAUDE_CODE_USE_ANTHROPIC_AWS``, ``CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD``), dual Vertex+Foundry,
+conflicting precedence/trust overrides, and unreadable settings files that may name a switch are
+refused before a session is opened (``check_cloud_provider``).
 
 Claude Code's settings files are read once per launch, with a bound (``claude_launch_settings``).
 
@@ -78,8 +78,9 @@ through the launcher's cleanup and exit 128 + N. SIGKILL cannot be caught, so a 
 (its own session, so terminal signals miss it) holds a pipe from the launcher: when the pipe closes
 without the launcher's "done", it sends claude SIGTERM and removes the temporary files. What a SIGKILL
 leaves: the session log has no ``exit`` event, and if the watchdog is killed too, the temporary
-directory stays in ``$TMPDIR`` (the proxy URL, the tool names, the session id and the home path;
-no secrets). Terminal resize (SIGWINCH) goes from the kernel to claude without the launcher's help.
+directory stays in ``$TMPDIR`` (mode ``0700`` directory with ``0600`` settings/MCP files, holding
+the proxy URL, tool names, session id, home path, and any merged user ``--settings`` content).
+Terminal resize (SIGWINCH) goes from the kernel to claude without the launcher's help.
 
 Window budget (contract rule 4): the engine keeps ``W = bound - headroom - F`` tokens for the
 working window, where ``F`` is the fixed overhead (system, tools, carried content, pinned text, and
@@ -138,7 +139,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from contexto.canonical import has_lone_surrogate
+from contexto.canonical import JSONTooDeepError, has_lone_surrogate, loads_bounded
 from contexto.cliversions import launch_check
 from contexto.hints import HINT_HEADERS_KEY, HINT_MARKER_KEY, HINT_STATES, OFF, STRIPPED, hint_headers_state
 from contexto.mcp import SERVER_NAME as MCP_SERVER_NAME
@@ -155,10 +156,24 @@ from contexto.store.prune import discard_new_session
 from contexto.store.sessions import named, starting_with
 from contexto.toolcheck import denied_tools_message, missing_tools_message
 from contexto.upstream import (
+    BASE_URL_KEY,
+    FOUNDRY_BASE_URL_KEY,
+    FOUNDRY_RESOURCE_KEY,
+    INTERCEPTED_CLOUD_PROVIDERS,
+    SETTINGS_FILE_LIMIT,
     SettingsFiles,
     Upstream,
+    _has_nonfinite,
+    _json_constant,
+    active_cloud_provider,
+    checked_provider_places,
+    claude_env_value,
+    claude_key_helper,
+    claude_oauth_detected,
     cloud_provider,
     cloud_provider_note,
+    read_settings_file,
+    resolve_provider_upstream,
     resolve_upstream,
     untrusted_note,
 )
@@ -190,7 +205,7 @@ ENV_VALUE_SHOWN = 40  # characters of an unrecognised variable's value quoted on
 # D63: set to 0, false, off or no to turn in-turn paging off, like --no-in-turn-paging.
 IN_TURN_PAGING_ENV = "CONTEXTO_IN_TURN_PAGING"
 # Claude Code's long options whose value is the next argument even when it starts with "-": every main-command
-# option declared with a required ``<value>`` in the 2.1.314 and 2.1.318 binaries, shown in ``--help`` or
+# option declared with a required ``<value>`` in 2.1.314-2.1.328 binaries, shown in ``--help`` or
 # hidden (variadic ones take at least that one). ``claude_options`` skips that value.
 CLAUDE_VALUE_OPTIONS = frozenset({
     "--add-dir", "--agent", "--agents", "--allowedTools", "--allowed-tools", "--append-system-prompt",
@@ -200,7 +215,7 @@ CLAUDE_VALUE_OPTIONS = frozenset({
     "--model", "--name", "--output-format", "--permission-mode", "--permission-prompts", "--plugin-dir",
     "--plugin-url", "--remote-control-session-name-prefix", "--session-id", "--setting-sources", "--settings",
     "--system-prompt", "--system-prompt-file", "--system-prompt-snapshot", "--tools",
-    # Hidden (in the 2.1.314 and 2.1.318 binaries, not in --help; --session-began-as-copy is 2.1.318's):
+    # Hidden (in the 2.1.314-2.1.328 binaries, not in --help):
     "--advisor", "--agent-color", "--agent-id", "--agent-name", "--agent-type", "--append-subagent-system-prompt",
     "--append-subagent-system-prompt-file", "--attach-serve", "--client-data-url", "--correlation-id",
     "--deep-link-last-fetch", "--deep-link-repo", "--fast-mode", "--inherit-permission-mode", "--managed-settings",
@@ -210,6 +225,13 @@ CLAUDE_VALUE_OPTIONS = frozenset({
     "--rewind-files", "--runner-declares", "--sdk-url", "--session-began-as-copy", "--task-budget", "--team-name",
     "--teammate-mode", "--thinking", "--thinking-display", "--watch-artifact", "--watch-artifact-no-autoreact",
     "--workload"})
+# Claude Code's long options with an optional value (``[value]`` in 2.1.328 --help): when followed by a
+# non-option argument (or bare ``-``), that argument is its value; when followed by another ``--flag``,
+# the option takes no value and the flag is still parsed.
+CLAUDE_OPTIONAL_VALUE_OPTIONS = frozenset({
+    "--cloud", "--debug", "--from-pr", "--prompt-suggestions", "--remote-control", "--resume", "--teleport",
+    "--worktree",
+})
 # Claude Code's short options (2.1.314 and 2.1.318, the same): True for a flag, False when it takes a value.
 # Commander reads a cluster such as ``-pc`` or ``-rabc123`` one letter at a time: a flag is consumed and the
 # rest is read again (``-pc`` is ``-p -c``); an option that takes a value, required (``-n``) or optional
@@ -263,21 +285,138 @@ class LaunchOptions:
     in_turn_paging: bool = True  # D63: page inside a running turn (rule 5)
 
 
+def _validate_settings_object(data: Any, label: str) -> dict[str, Any]:
+    """Validate that a user ``--settings`` JSON payload is an object with valid ``env`` and
+    ``permissions`` shapes."""
+    if not isinstance(data, dict):
+        raise LaunchError(f"{label} must be a JSON object", EXIT_USAGE)
+    if "env" in data and not isinstance(data["env"], dict):
+        raise LaunchError(f"{label} has an 'env' field that is not a JSON object", EXIT_USAGE)
+    if "permissions" in data:
+        perms = data["permissions"]
+        if not isinstance(perms, dict):
+            raise LaunchError(f"{label} has a 'permissions' field that is not a JSON object", EXIT_USAGE)
+        for field_name in ("allow", "deny", "ask"):
+            if field_name in perms and not isinstance(perms[field_name], list):
+                raise LaunchError(f"{label} has a 'permissions.{field_name}' field that is not a JSON list",
+                                  EXIT_USAGE)
+    return data
+
+
+def _load_user_settings_arg(raw: str) -> dict[str, Any]:
+    """Parse one user ``--settings <file-or-json>`` value safely (inline JSON object or regular JSON
+    file within ``SETTINGS_FILE_LIMIT``, via a single non-blocking bounded descriptor read). Never
+    leaks raw JSON text or file contents in errors."""
+    if not raw or not raw.strip():
+        raise LaunchError("--settings requires a non-empty file path or JSON object", EXIT_USAGE)
+    stripped = raw.lstrip()
+    if stripped.startswith(("{", "[")):
+        if len(raw.encode("utf-8", "surrogatepass")) > SETTINGS_FILE_LIMIT:
+            raise LaunchError("--settings JSON exceeds the 4 MiB limit", EXIT_USAGE)
+        try:
+            data = loads_bounded(raw, parse_constant=_json_constant)
+        except JSONTooDeepError:
+            raise LaunchError("--settings JSON is nested too deeply", EXIT_USAGE) from None
+        except (ValueError, RecursionError):
+            raise LaunchError("--settings is not valid JSON", EXIT_USAGE) from None
+        if _has_nonfinite(data):
+            raise LaunchError("--settings is not valid JSON", EXIT_USAGE)
+        return _validate_settings_object(data, "--settings JSON")
+    path = Path(raw)
+    found = read_settings_file(path, require_object=True, reject_huge_int=True)
+    if found.problem:
+        raise LaunchError(f"--settings file {found.problem}", EXIT_USAGE)
+    if found.data is None:
+        raise LaunchError("--settings file does not exist or cannot be opened", EXIT_USAGE)
+    return _validate_settings_object(found.data, "--settings file")
+
+
+def _merge_user_settings_dicts(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Merge two user ``--settings`` dicts in order (later keys override; ``env`` merges shallowly
+    and ``permissions`` merges ``allow``/``deny``/``ask`` lists without duplicates)."""
+    merged = dict(base)
+    for key, value in overlay.items():
+        if key == "env" and isinstance(merged.get("env"), dict) and isinstance(value, dict):
+            merged["env"] = {**merged["env"], **value}
+        elif key == "permissions" and isinstance(merged.get("permissions"), dict) and isinstance(value, dict):
+            perms = {**merged["permissions"], **value}
+            for field_name in ("allow", "deny", "ask"):
+                base_list = merged["permissions"].get(field_name)
+                over_list = value.get(field_name)
+                if isinstance(base_list, list) and isinstance(over_list, list):
+                    combined = list(base_list)
+                    for rule in over_list:
+                        if rule not in combined:
+                            combined.append(rule)
+                    perms[field_name] = combined
+            merged["permissions"] = perms
+        else:
+            merged[key] = value
+    return merged
+
+
+def extract_user_settings(claude_args: list[str]) -> tuple[list[str], dict[str, Any] | None]:
+    """Extract and parse any user ``--settings <file-or-json>`` flags before ``--`` so Contexto can
+    merge them into the temporary settings file it passes to Claude Code.
+
+    Scanning stops at the end-of-options ``--`` marker (while respecting ``CLAUDE_VALUE_OPTIONS``, so
+    ``--append-system-prompt -- --settings x.json`` still sees ``--settings`` and ``-p -- --settings``
+    treats ``--settings`` as a literal prompt). Returns ``(remaining_args, merged_user_settings)``."""
+    drop: set[int] = set()
+    raw_values: list[str] = []
+    for i, name, attached in claude_options(claude_args):
+        if name != "--settings":
+            continue
+        if attached is not None:
+            drop.add(i)
+            raw_values.append(attached)
+        else:
+            if i + 1 >= len(claude_args):
+                raise LaunchError("--settings requires a file path or JSON object", EXIT_USAGE)
+            drop.add(i)
+            drop.add(i + 1)
+            raw_values.append(claude_args[i + 1])
+    if not raw_values:
+        return list(claude_args), None
+    merged: dict[str, Any] = {}
+    for raw in raw_values:
+        merged = _merge_user_settings_dicts(merged, _load_user_settings_arg(raw))
+    remaining = [arg for idx, arg in enumerate(claude_args) if idx not in drop]
+    return remaining, merged
+
+
+def merge_settings(user_settings: dict[str, Any] | None, base_payload: dict[str, Any],
+                   status_line: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Merge a user's ``--settings`` payload with Contexto's required ``base_payload`` (``env`` and
+    ``permissions.allow``) and optional ``status_line``.
+
+    Contexto's ``env`` entries win so requests always reach the proxy; user ``env`` keys are kept.
+    User ``permissions`` (``deny``, ``ask``, ``allow``, etc.) are preserved with Contexto's tool allow
+    rules appended without duplicates. If the user's ``--settings`` defines ``statusLine``, it is
+    preserved untouched and ``user_had_statusline`` is returned True."""
+    if not user_settings:
+        return {**base_payload, **status_line}, False
+    merged = dict(user_settings)
+    user_env = merged.get("env") if isinstance(merged.get("env"), dict) else {}
+    merged["env"] = {**user_env, **base_payload["env"]}
+    user_perms = dict(merged["permissions"]) if isinstance(merged.get("permissions"), dict) else {}
+    allow = list(user_perms.get("allow")) if isinstance(user_perms.get("allow"), list) else []
+    for rule in base_payload["permissions"]["allow"]:
+        if rule not in allow:
+            allow.append(rule)
+    user_perms["allow"] = allow
+    merged["permissions"] = user_perms
+    user_had_statusline = "statusLine" in merged
+    if not user_had_statusline and status_line:
+        merged.update(status_line)
+    return merged, user_had_statusline
+
+
 def check_user_args(claude_args: list[str]) -> None:
-    """Fail closed on a user ``--settings``: Claude Code takes a single ``--settings``, so a second one
-    could replace ours and silently send requests around the proxy. ``--mcp-config`` is variadic and
-    allowed. Every argument is checked, after a ``--`` too: a ``--`` can be another option's value
-    (``--append-system-prompt -- --settings x.json``), and Claude Code 2.1.302 and 2.1.310 then still
-    read the ``--settings`` after it. So a prompt that is exactly ``--settings`` or starts with
-    ``--settings=`` is refused as well."""
-    for arg in claude_args:
-        if arg == "--settings" or arg.startswith("--settings="):
-            raise LaunchError(
-                "--settings in the claude arguments is not supported: Claude Code accepts one --settings, "
-                "and contexto uses it to route requests through its proxy, so a second one could bypass "
-                "the proxy. Put those settings in your Claude settings files instead "
-                "(see README, 'contexto run'). Every argument is checked, including those after --, so a "
-                "prompt that is exactly --settings or starts with --settings= is refused too.", EXIT_USAGE)
+    """Validate user arguments before ``--`` (such as ``--settings <file-or-json>``). Stops scanning
+    after ``--`` so a literal prompt like ``--settings`` is never refused; fails safely only when a
+    ``--settings`` flag has a missing, unreadable, or invalid JSON payload."""
+    extract_user_settings(claude_args)
 
 
 def check_misplaced_options(cli: str, cli_args: list[str]) -> None:
@@ -337,54 +476,92 @@ def check_not_service(upstream: Upstream, home: Path, command: str) -> None:
 
 
 def check_cloud_provider(cwd: Path, env: Mapping[str, str] | None = None, *, home: Path | None = None,
-                         files: SettingsFiles | None = None, managed: Path | None = None) -> None:
-    """D70: refuse a launch that Claude Code may send to a cloud provider. With one of the provider
-    switches on Claude Code 2.1.322 sent nothing to ``ANTHROPIC_BASE_URL``, so the proxy would see no
-    request, the session would run with no bound, and nothing would say so. The check fails closed
-    (``contexto.upstream.cloud_provider``): a switch that is on in the process environment or in any
-    settings file Contexto can find refuses, whichever of them Claude Code would apply, and so does
-    a settings file that is there and cannot be read. A usage error, before a session is opened,
-    naming the variable, each place it is on, and what to do. ``env``, ``home`` and ``managed``
-    default to the process environment, the home directory and the platform's managed settings file."""
-    found = cloud_provider(env=env, cwd=cwd, home=home, files=files, managed=managed)
+                         files: SettingsFiles | None = None, managed: Path | None = None,
+                         extra_settings: dict[str, Any] | None = None, allow_intercepted: bool = True) -> None:
+    """D70: refuse a launch that Claude Code may send to an unsupported cloud provider (such as
+    SigV4-signed Amazon Bedrock, Mantle, Claude Platform on AWS, or Claude Platform on Google Cloud),
+    or when both Vertex AI and Microsoft Foundry are enabled simultaneously, or when a settings file
+    that may name a provider switch cannot be read.
+
+    Vertex AI (``CLAUDE_CODE_USE_VERTEX``) and Microsoft Foundry (``CLAUDE_CODE_USE_FOUNDRY``) are
+    intercepted directly via ``ANTHROPIC_VERTEX_BASE_URL`` and ``ANTHROPIC_FOUNDRY_BASE_URL`` when
+    ``allow_intercepted=True`` (the default for ``contexto run claude``). The error message explicitly
+    lists every checked environment and settings location."""
+    found = cloud_provider(env=env, cwd=cwd, home=home, files=files, managed=managed,
+                           extra_settings=extra_settings, allow_intercepted=allow_intercepted)
     if found is None:
         return
     steps = []
     for name, places in found.on:
         if "env" in places:
             steps.append(f"unset {name} for this command (env -u {name} contexto run ...)")
-        blocks = len([place for place in places if place != "env"])
+        if "flag:--settings" in places:
+            steps.append(f"remove {name} from --settings, or set it to 0 there")
+        blocks = len([place for place in places if place not in ("env", "flag:--settings")])
         if blocks:
             where = "that env block" if blocks == 1 else "those env blocks"
             steps.append(f"remove {name} from {where}, or set it to 0 there")
+    for name, places, _ in found.conflicts:
+        if "env" in places:
+            steps.append(f"unset {name} for this command (env -u {name} contexto run ...)")
+        if "flag:--settings" in places:
+            steps.append(f"remove or align {name} in --settings")
+        blocks = len([place for place in places if place not in ("env", "flag:--settings")])
+        if blocks:
+            where = "that env block" if blocks == 1 else "those env blocks"
+            steps.append(f"remove or align {name} in {where}")
     if found.unread:
         steps.append("fix or remove the " + ("file" if len(found.unread) == 1 else "files")
                      + " that could not be read")
     remedy = "; ".join(steps)
-    if found.on:
-        why = ("Contexto's proxy would see no request and the session would run with no bound, so the launch "
-               "is refused. Contexto refuses when a switch is on in any of these places, whichever of them "
-               "Claude Code would apply")
+    checked = checked_provider_places()
+    if found.conflicts:
+        why = (f"Contexto cannot tell whether Claude Code will route to that cloud provider or directly to "
+               f"Anthropic (checked: {checked}), so the launch is refused")
+        how = f"Make the provider switch consistent: {remedy}."
+    elif found.on and all(name in INTERCEPTED_CLOUD_PROVIDERS for name, _ in found.on):
+        why = (f"Both Google Vertex AI and Microsoft Foundry switches are on at once (checked: {checked}); "
+               f"Contexto cannot tell which provider endpoint to intercept, whichever of them Claude Code "
+               f"would apply")
+        how = f"To run through Contexto, keep only one provider switch on: {remedy}."
+    elif found.on:
+        why = (f"Contexto's proxy would see no request and the session would run with no bound, so the launch "
+               f"is refused. Contexto refuses when an unsupported provider switch is on in any of: {checked}, "
+               f"whichever of them Claude Code would apply")
         how = (f"To run through Contexto: {remedy}; and give Contexto an upstream that speaks the Anthropic "
-               f"Messages API (--upstream or ANTHROPIC_BASE_URL). To keep using the provider, run claude "
-               f"without contexto.")
+               f"Messages API (--upstream or ANTHROPIC_BASE_URL), or use Vertex AI / Microsoft Foundry. "
+               f"To keep using this provider, run claude without contexto.")
     else:
-        why = ("With a provider on, Contexto's proxy would see no request and the session would run with no "
-               "bound, so the launch is refused")
+        why = (f"With an unsupported provider on, Contexto's proxy would see no request and the session would "
+               f"run with no bound, so the launch is refused (checked: {checked})")
         how = f"{remedy[0].upper()}{remedy[1:]}, then run again."
     raise LaunchError(f"{cloud_provider_note(found)}. {why}. {how}", EXIT_USAGE)
 
 
 def claude_launch_settings(explicit_upstream: str | None, cwd: Path, env: Mapping[str, str] | None = None, *,
-                           home: Path | None = None, managed: Path | None = None) -> tuple[Upstream, str]:
-    """Everything ``contexto run claude`` takes from Claude Code's settings files, each file read once
-    and with a bound (``contexto.upstream.SettingsFiles``): the cloud-provider check, which raises
-    before anything else is decided; the upstream (``resolve_upstream``); and the hint header state
-    (``contexto.hints.hint_headers_state``). Nothing is created on disk."""
-    files = SettingsFiles()
-    check_cloud_provider(cwd, env, home=home, files=files, managed=managed)
-    upstream = resolve_upstream(explicit_upstream, env=env, cwd=cwd, home=home, files=files)
-    return upstream, hint_headers_state(env=env, cwd=cwd, home=home, files=files, managed=managed)
+                           home: Path | None = None, managed: Path | None = None,
+                           extra_settings: dict[str, Any] | None = None,
+                           files: SettingsFiles | None = None) -> tuple[Upstream, str]:
+    """Everything ``contexto run claude`` takes from Claude Code's settings files (and any user
+    ``--settings`` payload), each file read once and with a bound (``contexto.upstream.SettingsFiles``):
+    the cloud-provider check, which refuses unsupported providers before anything else is decided; the
+    upstream (``resolve_provider_upstream`` for Vertex AI / Microsoft Foundry, else ``resolve_upstream``);
+    and the hint header state (``contexto.hints.hint_headers_state``). Nothing is created on disk."""
+    files = files or SettingsFiles()
+    check_cloud_provider(cwd, env, home=home, files=files, managed=managed, extra_settings=extra_settings)
+    provider_key, _ = active_cloud_provider(env=env, cwd=cwd, home=home, files=files, managed=managed,
+                                            extra_settings=extra_settings)
+    if provider_key is not None:
+        try:
+            upstream = resolve_provider_upstream(provider_key, explicit_upstream, env=env, cwd=cwd, home=home,
+                                                 files=files, managed=managed, extra_settings=extra_settings)
+        except ValueError as exc:
+            raise LaunchError(str(exc), EXIT_USAGE) from None
+    else:
+        upstream = resolve_upstream(explicit_upstream, env=env, cwd=cwd, home=home, files=files,
+                                    extra_settings=extra_settings)
+    return upstream, hint_headers_state(env=env, cwd=cwd, home=home, files=files, managed=managed,
+                                        extra_settings=extra_settings)
 
 
 def check_home(home: Path) -> None:
@@ -678,9 +855,11 @@ def claude_options(cli_args: list[str]) -> Iterator[tuple[int, str, str | None]]
     """(index, option, attached value) of each option Claude Code reads, up to ``--``, as its Commander
     parser reads them. A long option's attached value is what follows ``=``; the value of one in
     ``CLAUDE_VALUE_OPTIONS`` given as the next argument is skipped even when it starts with ``-``
-    (``--append-system-prompt --continue`` is a prompt, not a continue). A short-option cluster is split
-    per ``CLAUDE_SHORT_OPTIONS`` (``-pc`` yields ``-p`` and ``-c``; ``-rabc`` yields ``-r`` with ``abc``
-    attached); an unknown letter ends it, as Claude Code then stops with an error."""
+    (``--append-system-prompt --continue`` is a prompt, not a continue). Optional-value long options
+    (``CLAUDE_OPTIONAL_VALUE_OPTIONS``) consume the next argument only when it is not another flag.
+    A short-option cluster is split per ``CLAUDE_SHORT_OPTIONS`` (``-pc`` yields ``-p`` and ``-c``;
+    ``-rabc`` yields ``-r`` with ``abc`` attached); an unknown letter ends it, as Claude Code then
+    stops with an error."""
     i = 0
     while i < len(cli_args):
         arg = cli_args[i]
@@ -691,6 +870,9 @@ def claude_options(cli_args: list[str]) -> Iterator[tuple[int, str, str | None]]
             yield i, name, value if eq else None
             if not eq and name in CLAUDE_VALUE_OPTIONS:
                 i += 1
+            elif not eq and name in CLAUDE_OPTIONAL_VALUE_OPTIONS:
+                if i + 1 < len(cli_args) and (cli_args[i + 1] == "-" or not cli_args[i + 1].startswith("-")):
+                    i += 1
         elif arg.startswith("-") and len(arg) > 1:
             letters = arg[1:]
             while letters:
@@ -1098,7 +1280,7 @@ def write_private_json(directory: Path, name: str, payload: dict[str, Any]) -> P
     path = directory / name
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(payload, f)
+        json.dump(payload, f, allow_nan=False)
     return path
 
 
@@ -1108,13 +1290,12 @@ def contexto_tool_rules() -> list[str]:
     return [f"mcp__{MCP_SERVER_NAME}__{tool['name']}" for tool in MCP_TOOLS]
 
 
-def settings_payload(proxy_url: str, hint_headers: str = STRIPPED) -> dict[str, Any]:
-    """The flag-level ``--settings`` content: the proxy's base URL, the request for Claude Code's gateway
-    hint headers (D70: with a custom base URL they are off unless ``CLAUDE_CODE_GATEWAY_HINT_HEADERS`` is
-    on; the engine reads them and the proxy removes them before forwarding, ``contexto.hints``), and an
-    allow rule for each of Contexto's
-    own MCP tools (D44). Claude Code 2.1.302 refuses an MCP tool in ``-p`` mode unless a rule allows it
-    ("you haven't granted it yet"), so without these rules ``contexto run claude -p`` loses recall.
+def settings_payload(proxy_url: str, hint_headers: str = STRIPPED, *,
+                     base_url_key: str = BASE_URL_KEY) -> dict[str, Any]:
+    """The flag-level ``--settings`` content: the proxy's base URL (``ANTHROPIC_BASE_URL``, plus
+    ``ANTHROPIC_VERTEX_BASE_URL`` or ``ANTHROPIC_FOUNDRY_BASE_URL`` when intercepting Vertex AI or
+    Microsoft Foundry), the request for Claude Code's gateway hint headers (D70), and an allow rule
+    for each of Contexto's own MCP tools (D44).
 
     ``hint_headers`` is the launch's ``contexto.hints.hint_headers_state``. With ``off`` the hints are
     not asked for. The state is written beside the request as ``CONTEXTO_HINT_HEADERS``: Claude Code
@@ -1122,7 +1303,15 @@ def settings_payload(proxy_url: str, hint_headers: str = STRIPPED) -> dict[str, 
     and a nested ``contexto run claude`` reads the marker to tell Contexto's ``1`` from the user's."""
     if hint_headers not in HINT_STATES:
         raise ValueError(f"unknown hint header state {hint_headers!r}")
-    env = {"ANTHROPIC_BASE_URL": proxy_url}
+    env = {BASE_URL_KEY: proxy_url}
+    if base_url_key != BASE_URL_KEY:
+        env[base_url_key] = proxy_url
+        if base_url_key == FOUNDRY_BASE_URL_KEY:
+            # Claude Code's Foundry SDK rejects having both ANTHROPIC_FOUNDRY_BASE_URL and
+            # ANTHROPIC_FOUNDRY_RESOURCE set ("baseURL and resource are mutually exclusive",
+            # verified on 2.1.328); clearing the resource in --settings env routes cleanly through
+            # Contexto's proxy to the resolved resource upstream.
+            env[FOUNDRY_RESOURCE_KEY] = ""
     if hint_headers != OFF:
         env[HINT_HEADERS_KEY] = "1"
     env[HINT_MARKER_KEY] = hint_headers
@@ -1446,22 +1635,52 @@ def run_child(argv: list[str], env: dict[str, str] | None = None, *, stderr=None
 INFO_ARGS = (["--version"], ["-v"], ["--help"], ["-h"])  # claude prints and exits: no model request
 
 
+def _oauth_guidance_line(upstream: Upstream, cwd: Path, extra_settings: dict[str, Any] | None, *,
+                         files: SettingsFiles | None = None, env: Mapping[str, str] | None = None,
+                         home: Path | None = None) -> str | None:
+    """When Claude Pro/Max OAuth auth is detected (non-invasively, without reading secrets) and no
+    explicit API key or key helper overrides it, return a concise note only when the upstream is a
+    non-Anthropic host (not loopback), explaining transparent ``Authorization: Bearer`` passthrough."""
+    if upstream.provider is not None:
+        return None
+    env = os.environ if env is None else env
+    home = home or Path.home()
+    files = files or SettingsFiles()
+    oauth = claude_oauth_detected(env=env, cwd=cwd, home=home, files=files, extra_settings=extra_settings)
+    if oauth is None:
+        return None
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        val = claude_env_value(key, env=env, cwd=cwd, home=home, files=files, extra_settings=extra_settings)
+        if val.value and val.value.strip():
+            return None
+    if claude_key_helper(cwd, home, env, trusted_only=False, files=files, extra_settings=extra_settings).value:
+        return None
+    host = (urlsplit(upstream.url).hostname or "").lower()
+    if not host or host in ("127.0.0.1", "localhost", "::1") or is_vendor_host(host):
+        return None
+    return (f"Claude OAuth detected ({oauth}) with a custom upstream: Contexto forwards Authorization: Bearer "
+            "and anthropic-beta headers transparently (use --upstream https://api.anthropic.com for direct "
+            "Claude Pro/Max OAuth, or set ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN for a custom gateway).")
+
+
 def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
     check_misplaced_options("claude", options.claude_args)
-    check_user_args(options.claude_args)
+    claude_args, user_settings = extract_user_settings(options.claude_args)
     check_options(options)
     claude = shutil.which(options.claude_bin)
     if claude is None:
         raise LaunchError(cli_not_found(options.claude_bin), EXIT_NOT_FOUND)
     if options.claude_args in INFO_ARGS:  # nothing to bound, so no session or proxy (D57)
         return run_child([claude, *options.claude_args], stderr=stderr)
-    # D70: the provider check, the upstream and the hint header state, from one read of each settings file.
-    upstream, hint_headers = claude_launch_settings(options.upstream, Path.cwd())
+    # D70: the provider check, the upstream, the hint header state and OAuth check, from one read of each file.
+    settings_files = SettingsFiles()
+    upstream, hint_headers = claude_launch_settings(options.upstream, Path.cwd(), extra_settings=user_settings,
+                                                    files=settings_files)
     check_not_service(upstream, contexto_home(), "contexto run claude")
     check_upstream(upstream)
     if upstream.ignored:  # CLAUDE_CODE_IGNORE_PERSISTED_TRUST is set: as Claude Code -p, no project base URL (D52)
-        print(f"contexto: {untrusted_note('env.ANTHROPIC_BASE_URL', upstream.ignored, 'Pass --upstream', os.environ)}",
-              file=stderr)
+        note = untrusted_note(f"env.{upstream.base_url_key}", upstream.ignored, "Pass --upstream", os.environ)
+        print(f"contexto: {note}", file=stderr)
     home = contexto_home()
     check_home(home)
     memory = project_memory_wanted(options, stderr)
@@ -1488,8 +1707,12 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         watchdog = Watchdog.start(tmp, store)
         # D64: a statusLine only when it cannot replace one of the user's; the note says which it was.
         status_line, status_note = launch_status_line(session_id, home, Path.cwd(), enabled=options.statusline)
-        settings = write_private_json(tmp, "settings.json",
-                                      {**settings_payload(proxy.url, hint_headers), **status_line})
+        merged_settings, user_had_statusline = merge_settings(
+            user_settings, settings_payload(proxy.url, hint_headers, base_url_key=upstream.base_url_key), status_line
+        )
+        if user_had_statusline:
+            status_note = "user_flag"
+        settings = write_private_json(tmp, "settings.json", merged_settings)
         mcp = write_private_json(tmp, "mcp.json", mcp_payload(session_id, home))
         store.log({"event": "launch", "cli": "claude", "session": session_id, "config": config,
                    "engine": engine_name, "upstream_source": upstream.source,
@@ -1498,6 +1721,9 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
                    "hint_headers": hint_headers, "statusline": status_note})
         print(f"contexto: session {session_id} (bound {options.bound:,}, upstream {upstream.source})",
               file=stderr, flush=True)
+        oauth_note = _oauth_guidance_line(upstream, Path.cwd(), user_settings, files=settings_files)
+        if oauth_note:
+            print(f"contexto: {oauth_note}", file=stderr, flush=True)
         project_memory_notice(store, stderr, engine_pin_budget(config))  # D69: what it carries, or nothing
         if not check_cli_version("claude", claude, store, enabled=options.version_check, stderr=stderr):
             code = EXIT_INTERRUPTED
@@ -1510,7 +1736,7 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         notices.hold()  # claude owns the terminal until it exits (D55)
         started = time.monotonic()
         # The CLI's shell commands (`contexto state`, `contexto search`) then name this session (D57).
-        code = run_child(claude_argv(claude, settings, mcp, options.claude_args), session_env(session_id),
+        code = run_child(claude_argv(claude, settings, mcp, claude_args), session_env(session_id),
                          stderr=stderr, watchdog=watchdog)
         return code
     except Terminated as exc:
