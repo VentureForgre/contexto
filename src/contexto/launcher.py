@@ -1815,7 +1815,7 @@ def _run(options: LaunchOptions, stderr, signals: LaunchSignals) -> int:
         merged_settings, user_had_statusline = merge_settings(
             user_settings, settings_payload(proxy.url, hint_headers, base_url_key=upstream.base_url_key), status_line
         )
-        if user_had_statusline:
+        if user_had_statusline and not status_note.startswith("off:"):
             status_note = "user_flag"
         settings = write_private_json(tmp, "settings.json", merged_settings)
         mcp = write_private_json(tmp, "mcp.json", mcp_payload(session_id, home))

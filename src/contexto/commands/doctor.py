@@ -1324,15 +1324,27 @@ def check_live_upstream(ctx: Context, *, usable: Mapping[str, bool],
     never probes an invalid URL or ``contexto serve``."""
     probes: list[dict[str, Any]] = []
     if usable.get("claude"):
-        up = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files,
-                              config_upstream=ctx.config.upstream)
-        if _probe_allowed(up, ctx):
-            from_project = up.source.removeprefix("settings:") in PROJECT_KINDS
-            untrusted = from_project and not folder_trusted(ctx.cwd, ctx.home, ctx.env)
-            headers = {"anthropic-version": "2023-06-01"} if untrusted else _claude_probe_headers(ctx)
-            res = _probe_http(up.url, headers=headers, path_suffix="/v1/models", timeout=timeout)
-            if untrusted and res["auth"] == "unchecked":
-                res["auth"] = "skipped_untrusted"
+        provider_key, _ = active_cloud_provider(env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files)
+        up: Upstream | None
+        if provider_key is not None:
+            try:
+                up = resolve_provider_upstream(provider_key, None, env=ctx.env, cwd=ctx.cwd, home=ctx.home,
+                                               files=ctx.files)
+            except ValueError:
+                up = None
+        else:
+            up = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, files=ctx.files,
+                                  config_upstream=ctx.config.upstream)
+        if up is not None and _probe_allowed(up, ctx):
+            if up.provider is not None:
+                res = _probe_http(up.url, headers={}, path_suffix="", timeout=timeout)
+            else:
+                from_project = up.source.removeprefix("settings:") in PROJECT_KINDS
+                untrusted = from_project and not folder_trusted(ctx.cwd, ctx.home, ctx.env)
+                headers = {"anthropic-version": "2023-06-01"} if untrusted else _claude_probe_headers(ctx)
+                res = _probe_http(up.url, headers=headers, path_suffix="/v1/models", timeout=timeout)
+                if untrusted and res["auth"] == "unchecked":
+                    res["auth"] = "skipped_untrusted"
             probes.append({"cli": "claude", **res})
     if usable.get("codex"):
         from contexto.codex import API_KEY_MODE, CodexLaunchError, codex_upstream_with_source

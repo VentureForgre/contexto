@@ -1728,3 +1728,41 @@ def test_doctor_statusline_env_overrides_config_and_serve_lock_checks(both, caps
     (both.store / "serve.lock").chmod(0o644)
     _, found = checks(capsys)
     assert found["serve"]["status"] == "warn" and "0644" in found["serve"]["summary"]
+
+
+def test_doctor_live_probes_active_vertex_provider_without_anthropic_key(both, capsys, fast_mcp, monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen: list[tuple[str, str | None, str | None]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("x-api-key"), self.headers.get("authorization")))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+        monkeypatch.setenv("ANTHROPIC_VERTEX_BASE_URL", f"http://127.0.0.1:{port}/vertex")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-must-not-be-sent-to-vertex")
+
+        code, out, _ = run(capsys, "--live", "--json")
+        by_id = {c["id"]: c for c in json.loads(out)["checks"]}
+        assert code == 0 and by_id["live-upstream"]["status"] == "pass"
+        probe = by_id["live-upstream"]["details"]["probes"][0]
+        assert probe["origin"] == f"http://127.0.0.1:{port}"
+        assert probe["auth"] == "unchecked"
+        assert seen == [("/vertex", None, None)]
+    finally:
+        srv.shutdown()
+        srv.server_close()
