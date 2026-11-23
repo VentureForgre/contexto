@@ -343,14 +343,16 @@ def test_change_in_paged_turns_starts_new_epoch_without_sending_full_history():
     assert len(up["messages"]) < len(compacted)
 
 
-def test_paged_change_mid_tool_loop_keeps_in_flight_thinking():
+def test_paged_change_mid_tool_loop_strips_in_flight_thinking():
     store = MemoryStore(key=b"k" * 32)
     msgs = history(6) + [user("new prompt")]
     _, st, _, _ = run(msgs, store=store)
     changed = [user(f"replaced {FILL}", context=True), system()] + msgs[2:]
     changed += [tool_use(7, think="live"), tool_result(7)]
     up, st2, _, _ = run(changed, state=st, store=store)
-    assert up["messages"][-2]["content"][0]["type"] == "thinking"  # in-flight turn untouched
+    assert st2.strip_upto == len(changed)
+    assert all(b.get("type") not in ("thinking", "redacted_thinking")
+               for m in up["messages"] for b in (m["content"] if isinstance(m["content"], list) else []))
 
 
 def test_shorter_history_is_a_mismatch():
@@ -671,7 +673,7 @@ def test_per_turn_hook_messages_are_paged_and_carried_stays_flat():
     assert paged_systems > 5  # hook context went into the pages with its turns
 
 
-def test_paged_change_resync_reports_kept_inflight_thinking():
+def test_paged_change_resync_reports_inflight_thinking_stripped():
     store = MemoryStore(key=b"k" * 32)
     msgs = history(6) + [user("new prompt")]
     _, st, _, _ = run(msgs, store=store)
@@ -679,7 +681,7 @@ def test_paged_change_resync_reports_kept_inflight_thinking():
                + [tool_use(7, think="live"), tool_result(7)])
     _, _, ev, _ = run(changed, state=st, store=store)
     resync = next(e for e in ev if e["event"] == "resync")
-    assert resync["kind"] == "paged_changed" and resync["inflight_thinking_kept"] is True
+    assert resync["kind"] == "paged_changed" and resync["inflight_thinking_kept"] is False
 
 
 def test_unclassified_non_text_system_message_is_carried_and_logged():
