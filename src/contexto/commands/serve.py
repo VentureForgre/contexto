@@ -62,7 +62,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--allow-large-bound", action="store_true",
                         help=f"allow --bound above {BOUND_GUARD:,} (Claude Code may then compact on its own)")
     parser.add_argument("--window-fraction", type=float, default=None,
-                        help="share of the window budget kept as recent turns after a rotation (default 0.5)")
+                        help="share of the window budget kept as recent turns after a rotation (default 0.25)")
     parser.add_argument("--headroom-floor", type=int, default=None,
                         help="minimum headroom below the bound that triggers a rotation (default 25,000; "
                              "must be below the bound)")
