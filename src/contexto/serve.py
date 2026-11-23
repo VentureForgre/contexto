@@ -2073,9 +2073,16 @@ class _ServeHandler(_Handler):
             return stateless.handle(message)
         meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
         requested = meta.get(mcp_module.META_VERSION)
-        modern = requested is not None
-        if modern and requested not in mcp_module.MODERN_VERSIONS:
-            return stateless.handle(message)
+        modern = False
+        if requested is not None:
+            is_modern_ver = (
+                requested in mcp_module.MODERN_VERSIONS
+                or (mcp_module._is_version_date(requested) and requested >= mcp_module.MODERN_VERSIONS[0])
+            )
+            is_legacy_ver = requested in mcp_module.LEGACY_VERSIONS
+            if not is_modern_ver and not is_legacy_ver:
+                return stateless.handle(message)
+            modern = is_modern_ver
         is_notification = "id" not in message
 
         def _wrap_result(res: dict[str, Any]) -> dict[str, Any] | None:

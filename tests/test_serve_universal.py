@@ -380,6 +380,25 @@ def test_streamable_http_mcp_in_serve(tmp_path, multi_upstreams):
         assert st == 200
         assert "alpha uses postgres" in json.loads(raw)["result"]["content"][0]["text"]
 
+        # Forward-compatible modern and legacy _meta[META_VERSION] dates dispatch cleanly to the session
+        st, _, raw = rpc(f"/{token}/s/alpha-key/mcp", {
+            "jsonrpc": "2.0", "id": 51, "method": "tools/call",
+            "params": {"name": "contexto_state", "arguments": {},
+                       "_meta": {mcp.META_VERSION: "2026-08-01"}},
+        })
+        res_modern = json.loads(raw)["result"]
+        assert st == 200 and res_modern["isError"] is False and res_modern.get("resultType") == "complete"
+        assert "alpha uses postgres" in res_modern["content"][0]["text"]
+
+        st, _, raw = rpc(f"/{token}/s/alpha-key/mcp", {
+            "jsonrpc": "2.0", "id": 52, "method": "tools/call",
+            "params": {"name": "contexto_state", "arguments": {},
+                       "_meta": {mcp.META_VERSION: "2025-11-25"}},
+        })
+        res_legacy = json.loads(raw)["result"]
+        assert st == 200 and res_legacy["isError"] is False and "resultType" not in res_legacy
+        assert "alpha uses postgres" in res_legacy["content"][0]["text"]
+
         # Without binding when 2 sessions are open -> fail-closed ambiguous error
         st, _, raw = rpc(f"/{token}/mcp", {
             "jsonrpc": "2.0", "id": 6, "method": "tools/call",
