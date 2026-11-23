@@ -200,22 +200,25 @@ when that variable is set), then `ANTHROPIC_BASE_URL` in the environment, then `
 `config.toml`, then `https://api.anthropic.com`.
 
 For Codex in API-key mode (the default): `CONTEXTO_CODEX_UPSTREAM`, else `codex_upstream` in
-`config.toml`, else Claude Code's upstream plus `/v1`. A project file's base URL counts for Codex
-only in a folder Claude Code has recorded as trusted. If Claude Code's upstream is Anthropic's API, Codex has no upstream and the check warns:
-pass `--codex-upstream`. Doctor does not check `--codex-auth chatgpt`, which uses the ChatGPT
-backend and Codex's own login.
+`config.toml`, else Claude Code's non-Anthropic upstream plus `/v1`, else
+`https://api.openai.com/v1` (`openai-env`) when `OPENAI_API_KEY` is set in the environment and no
+`CONTEXTO_CODEX_KEY_HELPER` was specified. A project file's base URL counts for Codex only in a
+folder Claude Code has recorded as trusted. If Claude Code's upstream is Anthropic's API and
+`OPENAI_API_KEY` is not set (or a Codex key helper is set), Codex has no upstream and the check
+warns: pass `--codex-upstream`. Doctor does not check `--codex-auth chatgpt`, which uses the
+ChatGPT backend and Codex's own login.
 
 The base URL is not read from organization-managed Claude Code settings, here or by `contexto run`.
 
-`claude-upstream` fails when the URL is not one `contexto run claude` can use: not http(s), malformed,
-or holding a lone surrogate, which a settings file can give it (a `\ud800` escape, or a malformed
-UTF-16LE file). The line names where it came from and does not repeat the URL.
+`claude-upstream` and `codex-upstream` fail when the URL is not one `contexto run` can use: not
+http(s), malformed, or holding a lone surrogate, which a settings file can give it (a `\ud800`
+escape, or a malformed UTF-16LE file). The line names where it came from and does not repeat the URL.
 
-`claude-upstream` fails when Claude Code's upstream is this Contexto home's `contexto serve`, the base
-URL [serve.md](serve.md) has a client put in its settings: `contexto run claude` refuses it, because
-requests would pass two engines that open the same store. Pass `--upstream` to `contexto run`, or
-use the client through the service. The check shows only the origin, never the URL's path, which
-holds the service's token.
+`claude-upstream` and `codex-upstream` fail when the upstream is this Contexto home's `contexto serve`,
+the base URL [serve.md](serve.md) has a client put in its settings: `contexto run` refuses it, because
+requests would pass two engines that open the same store. Pass `--upstream` / `--codex-upstream` to
+`contexto run`, or use the client through the service. The check shows only the origin, never the URL's
+path, which holds the service's token.
 
 ### `claude-key` and `codex-key`
 
@@ -227,11 +230,12 @@ environment and in the `env` blocks of the settings files above (the managed fil
 an `apiKeyHelper` in the files other than the managed one. Finding none is a warning, not a failure: Claude Code may hold a login, which doctor does
 not look for.
 
-Codex gets its key from a helper command that `contexto run codex` hands to it:
-`CONTEXTO_CODEX_KEY_HELPER`, else Claude Code's `apiKeyHelper`, a project's only in a trusted
-folder. With neither, `contexto run codex` needs `--codex-key-helper`. A
-`CONTEXTO_CODEX_KEY_HELPER` that is set and holds only spaces is a warning: `contexto run codex`
-takes it as the helper and refuses to start ("the key helper command is empty").
+Codex gets its key from `CONTEXTO_CODEX_KEY_HELPER`, else `OPENAI_API_KEY` natively (`env_key`) when
+the upstream defaulted to OpenAI (`openai-env`), else Claude Code's `apiKeyHelper` (a project's only
+in a trusted folder), else `OPENAI_API_KEY` on an explicit non-Claude upstream. With none,
+`contexto run codex` needs `--codex-key-helper` or `OPENAI_API_KEY`. A `CONTEXTO_CODEX_KEY_HELPER`
+that is set and holds only spaces is a warning: `contexto run codex` takes it as the helper and
+refuses to start ("the key helper command is empty").
 
 ### `store`
 
@@ -411,11 +415,11 @@ check that could not be made has `{"error": <fault>}`, one of `no_working_direct
 | `python` | `version`, `executable` |
 | `claude`, `codex` | `cli`, `path` (or `null`), `version` (or `null`), `tested` (`true`, `false`, or `null` when the version is unknown), `tested_versions`; `error` when the CLI is missing (`not_found`), its version could not be read (`timeout`, `exit_<code>`, `unparsed`, or an error type), or, for `codex`, Contexto's Codex support is not installed (`codex_support_missing`) |
 | `config` | `path`, `exists`, `settings` (count of configured keys), or `error` when invalid |
-| `settings` | `files`: one `{"kind", "state"}` for each file looked for, highest precedence first and the managed file last, where `kind` is `main-checkout-local`, `local`, `project`, `user` or `managed` and `state` is `read`, `absent` or `unusable`; an unusable file also has `problem`. When `managed-settings.json` is present, also `managed_present: true` and `managed_sets_base_url` (`true`/`false`). Never a path. |
+| `settings` | `files`: one `{"kind", "state"}` for each file looked for, highest precedence first and the managed file last, where `kind` is `main-checkout-local`, `local`, `project`, `user` or `managed` and `state` is `read`, `absent` or `unusable`; an unusable file also has `problem`, what is wrong with it (the wording of the line). When `managed-settings.json` is present, also `managed_present: true` and `managed_sets_base_url` (`true`/`false`). Never a path. |
 | `claude-upstream` | `origin` (`scheme://host[:port]`, or `null` when the URL is invalid), `source` (`default`, `config`, `env`, or `settings:<kind>` with kind `user`, `project`, `local` or `main-checkout-local`); `ignored` (the project file kinds skipped) when a base URL was skipped |
-| `codex-upstream` | `origin` and `source` (`codex-env`, `codex-config`, or `claude-<source>+/v1`), both `null` when there is none; `ignored` as above |
+| `codex-upstream` | `origin` and `source` (`codex-env`, `codex-config`, `openai-env`, or `claude-<source>+/v1`), both `null` when there is none; `ignored` as above |
 | `claude-key` | `found`: a list of `{"name", "source"}`, where `name` is a variable or `apiKeyHelper` and `source` is `env` or `settings:<kind>` (`managed` included). Never a value. |
-| `codex-key` | `name` (`CONTEXTO_CODEX_KEY_HELPER`, `apiKeyHelper`, or `null`), `source` (`env`, `settings:<kind>`, or `null`); `ignored` when a project's helper was skipped as untrusted; `error` (`blank`) when `CONTEXTO_CODEX_KEY_HELPER` holds only spaces |
+| `codex-key` | `name` (`CONTEXTO_CODEX_KEY_HELPER`, `OPENAI_API_KEY`, `apiKeyHelper`, or `null`), `source` (`env`, `settings:<kind>`, or `null`); `ignored` when a project's helper was skipped as untrusted; `error` (`blank`) when `CONTEXTO_CODEX_KEY_HELPER` holds only spaces |
 | `store` | `path`, `exists` |
 | `serve` | `configured`, `running`, `files` (when configured), plus `port`/`pid` when running and `problems` when permissions or state are invalid |
 | `statusline` | `state` (`added`, `off:env`, `off:config`, `own:<kind>`, `unreadable:<kind>`, `hooks_off:<kind>`, `managed_hooks_only`, `unsafe_path`, `error`) |

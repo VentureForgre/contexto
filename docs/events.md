@@ -37,6 +37,8 @@ is never a line of its own: look for it inside a `request` line.
 | [`proxy_stop_incomplete`](#proxy_stop_incomplete) | proxy | own line | notice |
 | [`request_refused`](#request_refused) | proxy | own line | notice |
 | [`websocket_rejected`](#websocket_rejected) | proxy | own line | problem |
+| [`websocket_session`](#websocket_session) | proxy | own line | normal, notice, problem |
+| [`websocket_turn`](#websocket_turn) | proxy | own line | normal |
 | [`encoded_body_rejected`](#encoded_body_rejected) | proxy | own line | problem |
 | [`request_too_deep`](#request_too_deep) | proxy | own line | problem |
 | [`transform_error`](#transform_error) | proxy | own line | problem |
@@ -144,7 +146,7 @@ That file is not a session log, and its events are not in this reference.
 started `duration_ms` before its `ts`.
 
 **Lines and nested events.** The engine's events are not lines of their own. The engine returns them
-to the proxy, which puts them on the `request` line of the request they belong to:
+to the proxy, which puts them on the `request` (or `websocket_turn`) line of the request they belong to:
 
 - `transform_events`: what the engine did before the request was sent, in order. The engine's own
   [`request` event](#request-the-engines-nested-event) is the last one.
@@ -222,11 +224,11 @@ None is a credential or conversation text:
 | [`page_unreadable`](#page_unreadable) `error` | An exception's message. For a failed read it names the page file with its full path, which includes the home directory. | The machine. |
 | [`search_cache_invalid`](#search_cache_invalid) `value` | The first 100 characters of `CONTEXTO_SEARCH_CACHE_MB`. | The environment. |
 | [`launch`](#launch) `session` | The session id. With `--session` it is the name the user chose. | The command line. |
-| `model` on a `request` line and in [`upstream_4xx`](#upstream_4xx) | The model the request names, at most 80 characters. | The request body. |
+| `model` on a `request` or `websocket_turn` line and in [`upstream_4xx`](#upstream_4xx) | The model the request names, at most 80 characters. | The request body. |
 | `method`, `path` and `endpoint`, on every line that has one | The request's HTTP method and its path without the query string, at any length. On a [`request_refused`](#request_refused) line they are those of a request that did not come from the CLI. | The request line. |
 | [`encoded_body_rejected`](#encoded_body_rejected) `encoding` | The request's `Content-Encoding` header, lower-cased, at any length: the 80-character guard does not apply to it. | A request header. |
 | [`hold_skipped`](#hold_skipped) `encoding`, and `usage_unavailable` on a `request` line | The response's `Content-Encoding` header, lower-cased, at any length. | Upstream's response header. |
-| `usage` on a Responses API `request` line | Upstream's usage object: its key names as sent, with their numbers. Other values are dropped. | Upstream's response. |
+| `usage` on a Responses API `request` or `websocket_turn` line | Upstream's usage object: its key names as sent, with their numbers. Other values are dropped. | Upstream's response. |
 | `input_transformations` on a `request` line | What upstream reported, each string at most 80 characters. | Upstream's response. |
 | `client` and `version` in [`cli_version`](#cli_version), `version` in [`cli_version_untested`](#cli_version_untested), `cli_version` in [`session_start_unrecognised`](#session_start_unrecognised) | The client name and version from `User-Agent`, taken only in the form `name/1.2.3`. | A request header. |
 
@@ -293,12 +295,12 @@ The model reads a paged turn back:
 - **Turn**: a user prompt and everything up to the next one. A **turn start** is a request whose
   newest turn has no assistant message yet. The engine pages at turn starts. The exceptions are a
   [`resync`](#resync) with `paged_changed`, which pages at whatever request finds the change, and
-  in-turn paging inside a Claude Code tool loop (next point).
+  in-turn paging inside a tool loop (next point).
 - **Tool loop**: the requests of a turn after its turn start. The model called a tool, and the CLI
-  sends the result back with the turn so far. For Claude Code the engine pages inside a tool loop
-  too ([in-turn paging](in-turn-paging.md), D63; see [`in_turn_batch`](#in_turn_batch)). A Codex
-  tool loop, and any tool loop with `--no-in-turn-paging` (or `CONTEXTO_IN_TURN_PAGING=0`), is sent whole. A turn that grows there
-  can pass the bound.
+  sends the result back with the turn so far. For both Claude Code and Codex the engine pages inside
+  a tool loop too ([in-turn paging](in-turn-paging.md), D63; see [`in_turn_batch`](#in_turn_batch)).
+  With `--no-in-turn-paging` (or `CONTEXTO_IN_TURN_PAGING=0`), a tool loop is sent whole and a turn
+  that grows there can pass the bound.
 - **Epoch**: the stretch between two rotations of one conversation. Within an epoch the prompt
   prefix does not change, so the prompt cache can be read. `epoch` counts from 0.
 - **`k`**: the index, in the CLI's message list, of the first message still sent. Messages before `k`
@@ -324,7 +326,7 @@ The model reads a paged turn back:
 - **Degraded mode**: after a store failure in one conversation, the engine stops paging that
   conversation and sends its last good transform, extended with the new messages, until the store
   works again at one of its turn starts, at a `paged_changed` resync of it or at an in-turn batch in
-  one of its Claude Code tool loops, or the run ends. It belongs to that conversation alone: the
+  one of its tool loops, or the run ends. It belongs to that conversation alone: the
   others keep paging until a store call of their own fails.
 
 The design contract, [milestones/M2-contexto-proxy.md](milestones/M2-contexto-proxy.md), defines
@@ -354,7 +356,7 @@ conversation, and each run starts a new engine. Under `contexto serve`, each ope
   [`degraded_leave`](#degraded_leave) is one conversation leaving it, at the first of these that
   finds the store working: that conversation's next turn start, a `paged_changed`
   [`resync`](#resync) of it, which can come inside a tool loop, or, with in-turn paging on, a request
-  in one of its Claude Code tool loops that is due an [`in_turn_batch`](#in_turn_batch). That last
+  in one of its tool loops that is due an [`in_turn_batch`](#in_turn_batch). That last
   case covers a subagent too, inside its own tool loop. A conversation that sends none of these
   again, such as a subagent that has finished, never logs a leave. So a `degraded_enter`
   with no `degraded_leave` after it does not mean the session stopped paging: other conversations, the
@@ -587,7 +589,7 @@ The proxy is listening.
 - `port`: the port on 127.0.0.1.
 - `upstream_source`: where the upstream URL came from, never the URL: `flag`, `settings:<file kind>`,
   `env`, `config` or `default` for Claude Code; `codex-flag`, `codex-env`, `codex-config`,
-  `chatgpt-default` or `claude-<source>+/v1` for Codex.
+  `chatgpt-default`, `openai-env` or `claude-<source>+/v1` for Codex.
 - `observe_thinking`: whether `--observe-thinking` is on.
 - `pages`: the page files in the session's store when the proxy started. Absent when the pages
   directory could not be listed. `contexto stats` takes a run's pages added from it and the `pages`
@@ -627,10 +629,52 @@ a DNS-rebound name tried to reach the proxy. The session is unaffected.
 
 Writer: proxy. Where: own line. Kind: problem.
 
-A client asked for a WebSocket, which would bypass the bound. The proxy answered 501. The launcher
-keeps Codex on HTTP, so this means a client was not started through `contexto run`.
+A client asked for a WebSocket when WebSocket relay is disabled or on a path that is not a Responses
+endpoint. The proxy answered 501. The launcher keeps Codex on HTTP by default (opt in with
+`--codex-websocket` or `CONTEXTO_CODEX_WEBSOCKET=1`).
 
 - `path`: the request path.
+
+### `websocket_session`
+
+Writer: proxy. Where: own line. Kind: normal, notice, problem.
+
+Written once when an opt-in Responses WebSocket relay ends (or fails to connect or upgrade).
+
+- `path`: the request path.
+- `status`: the HTTP status returned by upstream (101 for an upgraded WebSocket session, 502 on a
+  connect or handshake failure, or upstream's non-101 status forwarded for HTTP fallback).
+- `turns`: how many `response.create` turns completed on the connection.
+- `duration_ms`: total connection duration in milliseconds.
+- `close_code`: present when either side sent a WebSocket close frame with a 2-byte status code.
+- `error`: present when the handshake or frame relay failed.
+
+### `websocket_turn`
+
+Writer: proxy. Where: own line. Kind: normal.
+
+One Responses API turn (`response.create` client frame through its terminal server event) relayed
+over an opt-in WebSocket connection.
+
+- `path`: the request path.
+- `model`: the model name from the `response.create` frame, or null.
+- `original_request_bytes`: byte length of the client's original text frame.
+- `request_bytes`: byte length of the forwarded text frame after rewriting.
+- `duration_ms`: milliseconds from `response.create` to the terminal event.
+- `usage`: the Responses `usage` dict from the terminal event, or null.
+- `over_bound`: true when any transform or usage event marked the turn over the bound.
+- `epoch`: present when the transform returned an epoch number.
+- `transform_events`: present when the transform returned engine events, reduced to scalars.
+- `transform_error`: present when transforming or serializing the frame failed (the client's original
+  frame was forwarded unchanged).
+- `transform_skipped`: present when the frame was not transformed (for example `previous_response_id`
+  was set or `input` was not a list).
+- `usage_events`: present when `observe_usage` returned events, reduced to scalars.
+- `end_event`: present when a terminal Responses event was seen (`completed`, `incomplete`, `failed`,
+  or `none`).
+- `response_status`: present when the terminal event reported a Responses status.
+- `incomplete_reason`: present when the terminal event reported `incomplete_details.reason`.
+- `error_code`: present when the terminal event or an error frame reported an error code.
 
 ### `encoded_body_rejected`
 
@@ -718,7 +762,8 @@ probe at launch gets one from some upstreams, which is harmless. A 4xx on a mode
 
 Writer: proxy. Where: own line. Kind: notice.
 
-A streamed response could not be held: upstream encoded it or did not send it chunked. Tool calls in
+A streamed response could not be held: upstream encoded it, did not send it chunked, or a
+WebSocket turn's buffered tool-call frames exceeded the hold buffer limit. Tool calls in
 that response reach the CLI before the room is published from real usage, so a recall in that moment
 is budgeted from the estimate made before sending.
 
@@ -1431,7 +1476,7 @@ In-turn paging ([in-turn-paging.md](in-turn-paging.md), D63) made room inside a 
 of stubbed tool results, folded tool rounds and paged earlier turns, on this request. The request
 is rewritten from its first changed message on. When the batch paged the earlier turns of the
 window, their [`page_out`](#page_out) and [`rotation`](#rotation) (reason `in_turn`) come before it
-in the same `transform_events`. Claude Code (the Messages API) only.
+in the same `transform_events`. Applies to both Claude Code (Messages API) and Codex (Responses API).
 
 - `epoch`: the current epoch, after this batch's rotation if it had one.
 - `trigger`: `result` (the batch only stubbed results the model had not read yet, because the
@@ -1543,7 +1588,7 @@ In the main conversation's history, a `contexto_pin` or `contexto_close` call ha
 not the MCP server's success reply, so no record id is taken from it: whatever it recorded is not
 carried to later sessions. Each engine logs a call once.
 
-- `tool`: `contexto_pin` or `contexto_close`.
+- `tool`: `contexto_pin`, `contexto_close`, or `exec` (when a Codex code-mode `exec` call batched both).
 - `reason`: `is_error` (the result is marked as an error), `reply` (its text is not a success
   reply), `shape` (its content is neither a string nor a list), `parts` (a list without exactly one
   part) or `part_type` (its one part is not text).

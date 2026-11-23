@@ -211,7 +211,7 @@ def digest(run: list[tuple]) -> str:
 # so each kind of store gave the same two hashes.
 # Again with D63 (PR #274), recorded from D63 merged with main 293b3478, the commit before D69, and the
 # same from the merge: D63's paging inside the script's tool loops changes the Claude Code requests and
-# its config field both records; the Codex requests are main's, byte for byte.
+# its config field both records.
 # Again after D71: Config.window_fraction moved to 0.25 and Config gained stable_prefix,
 # cache_ttl_seconds and cold_cache_fraction, updating the Codex rotation window and both epoch records
 # (Claude Code's requests stayed byte-for-byte identical).
@@ -220,11 +220,12 @@ def digest(run: list[tuple]) -> str:
 # hash are byte-for-byte identical.
 # Again with TokenEstimator EWMA + separate prose vs dense tool_result ratios: Turn 1 prose no longer
 # overwrites the 1.5 tool seed, changing the first tool round's pre-measurement estimate and subsequent
-# EWMA-decayed estimates; all four nothing-carried store kinds remain byte-for-byte identical.
+# EWMA-decayed estimates; ResponsesInTurn extends in-turn paging to Codex. All four nothing-carried
+# store kinds remain byte-for-byte identical.
 BEFORE_D69 = {MESSAGES: ("d7bdde076c35c1de04198af1b3d276db6ac626b79f420ed1e0d8a922d93b3dae",
                          "4dba8fc4935175c4b7be0f779b05e2daa7ab3c4e5dbf30acdb1c3f689c6f7df2"),
-              RESPONSES: ("d9e7269bdef69fb34fa6ad2a147cde26f0862a4d4c5663cc45f12382e5fe0dfa",
-                          "0f4c14284a3cb78863a7adb177266f5f51d464d0a0ac3ee4b586480075b61bf3")}
+              RESPONSES: ("88f5c05b1c53b657ad73b9ed95b0c35aa774e30821b995d323c2a65ebf2b1d18",
+                          "1fa6a0cffaf837267ffcf885fb64458ebe31d5a6f78dcdbbe8f5d1871935f819")}
 STORES = ("memory", "no_project", "nothing_carried", "memory_off")
 
 

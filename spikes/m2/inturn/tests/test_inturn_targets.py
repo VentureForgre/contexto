@@ -23,8 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from inturn import harness, scripts, targets  # noqa: E402
 
 CASES = [(name, dialect) for name in scripts.BUILDERS for dialect in scripts.build(name, tiny=True).dialects]
-NOT_BUILT = pytest.mark.xfail(strict=True, raises=AssertionError, reason="D63: in-turn paging not built")
-BOTH = pytest.mark.parametrize("dialect", ["claude", pytest.param("codex", marks=NOT_BUILT)])
+BOTH = pytest.mark.parametrize("dialect", ["claude", "codex"])
 
 
 def check(name: str, dialect: str) -> None:

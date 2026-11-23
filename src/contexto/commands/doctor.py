@@ -746,11 +746,13 @@ def check_claude_upstream(ctx: Context) -> Check:
 
 
 def codex_upstream_place(source: str, claude_source: str, env: Mapping[str, str]) -> str:
-    from contexto.codex import UPSTREAM_ENV  # here, not at import: see check_codex_upstream
+    from contexto.codex import OPENAI_API_KEY_ENV, UPSTREAM_ENV  # here, not at import: see check_codex_upstream
     if source == "codex-env":
         return f"{UPSTREAM_ENV} in the environment"
     if source == "codex-config":
         return "codex_upstream in config.toml"
+    if source == "openai-env":
+        return f"{OPENAI_API_KEY_ENV} in the environment (OpenAI default)"
     if source.startswith("claude-"):
         return f"Claude Code's upstream plus /v1; {base_url_place(claude_source, env)}"
     return source
@@ -761,7 +763,8 @@ def check_codex_upstream(ctx: Context) -> Check:
     as ``codex.run_codex`` resolves it: a project's base URL only from a folder Claude Code trusts."""
     # Imported here: the CLI imports every command module to build its parser, so a top-level import made
     # every command fail when contexto.codex is missing, where `contexto run codex` must exit 2 and say so.
-    from contexto.codex import API_KEY_MODE, UPSTREAM_ENV, CodexLaunchError, codex_upstream_with_source
+    from contexto.codex import API_KEY_MODE, OPENAI_UPSTREAM, UPSTREAM_ENV, CodexLaunchError, codex_upstream_with_source
+    from contexto.servecontract import names_service
 
     claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files,
                               config_upstream=ctx.config.upstream)
@@ -784,6 +787,14 @@ def check_codex_upstream(ctx: Context) -> Check:
         return Check("codex-upstream", FAIL, f"Codex upstream from {place} is not a usable http(s) URL: "
                      "`contexto run codex` refuses to start with it",
                      f"Fix it there, or pass --codex-upstream to contexto run (or set {UPSTREAM_ENV})", details)
+    try:  # D70: this home's `contexto serve` self-loop guard, matching check_claude_upstream
+        if names_service(target, contexto_home(ctx.env)):
+            return Check("codex-upstream", FAIL, f"Codex upstream from {place} is this Contexto home's "
+                         "`contexto serve`: `contexto run codex` refuses to start with it",
+                         f"Pass --codex-upstream URL to contexto run (for example --codex-upstream {OPENAI_UPSTREAM}), "
+                         "or use the client through `contexto serve`", details)
+    except (RuntimeError, OSError):
+        pass
     summary = f"Codex upstream: {details['origin']} (from {place})"
     if untrusted and source.startswith("claude-"):
         return Check("codex-upstream", WARN, summary, untrusted, details)
@@ -832,7 +843,13 @@ def check_codex_key(ctx: Context) -> Check:
     not shown. The variable is read as the launcher reads it: any value that is not empty is the helper,
     and one that is only spaces is then refused ("the key helper command is empty"), where reading on
     to ``apiKeyHelper`` would report a helper the launch never uses."""
-    from contexto.codex import KEY_HELPER_ENV  # here, not at import: see check_codex_upstream
+    from contexto.codex import (
+        API_KEY_MODE,
+        KEY_HELPER_ENV,
+        OPENAI_API_KEY_ENV,
+        CodexLaunchError,
+        codex_upstream_with_source,
+    )
 
     if ctx.env.get(KEY_HELPER_ENV):
         details = {"name": KEY_HELPER_ENV, "source": "env"}
@@ -842,11 +859,26 @@ def check_codex_key(ctx: Context) -> Check:
         return Check("codex-key", WARN, f"Codex key helper: {KEY_HELPER_ENV} is set and blank, and `contexto run "
                      "codex` refuses a blank helper", f"Unset {KEY_HELPER_ENV} or set it to a command, or pass "
                      "--codex-key-helper to contexto run", {**details, "error": "blank"})
+    claude = resolve_upstream(None, env=ctx.env, cwd=ctx.cwd, home=ctx.home, trusted_only=True, files=ctx.files,
+                              config_upstream=ctx.config.upstream)
+    try:
+        _, up_source = codex_upstream_with_source(API_KEY_MODE, None, dict(ctx.env), claude.url, claude.source,
+                                                  config_upstream=ctx.config.codex_upstream)
+    except CodexLaunchError:
+        up_source = ""
+    if up_source == "openai-env" and ctx.env.get(OPENAI_API_KEY_ENV, "").strip():
+        return Check("codex-key", PASS,
+                     f"Codex key: {OPENAI_API_KEY_ENV} in the environment (native env_key; no value shown)",
+                     details={"name": OPENAI_API_KEY_ENV, "source": "env"})
     helper = claude_key_helper(ctx.cwd, ctx.home, ctx.env)  # a project's only from a trusted folder (D52)
     if helper.value:
         place = settings_file(helper.source or "", ctx.env)
         return Check("codex-key", PASS, f"Codex key helper: Claude Code's {KEY_HELPER_KEY} in {place} (not run)",
                      details={"name": KEY_HELPER_KEY, "source": f"settings:{helper.source}"})
+    if up_source and not up_source.startswith("claude-") and ctx.env.get(OPENAI_API_KEY_ENV, "").strip():
+        return Check("codex-key", PASS,
+                     f"Codex key: {OPENAI_API_KEY_ENV} in the environment (native env_key; no value shown)",
+                     details={"name": OPENAI_API_KEY_ENV, "source": "env"})
     details: dict[str, Any] = {"name": None, "source": None}
     if helper.ignored:
         details["ignored"] = list(helper.ignored)

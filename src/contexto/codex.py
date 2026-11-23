@@ -28,21 +28,26 @@ Mapping onto the contract's rules (``contexto.rewrite``):
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from contexto import paths
+from contexto import inturn, paths
 from contexto.canonical import canonical_bytes, loads_bounded
 from contexto.rewrite import CARRIED_TEXT, SESSION_START, UNCLASSIFIED, Dialect
 from contexto.stats import print_exit_summary
@@ -50,7 +55,8 @@ from contexto.tokens import TokenEstimator
 from contexto.upstream import claude_key_helper, untrusted_note
 
 MODEL_OUTPUT_TYPES = frozenset({"reasoning", "function_call", "custom_tool_call", "local_shell_call",
-                                "web_search_call", "image_generation_call", "tool_search_call"})
+                                "computer_call", "web_search_call", "file_search_call", "code_interpreter_call",
+                                "image_generation_call", "tool_search_call", "mcp_call"})
 TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
 # Context sections Codex injects as messages, anchored to the exact openings measured on codex-cli
 # 0.154.0 (spikes/m2/codex/probe.sh: skills_instructions, permissions instructions, collaboration_mode,
@@ -59,9 +65,8 @@ TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
 # Rechecked on 0.163.0 for D38, with zero spend against loopback stubs: spikes/m2/cliversion/check.sh
 # (one `codex exec`) and spikes/m2/codex/probe.sh (five auth and provider scenarios) showed the same
 # six openings in every scenario, the environment_context message last in the lead; the AGENTS.md
-# header was not exercised. Rechecked on 0.166.0 for D56 the same way: the same six openings; only the
+# Rechecked on 0.166.0 for D56 and on 0.170.0 the same way: the same six openings; only the
 # built-in provider's requests (never Contexto's custom provider) add a role-less configuration_update item.
-# Rechecked on 0.170.0 the same way against a local stub: identical lead items and section tags.
 CONTEXT_SECTIONS_CODEX_VERSION = "0.170.0"
 CONTEXT_SECTION = re.compile(
     r"\s*(?:<(?:skills_instructions|permissions instructions|collaboration_mode|multi_agent_role|"
@@ -109,8 +114,8 @@ class ResponsesDialect(Dialect):
     name = "responses"
     field = "input"
     media_floor = False  # D48: OpenAI prices images by tiles (85 tokens at low detail), under Claude's floor
-    # D63: no in-turn paging for Codex yet. The Responses primitives go here (see contexto.inturn.MessagesInTurn).
-    in_turn = None
+    # D63: in-turn paging primitives for Responses API items (contexto.inturn.ResponsesInTurn).
+    in_turn = inturn.RESPONSES
 
     def is_context_block(self, block: Any) -> bool:
         return False  # Codex sends context as separate messages, not inside the prompt message
@@ -122,7 +127,10 @@ class ResponsesDialect(Dialect):
         return any(isinstance(p, dict) and not is_context_part(p) for p in parts)
 
     def is_assistant(self, item: dict) -> bool:
-        return item.get("type") in MODEL_OUTPUT_TYPES or (_is_message(item) and item.get("role") == "assistant")
+        kind = item.get("type")
+        if isinstance(kind, str) and (kind in MODEL_OUTPUT_TYPES or kind.endswith("_call")):
+            return True
+        return _is_message(item) and item.get("role") == "assistant"
 
     def is_system_like(self, item: dict) -> bool:
         if item.get("type") == "additional_tools":
@@ -164,7 +172,7 @@ class ResponsesDialect(Dialect):
                 args = raw  # not JSON, or nested deeper than MAX_JSON_DEPTH: rendered as the string it is
             return [("assistant", {"type": "tool_use", "name": item.get("name", ""),
                                    "input": {} if args is None else args})]
-        if kind in ("function_call_output", "custom_tool_call_output"):
+        if kind.endswith("_output"):
             out = item.get("output")
             if isinstance(out, str):
                 content = out
@@ -249,19 +257,28 @@ RESPONSES = ResponsesDialect()
 # Launch planning (intake decision D22) -----------------------------------------------------------
 #
 # API-key mode, the default and the only mode run live: a private CODEX_HOME (directory 0700, config
-# 0600, removed on exit) whose custom provider points at the proxy and gets its bearer token from
-# ``auth.command`` running the existing key helper through ``/bin/sh -c``. The config names the helper
-# command only, never a key. ChatGPT mode (``--codex-auth chatgpt``): the user's own CODEX_HOME with
-# ``-c`` overrides only and ``requires_openai_auth``: Codex keeps its own login and the proxy passes it
-# through. Under D35 logins belong in CLIProxyAPI (reached in API-key mode) or the vendor's own CLI,
-# never in Contexto, and users follow their providers' terms. Both keep Codex on HTTP (custom
-# providers have no WebSocket transport) and turn request compression off, because the proxy cannot
-# transform compressed bodies. Some Codex calls (rate limits, usage, a remote MCP
-# connection) go to chatgpt.com directly and bypass the proxy by design.
+# 0600, removed on exit) whose custom provider points at the proxy and gets its bearer token either
+# from ``auth.command`` (running the key helper through ``/bin/sh -c``) or natively via ``env_key``
+# (``OPENAI_API_KEY``). User settings from ``~/.codex/config.toml`` are merged (excluding other
+# provider definitions) and non-secret assets are symlinked; the config never holds a key value.
+# ChatGPT mode (``--codex-auth chatgpt``): the user's own CODEX_HOME with ``-c`` overrides only and
+# ``requires_openai_auth``: Codex keeps its own login and the proxy passes it through. Under D35
+# logins belong in CLIProxyAPI (reached in API-key mode) or the vendor's own CLI, never in Contexto,
+# and users follow their providers' terms. Both keep Codex on HTTP by default (opt-in WebSocket relay
+# is enabled via ``--codex-websocket`` or ``CONTEXTO_CODEX_WEBSOCKET=1``) and turn request compression
+# off, because the proxy cannot transform compressed bodies. Some Codex calls (rate limits, usage, a
+# remote MCP connection) go to chatgpt.com directly and bypass the proxy by design.
 
 API_KEY_MODE = "apikey"
 CHATGPT_MODE = "chatgpt"
 KEY_HELPER_ENV = "CONTEXTO_CODEX_KEY_HELPER"
+OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+WEBSOCKET_ENV = "CONTEXTO_CODEX_WEBSOCKET"
+# Non-secret assets in the user's own CODEX_HOME symlinked into a session's CODEX_HOME so skills,
+# instructions, prompts, rules, and custom agents stay available. Credentials (auth.json), rollouts
+# (sessions/), history, caches, and databases are deliberately excluded.
+USER_CODEX_ASSETS = ("AGENTS.md", "instructions.md", "skills", "prompts", "rules", "agents")
+USER_CONFIG_MAX_BYTES = 1_048_576  # 1 MiB cap when reading the user's config.toml
 # The helper the "no key helper" error and the option's help give as an example (D64): it prints the key
 # from the environment Codex runs it in, has nothing for a shell or an environment variable to expand or
 # quote, and fails with no output when the variable is unset, where `echo "$OPENAI_API_KEY"` would hand
@@ -345,16 +362,21 @@ class CodexLaunch:
     codex_home: Path | None = None  # CODEX_HOME written for this launch (API-key mode)
     notes: list[str] = field(default_factory=list)
     keep_home: bool = False  # True when CODEX_HOME lives in the Contexto session dir (rollouts kept)
+    linked_entries: list[Path] = field(default_factory=list)  # symlinks to user CODEX_HOME assets
 
     def cleanup(self) -> None:
         if self.codex_home is None:
             return
         if self.keep_home:
             (self.codex_home / "config.toml").unlink(missing_ok=True)
+            for link in self.linked_entries:
+                if link.is_symlink():
+                    link.unlink(missing_ok=True)
             for name in DISPOSABLE_HOME_DIRS:
                 shutil.rmtree(self.codex_home / name, ignore_errors=True)
         else:
             shutil.rmtree(self.codex_home, ignore_errors=True)
+        self.linked_entries.clear()
         self.codex_home = None
 
 
@@ -365,17 +387,170 @@ def claude_api_key_helper(cwd: Path, home: Path, env: dict[str, str] | None = No
     return claude_key_helper(cwd, home, env).value
 
 
+_BARE_TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def _toml(value: object) -> str:
-    """TOML literal for strings, booleans, and lists of strings (JSON escapes are valid TOML). TOML also
-    forbids a raw DEL, which JSON leaves as is, and has no escape for a lone surrogate."""
+    """TOML literal for scalar, date/time, list, and inline-table values. TOML forbids a raw DEL
+    (which JSON leaves as is) and has no escape for a lone surrogate."""
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "nan"
+        if math.isinf(value):
+            return "inf" if value > 0 else "-inf"
+        return repr(value)
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value.isoformat()
     if isinstance(value, list):
         return "[" + ", ".join(_toml(v) for v in value) + "]"
+    if isinstance(value, dict):
+        inner = ", ".join(f"{_toml_key(k)} = {_toml(v)}" for k, v in value.items())
+        return "{" + inner + "}"
     text = str(value)
     if any(0xD800 <= ord(c) <= 0xDFFF for c in text):
         raise CodexLaunchError("a value for Codex's config holds a lone surrogate, which TOML cannot hold")
     return json.dumps(text, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
+def _toml_key(key: str) -> str:
+    return key if _BARE_TOML_KEY.fullmatch(key) else _toml(key)
+
+
+def _is_table_array(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(v, dict) for v in value)
+
+
+def _dump_toml(doc: dict[str, Any]) -> str:
+    """Serialize a TOML document (as produced by ``tomllib.loads``) back to valid TOML."""
+    lines: list[str] = []
+
+    def split_entries(table: dict[str, Any]):
+        scalars: list[tuple[str, Any]] = []
+        subtables: list[tuple[str, dict[str, Any]]] = []
+        table_arrays: list[tuple[str, list[dict[str, Any]]]] = []
+        for k, v in table.items():
+            if isinstance(v, dict):
+                subtables.append((k, v))
+            elif _is_table_array(v):
+                table_arrays.append((k, v))
+            else:
+                scalars.append((k, v))
+        return scalars, subtables, table_arrays
+
+    def emit_body(table: dict[str, Any], prefix: tuple[str, ...]) -> None:
+        scalars, subtables, table_arrays = split_entries(table)
+        for k, v in scalars:
+            lines.append(f"{_toml_key(k)} = {_toml(v)}")
+        for k, sub in subtables:
+            emit(sub, (*prefix, k))
+        for k, items in table_arrays:
+            header = "[[" + ".".join(_toml_key(p) for p in (*prefix, k)) + "]]"
+            for item in items:
+                if lines and lines[-1] != "":
+                    lines.append("")
+                lines.append(header)
+                emit_body(item, (*prefix, k))
+
+    def emit(table: dict[str, Any], prefix: tuple[str, ...]) -> None:
+        scalars, subtables, table_arrays = split_entries(table)
+        if prefix and (scalars or not (subtables or table_arrays)):
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append("[" + ".".join(_toml_key(p) for p in prefix) + "]")
+        emit_body(table, prefix)
+
+    emit(doc, ())
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _safe_path_label(path: Path) -> str:
+    """Escape non-printable characters before putting a filesystem path in a stderr note."""
+    text = str(path)
+    return text if text.isprintable() else repr(text)
+
+
+def _user_codex_home(env: Mapping[str, str], home: Path) -> Path | None:
+    """The user's own Codex home directory (``$CODEX_HOME`` when set, else ``~/.codex``), resolved
+    to an absolute path so asset symlinks created inside a session ``codex-home`` never break."""
+    raw = env.get("CODEX_HOME")
+    if raw:
+        try:
+            return Path(raw).expanduser().resolve(strict=False)
+        except (RuntimeError, OSError):
+            return None
+    try:
+        return (home / ".codex").resolve(strict=False)
+    except OSError:
+        return home / ".codex"
+
+
+def _load_user_config(user_home: Path | None) -> tuple[dict[str, Any], str | None]:
+    """Read the user's ``config.toml`` for merging into a session ``CODEX_HOME``. Opens non-blocking
+    and verifies a regular file with a bounded read so FIFOs, devices, or oversized files cannot hang
+    or exhaust memory. Never raises: returns an empty dict and an optional note instead."""
+    if user_home is None:
+        return {}, None
+    path = user_home / "config.toml"
+    label = _safe_path_label(path)
+    fd: int | None = None
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return {}, f"ignored {label}: not a regular file"
+        chunks: list[bytes] = []
+        total = 0
+        while total <= USER_CONFIG_MAX_BYTES:
+            chunk = os.read(fd, min(65536, USER_CONFIG_MAX_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > USER_CONFIG_MAX_BYTES:
+            return {}, f"ignored {label}: larger than {USER_CONFIG_MAX_BYTES:,} bytes"
+        data = tomllib.loads(b"".join(chunks).decode("utf-8"))
+        return (data if isinstance(data, dict) else {}), None
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        return {}, f"ignored {label}: could not be parsed ({type(exc).__name__})"
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _link_user_assets(user_home: Path | None, session_home: Path) -> list[Path]:
+    """Symlink non-secret assets (skills, instructions, rules, prompts, agents) from the user's
+    Codex home into ``session_home``. Never touches ``auth.json``, sessions, or databases, and
+    returns only symlinks created by this call so cleanup never unlinks pre-existing entries."""
+    if user_home is None:
+        return []
+    try:
+        resolved_user = user_home.resolve()
+        if not resolved_user.is_dir() or resolved_user == session_home.resolve():
+            return []
+    except OSError:
+        return []
+    linked: list[Path] = []
+    for name in USER_CODEX_ASSETS:
+        src = resolved_user / name
+        dst = session_home / name
+        try:
+            if not src.exists() or os.path.lexists(dst):
+                continue
+            dst.symlink_to(src)
+            linked.append(dst)
+        except OSError:
+            continue
+    return linked
 
 
 # Exec mode runs with approval policy "never", which refuses every MCP call that needs approval, so
@@ -398,47 +573,68 @@ def _mcp_server(session_id: str) -> tuple[str, list[str]]:
     return sys.executable, ["-P", "-m", "contexto", "mcp", f"--session={session_id}"]
 
 
-def api_key_config(proxy_url: str, helper: str, session_id: str, contexto_home: Path,
-                   env: dict[str, str] | None = None) -> str:
+def api_key_config(proxy_url: str, helper: str | None, session_id: str, contexto_home: Path,
+                   env: dict[str, str] | None = None, *, env_key: str | None = None,
+                   supports_websockets: bool = False,
+                   user_config: dict[str, Any] | None = None) -> str:
     mcp_command, mcp_args = _mcp_server(session_id)
-    if not helper.strip():
+    if helper is not None:
+        if not helper.strip():
+            raise CodexLaunchError("the key helper command is empty")
+    elif not env_key or not env_key.strip():
         raise CodexLaunchError("the key helper command is empty")
-    lines = [
-        f"model_provider = {_toml(PROVIDER_ID)}",
-        "",
-        f"[model_providers.{PROVIDER_ID}]",
-        f"name = {_toml('Contexto')}",
-        f"base_url = {_toml(proxy_url)}",
-        f"wire_api = {_toml('responses')}",
-        f"supports_websockets = {_toml(False)}",
-        "",
-        f"[model_providers.{PROVIDER_ID}.auth]",
-        f"command = {_toml(KEY_HELPER_SHELL)}",
-        f"args = {_toml(['-c', helper])}",
-        "",
-        "[features]",
-        f"enable_request_compression = {_toml(False)}",
-        "",
-        f"[mcp_servers.{PROVIDER_ID}]",
-        f"command = {_toml(mcp_command)}",
-        f"args = {_toml(mcp_args)}",
-        f"default_tools_approval_mode = {_toml(MCP_APPROVAL_MODE)}",
-        "",
-        # Codex starts MCP servers with a restricted environment, so the server is told the home
-        # explicitly, always, as the Claude path does (launcher.mcp_payload): otherwise it opens
-        # ~/.contexto, a different store than the proxy's (packet A18). CONTEXTO_SEARCH_CACHE_MB too, when set (D39).
-        f"[mcp_servers.{PROVIDER_ID}.env]",
-        *(f"{k} = {_toml(v)}" for k, v in paths.mcp_env(contexto_home, env or {}).items()),
-        "",
-    ]
-    return "\n".join(lines)
+    provider: dict[str, Any] = {
+        "name": "Contexto",
+        "base_url": proxy_url,
+        "wire_api": "responses",
+        "supports_websockets": supports_websockets,
+    }
+    if helper is not None:
+        provider["auth"] = {"command": KEY_HELPER_SHELL, "args": ["-c", helper]}
+    else:
+        assert env_key is not None
+        provider["env_key"] = env_key
+    # Codex starts MCP servers with a restricted environment, so the server is told the home
+    # explicitly, always, as the Claude path does (launcher.mcp_payload): otherwise it opens
+    # ~/.contexto, a different store than the proxy's (packet A18). CONTEXTO_SEARCH_CACHE_MB too, when set (D39).
+    mcp_entry: dict[str, Any] = {
+        "command": mcp_command,
+        "args": mcp_args,
+        "default_tools_approval_mode": MCP_APPROVAL_MODE,
+        "env": paths.mcp_env(contexto_home, env or {}),
+    }
+    doc: dict[str, Any] = dict(user_config) if isinstance(user_config, dict) else {}
+    doc["model_provider"] = PROVIDER_ID
+    # Never copy unrelated [model_providers.*] tables into the session config: they can hold
+    # provider-specific bearer tokens or auth headers that should not be duplicated into session files.
+    doc["model_providers"] = {PROVIDER_ID: provider}
+    features = dict(doc["features"]) if isinstance(doc.get("features"), dict) else {}
+    features["enable_request_compression"] = False
+    doc["features"] = features
+    if isinstance(doc.get("profiles"), dict):
+        sanitized_profiles: dict[str, Any] = {}
+        for pname, pval in doc["profiles"].items():
+            if isinstance(pval, dict):
+                entry = {k: v for k, v in pval.items() if k not in ("model_provider", "model_providers")}
+                if isinstance(entry.get("features"), dict):
+                    pfeat = dict(entry["features"])
+                    pfeat["enable_request_compression"] = False
+                    entry["features"] = pfeat
+                sanitized_profiles[pname] = entry
+            else:
+                sanitized_profiles[pname] = pval
+        doc["profiles"] = sanitized_profiles
+    mcp_servers = dict(doc["mcp_servers"]) if isinstance(doc.get("mcp_servers"), dict) else {}
+    mcp_servers[PROVIDER_ID] = mcp_entry
+    doc["mcp_servers"] = mcp_servers
+    return _dump_toml(doc)
 
 
 def chatgpt_overrides(proxy_url: str, session_id: str, contexto_home: Path,
-                      env: dict[str, str] | None = None) -> list[str]:
+                      env: dict[str, str] | None = None, *, supports_websockets: bool = False) -> list[str]:
     mcp_command, mcp_args = _mcp_server(session_id)
     provider = (f"{{name={_toml('Contexto')}, base_url={_toml(proxy_url)}, wire_api={_toml('responses')}, "
-                f"requires_openai_auth=true, supports_websockets=false}}")
+                f"requires_openai_auth=true, supports_websockets={_toml(supports_websockets)}}}")
     return ["-c", f"model_providers.{PROVIDER_ID}={provider}", "-c", f"model_provider={PROVIDER_ID}",
             "-c", "features.enable_request_compression=false",
             "-c", f"mcp_servers.{PROVIDER_ID}.command={_toml(mcp_command)}",
@@ -448,20 +644,36 @@ def chatgpt_overrides(proxy_url: str, session_id: str, contexto_home: Path,
               for arg in ("-c", f"mcp_servers.{PROVIDER_ID}.env.{k}={_toml(v)}"))]
 
 
+def codex_websocket(flag: bool, env: Mapping[str, str] | None = None) -> bool:
+    """Whether WebSocket transport is opted into for Codex (``--codex-websocket`` or
+    ``CONTEXTO_CODEX_WEBSOCKET=1/true/yes/on``). Off by default so HTTP stays the default."""
+    if flag:
+        return True
+    value = (os.environ if env is None else env).get(WEBSOCKET_ENV, "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
 def resolve_codex_upstream(auth_mode: str, explicit: str | None, env: dict[str, str],
-                           claude_upstream: str | None) -> str:
+                           claude_upstream: str | None, *, key_helper: str | None = None,
+                           config_upstream: str | None = None) -> str:
     """The proxy's upstream for Codex, which carries the version path: ``--codex-upstream``, else
-    ``CONTEXTO_CODEX_UPSTREAM``, else the ChatGPT backend in ChatGPT mode, else the upstream Claude Code
-    would use (for example a CLIProxyAPI root, D35) plus ``/v1`` in API-key mode."""
-    return codex_upstream_with_source(auth_mode, explicit, env, claude_upstream)[0]
+    ``CONTEXTO_CODEX_UPSTREAM``, else ``codex_upstream`` in ``config.toml``, else the ChatGPT backend
+    in ChatGPT mode, else the upstream Claude Code would use (for example a CLIProxyAPI root, D35)
+    plus ``/v1`` in API-key mode, else ``https://api.openai.com/v1`` when ``OPENAI_API_KEY`` is set
+    and no key helper was specified."""
+    return codex_upstream_with_source(auth_mode, explicit, env, claude_upstream, key_helper=key_helper,
+                                      config_upstream=config_upstream)[0]
 
 
 def codex_upstream_with_source(auth_mode: str, explicit: str | None, env: dict[str, str],
                                claude_upstream: str | None, claude_source: str | None = None, *,
+                               key_helper: str | None = None,
                                config_upstream: str | None = None) -> tuple[str, str]:
     """``resolve_codex_upstream`` plus where the URL came from, for the session line and log (D35):
-    ``codex-flag``, ``codex-env``, ``codex-config``, ``chatgpt-default``, or ``claude-<source>+/v1``
-    (the Claude upstream's own source label, such as ``claude-settings:local+/v1``). Never the URL itself."""
+    ``codex-flag``, ``codex-env``, ``codex-config``, ``chatgpt-default``, ``claude-<source>+/v1``
+    (the Claude upstream's own source label, such as ``claude-settings:local+/v1``), or
+    ``openai-env`` (when ``$OPENAI_API_KEY`` is set and no key helper or non-Anthropic upstream was
+    given). Never the URL itself."""
     if auth_mode not in (API_KEY_MODE, CHATGPT_MODE):
         raise CodexLaunchError(f"unknown Codex auth mode: {auth_mode}")
     if explicit:
@@ -472,17 +684,19 @@ def codex_upstream_with_source(auth_mode: str, explicit: str | None, env: dict[s
         return config_upstream, "codex-config"
     if auth_mode == CHATGPT_MODE:
         return CHATGPT_UPSTREAM, "chatgpt-default"
-    if claude_upstream:
+    host = _anthropic_host(claude_upstream) if claude_upstream else None
+    if claude_upstream and not host:
         label = f"claude-{claude_source or 'upstream'}+/v1"
-        host = _anthropic_host(claude_upstream)
-        if host:
-            # Claude Code's own API (its default, or a base URL set to it) does not serve the Responses
-            # API: Codex's /responses would 404 there, after sending the user's key to the wrong vendor.
-            raise CodexLaunchError(
-                f"no upstream for Codex: Claude Code's upstream ({claude_source or 'upstream'}) is {host}, "
-                f"which does not serve Codex. With an OpenAI API key pass --codex-upstream "
-                f"https://api.openai.com/v1; with CLIProxyAPI pass its URL plus /v1 (or set {UPSTREAM_ENV}).")
         return claude_upstream.rstrip("/") + "/v1", label
+    if not key_helper and not env.get(KEY_HELPER_ENV) and env.get(OPENAI_API_KEY_ENV, "").strip():
+        return OPENAI_UPSTREAM, "openai-env"
+    if claude_upstream and host:
+        # Claude Code's own API (its default, or a base URL set to it) does not serve the Responses
+        # API: Codex's /responses would 404 there, after sending the user's key to the wrong vendor.
+        raise CodexLaunchError(
+            f"no upstream for Codex: Claude Code's upstream ({claude_source or 'upstream'}) is {host}, "
+            f"which does not serve Codex. With an OpenAI API key pass --codex-upstream "
+            f"https://api.openai.com/v1; with CLIProxyAPI pass its URL plus /v1 (or set {UPSTREAM_ENV}).")
     raise CodexLaunchError(f"no upstream for Codex: pass --codex-upstream or set {UPSTREAM_ENV}")
 
 
@@ -564,7 +778,8 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
                codex_bin: str = "codex", env: dict[str, str] | None = None, cwd: Path | None = None,
                home: Path | None = None, claude_upstream: str | None = None,
                codex_home_dir: Path | None = None, contexto_home: Path | None = None,
-               no_daemon: bool = False, named_upstream: str | None = None) -> CodexLaunch:
+               no_daemon: bool = False, named_upstream: str | None = None,
+               upstream_source: str | None = None, supports_websockets: bool = False) -> CodexLaunch:
     """Plan a ``codex`` launch behind the proxy at ``proxy_url`` (no ``/v1``: the upstream carries the
     version path). The caller starts the proxy with ``launch.upstream``, runs ``launch.argv`` with
     ``launch.env``, and calls ``launch.cleanup()`` on exit. ``no_daemon`` (``takes_no_daemon``) puts
@@ -573,25 +788,38 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
     contexto_home = Path(contexto_home) if contexto_home is not None else paths.contexto_home(base_env)
     cwd = cwd or Path.cwd()
     home = home or Path.home()
-    target = resolve_codex_upstream(auth_mode, upstream, base_env, claude_upstream)
+    target, resolved_source = codex_upstream_with_source(
+        auth_mode, upstream, base_env, claude_upstream, key_helper=key_helper)
+    source = upstream_source or resolved_source
     flags = [NO_DAEMON_FLAG] if no_daemon else []
     if auth_mode == CHATGPT_MODE:
         # --no-daemon here too, so the TUI does not attach to a server already running for the user's
         # own CODEX_HOME, started without the proxy's -c overrides (whether it would honor them is not
         # measured).
-        argv = [codex_bin, *flags, *chatgpt_overrides(proxy_url, session_id, contexto_home, base_env),
+        argv = [codex_bin, *flags,
+                *chatgpt_overrides(proxy_url, session_id, contexto_home, base_env,
+                                   supports_websockets=supports_websockets),
                 *codex_args]
         return CodexLaunch(argv=argv, env=base_env, upstream=target, notes=[CHATGPT_MODE_HELP])
     helper = key_helper or base_env.get(KEY_HELPER_ENV)
+    env_key: str | None = None
     notes: list[str] = []
-    if not helper:
+    if not helper and source == "openai-env" and base_env.get(OPENAI_API_KEY_ENV, "").strip():
+        # Upstream defaulted to api.openai.com solely because $OPENAI_API_KEY is set: use native
+        # env_key directly and NEVER fall back to Claude Code's apiKeyHelper (which may print an
+        # Anthropic key and leak it to OpenAI).
+        env_key = OPENAI_API_KEY_ENV
+    if not helper and not env_key:
         # A project's apiKeyHelper only from a folder Claude Code trusts: Codex runs it unasked (D52).
         found = claude_key_helper(cwd, home, base_env)
         helper = found.value
         if found.ignored:
             notes.append(untrusted_note("apiKeyHelper", found.ignored,
                                         f"Pass --codex-key-helper (or set {KEY_HELPER_ENV})", base_env))
-    if not helper:
+    if not helper and not env_key and not source.startswith("claude-") and base_env.get(OPENAI_API_KEY_ENV, "").strip():
+        # Explicit --codex-upstream / CONTEXTO_CODEX_UPSTREAM with $OPENAI_API_KEY and no helper.
+        env_key = OPENAI_API_KEY_ENV
+    if not helper and not env_key:
         example = f"With an OpenAI key in $OPENAI_API_KEY, run `{KEY_HELPER_COMMAND}`"
         # ``upstream`` is the resolved one, given even when the user named none (PR #290 review A): only
         # --codex-upstream (``named_upstream``) or CONTEXTO_CODEX_UPSTREAM is one the user named.
@@ -601,35 +829,57 @@ def plan_codex(codex_args: list[str], proxy_url: str, session_id: str, *, auth_m
             example += f" (it sends Codex's requests to {OPENAI_UPSTREAM}, not to the upstream you named)"
         # The variable replaces only the helper: without --codex-upstream the key goes to Claude Code's
         # upstream plus /v1, which need not be OpenAI's (PR #257 review A).
+        if source.startswith("claude-") and base_env.get(OPENAI_API_KEY_ENV, "").strip():
+            raise CodexLaunchError(
+                f"no key helper: {OPENAI_API_KEY_ENV} is not sent to a Claude-derived upstream ({source}). "
+                f"Pass --codex-upstream {OPENAI_UPSTREAM} to use {OPENAI_API_KEY_ENV} with OpenAI, or pass "
+                f"--codex-key-helper / set {KEY_HELPER_ENV} for this upstream")
         raise CodexLaunchError(f"no key helper: {notes[0]}. {example}" if notes else
                                "no key helper: Codex gets its API key from a command that prints it. "
                                f"{example}; or set {KEY_HELPER_ENV} to such a command and still pass "
                                "--codex-upstream, or configure apiKeyHelper in Claude Code settings")
+    user_home = _user_codex_home(base_env, home)
     if codex_home_dir is not None:
         # Kept under the Contexto session directory so Codex's rollouts stay resumable; only the
-        # config (which names the helper command) is removed on exit.
+        # config (which names the helper command) and symlinks to user assets are removed on exit.
         codex_home = Path(codex_home_dir)
         codex_home.mkdir(mode=0o700, parents=True, exist_ok=True)
         keep = True
     else:
         codex_home = Path(tempfile.mkdtemp(prefix="contexto-codex-"))
         keep = False
-    config = codex_home / "config.toml"
     try:
+        same_home = user_home is not None and user_home.exists() and user_home.resolve() == codex_home.resolve()
+    except OSError:
+        same_home = False
+    user_config, cfg_note = ({}, None) if same_home else _load_user_config(user_home)
+    if cfg_note:
+        notes.append(cfg_note)
+    config = codex_home / "config.toml"
+    linked: list[Path] = []
+    try:
+        if codex_home.is_symlink():
+            raise CodexLaunchError(f"session codex-home {str(codex_home)!r} is a symlink")
         codex_home.chmod(0o700)
-        if config.exists():
-            config.unlink()  # a stale config from an interrupted run
+        config.unlink(missing_ok=True)  # a stale config or broken symlink from an interrupted run
         fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(api_key_config(proxy_url, helper, session_id, contexto_home, base_env))
+            f.write(api_key_config(proxy_url, helper, session_id, contexto_home, base_env,
+                                   env_key=env_key, supports_websockets=supports_websockets,
+                                   user_config=user_config))
+        linked = _link_user_assets(None if same_home else user_home, codex_home)
     except BaseException:
+        for link in linked:
+            if link.is_symlink():
+                link.unlink(missing_ok=True)
         if keep:
             config.unlink(missing_ok=True)
         else:
             shutil.rmtree(codex_home, ignore_errors=True)
         raise
     return CodexLaunch(argv=[codex_bin, *flags, *codex_args], env={**base_env, "CODEX_HOME": str(codex_home)},
-                       upstream=target, codex_home=codex_home, notes=notes, keep_home=keep)
+                       upstream=target, codex_home=codex_home, notes=notes, keep_home=keep,
+                       linked_entries=linked)
 
 
 # The run command's codex branch (agreed with builder-1: commands/run.py calls add_arguments and
@@ -648,7 +898,11 @@ def add_arguments(parser) -> None:
     group.add_argument("--codex-upstream", default=None,
                        help=f"upstream for Codex requests, with its version path, such as https://api.openai.com/v1 "
                             f"(default ${UPSTREAM_ENV}, else the ChatGPT backend in chatgpt mode, else Claude Code's "
-                            "upstream plus /v1 unless that is Anthropic's API)")
+                            f"upstream plus /v1 unless that is Anthropic's API, else {OPENAI_UPSTREAM} when "
+                            f"${OPENAI_API_KEY_ENV} is set)")
+    group.add_argument("--codex-websocket", action="store_true",
+                       help="allow OpenAI Responses WebSocket transport through the proxy (off by default: HTTP is "
+                            f"used; also {WEBSOCKET_ENV}=1)")
 
 
 def run_codex(args, *, launcher=None, stderr=None) -> int:
@@ -718,7 +972,8 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                    if claude.ignored else None)
         try:
             target, source = codex_upstream_with_source(args.codex_auth, args.codex_upstream, dict(os.environ),
-                                                        claude.url, claude.source, config_upstream=cfg.codex_upstream)
+                                                        claude.url, claude.source, key_helper=args.codex_key_helper,
+                                                        config_upstream=cfg.codex_upstream)
         except CodexLaunchError:
             # A refusal of the derived upstream (Anthropic's, or none): first say why Claude Code's
             # upstream fell back, when an untrusted project's base URL was skipped.
@@ -727,6 +982,16 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
             raise
         if ignored and source.startswith("claude-"):
             print(f"contexto: {ignored}", file=stderr)
+        home = paths.contexto_home()
+        from contexto.servecontract import names_service
+
+        if names_service(target, home):
+            # D70: refuse an upstream pointing at this Contexto home's `contexto serve` (same
+            # self-loop guard as `contexto run claude`); never print the URL, which holds the token.
+            raise CodexLaunchError(
+                f"the upstream (from {source}) is this Contexto home's `contexto serve`, which bounds the "
+                f"requests it is sent itself. Pass --codex-upstream URL (for example --codex-upstream "
+                f"{OPENAI_UPSTREAM}), or use the client through `contexto serve` instead of `contexto run codex`.")
         no_daemon = False
         if _may_take_no_daemon(codex_args):
             if version_error is None and not _version_tuple(version):
@@ -737,7 +1002,6 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
                 print("contexto: interrupted", file=stderr, flush=True)
                 return launcher.EXIT_INTERRUPTED
             no_daemon = takes_no_daemon(codex_args, version, listed)
-        home = paths.contexto_home()
         memory = project_memory_wanted(options, stderr)
         session_id = args.session if args.session is not None else uuid.uuid4().hex  # '' is invalid (D57)
         try:
@@ -750,8 +1014,12 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         created = None if existed else paths.session_dir(home, session_id)
         record_project_memory(store, memory)  # before anything reads the store: the proxy, the MCP server
         config = launcher.engine_config(options)
+        ws_enabled = codex_websocket(getattr(args, "codex_websocket", False))
+        proxy_kwargs: dict[str, Any] = {"stderr": stderr}
+        if ws_enabled:
+            proxy_kwargs["allow_websocket"] = True
         proxy, engine_name = launcher.start_proxy(store, target, source, config, options.observe_thinking,
-                                                  stderr=stderr)
+                                                  **proxy_kwargs)
     except (CodexLaunchError, ConfigError, launcher.LaunchError) as exc:
         print(f"contexto: {exc}", file=stderr)
         _remove_session(created)
@@ -765,7 +1033,8 @@ def run_codex(args, *, launcher=None, stderr=None) -> int:
         plan = plan_codex(codex_args, proxy.url, session_id, auth_mode=args.codex_auth,
                           key_helper=args.codex_key_helper, upstream=target, codex_bin=codex,
                           codex_home_dir=paths.session_dir(home, session_id) / "codex-home",
-                          contexto_home=home, no_daemon=no_daemon, named_upstream=args.codex_upstream)
+                          contexto_home=home, no_daemon=no_daemon, named_upstream=args.codex_upstream,
+                          upstream_source=source, supports_websockets=ws_enabled)
         for note in plan.notes:
             print(f"contexto: {note}", file=stderr)
         store.log({"event": "launch", "cli": "codex", "session": session_id, "config": config,

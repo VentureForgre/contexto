@@ -1089,12 +1089,16 @@ def test_stub_and_note_wording_is_true_without_contextos_tools():
     assert len(inturn.note_calls(inturn._fold_note_uncached(inturn.MESSAGES, many, "pg_0000000000000001"))) == 600
 
 
-def test_codex_has_no_in_turn_paging_yet():
-    assert RESPONSES.in_turn is None and ANTHROPIC.in_turn is inturn.MESSAGES
-    edits = inturn.InTurn(stubs=((1, 0, "pg_0123456789abcdef"),), strips=((1, 2),), batches=1)
+def test_codex_in_turn_paging_is_wired_and_stubs_responses_outputs():
+    assert RESPONSES.in_turn is inturn.RESPONSES and ANTHROPIC.in_turn is inturn.MESSAGES
+    edits = inturn.InTurn(stubs=((1, 0, "pg_0123456789abcdef"),), strips=(), batches=1)
     items = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
              {"type": "function_call_output", "call_id": "c1", "output": "x" * 9_000}]
-    assert inturn.view(items, EpochState(inturn=edits), RESPONSES) is items
+    viewed = inturn.view(items, EpochState(inturn=edits), RESPONSES)
+    assert viewed is not items
+    assert viewed[1]["call_id"] == "c1"
+    assert "pg_0123456789abcdef" in viewed[1]["output"]
+    assert len(viewed[1]["output"]) < 500
 
 
 def test_model_and_upstream_helpers_agree_with_the_engine():

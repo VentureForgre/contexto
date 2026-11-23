@@ -14,7 +14,14 @@ from typing import Any
 
 from contexto.canonical import canonical_bytes
 from contexto.store.recall import DEFAULT_LINES, salient_identifiers
-from contexto.store.render import as_message, is_own_block, is_own_item, is_responses_item, own_call_ids
+from contexto.store.render import (
+    as_message,
+    is_developer_only_page,
+    is_own_block,
+    is_own_item,
+    is_responses_item,
+    own_call_ids,
+)
 from contexto.store.search import Query, SearchEntry, rank, search_text, searchable
 from contexto.tokens import estimate_message_tokens, estimate_tokens, message_bytes
 
@@ -153,7 +160,8 @@ def _is_text(block: Any) -> bool:
 
 def _view(turn: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The turn as Messages API messages: Messages pages unchanged, Responses items mapped (B23)."""
-    return [m for m in (as_message(item) for item in turn) if isinstance(m, dict)]
+    dev_only = is_developer_only_page(turn)
+    return [m for m in (as_message(item, include_developer=dev_only) for item in turn) if isinstance(m, dict)]
 
 
 def _walk_strings(value: Any):
@@ -174,8 +182,9 @@ def _texts(turn: list[dict[str, Any]]):
     results (both dialects), except the inputs and results of Contexto's search, recall, and state calls
     (``own_call_ids``, D51)."""
     own = own_call_ids(turn)
+    dev_only = is_developer_only_page(turn)
     for item in turn:
-        message = as_message(item)
+        message = as_message(item, include_developer=dev_only)
         if not isinstance(message, dict) or is_own_item(item, own):
             continue
         content = message.get("content")
@@ -211,11 +220,17 @@ def _first_line(text: str) -> str | None:
 
 
 def _system_first_line(turn: list[dict[str, Any]]) -> str | None:
-    """First non-empty line of the turn's system text (inside the tag, if tagged), a placeholder if it
-    is empty, None if no system message."""
-    systems = [m for m in turn if isinstance(m, dict) and m.get("role") == "system"]
-    if not systems:
-        return None
+    """First non-empty line of the turn's system (or standalone Codex developer) text (inside the tag,
+    if tagged), a placeholder if it is empty, None if no system/developer message."""
+    dev_only = is_developer_only_page(turn)
+    if dev_only:
+        systems = _view(turn)
+        if not systems:
+            return EMPTY_SYSTEM_STUB
+    else:
+        systems = [m for m in turn if isinstance(m, dict) and m.get("role") == "system"]
+        if not systems:
+            return None
     for message in systems:
         line = _first_line(_user_text(message))
         if line is not None:
@@ -386,7 +401,7 @@ def current_stub(page: dict[str, Any]) -> dict[str, Any]:
     messages = page.get("messages")
     if not isinstance(stub, dict) or not isinstance(messages, list):
         return page
-    codex_v010 = (not (stub.get("user_text") or stub.get("tools") or stub.get("paths"))
+    codex_v010 = (not (stub.get("user_text") or stub.get("system_text") or stub.get("tools") or stub.get("paths"))
                   and any(isinstance(m, dict) and is_responses_item(m) for m in messages))
     if not codex_v010 and not own_call_ids(messages):
         return page
@@ -427,6 +442,11 @@ def _result_locator(turn: list[dict[str, Any]]) -> str:
     """A result page's call as a stub names it: the tool and what it ran or read."""
     from contexto import inturn  # inturn imports the store's render module: looked up when called
 
+    resp_call = next((m for m in turn if isinstance(m, dict) and is_responses_item(m)
+                      and str(m.get("type", "")).endswith("_call")), None)
+    if resp_call is not None:
+        name, locator, _ = inturn.RESPONSES.describe(resp_call)
+        return f"{name} {locator}"
     call = next((b for m in turn if isinstance(m, dict) and m.get("role") == "assistant"
                  for b in (m.get("content") if isinstance(m.get("content"), list) else [])
                  if isinstance(b, dict) and b.get("type") == "tool_use"), None)
@@ -470,9 +490,8 @@ def is_context_page(page: dict[str, Any]) -> bool:
     system messages and Codex developer items one per page (lane A), and each paged context block as
     a user message holding that block (D32). Read from the messages, not the stub (a paged block's
     stub has ``reminder_text``). Search ranks these pages after every turn page, and its reply shows
-    them after every turn page (D34). A Codex developer page has no searchable text today (search
-    reads Responses items through ``as_message``, which drops system-like items, B23), so it never
-    matches; it is recognised so that it would rank as context if that changed."""
+    them after every turn page (D34). Standalone paged Codex ``developer`` pages are rendered and
+    searched through ``as_message(..., include_developer=True)`` and ranked here as context pages."""
     messages = page.get("messages")
     if not isinstance(messages, list) or not messages:
         return False

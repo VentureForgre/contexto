@@ -122,3 +122,12 @@ def test_recall_and_search_find_a_planted_line_in_a_codex_page():
     assert line == planted and text[start:end] == planted
     chunk = recall_chunk(page, offset=start, limit=len(planted))
     assert chunk["text"] == planted and chunk["offset"] == start
+
+
+def test_standalone_developer_page_renders_while_mixed_turn_still_omits_developer():
+    dev = {"type": "message", "role": "developer",
+           "content": [{"type": "input_text", "text": "carried developer note"}]}
+    # Standalone paged developer page renders its text cleanly.
+    assert render_page({"turn": 3, "messages": [dev]}) == "[turn 3] developer:\ncarried developer note"
+    # Mixed with a normal user message, developer items are still omitted.
+    assert render_page({"turn": 3, "messages": [dev, prompt("hello")]}) == "[turn 3] user:\nhello"
