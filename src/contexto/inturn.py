@@ -1010,14 +1010,7 @@ def turn_note(hooks: Any, messages: list[dict], sent: list[dict], start: int,
     else:
         numbers, spans = None, ()
     tail_ids = tuple(
-        tuple(
-            _safe_id(b["id"])
-            for a, b_ in rs
-            for i in range(a, b_)
-            if dialect.is_assistant(messages[i])
-            for b in _blocks(messages[i])
-            if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str) and b["id"]
-        )
+        tuple(hooks.call_ids_in([messages[i] for a, b_ in rs for i in range(a, b_)]))
         for rs, _ in group[covered:]
     )
     key = (dialect.name, start, tuple(group), listed, spans, tail_ids)
