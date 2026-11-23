@@ -1148,12 +1148,11 @@ class _ClientWatch:
                 return
             self._closed = True
             self._done.set()
-            wake_w = self._wake_w
-        if wake_w is not None:
-            try:
-                os.write(wake_w, b"\x00")
-            except OSError:
-                pass
+            if self._wake_w is not None:
+                try:
+                    os.write(self._wake_w, b"\x00")
+                except OSError:
+                    pass
         self._thread.join(timeout=1.0)
         with self._lock:
             upstream, self._upstream = self._upstream, None
@@ -1779,7 +1778,7 @@ class _Handler(BaseHTTPRequestHandler):
         valid_cl = _parse_content_length(raw_cl_values)
         no_body = _no_body_response(response.status, self.command)
         interim_1xx = 100 <= response.status < 200
-        chunked = (not no_body) and (bool(response.chunked) or valid_cl is None)
+        chunked = (not no_body) and (bool(response.chunked) or valid_cl is None or response.length != valid_cl)
         expected = None if (chunked or no_body) else valid_cl
         response_bytes = 0
         # The client must not see the response complete before the engine has its usage and the

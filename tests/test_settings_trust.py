@@ -648,16 +648,17 @@ def test_folder_trusted_refuses_fifo_and_oversized_global_config(tree, home, tmp
 
     big_cfg = tmp_path / "big_cfg"
     big_cfg.mkdir()
-    monkeypatch.setattr(upstream_mod, "GLOBAL_CONFIG_LIMIT", 128)
-    record_trust(big_cfg, tree / "repo")
-    # Pad valid JSON past the bound: refused cleanly as untrusted.
-    (big_cfg / ".claude.json").write_text(
-        json.dumps({"projects": {str(tree / "repo"): {"hasTrustDialogAccepted": True}}, "pad": "x" * 256})
-    )
-    assert not folder_trusted(tree / "repo", home, {"CLAUDE_CONFIG_DIR": str(big_cfg)})
+    with monkeypatch.context() as mp:
+        mp.setattr(upstream_mod, "GLOBAL_CONFIG_LIMIT", 128)
+        record_trust(big_cfg, tree / "repo")
+        # Pad valid JSON past the bound: refused cleanly as untrusted.
+        (big_cfg / ".claude.json").write_text(
+            json.dumps({"projects": {str(tree / "repo"): {"hasTrustDialogAccepted": True}}, "pad": "x" * 256})
+        )
+        assert not folder_trusted(tree / "repo", home, {"CLAUDE_CONFIG_DIR": str(big_cfg)})
 
-    # Deeply nested JSON past MAX_JSON_DEPTH is rejected cleanly without raising.
+    # Deeply nested JSON past MAX_JSON_DEPTH (512) within default size limit is rejected cleanly.
     deep_cfg = tmp_path / "deep_cfg"
     deep_cfg.mkdir()
-    (deep_cfg / ".claude.json").write_text("[" * 400 + "]" * 400)
+    (deep_cfg / ".claude.json").write_text("[" * 600 + "]" * 600)
     assert not folder_trusted(tree / "repo", home, {"CLAUDE_CONFIG_DIR": str(deep_cfg)})
