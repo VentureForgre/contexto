@@ -58,7 +58,7 @@ Security = "https://github.com/VentureForgre/contexto/security/policy"
 contexto = "contexto.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=9.0", "ruff==0.17.2"]
+dev = ["pytest>=9.0", "ruff==0.17.6"]
 
 [build-system]
 requires = ["uv_build>=0.8,<0.14"]
